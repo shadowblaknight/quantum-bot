@@ -226,32 +226,27 @@ export default function TradingBotLive() {
     return () => wsRef.current?.close();
   }, [addLog]);
 
-  // ── GBP/USD via Binance GBPUSDT WebSocket (real-time) ──
+  // ── GBP/USD via backend API (polls every 5s, no CORS issues) ──
   useEffect(() => {
-    let ws;
-    const connect = () => {
+    const fetchGBP = async () => {
       try {
-        // Binance has GBP/USDT pair - tracks GBP/USD very closely
-        ws = new WebSocket("wss://stream.binance.com:9443/ws/gbpusdt@ticker");
-        ws.onopen = () => {
+        const r = await fetch('/api/gbpusd');
+        const d = await r.json();
+        if (d.price) {
+          const price = parseFloat(d.price);
+          setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
+          setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
           setStatus(s => ({...s, GBPUSD: "live"}));
-          addLog("GBP/USD WebSocket connected (Binance)", "success");
-        };
-        ws.onmessage = (e) => {
-          const d = JSON.parse(e.data);
-          const price = parseFloat(d.c);
-          if (price) {
-            setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
-            setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
-            setLastUpdate(new Date());
-          }
-        };
-        ws.onerror = () => { setStatus(s => ({...s, GBPUSD: "error"})); };
-        ws.onclose = () => { setTimeout(connect, 5000); };
-      } catch(e) { addLog("GBP WebSocket failed: " + e.message, "error"); }
+          setLastUpdate(new Date());
+        }
+      } catch(e) {
+        setStatus(s => ({...s, GBPUSD: "error"}));
+        addLog("GBP/USD fetch failed: " + e.message, "error");
+      }
     };
-    connect();
-    return () => ws && ws.close();
+    fetchGBP();
+    const id = setInterval(fetchGBP, 5000); // Every 5 seconds
+    return () => clearInterval(id);
   }, [addLog]);
 
   // ── XAU/USD via Binance PAXGUSDT WebSocket (gold-backed token, real-time) ──
@@ -356,15 +351,10 @@ export default function TradingBotLive() {
   useEffect(() => {
     const fetchCalendar = async () => {
       try {
-        const res  = await fetch(
-          "https://api.twelvedata.com/economic_calendar?start_date=" +
-          new Date().toISOString().split("T")[0] +
-          "&end_date=" + new Date(Date.now() + 7*24*60*60*1000).toISOString().split("T")[0] +
-          "&importance=high&apikey=" + TWELVE_DATA_KEY
-        );
+        const res  = await fetch('/api/calendar');
         const data = await res.json();
-        const events = (data.result?.list || []).map(e => ({
-          name: e.event,
+        const events = (data.events || []).map(e => ({
+          name: e.name,
           date: e.date,
           country: e.country,
           importance: e.importance,
