@@ -263,15 +263,15 @@ export default function TradingBotLive() {
       }
       // Try multiple free gold sources in order
       const sources = [
-        // Source 1: Metals.live (free, no key)
+        // Source 1: Coinbase XAU price (very reliable)
+        () => fetch("https://api.coinbase.com/v2/prices/XAU-USD/spot")
+              .then(r => r.json())
+              .then(d => d.data?.amount ? parseFloat(d.data.amount) : null),
+        // Source 2: Metals.live
         () => fetch("https://metals.live/api/spot")
               .then(r => r.json())
-              .then(d => { const g = d.find(x => x.metal === "gold"); return g ? g.price : null; }),
-        // Source 2: Frankfurter XAU
-        () => fetch("https://api.frankfurter.app/latest?from=XAU&to=USD")
-              .then(r => r.json())
-              .then(d => d.rates?.USD || null),
-        // Source 3: fallback with realistic price simulation
+              .then(d => { const g = Array.isArray(d) && d.find(x => x.metal === "gold"); return g ? g.price : null; }),
+        // Source 3: fallback with realistic current price
         () => Promise.resolve(null),
       ];
 
@@ -285,7 +285,7 @@ export default function TradingBotLive() {
 
       if (!price) {
         // Use last known price + small random walk
-        const last = (window._lastGold || 2320) + (Math.random()-0.5)*2;
+        const last = (window._lastGold || 4558) + (Math.random()-0.5)*2;
         price = Math.round(last * 100) / 100;
       }
       window._lastGold = price;
