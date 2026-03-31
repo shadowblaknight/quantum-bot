@@ -455,7 +455,7 @@ Be direct and specific. No disclaimers.`;
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(trade)
     }).catch(e => console.error('Failed to save trade:', e));
-  }, [signals, selected]);
+  }, [signals, prices, eventAlert]);
 
   useEffect(() => { if(logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
 
