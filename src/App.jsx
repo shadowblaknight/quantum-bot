@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 // NEWS_API_KEY moved to server-side api/news.js
+const TWELVE_DATA_KEY = "7a56659902cd4756a8a65068af305db4";
 // eslint-disable-next-line no-unused-vars
 const FRED_API_KEY = "6ea866d906a96ca293231d54a2746251";
 
@@ -151,6 +152,8 @@ export default function TradingBotLive() {
   const [isAiLoading,setIsAiLoading] = useState(false);
   const [trades,    setTrades]    = useState([]);
   const [lastUpdate,setLastUpdate]= useState(null);
+  const [calendar, setCalendar]   = useState([]);
+  const [eventAlert, setEventAlert] = useState(null);
   const wsRef   = useRef(null);
   const logRef  = useRef(null);
 
@@ -223,81 +226,81 @@ export default function TradingBotLive() {
     return () => wsRef.current?.close();
   }, [addLog]);
 
-  // ── GBP/USD via Frankfurter — respects market hours ──
+  // ── GBP/USD + XAU/USD via Twelve Data WebSocket (live streaming) ──
   useEffect(() => {
-    const fetchGBP = async () => {
-      const mkt = getMarketStatus();
-      if (!mkt.GBPUSD.open) {
-        setStatus(s => ({...s, GBPUSD: "closed"}));
-        addLog("GBP/USD market CLOSED (weekend) — signals paused", "warn");
-        return;
-      }
+    const mkt = getMarketStatus();
+    if (!mkt.GBPUSD.open) {
+      setStatus(s => ({...s, GBPUSD: "closed", XAUUSD: "closed"}));
+      addLog("Forex/Gold markets CLOSED (weekend) — signals paused", "warn");
+      return;
+    }
+
+    let ws;
+    const connect = () => {
       try {
-        const res  = await fetch("https://api.frankfurter.app/latest?from=GBP&to=USD");
-        const data = await res.json();
-        const price = data.rates?.USD;
-        if (price) {
-          setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
-          setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
-          setStatus(s => ({...s, GBPUSD: "live"}));
-          setLastUpdate(new Date());
-        }
+        ws = new WebSocket("wss://ws.twelvedata.com/v1/quotes/price?apikey=" + TWELVE_DATA_KEY);
+        ws.onopen = () => {
+          ws.send(JSON.stringify({
+            action: "subscribe",
+            params: { symbols: "GBP/USD,XAU/USD" }
+          }));
+          setStatus(s => ({...s, GBPUSD: "live", XAUUSD: "live"}));
+          addLog("GBP/USD & Gold WebSocket connected (Twelve Data)", "success");
+        };
+        ws.onmessage = (e) => {
+          try {
+            const d = JSON.parse(e.data);
+            if (d.event === "price" && d.price) {
+              const price = parseFloat(d.price);
+              if (d.symbol === "GBP/USD") {
+                setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
+                setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
+                setLastUpdate(new Date());
+              } else if (d.symbol === "XAU/USD") {
+                setPrices(prev => { setPrevPrices(prev); return {...prev, XAUUSD: price}; });
+                setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
+                window._lastGold = price;
+              }
+            }
+          } catch(err) {}
+        };
+        ws.onerror = () => {
+          setStatus(s => ({...s, GBPUSD: "error"}));
+          addLog("Twelve Data WebSocket error — retrying in 5s", "error");
+        };
+        ws.onclose = () => {
+          setStatus(s => ({...s, GBPUSD: "reconnecting"}));
+          setTimeout(connect, 5000);
+        };
       } catch(e) {
-        setStatus(s => ({...s, GBPUSD: "error"}));
-        addLog("GBP/USD fetch failed: " + e.message, "error");
+        addLog("Twelve Data connection failed: " + e.message, "error");
       }
     };
-    fetchGBP();
-    const id = setInterval(fetchGBP, 30000);
-    return () => clearInterval(id);
+    connect();
+    return () => ws && ws.close();
   }, [addLog]);
 
-  // ── XAU/USD — uses metals-api via backend proxy ──
+  // ── XAU/USD REST fallback (when market closed or WS not connected) ──
   useEffect(() => {
-    const fetchGold = async () => {
+    const fetchGoldRest = async () => {
       const mkt = getMarketStatus();
-      if (!mkt.XAUUSD.open) {
-        setStatus(s => ({...s, XAUUSD: "closed"}));
-        addLog("Gold market CLOSED (weekend) — signals paused", "warn");
-        return;
-      }
-      // Try multiple free gold sources in order
-      const sources = [
-        // Source 1: Coinbase XAU price (very reliable)
-        () => fetch("https://api.coinbase.com/v2/prices/XAU-USD/spot")
-              .then(r => r.json())
-              .then(d => d.data?.amount ? parseFloat(d.data.amount) : null),
-        // Source 2: Metals.live
-        () => fetch("https://metals.live/api/spot")
-              .then(r => r.json())
-              .then(d => { const g = Array.isArray(d) && d.find(x => x.metal === "gold"); return g ? g.price : null; }),
-        // Source 3: fallback with realistic current price
-        () => Promise.resolve(null),
-      ];
-
-      let price = null;
-      for (const source of sources) {
-        try {
-          price = await source();
-          if (price && price > 1000 && price < 5000) break;
-        } catch(e) { continue; }
-      }
-
-      if (!price) {
-        // Use last known price + small random walk
-        const last = (window._lastGold || 4558) + (Math.random()-0.5)*2;
-        price = Math.round(last * 100) / 100;
-      }
-      window._lastGold = price;
-
-      setPrices(prev => { setPrevPrices(prev); return {...prev, XAUUSD: price}; });
-      setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
-      setStatus(s => ({...s, XAUUSD: "live"}));
-      setLastUpdate(new Date());
-      addLog("XAU/USD updated: $" + price.toFixed(2), "success");
+      if (!mkt.XAUUSD.open) return;
+      try {
+        const res  = await fetch("https://api.twelvedata.com/price?symbol=XAU/USD&apikey=" + TWELVE_DATA_KEY);
+        const data = await res.json();
+        if (data.price) {
+          const price = parseFloat(data.price);
+          setPrices(prev => ({...prev, XAUUSD: price}));
+          setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
+          setStatus(s => ({...s, XAUUSD: "live"}));
+          window._lastGold = price;
+          addLog("XAU/USD REST: $" + price.toFixed(2), "success");
+        }
+      } catch(e) {}
     };
-    fetchGold();
-    const id = setInterval(fetchGold, 60000);
+    // Initial REST fetch, then rely on WebSocket for updates
+    fetchGoldRest();
+    const id = setInterval(fetchGoldRest, 60000);
     return () => clearInterval(id);
   }, [addLog]);
 
@@ -368,6 +371,48 @@ export default function TradingBotLive() {
     return () => clearInterval(id);
   }, [addLog]);
 
+  // ── Economic Calendar — auto-pause before major events ──
+  useEffect(() => {
+    const fetchCalendar = async () => {
+      try {
+        const res  = await fetch(
+          "https://api.twelvedata.com/economic_calendar?start_date=" +
+          new Date().toISOString().split("T")[0] +
+          "&end_date=" + new Date(Date.now() + 7*24*60*60*1000).toISOString().split("T")[0] +
+          "&importance=high&apikey=" + TWELVE_DATA_KEY
+        );
+        const data = await res.json();
+        const events = (data.result?.list || []).map(e => ({
+          name: e.event,
+          date: e.date,
+          country: e.country,
+          importance: e.importance,
+          actual: e.actual,
+          forecast: e.forecast,
+        }));
+        setCalendar(events);
+
+        // Check if major event within 30 minutes
+        const now = Date.now();
+        const upcoming = events.find(e => {
+          const t = new Date(e.date).getTime();
+          return t > now && t - now < 30 * 60 * 1000;
+        });
+        if (upcoming) {
+          setEventAlert(upcoming);
+          addLog("⚠️ MAJOR EVENT in <30min: " + upcoming.name + " — signals paused!", "error");
+        } else {
+          setEventAlert(null);
+        }
+      } catch(e) {
+        addLog("Calendar fetch failed: " + e.message, "warn");
+      }
+    };
+    fetchCalendar();
+    const id = setInterval(fetchCalendar, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [addLog]);
+
   // ── AI Analysis ──
   const runAI = async () => {
     setIsAiLoading(true); setAiText("");
@@ -417,6 +462,8 @@ Be direct and specific. No disclaimers.`;
   useEffect(() => {
     const sig = signals[selected];
     if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 78) return;
+    // Auto-pause before major economic events
+    if (eventAlert) { addLog("⚠️ Trade blocked: " + eventAlert.name + " imminent", "warn"); return; }
     const p = prices[selected];
     if (!p) return;
     // Add a paper trade entry when high-confidence signal fires
@@ -514,6 +561,19 @@ Be direct and specific. No disclaimers.`;
         ))}
       </div>
 
+      {/* EVENT ALERT BANNER */}
+      {eventAlert && (
+        <div style={{background:"#FF4466", padding:"8px 18px", display:"flex", alignItems:"center", gap:12, flexShrink:0}}>
+          <span style={{fontSize:14}}>⚠️</span>
+          <span style={{fontSize:11, fontWeight:700, color:"#fff", letterSpacing:".05em"}}>
+            MAJOR EVENT IN &lt;30 MIN: {eventAlert.name} ({eventAlert.country}) — ALL SIGNALS PAUSED
+          </span>
+          <span style={{marginLeft:"auto", fontSize:10, color:"rgba(255,255,255,0.8)"}}>
+            {new Date(eventAlert.date).toLocaleTimeString()}
+          </span>
+        </div>
+      )}
+
       {/* MAIN BODY */}
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
 
@@ -587,7 +647,7 @@ Be direct and specific. No disclaimers.`;
 
           {/* Tabs */}
           <div style={{borderBottom:"1px solid #182A3C",display:"flex",padding:"0 14px"}}>
-            {[["signals","STRATEGY MATRIX"],["analysis","AI DEEP ANALYSIS"],["trades","PAPER TRADE LOG"],["macro","MACRO DATA"]].map(([id,lbl])=>(
+            {[["signals","STRATEGY MATRIX"],["analysis","AI DEEP ANALYSIS"],["trades","PAPER TRADE LOG"],["macro","MACRO DATA"],["calendar","ECONOMIC CALENDAR"]].map(([id,lbl])=>(
               <button key={id} className={`tb${activeTab===id?" a":""}`} onClick={()=>setActiveTab(id)}>{lbl}</button>
             ))}
           </div>
@@ -738,6 +798,47 @@ Be direct and specific. No disclaimers.`;
                       <span style={{fontWeight:600,color:t.pnl>=0?"#00D4AA":"#FF4466"}}>{t.pnl>=0?"+":""}${t.pnl}</span>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── CALENDAR TAB ── */}
+            {activeTab==="calendar" && (
+              <div style={{animation:"fadeUp .3s"}}>
+                <div style={{fontSize:9,color:"#2A5A7A",marginBottom:12}}>
+                  High-impact economic events for the next 7 days. Bot auto-pauses 30 minutes before each event.
+                </div>
+                {calendar.length === 0 && (
+                  <div className="card" style={{padding:20,textAlign:"center",color:"#2A5A7A",fontSize:9}}>
+                    Loading economic calendar...
+                  </div>
+                )}
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {calendar.slice(0,15).map((e,i) => {
+                    const eventTime = new Date(e.date);
+                    const isPast    = eventTime < new Date();
+                    const isSoon    = !isPast && (eventTime - new Date()) < 30*60*1000;
+                    return (
+                      <div key={i} className="card" style={{
+                        padding:"10px 14px",
+                        borderLeft: isSoon ? "3px solid #FF4466" : isPast ? "3px solid #2A4A6A" : "3px solid #FFB800",
+                        opacity: isPast ? 0.5 : 1
+                      }}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                          <span style={{fontSize:11,fontWeight:600,color:isSoon?"#FF4466":isPast?"#3A6A8A":"#E0F0FF"}}>{e.name}</span>
+                          <span style={{fontSize:9,color:isSoon?"#FF4466":"#FFB800",fontWeight:isSoon?700:400}}>
+                            {isSoon ? "⚠️ SOON" : isPast ? "DONE" : "UPCOMING"}
+                          </span>
+                        </div>
+                        <div style={{display:"flex",gap:16,fontSize:9,color:"#5A7A9A"}}>
+                          <span>🌍 {e.country}</span>
+                          <span>🕐 {eventTime.toLocaleDateString()} {eventTime.toLocaleTimeString()}</span>
+                          {e.forecast && <span>Forecast: {e.forecast}</span>}
+                          {e.actual && <span style={{color:"#00D4AA"}}>Actual: {e.actual}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
