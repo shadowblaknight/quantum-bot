@@ -226,83 +226,64 @@ export default function TradingBotLive() {
     return () => wsRef.current?.close();
   }, [addLog]);
 
-  // ── GBP/USD + XAU/USD via Twelve Data WebSocket (live streaming) ──
+  // ── GBP/USD via Binance GBPUSDT WebSocket (real-time) ──
   useEffect(() => {
-    const mkt = getMarketStatus();
-    if (!mkt.GBPUSD.open) {
-      setStatus(s => ({...s, GBPUSD: "closed", XAUUSD: "closed"}));
-      addLog("Forex/Gold markets CLOSED (weekend) — signals paused", "warn");
-      return;
-    }
-
     let ws;
     const connect = () => {
       try {
-        ws = new WebSocket("wss://ws.twelvedata.com/v1/quotes/price?apikey=" + TWELVE_DATA_KEY);
+        // Binance has GBP/USDT pair - tracks GBP/USD very closely
+        ws = new WebSocket("wss://stream.binance.com:9443/ws/gbpusdt@ticker");
         ws.onopen = () => {
-          ws.send(JSON.stringify({
-            action: "subscribe",
-            params: { symbols: "GBP/USD,XAU/USD" }
-          }));
-          setStatus(s => ({...s, GBPUSD: "live", XAUUSD: "live"}));
-          addLog("GBP/USD & Gold WebSocket connected (Twelve Data)", "success");
+          setStatus(s => ({...s, GBPUSD: "live"}));
+          addLog("GBP/USD WebSocket connected (Binance)", "success");
         };
         ws.onmessage = (e) => {
-          try {
-            const d = JSON.parse(e.data);
-            if (d.event === "price" && d.price) {
-              const price = parseFloat(d.price);
-              if (d.symbol === "GBP/USD") {
-                setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
-                setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
-                setLastUpdate(new Date());
-              } else if (d.symbol === "XAU/USD") {
-                setPrices(prev => { setPrevPrices(prev); return {...prev, XAUUSD: price}; });
-                setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
-                window._lastGold = price;
-              }
-            }
-          } catch(err) {}
+          const d = JSON.parse(e.data);
+          const price = parseFloat(d.c);
+          if (price) {
+            setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
+            setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
+            setLastUpdate(new Date());
+          }
         };
-        ws.onerror = () => {
-          setStatus(s => ({...s, GBPUSD: "error"}));
-          addLog("Twelve Data WebSocket error — retrying in 5s", "error");
-        };
-        ws.onclose = () => {
-          setStatus(s => ({...s, GBPUSD: "reconnecting"}));
-          setTimeout(connect, 5000);
-        };
-      } catch(e) {
-        addLog("Twelve Data connection failed: " + e.message, "error");
-      }
+        ws.onerror = () => { setStatus(s => ({...s, GBPUSD: "error"})); };
+        ws.onclose = () => { setTimeout(connect, 5000); };
+      } catch(e) { addLog("GBP WebSocket failed: " + e.message, "error"); }
     };
     connect();
     return () => ws && ws.close();
   }, [addLog]);
 
-  // ── XAU/USD REST fallback (when market closed or WS not connected) ──
+  // ── XAU/USD via Binance PAXGUSDT WebSocket (gold-backed token, real-time) ──
   useEffect(() => {
-    const fetchGoldRest = async () => {
-      const mkt = getMarketStatus();
-      if (!mkt.XAUUSD.open) return;
+    let ws;
+    const connect = () => {
       try {
-        const res  = await fetch("https://api.twelvedata.com/price?symbol=XAU/USD&apikey=" + TWELVE_DATA_KEY);
-        const data = await res.json();
-        if (data.price) {
-          const price = parseFloat(data.price);
-          setPrices(prev => ({...prev, XAUUSD: price}));
-          setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
+        // PAXG is a gold-backed token on Binance, tracks XAU/USD price tick by tick
+        ws = new WebSocket("wss://stream.binance.com:9443/ws/paxgusdt@ticker");
+        ws.onopen = () => {
           setStatus(s => ({...s, XAUUSD: "live"}));
-          window._lastGold = price;
-          addLog("XAU/USD REST: $" + price.toFixed(2), "success");
-        }
-      } catch(e) {}
+          addLog("XAU/USD WebSocket connected via PAXG (Binance)", "success");
+        };
+        ws.onmessage = (e) => {
+          const d = JSON.parse(e.data);
+          const price = parseFloat(d.c);
+          if (price && price > 1000) {
+            setPrices(prev => { setPrevPrices(prev); return {...prev, XAUUSD: price}; });
+            setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
+            window._lastGold = price;
+            setLastUpdate(new Date());
+          }
+        };
+        ws.onerror = () => { setStatus(s => ({...s, XAUUSD: "error"})); };
+        ws.onclose = () => { setTimeout(connect, 5000); };
+      } catch(e) { addLog("Gold WebSocket failed: " + e.message, "error"); }
     };
-    // Initial REST fetch, then rely on WebSocket for updates
-    fetchGoldRest();
-    const id = setInterval(fetchGoldRest, 60000);
-    return () => clearInterval(id);
+    connect();
+    return () => ws && ws.close();
   }, [addLog]);
+
+
 
   // ── News sentiment (NewsAPI — needs free key from newsapi.org) ──
   useEffect(() => {
