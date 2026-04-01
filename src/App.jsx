@@ -106,10 +106,10 @@ const analyzeStrategies = (prices) => {
 
   // Score each strategy 0-100
   const scores = {
-    RSI:        rsi < 35 ? 85 : rsi > 65 ? 20 : 55,
-    MACD:       macd.hist > 0 ? 75 : 30,
+    RSI:        rsi < 35 ? 85 : rsi > 70 ? 15 : rsi > 60 ? 35 : 55,
+    MACD:       macd.hist > 0.001 ? 75 : macd.hist < -0.001 ? 20 : 50,
     Bollinger:  bb.pct < 20 ? 80 : bb.pct > 80 ? 25 : 50,
-    "EMA Cloud": ema9 > ema21 ? 75 : 30,
+    "EMA Cloud": ema9 > ema21 ? 75 : ema9 < ema21 ? 20 : 50,
     Fibonacci:  50 + (change * 8),
     Volume:     50 + Math.random() * 20 - 10,
   };
