@@ -431,7 +431,7 @@ Be direct and specific. No disclaimers.`;
   // ── Simulated paper trade log ──
   // eslint-disable-next-line
   useEffect(() => {
-    const sig = signals[selected];
+    INSTRUMENTS.forEach(function(inst){var instId=inst.id;var sig=signals[instId];if(!sig||sig.direction==="NEUTRAL"||sig.confidence<78)return;if(eventAlert)return;var p=prices[instId];if(!p)return;var win=Math.random()>0.22;var pnl=win?+(Math.random()*180+20).toFixed(0):-(Math.random()*70+10).toFixed(0);var trade={instrument:instId,direction:sig.direction,entry:p,confidence:sig.confidence,pnl:pnl,win:win,ts:new Date(),label:inst.label};setTrades(function(prev){return[trade].concat(prev.slice(0,499))});addLog("Trade: "+inst.label+" "+sig.direction+" "+sig.confidence+"%","signal");fetch("/api/trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(trade)}).catch(function(){});});var ___dummy___
     if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 78) return;
     // Auto-pause before major economic events
     if (eventAlert) { addLog("⚠️ Trade blocked: " + eventAlert.name + " imminent", "warn"); return; }
