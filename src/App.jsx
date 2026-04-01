@@ -429,32 +429,24 @@ Be direct and specific. No disclaimers.`;
   };
 
   // ── Simulated paper trade log ──
-  // eslint-disable-next-line
+   const lastTradeRef = useRef({});
   useEffect(() => {
-    INSTRUMENTS.forEach(function(inst){var instId=inst.id;var sig=signals[instId];if(!sig||sig.direction==="NEUTRAL"||sig.confidence<78)return;if(eventAlert)return;var p=prices[instId];if(!p)return;var win=Math.random()>0.22;var pnl=win?+(Math.random()*180+20).toFixed(0):-(Math.random()*70+10).toFixed(0);var trade={instrument:instId,direction:sig.direction,entry:p,confidence:sig.confidence,pnl:pnl,win:win,ts:new Date(),label:inst.label};setTrades(function(prev){return[trade].concat(prev.slice(0,499))});addLog("Trade: "+inst.label+" "+sig.direction+" "+sig.confidence+"%","signal");fetch("/api/trades",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(trade)}).catch(function(){});});var ___dummy___
-    if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 78) return;
-    // Auto-pause before major economic events
-    if (eventAlert) { addLog("⚠️ Trade blocked: " + eventAlert.name + " imminent", "warn"); return; }
-    const p = prices[selected];
-    if (!p) return;
-    // Add a paper trade entry when high-confidence signal fires
-    const last = trades[0];
-    if (last && (new Date() - new Date(last.ts)) < 60000) return; // 1 trade per minute max
-    const win = Math.random() > 0.22;
-    const pnl = win ? +(Math.random()*180+20).toFixed(0) : -(Math.random()*70+10).toFixed(0);
-    const trade = {
-      id: `P${1000+trades.length}`, instrument: selected, direction: sig.direction,
-      entry: p, confidence: sig.confidence, pnl, win, ts: new Date(),
-      label: INSTRUMENTS.find(i=>i.id===selected)?.label
-    };
-    setTrades(prev => [trade, ...prev.slice(0,499)]);
-    addLog("📋 Paper trade: " + trade.direction + " " + trade.label + " @ " + p.toFixed(selected==="BTCUSDT"?0:4) + " | Conf: " + sig.confidence + "%", "signal");
-    // Save to persistent database
-    fetch('/api/trades', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(trade)
-    }).catch(e => console.error('Failed to save trade:', e));
+    INSTRUMENTS.forEach(inst => {
+      const sig = signals[inst.id];
+      if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 78) return;
+      if (eventAlert) return;
+      const p = prices[inst.id];
+      if (!p) return;
+      const now = Date.now();
+      if (lastTradeRef.current[inst.id] && (now - lastTradeRef.current[inst.id]) < 300000) return;
+      lastTradeRef.current[inst.id] = now;
+      const win = Math.random() > 0.22;
+      const pnl = win ? +(Math.random()*180+20).toFixed(0) : -(Math.random()*70+10).toFixed(0);
+      const trade = { instrument: inst.id, direction: sig.direction, entry: p, confidence: sig.confidence, pnl, win, ts: new Date(), label: inst.label };
+      setTrades(prev => [trade, ...prev.slice(0, 499)]);
+      addLog("Trade: " + inst.label + " " + sig.direction + " " + sig.confidence + "%", "signal");
+      fetch("/api/trades", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(trade) }).catch(()=>{});
+    });
   }, [signals, prices, eventAlert]);
 
   useEffect(() => { if(logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
