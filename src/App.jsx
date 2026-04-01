@@ -119,7 +119,7 @@ const analyzeStrategies = (prices) => {
   const bullCount = Object.values(scores).filter(s => s >= 60).length;
   const bearCount = Object.values(scores).filter(s => s <= 40).length;
   const confidence = Math.round(Math.max(...Object.values(scores)) * 0.7 + (bullCount/6)*30);
-  const direction  = bullCount >= 4 ? "LONG" : bearCount >= 4 ? "SHORT" : "NEUTRAL";
+  const direction  = bullCount >= 4 ? "LONG" : bearCount >= 3 ? "SHORT" : "NEUTRAL";
 
   return { scores, direction, confidence: Math.min(95, Math.max(50, confidence)), rsi, macd, bb, ema9, ema21 };
 };
