@@ -446,7 +446,7 @@ Be direct and specific. No disclaimers.`;
       setTrades(prev => [trade, ...prev.slice(0, 499)]);
       addLog("Trade: " + inst.label + " " + sig.direction + " " + sig.confidence + "%", "signal");
       fetch("/api/trades", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(trade) }).catch(()=>{});
-      fetch("/api/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instrument: inst.id, direction: sig.direction, entry: p, stopLossPips: 50 }) }).catch(()=>{});
+      // execute disabled temporarily
     });
   }, [signals, prices, eventAlert]);
 
