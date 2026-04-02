@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h2>MetaAPI Test</h2>
+<button onclick="testExecute()">Test Execute</button>
+<pre id="result"></pre>
+<script>
+async function testExecute() {
+  document.getElementById('result').textContent = 'Testing...';
+  try {
+    const r = await fetch('/api/execute', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        instrument: 'BTCUSDT',
+        direction: 'LONG',
+        entry: 67000,
+        stopLossPips: 50
+      })
+    });
+    const d = await r.json();
+    document.getElementById('result').textContent = JSON.stringify(d, null, 2);
+  } catch(e) {
+    document.getElementById('result').textContent = 'Error: ' + e.message;
+  }
+}
+</script>
+</body>
+</html>
