@@ -6,8 +6,26 @@
     }
   ],
   "functions": {
-    "api/*.js": {
-      "maxDuration": 30
+    "api/execute.js": {
+      "runtime": "nodejs20.x"
+    },
+    "api/trades.js": {
+      "runtime": "nodejs20.x"
+    },
+    "api/gbpusd.js": {
+      "runtime": "nodejs20.x"
+    },
+    "api/news.js": {
+      "runtime": "nodejs20.x"
+    },
+    "api/calendar.js": {
+      "runtime": "nodejs20.x"
+    },
+    "api/ai.js": {
+      "runtime": "nodejs20.x"
+    },
+    "api/cron.js": {
+      "runtime": "nodejs20.x"
     }
   }
 }
