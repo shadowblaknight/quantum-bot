@@ -1,867 +1,1284 @@
-/* eslint-disable */
 import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-// NEWS_API_KEY moved to server-side api/news.js
-const TWELVE_DATA_KEY = "7a56659902cd4756a8a65068af305db4";
-// eslint-disable-next-line no-unused-vars
-const FRED_API_KEY = "6ea866d906a96ca293231d54a2746251";
-
 const INSTRUMENTS = [
-  { id: "GBPUSD",  label: "GBP/USD", type: "FOREX",     color: "#00D4AA", icon: "₤", base: "GBP", quote: "USD" },
-  { id: "BTCUSDT", label: "BTC/USDT",type: "CRYPTO",    color: "#F7931A", icon: "₿", base: "BTC", quote: "USDT" },
-  { id: "XAUUSD",  label: "XAU/USD", type: "COMMODITY", color: "#FFD700", icon: "⬡", base: "XAU", quote: "USD" },
+  { id: "GBPUSD",  label: "GBP/USD",  type: "FOREX",     color: "#00D4AA", icon: "₤" },
+  { id: "BTCUSDT", label: "BTC/USDT", type: "CRYPTO",    color: "#F7931A", icon: "₿" },
+  { id: "XAUUSD",  label: "XAU/USD",  type: "COMMODITY", color: "#FFD700", icon: "⬡" },
 ];
 
-// eslint-disable-next-line no-unused-vars
-const STRATEGIES = ["RSI","MACD","Bollinger","EMA Cloud","Fibonacci","Volume"];
-const TIMEFRAMES  = ["1m","5m","15m","1h","4h","1D"];
-// ─── MARKET HOURS ────────────────────────────────────────────────────────────────────────────────
+// ─── MARKET HOURS ─────────────────────────────────────────────────────────────
 const getMarketStatus = () => {
   const now = new Date();
-  const utcDay  = now.getUTCDay();   // 0=Sun, 6=Sat
+  const utcDay  = now.getUTCDay();
   const utcHour = now.getUTCHours();
   const utcMin  = now.getUTCMinutes();
   const utcTime = utcHour + utcMin / 60;
-
-  // Crypto: always open 24/7
-  const crypto = { open: true, label: "OPEN", session: "24/7" };
-
-  // Forex: Mon 00:00 UTC — Fri 22:00 UTC, Sun opens at 22:00 UTC
-  let forex = { open: false, label: "CLOSED", session: "WEEKEND — No signals" };
+  const crypto  = { open: true, session: "24/7" };
+  let forex = { open: false, session: "WEEKEND" };
   if (utcDay >= 1 && utcDay <= 4) {
-    const session = utcTime < 8 ? "SYDNEY/TOKYO" : utcTime < 16 ? "LONDON" : "NEW YORK";
-    forex = { open: true, label: "OPEN", session };
+    const s = utcTime < 8 ? "SYDNEY/TOKYO" : utcTime < 16 ? "LONDON" : "NEW YORK";
+    forex = { open: true, session: s };
   } else if (utcDay === 5 && utcTime < 22) {
-    forex = { open: true, label: "OPEN", session: utcTime < 16 ? "LONDON" : "NEW YORK" };
+    forex = { open: true, session: utcTime < 16 ? "LONDON" : "NEW YORK" };
   } else if (utcDay === 0 && utcTime >= 22) {
-    forex = { open: true, label: "OPEN", session: "SYDNEY" };
+    forex = { open: true, session: "SYDNEY" };
   }
-
-  // Gold follows forex hours
-  const gold = forex.open
-    ? { open: true,  label: "OPEN",   session: "COMMODITIES" }
-    : { open: false, label: "CLOSED", session: "WEEKEND — No signals" };
-
+  const gold = forex.open ? { open: true, session: "COMMODITIES" } : { open: false, session: "WEEKEND" };
   return { GBPUSD: forex, BTCUSDT: crypto, XAUUSD: gold };
 };
 
-
-
-// ─── TECHNICAL INDICATOR CALCULATIONS ────────────────────────────────────────
-// eslint-disable-next-line no-unused-vars
-const calcSMA = (arr, period) => {
-  if (arr.length < period) return null;
-  return arr.slice(-period).reduce((a,b) => a+b, 0) / period;
+// Check if current time is near market close (avoid overnight trades)
+const isNearMarketClose = () => {
+  const now = new Date();
+  const utcDay = now.getUTCDay();
+  const utcHour = now.getUTCHours();
+  const utcMin = now.getUTCMinutes();
+  const utcTime = utcHour + utcMin / 60;
+  if (utcDay === 5 && utcTime >= 21.5) return true;
+  return false;
 };
 
+// ─── REAL INDICATOR CALCULATIONS ──────────────────────────────────────────────
 const calcEMA = (arr, period) => {
   if (arr.length < period) return null;
   const k = 2 / (period + 1);
-  let ema = arr.slice(0, period).reduce((a,b) => a+b, 0) / period;
+  let ema = arr.slice(0, period).reduce((a, b) => a + b, 0) / period;
   for (let i = period; i < arr.length; i++) ema = arr[i] * k + ema * (1 - k);
   return ema;
 };
 
 const calcRSI = (prices, period = 14) => {
   if (prices.length < period + 1) return 50;
-  const changes = prices.slice(1).map((p,i) => p - prices[i]);
-  const gains = changes.map(c => c > 0 ? c : 0);
-  const losses = changes.map(c => c < 0 ? -c : 0);
-  const avgGain = gains.slice(-period).reduce((a,b) => a+b, 0) / period;
-  const avgLoss = losses.slice(-period).reduce((a,b) => a+b, 0) / period;
+  const changes = prices.slice(1).map((p, i) => p - prices[i]);
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 0; i < period; i++) {
+    if (changes[i] > 0) avgGain += changes[i];
+    else avgLoss -= changes[i];
+  }
+  avgGain /= period; avgLoss /= period;
+  // Smoothed RSI
+  for (let i = period; i < changes.length; i++) {
+    avgGain = (avgGain * (period - 1) + Math.max(changes[i], 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-changes[i], 0)) / period;
+  }
   if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
+  return 100 - (100 / (1 + avgGain / avgLoss));
 };
 
+// Real MACD calculation
 const calcMACD = (prices) => {
+  if (prices.length < 26) return { macd: 0, signal: 0, hist: 0 };
   const ema12 = calcEMA(prices, 12);
   const ema26 = calcEMA(prices, 26);
   if (!ema12 || !ema26) return { macd: 0, signal: 0, hist: 0 };
-  const macd = ema12 - ema26;
-  return { macd, signal: macd * 0.9, hist: macd * 0.1 };
+  const macdLine = ema12 - ema26;
+  // Calculate signal line (9 EMA of MACD values)
+  const macdValues = [];
+  for (let i = 26; i <= prices.length; i++) {
+    const e12 = calcEMA(prices.slice(0, i), 12);
+    const e26 = calcEMA(prices.slice(0, i), 26);
+    if (e12 && e26) macdValues.push(e12 - e26);
+  }
+  const signalLine = macdValues.length >= 9 ? calcEMA(macdValues, 9) : macdLine;
+  const histogram = macdLine - (signalLine || macdLine);
+  return { macd: macdLine, signal: signalLine || macdLine, hist: histogram };
 };
 
 const calcBollinger = (prices, period = 20) => {
   if (prices.length < period) return { upper: 0, middle: 0, lower: 0, pct: 50 };
   const slice = prices.slice(-period);
-  const mean = slice.reduce((a,b) => a+b, 0) / period;
-  const std  = Math.sqrt(slice.reduce((a,b) => a + (b-mean)**2, 0) / period);
-  const upper = mean + 2*std, lower = mean - 2*std;
-  const last  = prices[prices.length-1];
-  const pct   = upper === lower ? 50 : ((last - lower)/(upper - lower))*100;
-  return { upper, middle: mean, lower, pct };
+  const mean  = slice.reduce((a, b) => a + b, 0) / period;
+  const std   = Math.sqrt(slice.reduce((a, b) => a + (b - mean) ** 2, 0) / period);
+  const upper = mean + 2 * std, lower = mean - 2 * std;
+  const last  = prices[prices.length - 1];
+  const pct   = upper === lower ? 50 : ((last - lower) / (upper - lower)) * 100;
+  return { upper, middle: mean, lower, pct, std };
 };
 
-const analyzeStrategies = (prices) => {
-  if (!prices || prices.length < 30) return null;
-  const rsi    = calcRSI(prices);
-  const macd   = calcMACD(prices);
-  const bb     = calcBollinger(prices);
-  const ema9   = calcEMA(prices, 9)  || prices[prices.length-1];
-  const ema21  = calcEMA(prices, 21) || prices[prices.length-1];
-  const last   = prices[prices.length-1];
-  const change = prices.length > 1 ? ((last - prices[prices.length-2]) / prices[prices.length-2]) * 100 : 0;
+// ATR for stop loss calculation
+const calcATR = (prices, period = 14) => {
+  if (prices.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < prices.length; i++) {
+    trs.push(Math.abs(prices[i] - prices[i - 1]));
+  }
+  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+};
 
-  // Score each strategy 0-100
-  const scores = {
-    RSI:        rsi < 35 ? 85 : rsi > 70 ? 15 : rsi > 60 ? 35 : 55,
-    MACD:       macd.hist > 0.001 ? 75 : macd.hist < -0.001 ? 20 : 50,
-    Bollinger:  bb.pct < 20 ? 80 : bb.pct > 80 ? 25 : 50,
-    "EMA Cloud": ema9 > ema21 ? 75 : ema9 < ema21 ? 20 : 50,
-    Fibonacci:  50 + (change * 8),
-    Volume:     50 + Math.random() * 20 - 10,
+
+// ─── SMART MONEY CONCEPTS ENGINE ─────────────────────────────────────────────
+
+// Break of Structure & Change of Character
+const calcBOSCHOCH = (candles) => {
+  if (!candles || candles.length < 10) return { bos: null, choch: null, bias: null };
+
+  const n = candles.length;
+  // Find recent swing highs and lows (last 20 candles)
+  const lookback = Math.min(20, n);
+  const recent = candles.slice(n - lookback);
+
+  let swingHighs = [];
+  let swingLows = [];
+
+  for (let i = 2; i < recent.length - 2; i++) {
+    const c = recent[i];
+    // Swing high: higher than 2 candles each side
+    if (c.high > recent[i-1].high && c.high > recent[i-2].high &&
+        c.high > recent[i+1].high && c.high > recent[i+2].high) {
+      swingHighs.push({ price: c.high, idx: i });
+    }
+    // Swing low: lower than 2 candles each side
+    if (c.low < recent[i-1].low && c.low < recent[i-2].low &&
+        c.low < recent[i+1].low && c.low < recent[i+2].low) {
+      swingLows.push({ price: c.low, idx: i });
+    }
+  }
+
+  const lastCandle = candles[n - 1];
+  const lastClose = lastCandle.close;
+  const lastHigh = lastCandle.high;
+  const lastLow = lastCandle.low;
+
+  let bos = null;
+  let choch = null;
+
+  // BOS Bullish: price breaks above most recent swing high
+  if (swingHighs.length > 0) {
+    const lastSwingHigh = swingHighs[swingHighs.length - 1];
+    if (lastClose > lastSwingHigh.price) {
+      bos = { type: 'BULLISH', level: lastSwingHigh.price, broken: true };
+    }
+  }
+
+  // BOS Bearish: price breaks below most recent swing low
+  if (swingLows.length > 0) {
+    const lastSwingLow = swingLows[swingLows.length - 1];
+    if (lastClose < lastSwingLow.price) {
+      if (bos && bos.type === 'BULLISH') {
+        // Conflicting - most recent takes priority
+        choch = { type: 'BEARISH', level: lastSwingLow.price };
+        bos = null;
+      } else {
+        bos = { type: 'BEARISH', level: lastSwingLow.price, broken: true };
+      }
+    }
+  }
+
+  // CHoCH: previous trend broken in opposite direction
+  // If we had higher highs/higher lows (uptrend) and now break a swing low = CHoCH BEARISH
+  if (swingHighs.length >= 2 && swingLows.length >= 2) {
+    const prevHigh = swingHighs[swingHighs.length - 2];
+    const lastHighSH = swingHighs[swingHighs.length - 1];
+    const prevLow = swingLows[swingLows.length - 2];
+    const lastLowSL = swingLows[swingLows.length - 1];
+
+    const wasUptrend = lastHighSH.price > prevHigh.price && lastLowSL.price > prevLow.price;
+    const wasDowntrend = lastHighSH.price < prevHigh.price && lastLowSL.price < prevLow.price;
+
+    if (wasUptrend && lastClose < lastLowSL.price) {
+      choch = { type: 'BEARISH', level: lastLowSL.price };
+    } else if (wasDowntrend && lastClose > lastHighSH.price) {
+      choch = { type: 'BULLISH', level: lastHighSH.price };
+    }
+  }
+
+  // Overall bias from structure
+  let bias = null;
+  if (choch) bias = choch.type;
+  else if (bos) bias = bos.type;
+
+  return { bos, choch, bias, swingHighs, swingLows };
+};
+
+// Order Blocks
+const calcOrderBlocks = (candles) => {
+  if (!candles || candles.length < 5) return { bullishOB: null, bearishOB: null };
+
+  const n = candles.length;
+  let bullishOB = null;
+  let bearishOB = null;
+
+  // Look back through last 30 candles
+  const lookback = Math.min(30, n - 1);
+
+  for (let i = n - lookback; i < n - 1; i++) {
+    const c = candles[i];
+    const next = candles[i + 1];
+    const isBullishMove = next.close > c.high * 1.001; // strong move up after candle
+    const isBearishMove = next.close < c.low * 0.999;  // strong move down after candle
+
+    // Bullish OB: last bearish candle before a strong bullish move
+    if (!bullishOB && c.close < c.open && isBullishMove) {
+      bullishOB = {
+        high: c.high,
+        low: c.low,
+        mid: (c.high + c.low) / 2,
+        idx: i
+      };
+    }
+
+    // Bearish OB: last bullish candle before a strong bearish move
+    if (!bearishOB && c.close > c.open && isBearishMove) {
+      bearishOB = {
+        high: c.high,
+        low: c.low,
+        mid: (c.high + c.low) / 2,
+        idx: i
+      };
+    }
+
+    if (bullishOB && bearishOB) break;
+  }
+
+  return { bullishOB, bearishOB };
+};
+
+// Fair Value Gaps
+const calcFVG = (candles) => {
+  if (!candles || candles.length < 3) return { bullishFVG: null, bearishFVG: null };
+
+  const n = candles.length;
+  let bullishFVG = null;
+  let bearishFVG = null;
+
+  // Scan last 20 candles for FVGs
+  for (let i = n - 20; i < n - 2; i++) {
+    if (i < 0) continue;
+    const c1 = candles[i];
+    const c3 = candles[i + 2];
+
+    // Bullish FVG: gap between c1 high and c3 low (price moved up fast)
+    if (!bullishFVG && c3.low > c1.high) {
+      bullishFVG = {
+        top: c3.low,
+        bottom: c1.high,
+        mid: (c3.low + c1.high) / 2,
+        idx: i
+      };
+    }
+
+    // Bearish FVG: gap between c1 low and c3 high (price moved down fast)
+    if (!bearishFVG && c3.high < c1.low) {
+      bearishFVG = {
+        top: c1.low,
+        bottom: c3.high,
+        mid: (c1.low + c3.high) / 2,
+        idx: i
+      };
+    }
+
+    if (bullishFVG && bearishFVG) break;
+  }
+
+  return { bullishFVG, bearishFVG };
+};
+
+// SMC Confirmation: checks if current price is in a valid SMC setup
+const getSMCConfirmation = (candles, direction) => {
+  if (!candles || candles.length < 30) return { confirmed: false, reason: 'Not enough data' };
+
+  const lastPrice = candles[candles.length - 1].close;
+  const { bos, choch, bias } = calcBOSCHOCH(candles);
+  const { bullishOB, bearishOB } = calcOrderBlocks(candles);
+  const { bullishFVG, bearishFVG } = calcFVG(candles);
+
+  let score = 0;
+  const reasons = [];
+
+  if (direction === 'LONG') {
+    // 1. Structure confirms bullish
+    if (bias === 'BULLISH') { score += 3; reasons.push('BOS/CHoCH bullish'); }
+
+    // 2. Price near or inside bullish Order Block
+    if (bullishOB) {
+      const inOB = lastPrice >= bullishOB.low * 0.999 && lastPrice <= bullishOB.high * 1.001;
+      const nearOB = lastPrice >= bullishOB.low * 0.995 && lastPrice <= bullishOB.high * 1.005;
+      if (inOB) { score += 3; reasons.push('Price inside bullish OB'); }
+      else if (nearOB) { score += 1; reasons.push('Price near bullish OB'); }
+    }
+
+    // 3. Bullish FVG present (price may fill it going up)
+    if (bullishFVG && lastPrice <= bullishFVG.top * 1.002) {
+      score += 2; reasons.push('Bullish FVG present');
+    }
+
+    // 4. No bearish CHoCH contradicting
+    if (choch && choch.type === 'BEARISH') { score -= 3; reasons.push('CHoCH bearish conflict'); }
+
+  } else if (direction === 'SHORT') {
+    // 1. Structure confirms bearish
+    if (bias === 'BEARISH') { score += 3; reasons.push('BOS/CHoCH bearish'); }
+
+    // 2. Price near or inside bearish Order Block
+    if (bearishOB) {
+      const inOB = lastPrice >= bearishOB.low * 0.999 && lastPrice <= bearishOB.high * 1.001;
+      const nearOB = lastPrice >= bearishOB.low * 0.995 && lastPrice <= bearishOB.high * 1.005;
+      if (inOB) { score += 3; reasons.push('Price inside bearish OB'); }
+      else if (nearOB) { score += 1; reasons.push('Price near bearish OB'); }
+    }
+
+    // 3. Bearish FVG present
+    if (bearishFVG && lastPrice >= bearishFVG.bottom * 0.998) {
+      score += 2; reasons.push('Bearish FVG present');
+    }
+
+    // 4. No bullish CHoCH contradicting
+    if (choch && choch.type === 'BULLISH') { score -= 3; reasons.push('CHoCH bullish conflict'); }
+  }
+
+  // SMC confirmed if score >= 3 (at least structure + one other factor)
+  const confirmed = score >= 3;
+
+  return {
+    confirmed,
+    score,
+    reasons,
+    bias,
+    bos,
+    choch,
+    bullishOB,
+    bearishOB,
+    bullishFVG,
+    bearishFVG
   };
-  // Clamp
-  Object.keys(scores).forEach(k => { scores[k] = Math.min(95, Math.max(5, Math.round(scores[k]))); });
+};
+
+// ─── REAL SIGNAL ENGINE (NO MATH.RANDOM) ──────────────────────────────────────
+const analyzeStrategies = (prices) => {
+  if (!prices || prices.length < 50) return null;
+
+  const rsi  = calcRSI(prices);
+  const macd = calcMACD(prices);
+  const bb   = calcBollinger(prices);
+  const atr  = calcATR(prices);
+
+  // EMAs for trend detection
+  const ema9   = calcEMA(prices, 9);
+  const ema21  = calcEMA(prices, 21);
+  const ema50  = calcEMA(prices, 50);
+  const ema200 = prices.length >= 200 ? calcEMA(prices, 200) : null;
+
+  const last = prices[prices.length - 1];
+  const prev = prices[prices.length - 2];
+
+  if (!ema9 || !ema21 || !ema50) return null;
+
+  // ── Primary Trend (EMA200 or EMA50 as fallback) ──
+  const trendEMA = ema200 || ema50;
+  const bullTrend = last > trendEMA;
+  const bearTrend = last < trendEMA;
+
+  // ── Score each indicator (pure math, no random) ──
+  const scores = {
+    // RSI: oversold = bullish, overbought = bearish
+    RSI: rsi < 30 ? 90 : rsi < 40 ? 70 : rsi > 70 ? 10 : rsi > 60 ? 30 : 50,
+
+    // MACD: histogram direction is key signal
+    MACD: macd.hist > 0 && macd.macd > macd.signal ? 80
+         : macd.hist < 0 && macd.macd < macd.signal ? 20
+         : macd.hist > 0 ? 65 : macd.hist < 0 ? 35 : 50,
+
+    // Bollinger: price position relative to bands
+    Bollinger: bb.pct < 15 ? 85 : bb.pct < 30 ? 65
+             : bb.pct > 85 ? 15 : bb.pct > 70 ? 35 : 50,
+
+    // EMA Cloud: short vs long term trend
+    "EMA Cloud": ema9 > ema21 && ema21 > ema50 ? 85
+               : ema9 < ema21 && ema21 < ema50 ? 15
+               : ema9 > ema21 ? 65 : ema9 < ema21 ? 35 : 50,
+
+    // Trend: primary trend direction (weighted heavily)
+    Trend: bullTrend ? 75 : bearTrend ? 25 : 50,
+
+    // Momentum: price vs previous candle + ATR filter
+    Momentum: atr ? (
+      (last - prev) > atr * 0.5 ? 75 :
+      (last - prev) < -atr * 0.5 ? 25 : 50
+    ) : (last > prev ? 60 : last < prev ? 40 : 50),
+  };
+
+  // Clamp all scores
+  Object.keys(scores).forEach(k => {
+    scores[k] = Math.min(95, Math.max(5, Math.round(scores[k])));
+  });
 
   const bullCount = Object.values(scores).filter(s => s >= 60).length;
   const bearCount = Object.values(scores).filter(s => s <= 40).length;
-  const confidence = Math.round(Math.max(...Object.values(scores)) * 0.7 + (bullCount/6)*30);
-  const direction  = bullCount >= 4 ? "LONG" : bearCount >= 3 ? "SHORT" : "NEUTRAL";
 
-  return { scores, direction, confidence: Math.min(95, Math.max(50, confidence)), rsi, macd, bb, ema9, ema21 };
-};
+  // Step 1: Technical direction (need 4/6)
+  let direction = "NEUTRAL";
+  if (bullCount >= 4) direction = "LONG";
+  else if (bearCount >= 4) direction = "SHORT";
 
-// ─── NEWS SENTIMENT ───────────────────────────────────────────────────────────
-const scoreSentiment = (text) => {
-  const bull = ["surge","rally","gain","bull","rise","high","strong","positive","growth","up","buy","breakout"];
-  const bear = ["drop","fall","crash","bear","decline","low","weak","negative","loss","down","sell","breakdown"];
-  const t = text.toLowerCase();
-  let score = 50;
-  bull.forEach(w => { if (t.includes(w)) score += 6; });
-  bear.forEach(w => { if (t.includes(w)) score -= 6; });
-  return Math.min(100, Math.max(0, score));
+  // Extra confirmation: RSI must not be extreme
+  if (direction === "LONG"  && rsi > 75) direction = "NEUTRAL";
+  if (direction === "SHORT" && rsi < 25) direction = "NEUTRAL";
+
+  // Step 2: SMC Confirmation (strictly required)
+  let smc = null;
+  if (direction !== "NEUTRAL") {
+    if (!prices.candles || prices.candles.length < 30) {
+      // No candles = no SMC = no trade
+      direction = "NEUTRAL";
+    } else {
+      smc = getSMCConfirmation(prices.candles, direction);
+      if (!smc.confirmed) direction = "NEUTRAL";
+    }
+  }
+
+  // Confidence based on agreement strength + SMC score boost
+  const agreementScore = direction === "LONG" ? bullCount : direction === "SHORT" ? bearCount : 0;
+  const smcBoost = smc && smc.confirmed ? Math.min(smc.score * 2, 10) : 0;
+  const confidence = Math.min(95, Math.max(50, Math.round(50 + agreementScore * 7.5 + smcBoost)));
+
+  // SL/TP based on ATR
+  const slMultiplier = 1.5;
+  const tpMultiplier = 3.0;
+  const slDistance = atr ? atr * slMultiplier : last * 0.005;
+  const tpDistance = atr ? atr * tpMultiplier : last * 0.010;
+
+  const stopLoss   = direction === "LONG"  ? last - slDistance : last + slDistance;
+  const takeProfit = direction === "LONG"  ? last + tpDistance : last - tpDistance;
+
+  return {
+    scores, direction, confidence,
+    rsi, macd, bb, atr,
+    ema9, ema21, ema50, ema200,
+    stopLoss, takeProfit, slDistance, tpDistance,
+    bullTrend, bearTrend,
+    smc // SMC analysis results
+  };
 };
 
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export default function TradingBotLive() {
-  const [prices,    setPrices]    = useState({ GBPUSD: null, BTCUSDT: null, XAUUSD: null });
-  const [prevPrices,setPrevPrices]= useState({ GBPUSD: null, BTCUSDT: null, XAUUSD: null });
-  const [priceHistory, setPriceHistory] = useState({ GBPUSD: [], BTCUSDT: [], XAUUSD: [] });
-  const [signals,   setSignals]   = useState({});
-  const [news,      setNews]      = useState([]);
-  const [sentiment, setSentiment] = useState({ GBPUSD: 50, BTCUSDT: 50, XAUUSD: 50 });
-  const [macro,     setMacro]     = useState({});
-  const [status,    setStatus]    = useState({ GBPUSD:"connecting",BTCUSDT:"connecting",XAUUSD:"connecting" });
-  const [log,       setLog]       = useState([]);
-  const [selected,  setSelected]  = useState("BTCUSDT");
-  const [activeTab, setActiveTab] = useState("signals");
-  const [aiText,    setAiText]    = useState("");
-  const [isAiLoading,setIsAiLoading] = useState(false);
-  const [trades,    setTrades]    = useState([]);
-  const [lastUpdate,setLastUpdate]= useState(null);
-  const [calendar, setCalendar]   = useState([]);
-  const [eventAlert, setEventAlert] = useState(null);
-  const wsRef   = useRef(null);
-  const logRef  = useRef(null);
+  const [prices,       setPrices]       = useState({ GBPUSD: null, BTCUSDT: null, XAUUSD: null });
+  const [prevPrices,   setPrevPrices]   = useState({ GBPUSD: null, BTCUSDT: null, XAUUSD: null });
+  // priceHistory removed - brokerCandles is single source of truth
+  const [signals,      setSignals]      = useState({});
+  const [news,         setNews]         = useState([]);
+  // liveTrades removed - using closedTrades and openPositions directly
+  const [closedTrades, setClosedTrades] = useState([]); // Closed MT5 trades
+  const [openPositions,setOpenPositions]= useState([]); // Current open positions
+  const [brokerCandles, setBrokerCandles] = useState({ BTCUSDT: [], XAUUSD: [], GBPUSD: [] });
+  const [selected,     setSelected]     = useState("BTCUSDT");
+  const [activeTab,    setActiveTab]    = useState("signals");
+  const [eventAlert,   setEventAlert]   = useState(null);
+  const [marketStatus, setMarketStatus] = useState(getMarketStatus());
+  const [log,          setLog]          = useState([]);
+  const [isAiLoading,  setIsAiLoading]  = useState(false);
+  const [aiAnalysis,   setAiAnalysis]   = useState("");
+  const [calendarEvents, setCalendarEvents] = useState([]);
+  const lastTradeRef = useRef({});
+  const logRef       = useRef(null);
 
-  // ── Load persisted trades from database on mount ──
+  const addLog = useCallback((msg, type = "info") => {
+    const now  = new Date();
+    const time = `${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}:${now.getSeconds().toString().padStart(2,"0")}`;
+    setLog(prev => [...prev.slice(-50), { time, msg, type }]);
+  }, []);
+
+  // ── Fetch live trades from MetaAPI ──
+  const fetchLiveTrades = useCallback(async () => {
+    try {
+      const r = await fetch("/api/positions");
+      if (r.ok) {
+        const d = await r.json();
+        setOpenPositions(d.positions || []);
+      }
+    } catch(e) {}
+  }, []);
+
+  const fetchClosedTrades = useCallback(async () => {
+    try {
+      const r = await fetch("/api/trades");
+      if (r.ok) {
+        const d = await r.json();
+        setClosedTrades(d.trades || []);
+      }
+    } catch(e) {}
+  }, []);
+
+  // ── Price feeds (all from PU Prime broker via MetaAPI) ──
   useEffect(() => {
-    const loadTrades = async () => {
+    // Instrument to broker symbol mapping
+    const symbolMap = { BTCUSDT: 'BTCUSD', XAUUSD: 'XAUUSD', GBPUSD: 'GBPUSD' };
+
+    // Fetch broker candles for signal engine
+    const fetchBrokerCandles = async (instId) => {
+      const symbol = symbolMap[instId];
       try {
-        const res  = await fetch('/api/trades');
-        const data = await res.json();
-        if (data.trades && data.trades.length > 0) {
-          setTrades(data.trades);
-          addLog("Loaded " + data.trades.length + " trades from database", "success");
+        const r = await fetch(`/api/broker-candles?symbol=${symbol}&timeframe=M1&limit=200`);
+        const d = await r.json();
+        if (d.candles && d.candles.length >= 50) {
+          setBrokerCandles(prev => ({ ...prev, [instId]: d.candles }));
+          // Update price from latest candle close
+          const lastClose = d.candles[d.candles.length - 1].close;
+          if (Number.isFinite(lastClose)) {
+            setPrices(prev => {
+              setPrevPrices(pp => ({ ...pp, [instId]: prev[instId] }));
+              return { ...prev, [instId]: lastClose };
+            });
+          }
+        } else {
+          // Candles unavailable - clear ALL stale data for this instrument
+          addLog(`${symbol} candles unavailable - signals cleared`, "warn");
+          setPrices(prev => ({ ...prev, [instId]: null }));
+          setBrokerCandles(prev => ({ ...prev, [instId]: [] }));
+          setSignals(prev => { const n = {...prev}; delete n[instId]; return n; });
         }
       } catch(e) {
-        addLog("Could not load trade history: " + e.message, "warn");
+        addLog(`${symbol} candles error - signals cleared`, "warn");
+        setPrices(prev => ({ ...prev, [instId]: null }));
+        setBrokerCandles(prev => ({ ...prev, [instId]: [] }));
+        setSignals(prev => { const n = {...prev}; delete n[instId]; return n; });
       }
     };
-    loadTrades();
-  }, []);
 
-  const addLog = useCallback((msg, type="info") => {
-    const t = new Date().toLocaleTimeString("en-GB");
-    setLog(prev => [...prev.slice(-60), { t, msg, type }]);
-  }, []);
+    // Fetch current broker price for live display
+    const fetchBrokerPrice = async (instId) => {
+      const symbol = symbolMap[instId];
+      try {
+        const r = await fetch(`/api/broker-price?symbol=${symbol}`);
+        const d = await r.json();
+        if (Number.isFinite(d.price)) {
+          // Display price only - indicators use candles only
+          setPrices(prev => {
+            setPrevPrices(pp => ({ ...pp, [instId]: prev[instId] }));
+            return { ...prev, [instId]: d.price };
+          });
+        }
+        // else: keep last valid displayed price, don't erase
+      } catch(e) {
+        // keep previous price on error
+      }
+    };
 
-  // ── Recalculate signals whenever price history updates ──
+    // Initial candle fetch for all instruments
+    INSTRUMENTS.forEach(inst => fetchBrokerCandles(inst.id));
+
+    // Live price updates every 5 seconds from broker
+    const intervals = INSTRUMENTS.map(inst =>
+      setInterval(() => fetchBrokerPrice(inst.id), 5000)
+    );
+
+    // Refresh candles every 60 seconds for fresh signal data
+    const candleIntervals = INSTRUMENTS.map(inst =>
+      setInterval(() => fetchBrokerCandles(inst.id), 60000)
+    );
+
+    addLog("Price feeds: PU Prime broker (MetaAPI)", "success");
+    addLog("BTC/USDT, GBP/USD, XAU/USD via broker", "info");
+
+    return () => {
+      intervals.forEach(clearInterval);
+      candleIntervals.forEach(clearInterval);
+    };
+  }, [addLog]);
+
+  // ── Signal calculation (candles are single source of truth) ──
+
   useEffect(() => {
     const newSignals = {};
     INSTRUMENTS.forEach(inst => {
-      const hist = priceHistory[inst.id];
-      if (hist.length >= 30) {
-        const analysis = analyzeStrategies(hist);
-        if (analysis) {
-          // Build per-timeframe mock signals from RSI/MACD
-          const tfSignals = {};
-          TIMEFRAMES.forEach(tf => {
-            const noise = Math.random();
-            tfSignals[tf] = analysis.direction === "LONG"
-              ? (noise > 0.25 ? "BULL" : "NEUT")
-              : analysis.direction === "SHORT"
-              ? (noise > 0.25 ? "BEAR" : "NEUT")
-              : "NEUT";
-          });
-          newSignals[inst.id] = { ...analysis, tfSignals, entry: priceHistory[inst.id].slice(-1)[0], ts: new Date() };
-        }
-      }
+      const candles = brokerCandles[inst.id];
+      // Need at least 50 candles for indicators
+      if (!candles || candles.length < 50) return;
+      const closes = candles.map(c => c.close);
+      // Attach full candles for SMC
+      closes.candles = candles;
+      const sig = analyzeStrategies(closes);
+      if (sig) newSignals[inst.id] = sig;
     });
-    if (Object.keys(newSignals).length > 0) setSignals(prev => ({ ...prev, ...newSignals }));
-  }, [priceHistory]);
+    setSignals(newSignals); // always update - clears stale signals when instruments fail
+  }, [brokerCandles]);
 
-  // ── BTC WebSocket (Binance public, no key needed) ──
+  // ── Market status ──
   useEffect(() => {
-    const connect = () => {
-      try {
-        const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
-        wsRef.current = ws;
-        ws.onopen  = () => { setStatus(s => ({...s, BTCUSDT:"live"})); addLog("BTC/USDT WebSocket connected (Binance)", "success"); };
-        ws.onmessage = (e) => {
-          const d = JSON.parse(e.data);
-          const price = parseFloat(d.c);
-          setPrices(prev => { setPrevPrices(prev); return {...prev, BTCUSDT: price}; });
-          setPriceHistory(prev => ({ ...prev, BTCUSDT: [...prev.BTCUSDT.slice(-200), price] }));
-          setLastUpdate(new Date());
-        };
-        ws.onerror  = () => { setStatus(s => ({...s, BTCUSDT:"error"})); addLog("BTC WebSocket error — retrying in 5s", "error"); };
-        ws.onclose  = () => { setStatus(s => ({...s, BTCUSDT:"reconnecting"})); setTimeout(connect, 5000); };
-      } catch(e) { addLog("BTC WebSocket failed: " + e.message, "error"); }
-    };
-    connect();
-    return () => wsRef.current?.close();
-  }, [addLog]);
+    const interval = setInterval(() => setMarketStatus(getMarketStatus()), 60000);
+    return () => clearInterval(interval);
+  }, []);
 
-  // ── GBP/USD via backend API (polls every 5s, no CORS issues) ──
-  useEffect(() => {
-    const fetchGBP = async () => {
-      try {
-        const r = await fetch('/api/gbpusd');
-        const d = await r.json();
-        if (d.price) {
-          const price = parseFloat(d.price);
-          setPrices(prev => { setPrevPrices(prev); return {...prev, GBPUSD: price}; });
-          setPriceHistory(prev => ({ ...prev, GBPUSD: [...prev.GBPUSD.slice(-200), price] }));
-          setStatus(s => ({...s, GBPUSD: "live"}));
-          setLastUpdate(new Date());
-        }
-      } catch(e) {
-        setStatus(s => ({...s, GBPUSD: "error"}));
-        addLog("GBP/USD fetch failed: " + e.message, "error");
-      }
-    };
-    fetchGBP();
-    const id = setInterval(fetchGBP, 5000); // Every 5 seconds
-    return () => clearInterval(id);
-  }, [addLog]);
-
-  // ── XAU/USD via Binance PAXGUSDT WebSocket (gold-backed token, real-time) ──
-  useEffect(() => {
-    let ws;
-    const connect = () => {
-      try {
-        // PAXG is a gold-backed token on Binance, tracks XAU/USD price tick by tick
-        ws = new WebSocket("wss://stream.binance.com:9443/ws/paxgusdt@ticker");
-        ws.onopen = () => {
-          setStatus(s => ({...s, XAUUSD: "live"}));
-          addLog("XAU/USD WebSocket connected via PAXG (Binance)", "success");
-        };
-        ws.onmessage = (e) => {
-          const d = JSON.parse(e.data);
-          const price = parseFloat(d.c);
-          if (price && price > 1000) {
-            setPrices(prev => { setPrevPrices(prev); return {...prev, XAUUSD: price}; });
-            setPriceHistory(prev => ({ ...prev, XAUUSD: [...prev.XAUUSD.slice(-200), price] }));
-            window._lastGold = price;
-            setLastUpdate(new Date());
-          }
-        };
-        ws.onerror = () => { setStatus(s => ({...s, XAUUSD: "error"})); };
-        ws.onclose = () => { setTimeout(connect, 5000); };
-      } catch(e) { addLog("Gold WebSocket failed: " + e.message, "error"); }
-    };
-    connect();
-    return () => ws && ws.close();
-  }, [addLog]);
-
-
-
-  // ── News sentiment (NewsAPI — needs free key from newsapi.org) ──
+  // ── News feed ──
   useEffect(() => {
     const fetchNews = async () => {
-      if (NEWS_API_KEY === "YOUR_NEWSAPI_KEY") {
-        // Use RSS via proxy for demo
-        addLog("NewsAPI key not set — using headline simulation", "warn");
-        const demoNews = [
-          { title: "Fed signals rate hold amid strong jobs data", sentiment: 55, source: "Reuters", time: "2m ago" },
-          { title: "BTC surges past resistance on ETF inflows",   sentiment: 78, source: "CoinDesk", time: "8m ago" },
-          { title: "GBP weakens on UK inflation miss",            sentiment: 32, source: "FT", time: "15m ago" },
-          { title: "Gold rallies on safe-haven demand",           sentiment: 72, source: "Bloomberg", time: "22m ago" },
-          { title: "US Dollar Index holds key support level",     sentiment: 50, source: "FXStreet", time: "31m ago" },
-          { title: "Bank of England holds rates, pound steady",   sentiment: 55, source: "BBC", time: "45m ago" },
-        ];
-        setNews(demoNews);
-        setSentiment({
-          GBPUSD:  scoreSentiment(demoNews.filter(n=>n.title.toLowerCase().includes("gbp")||n.title.toLowerCase().includes("pound")).map(n=>n.title).join(" ")),
-          BTCUSDT: scoreSentiment(demoNews.filter(n=>n.title.toLowerCase().includes("btc")||n.title.toLowerCase().includes("bitcoin")).map(n=>n.title).join(" ")),
-          XAUUSD:  scoreSentiment(demoNews.filter(n=>n.title.toLowerCase().includes("gold")).map(n=>n.title).join(" ")),
-        });
-        return;
-      }
       try {
-        const res  = await fetch('/api/news');
-        const data = await res.json();
-        const allNews = (data.articles || []).map(a => ({
-          title: a.title,
-          source: a.source,
-          time: a.time,
-          sentiment: scoreSentiment(a.title),
-          inst: a.inst,
-        }));
-        setNews(allNews);
-        setSentiment({
-          GBPUSD:  allNews.filter(n=>n.inst==="GBPUSD").reduce((a,n)=>a+n.sentiment,50)/4  || 50,
-          BTCUSDT: allNews.filter(n=>n.inst==="BTCUSDT").reduce((a,n)=>a+n.sentiment,50)/4 || 50,
-          XAUUSD:  allNews.filter(n=>n.inst==="XAUUSD").reduce((a,n)=>a+n.sentiment,50)/4  || 50,
-        });
-        addLog(allNews.length + " headlines loaded from server", "success");
-      } catch(e) { addLog("News fetch failed: " + e.message, "error"); }
+        const r = await fetch("/api/news");
+        const d = await r.json();
+        if (d.articles) setNews(d.articles);
+      } catch(e) {}
     };
     fetchNews();
-    const id = setInterval(fetchNews, 5 * 60 * 1000); // Every 5min
-    return () => clearInterval(id);
-  }, [addLog]);
+    const interval = setInterval(fetchNews, 300000);
+    return () => clearInterval(interval);
+  }, []);
 
-  // ── FRED Macro data (free, needs key from fred.stlouisfed.org) ──
-  useEffect(() => {
-    const fetchMacro = async () => {
-      // Always show macro panel with real labels; values from FRED when key is set
-      const macroData = {
-        "Fed Funds Rate":   { value: "5.33%", score: 38 },
-        "US CPI (YoY)":     { value: "3.2%",  score: 42 },
-        "USD Index (DXY)":  { value: "104.8", score: 55 },
-        "UK Base Rate":     { value: "5.25%", score: 40 },
-        "US 10Y Yield":     { value: "4.31%", score: 48 },
-        "Risk Sentiment":   { value: "Neutral",score: 52 },
-        "Global Equities":  { value: "Bullish",score: 65 },
-        "Oil (WTI)":        { value: "$82.4", score: 58 },
-      };
-      setMacro(macroData);
-    };
-    fetchMacro();
-    const id = setInterval(fetchMacro, 15 * 60 * 1000);
-    return () => clearInterval(id);
-  }, [addLog]);
-
-  // ── Economic Calendar — auto-pause before major events ──
+  // ── Economic calendar ──
   useEffect(() => {
     const fetchCalendar = async () => {
       try {
-        const res  = await fetch('/api/calendar');
-        const data = await res.json();
-        const events = (data.events || []).map(e => ({
-          name: e.name,
-          date: e.date,
-          country: e.country,
-          importance: e.importance,
-          actual: e.actual,
-          forecast: e.forecast,
-        }));
-        setCalendar(events);
+        const r = await fetch("/api/calendar");
+        const d = await r.json();
 
-        // Check if major event within 30 minutes
-        const now = Date.now();
-        const upcoming = events.find(e => {
-          const t = new Date(e.date).getTime();
-          return t > now && t - now < 30 * 60 * 1000;
-        });
-        if (upcoming) {
-          setEventAlert(upcoming);
-          addLog("⚠️ MAJOR EVENT in <30min: " + upcoming.name + " — signals paused!", "error");
-        } else {
-          setEventAlert(null);
+        // If calendar is unavailable, pause trading by default (safer)
+        if (d.source === 'unavailable' || !Array.isArray(d.events)) {
+          addLog("Calendar unavailable - trading paused for safety", "warn");
+          setEventAlert({ name: "Calendar unavailable", date: null });
+          return;
         }
+
+        setCalendarEvents(d.events);
+
+        // Check for events within next 30 min
+        const now = Date.now();
+        const upcoming = d.events.find(ev => {
+          const evTime = new Date(ev.date).getTime();
+          return evTime > now && evTime < now + 30 * 60 * 1000;
+        });
+        setEventAlert(upcoming || null);
       } catch(e) {
-        addLog("Calendar fetch failed: " + e.message, "warn");
+        addLog("Calendar fetch error - trading paused for safety", "warn");
+        setEventAlert({ name: "Calendar error", date: null });
       }
     };
     fetchCalendar();
-    const id = setInterval(fetchCalendar, 5 * 60 * 1000);
-    return () => clearInterval(id);
-  }, [addLog]);
+    const interval = setInterval(fetchCalendar, 300000);
+    return () => clearInterval(interval);
+  }, []);
 
-  // ── AI Analysis ──
-  const runAI = async () => {
-    setIsAiLoading(true); setAiText("");
-    const inst = INSTRUMENTS.find(i => i.id === selected);
-    const sig  = signals[selected] || {};
-    const p    = prices[selected];
-    const sent = sentiment[selected];
-    try {
-      const prompt = `You are a professional quantitative trading analyst. Give a sharp, specific, actionable analysis.
+  // ── Fetch live trades periodically ──
+  useEffect(() => {
+    fetchLiveTrades();
+    fetchClosedTrades();
+    const interval = setInterval(() => {
+      fetchLiveTrades();
+      fetchClosedTrades();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [fetchLiveTrades, fetchClosedTrades]);
 
-Instrument: ${inst?.label}
-Live Price: ${p ? p.toFixed(inst?.id==="BTCUSDT"?0:4) : "loading"}
-Signal: ${sig.direction || "N/A"} | Confidence: ${sig.confidence || 0}%
-RSI: ${sig.rsi?.toFixed(1) || "N/A"}
-MACD Histogram: ${sig.macd?.hist?.toFixed(4) || "N/A"}
-Bollinger %B: ${sig.bb?.pct?.toFixed(1) || "N/A"}%
-EMA9 vs EMA21: ${sig.ema9?.toFixed(4) || "N/A"} vs ${sig.ema21?.toFixed(4) || "N/A"}
-News Sentiment Score: ${sent}/100
-Strategy Scores: ${JSON.stringify(sig.scores || {})}
-Macro Context: ${Object.entries(macro).map(([k,v])=> k + ": " + v.value).join(", ")}
+  // ── Log scroll ──
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
 
-Write 4 short paragraphs:
-1. Current market regime for this instrument (1-2 sentences)
-2. What the technical indicators are saying (specific numbers)
-3. How macro/news sentiment affects this trade
-4. Trade quality grade (A/B/C/D) with entry, stop loss, and take profit levels
+  const pendingTradeRef = useRef({});
+  const lastEventTimeRef = useRef(0);
+  const lastBlockLogRef = useRef({});
 
-Be direct and specific. No disclaimers.`;
-
-      const res  = await fetch('/api/ai', {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt })
-      });
-      const data = await res.json();
-      setAiText(data.text || "No response.");
-      addLog("AI analysis done for " + inst?.label, "success");
-    } catch(e) {
-      setAiText("AI analysis failed. Check your internet connection.");
-      addLog("AI analysis error", "error");
+  // Throttle block warning logs - max once per minute per key
+  const shouldLogBlock = useCallback((key, cooldownMs = 60000) => {
+    const now = Date.now();
+    if (!lastBlockLogRef.current[key] || now - lastBlockLogRef.current[key] > cooldownMs) {
+      lastBlockLogRef.current[key] = now;
+      return true;
     }
-    setIsAiLoading(false);
-  };
+    return false;
+  }, []);
 
-  // ── Simulated paper trade log ──
-   const lastTradeRef = useRef({});
+  // Track actual event timestamp for post-event blackout
+  useEffect(() => {
+    if (eventAlert?.date) {
+      lastEventTimeRef.current = new Date(eventAlert.date).getTime();
+    }
+  }, [eventAlert]);
+
+  // ── LIVE TRADE EXECUTION (real signals only) ──
   useEffect(() => {
     INSTRUMENTS.forEach(inst => {
       const sig = signals[inst.id];
       if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 78) return;
-      if (eventAlert) return;
-      const p = prices[inst.id];
-      if (!p) return;
+
+      // Block if event is genuinely within next 30 min
+      const nowTs = Date.now();
+      const eventTs = eventAlert?.date ? new Date(eventAlert.date).getTime() : 0;
+      if (eventTs > nowTs && eventTs < nowTs + 30 * 60 * 1000) {
+        if (shouldLogBlock(`${inst.id}-event`)) addLog(`Trade blocked: ${eventAlert.name} imminent`, "warn");
+        return;
+      }
+
+      // Block 30 min AFTER event ends
+      const lastEvTs = lastEventTimeRef.current;
+      if (lastEvTs > 0 && nowTs >= lastEvTs && nowTs < lastEvTs + 30 * 60 * 1000) {
+        if (shouldLogBlock(`${inst.id}-postevent`)) addLog("Trade blocked: post-event cooldown", "warn");
+        return;
+      }
+
+      // Block near market close
+      if (isNearMarketClose() && inst.type !== "CRYPTO") {
+        if (shouldLogBlock(`${inst.id}-close`)) addLog("Trade blocked: near market close", "warn");
+        return;
+      }
+
+      // Check market hours
+      const mStatus = marketStatus[inst.id];
+      if (!mStatus?.open && inst.type !== "CRYPTO") return;
+
+      // Cooldown: max 1 trade per instrument per 5 minutes
       const now = Date.now();
       if (lastTradeRef.current[inst.id] && (now - lastTradeRef.current[inst.id]) < 300000) return;
-      lastTradeRef.current[inst.id] = now;
-      const win = Math.random() > 0.22;
-      const pnl = win ? +(Math.random()*180+20).toFixed(0) : -(Math.random()*70+10).toFixed(0);
-      const trade = { instrument: inst.id, direction: sig.direction, entry: p, confidence: sig.confidence, pnl, win, ts: new Date(), label: inst.label };
-      setTrades(prev => [trade, ...prev.slice(0, 499)]);
-      addLog("Trade: " + inst.label + " " + sig.direction + " " + sig.confidence + "%", "signal");
-      fetch("/api/trades", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(trade) }).catch(()=>{});
-      //fetch("/api/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instrument: inst.id, direction: sig.direction, entry: p, stopLossPips: 50 }) }).catch(()=>{});
-    });
-  }, [signals, prices, eventAlert]);
 
-  useEffect(() => { if(logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
+      // Pending lock - prevent duplicate execution
+      if (pendingTradeRef.current[inst.id]) return;
+
+      // Symbol normalization - handle broker suffixes like BTCUSDm, XAUUSD.
+      const alreadyOpen = openPositions.some(p => {
+        const brokerSym = (p.symbol || "").replace(/[^A-Z]/gi, "").toUpperCase();
+        const targetSym = (inst.id === "BTCUSDT" ? "BTCUSD" : inst.id).toUpperCase();
+        return brokerSym === targetSym || brokerSym.startsWith(targetSym);
+      });
+      if (alreadyOpen) return;
+
+      // Max 2 total open positions
+      if (openPositions.length >= 2) return;
+
+      // Require valid SL/TP
+      if (!Number.isFinite(sig.stopLoss) || !Number.isFinite(sig.takeProfit)) { addLog("Trade blocked: missing SL/TP", "warn"); return; }
+
+      // Lock this instrument
+      pendingTradeRef.current[inst.id] = true;
+
+      addLog(`Signal: ${inst.label} ${sig.direction} ${sig.confidence}% | RSI:${sig.rsi?.toFixed(1)} | SL:${sig.stopLoss?.toFixed(inst.id==="BTCUSDT"?0:4)} TP:${sig.takeProfit?.toFixed(inst.id==="BTCUSDT"?0:4)}`, "signal");
+
+      fetch("/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instrument: inst.id,
+          direction: sig.direction,
+          entry: prices[inst.id],
+          stopLoss: sig.stopLoss,
+          takeProfit: sig.takeProfit,
+        })
+      })
+      .then(r => r.json())
+      .then(d => {
+        pendingTradeRef.current[inst.id] = false;
+        if (d.success) {
+          lastTradeRef.current[inst.id] = now; // set cooldown ONLY on success
+          addLog(`✅ Trade executed: ${inst.label} ${sig.direction} ${d.volume || "?"} lots @ ${prices[inst.id]}`, "success");
+          setTimeout(fetchLiveTrades, 2000);
+        } else {
+          addLog(`❌ Execution failed: ${d.error || "unknown"}`, "error");
+        }
+      })
+      .catch(e => {
+        pendingTradeRef.current[inst.id] = false;
+        addLog(`❌ Execute error: ${e.message}`, "error");
+      });
+    });
+  }, [signals, prices, eventAlert, marketStatus, openPositions, addLog, fetchLiveTrades, shouldLogBlock]);
+
+  // ── AI Analysis ──
+  const runAI = async () => {
+    setIsAiLoading(true);
+    setAiAnalysis("");
+    const sig  = signals[selected] || {};
+    const inst = INSTRUMENTS.find(i => i.id === selected);
+    const prompt = `You are a professional quant trader. Analyze this market data and give a concise trade recommendation.
+
+Instrument: ${inst?.label}
+Current Price: ${prices[selected]}
+Signal: ${sig.direction} (${sig.confidence}% confidence)
+RSI: ${sig.rsi?.toFixed(1)}
+MACD Histogram: ${sig.macd?.hist?.toFixed(6)}
+Bollinger %B: ${sig.bb?.pct?.toFixed(1)}%
+EMA9: ${sig.ema9?.toFixed(4)} | EMA21: ${sig.ema21?.toFixed(4)} | EMA50: ${sig.ema50?.toFixed(4)}
+Bull trend: ${sig.bullTrend} | Bear trend: ${sig.bearTrend}
+ATR: ${sig.atr?.toFixed(4)}
+Suggested SL: ${sig.stopLoss?.toFixed(4)} | TP: ${sig.takeProfit?.toFixed(4)}
+Open positions: ${openPositions.length}
+News sentiment: ${news.slice(0,3).map(n=>n.title).join(" | ")}
+
+Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Final recommendation. Be direct and specific.`;
+
+    try {
+      const r = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt })
+      });
+      const d = await r.json();
+      setAiAnalysis(d.analysis || "No response");
+    } catch(e) {
+      setAiAnalysis("AI analysis error");
+    }
+    setIsAiLoading(false);
+  };
 
   // ── Helpers ──
-  const fmt = (id, p) => p ? (id==="BTCUSDT" ? p.toLocaleString("en",{maximumFractionDigits:0}) : p.toFixed(4)) : "—";
-  const dir  = d => d==="LONG"||d==="BULL" ? "#00D4AA" : d==="SHORT"||d==="BEAR" ? "#FF4466" : "#666";
-  const dirBg= d => d==="LONG"||d==="BULL" ? "#00D4AA18" : d==="SHORT"||d==="BEAR" ? "#FF446618" : "#66666618";
+  const fmt = (id, p) => p ? (id === "BTCUSDT" ? p.toLocaleString("en", { maximumFractionDigits: 0 }) : p.toFixed(id === "GBPUSD" ? 4 : 2)) : "—";
   const priceDelta = (id) => {
-    const cur = prices[id], prev = prevPrices[id];
-    if (!cur || !prev) return null;
-    return cur - prev;
+    if (!prices[id] || !prevPrices[id]) return null;
+    return prices[id] - prevPrices[id];
   };
-  const winRate = trades.length > 0 ? ((trades.filter(t=>t.win).length / trades.length)*100).toFixed(1) : "—";
-  const netPnl  = trades.reduce((a,t) => a+t.pnl, 0);
   const sig = signals[selected] || {};
-  const inst = INSTRUMENTS.find(i=>i.id===selected);
+  const inst = INSTRUMENTS.find(i => i.id === selected);
+  const mStatus = marketStatus[selected];
+
+  // Compute event visibility once - used by both banner and header
+  const nowTs = Date.now();
+  const eventTs = eventAlert?.date ? new Date(eventAlert.date).getTime() : 0;
+  const showEventBanner = !!eventAlert && (
+    !eventTs ||
+    (eventTs > nowTs && eventTs < nowTs + 30 * 60 * 1000) ||
+    (eventTs > 0 && nowTs >= eventTs && nowTs < eventTs + 30 * 60 * 1000)
+  );
+
+  // ── Stats from closed trades ──
+  const wins = closedTrades.filter(t => t.profit > 0).length;
+  const totalPnl = closedTrades.reduce((a, t) => a + (t.profit || 0), 0);
+  const winRate = closedTrades.length > 0 ? ((wins / closedTrades.length) * 100).toFixed(1) : "0.0";
+
+  const styles = {
+    app: { background: "#0a0a0f", color: "#e0e0e0", fontFamily: "'JetBrains Mono', 'Fira Code', monospace", minHeight: "100vh", fontSize: "12px" },
+    header: { background: "linear-gradient(135deg, #0d1117 0%, #161b22 100%)", borderBottom: "1px solid #21262d", padding: "12px 20px", display: "flex", alignItems: "center", gap: "20px", flexWrap: "wrap" },
+    statBox: { display: "flex", flexDirection: "column", gap: "2px" },
+    statLabel: { color: "#8b949e", fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.5px" },
+    statValue: { fontWeight: "700", fontSize: "14px" },
+    body: { display: "flex", height: "calc(100vh - 60px)" },
+    sidebar: { width: "200px", background: "#0d1117", borderRight: "1px solid #21262d", padding: "12px", display: "flex", flexDirection: "column", gap: "8px", overflowY: "auto" },
+    instCard: (id) => ({ padding: "10px", borderRadius: "6px", cursor: "pointer", border: selected === id ? `1px solid ${INSTRUMENTS.find(i=>i.id===id)?.color}` : "1px solid #21262d", background: selected === id ? "rgba(255,255,255,0.05)" : "transparent", transition: "all 0.2s" }),
+    main: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
+    tabs: { display: "flex", borderBottom: "1px solid #21262d", background: "#0d1117" },
+    tab: (active) => ({ padding: "10px 16px", cursor: "pointer", borderBottom: active ? "2px solid #58a6ff" : "2px solid transparent", color: active ? "#58a6ff" : "#8b949e", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.5px", transition: "all 0.2s" }),
+    content: { flex: 1, padding: "16px", overflowY: "auto" },
+    card: { background: "#0d1117", border: "1px solid #21262d", borderRadius: "8px", padding: "16px", marginBottom: "12px" },
+    logPanel: { width: "280px", background: "#0d1117", borderLeft: "1px solid #21262d", display: "flex", flexDirection: "column" },
+    logHeader: { padding: "10px 12px", borderBottom: "1px solid #21262d", color: "#8b949e", fontSize: "10px", textTransform: "uppercase" },
+    logBody: { flex: 1, overflowY: "auto", padding: "8px" },
+    logEntry: (type) => ({ padding: "3px 6px", marginBottom: "2px", borderRadius: "3px", fontSize: "10px", color: type === "signal" ? "#3fb950" : type === "error" ? "#f85149" : type === "warn" ? "#e3b341" : type === "success" ? "#3fb950" : "#8b949e" }),
+    badge: (dir) => ({ padding: "3px 8px", borderRadius: "4px", fontSize: "11px", fontWeight: "700", background: dir === "LONG" ? "rgba(63,185,80,0.15)" : dir === "SHORT" ? "rgba(248,81,73,0.15)" : "rgba(139,148,158,0.15)", color: dir === "LONG" ? "#3fb950" : dir === "SHORT" ? "#f85149" : "#8b949e", border: `1px solid ${dir === "LONG" ? "#3fb950" : dir === "SHORT" ? "#f85149" : "#8b949e"}40` }),
+    scoreBar: (score) => ({ height: "6px", borderRadius: "3px", background: score >= 60 ? "#3fb950" : score <= 40 ? "#f85149" : "#e3b341", width: `${score}%`, transition: "width 0.5s" }),
+    tradeRow: { display: "grid", gridTemplateColumns: "80px 70px 60px 90px 80px 80px", gap: "8px", padding: "8px", borderBottom: "1px solid #21262d", fontSize: "11px", alignItems: "center" },
+    positionCard: { background: "#161b22", border: "1px solid #30363d", borderRadius: "6px", padding: "12px", marginBottom: "8px" },
+    alertBanner: { background: "rgba(227,179,65,0.15)", border: "1px solid #e3b341", borderRadius: "6px", padding: "10px 16px", marginBottom: "12px", color: "#e3b341", display: "flex", alignItems: "center", gap: "8px" },
+  };
 
   return (
-    <div style={{ fontFamily:"'IBM Plex Mono',monospace", background:"#060A10", color:"#C0D4E8", minHeight:"100vh", display:"flex", flexDirection:"column", fontSize:11 }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap');
-        ::-webkit-scrollbar{width:3px} ::-webkit-scrollbar-track{background:#0A1520} ::-webkit-scrollbar-thumb{background:#1E3A5F}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-        @keyframes fadeUp{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
-        .card{background:#0C1824;border:1px solid #182A3C;border-radius:3px}
-        .tb{background:none;border:none;cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:.12em;padding:8px 14px;color:#3A6A8A;border-bottom:2px solid transparent;transition:all .2s}
-        .tb.a{color:#00D4AA;border-bottom-color:#00D4AA}
-        .ib{background:#0C1824;border:1px solid #182A3C;cursor:pointer;font-family:inherit;font-size:10px;padding:7px 12px;color:#3A6A8A;border-radius:2px;transition:all .2s}
-        .ib.a{color:var(--c);border-color:var(--c);background:var(--bg)}
-        .bar{height:2px;background:#182A3C;border-radius:1px;overflow:hidden;margin-top:3px}
-        .fill{height:100%;border-radius:1px;transition:width .8s}
-        .aibtn{background:#0A2540;border:1px solid #1A4A7A;color:#4DB8FF;cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:.1em;padding:9px 18px;border-radius:2px;transition:all .2s}
-        .aibtn:hover:not(:disabled){background:#12345A;border-color:#4DB8FF}
-        .aibtn:disabled{opacity:.4;cursor:not-allowed}
-        .row:hover{background:#0F1E2E!important}
-      `}</style>
-
-      {/* TOP HEADER */}
-      <div style={{background:"#08101A",borderBottom:"1px solid #182A3C",padding:"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:7,height:7,borderRadius:"50%",background:"#00D4AA",animation:"pulse 2s infinite"}}/>
-          <span style={{fontSize:14,fontWeight:700,letterSpacing:".06em",color:"#E0F0FF"}}>QUANTUM BOT</span>
-          <span style={{color:"#182A3C",margin:"0 4px"}}>|</span>
-          <span style={{fontSize:9,color:"#2A5A7A",letterSpacing:".15em"}}>LIVE DATA ENGINE</span>
+    <div style={styles.app}>
+      {/* HEADER */}
+      <div style={styles.header}>
+        <div style={{ color: "#58a6ff", fontWeight: "900", fontSize: "16px", letterSpacing: "2px" }}>
+          ● QUANTUM BOT
         </div>
-        <div style={{display:"flex",gap:16,fontSize:9,color:"#2A5A7A",alignItems:"center"}}>
-          {INSTRUMENTS.map(i => (
-            <span key={i.id} style={{display:"flex",alignItems:"center",gap:4}}>
-              <span style={{width:5,height:5,borderRadius:"50%",background:status[i.id]==="live"?"#00D4AA":status[i.id]==="error"?"#FF4466":status[i.id]==="closed"?"#555555":"#FFB800",display:"inline-block",animation:status[i.id]==="live"?"pulse 2s infinite":"none"}}/>
-              <span style={{color:status[i.id]==="live"?"#4A8A7A":status[i.id]==="closed"?"#444444":"#5A5A5A"}}>{i.label}: {status[i.id].toUpperCase()}</span>
-            </span>
-          ))}
-          {lastUpdate && <span style={{color:"#1A3A5A"}}>UPD {lastUpdate.toLocaleTimeString()}</span>}
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>Win Rate</span>
+          <span style={{ ...styles.statValue, color: "#3fb950" }}>{winRate}%</span>
+        </div>
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>Closed Trades</span>
+          <span style={{ ...styles.statValue, color: "#58a6ff" }}>{closedTrades.length}</span>
+        </div>
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>Net P&L</span>
+          <span style={{ ...styles.statValue, color: totalPnl >= 0 ? "#3fb950" : "#f85149" }}>${totalPnl.toFixed(2)}</span>
+        </div>
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>Open Positions</span>
+          <span style={{ ...styles.statValue, color: "#e3b341" }}>{openPositions.length}</span>
+        </div>
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>BTC</span>
+          <span style={{ ...styles.statValue, color: "#F7931A" }}>${fmt("BTCUSDT", prices.BTCUSDT)}</span>
+        </div>
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>Gold</span>
+          <span style={{ ...styles.statValue, color: "#FFD700" }}>${fmt("XAUUSD", prices.XAUUSD)}</span>
+        </div>
+        <div style={styles.statBox}>
+          <span style={styles.statLabel}>GBP/USD</span>
+          <span style={{ ...styles.statValue, color: "#00D4AA" }}>{fmt("GBPUSD", prices.GBPUSD)}</span>
+        </div>
+        <div style={{ marginLeft: "auto", color: "#e3b341", fontSize: "11px" }}>
+          {mStatus?.session} {showEventBanner && `⚠️ ${eventAlert.name}`}
         </div>
       </div>
 
-      {/* STATS BAR */}
-      <div style={{background:"#080E18",borderBottom:"1px solid #182A3C",padding:"7px 18px",display:"flex",gap:28,flexShrink:0}}>
-        {[
-          {l:"PAPER WIN RATE", v: winRate !== "—" ? `${winRate}%` : "—", c: Number(winRate)>=75?"#00D4AA":"#FFB800"},
-          {l:"PAPER TRADES",   v: trades.length, c:"#C0D4E8"},
-          {l:"NET P&L (SIM)",  v: `$${netPnl > 0 ? "+" : ""}${netPnl.toFixed(0)}`, c: netPnl>=0?"#00D4AA":"#FF4466"},
-          {l:"BTC PRICE",      v: `$${fmt("BTCUSDT", prices.BTCUSDT)}`, c:"#F7931A"},
-          {l:"GBP/USD",        v: fmt("GBPUSD", prices.GBPUSD), c:"#00D4AA"},
-          {l:"GOLD",           v: `$${fmt("XAUUSD", prices.XAUUSD)}`, c:"#FFD700"},
-          {l:"NEWS SENTIMENT", v: `${Math.round(sentiment[selected])}/100`, c: sentiment[selected]>60?"#00D4AA":sentiment[selected]>40?"#FFB800":"#FF4466"},
-          {l:"FOREX SESSION",  v: getMarketStatus().GBPUSD.open ? getMarketStatus().GBPUSD.session : "WEEKEND CLOSED", c: getMarketStatus().GBPUSD.open?"#00D4AA":"#FF4466"},
-        ].map(s=>(
-          <div key={s.l}>
-            <div style={{fontSize:8,color:"#2A4A6A",letterSpacing:".12em",marginBottom:2}}>{s.l}</div>
-            <div style={{fontSize:13,fontWeight:600,color:s.c}}>{s.v}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* EVENT ALERT BANNER */}
-      {eventAlert && (
-        <div style={{background:"#FF4466", padding:"8px 18px", display:"flex", alignItems:"center", gap:12, flexShrink:0}}>
-          <span style={{fontSize:14}}>⚠️</span>
-          <span style={{fontSize:11, fontWeight:700, color:"#fff", letterSpacing:".05em"}}>
-            MAJOR EVENT IN &lt;30 MIN: {eventAlert.name} ({eventAlert.country}) — ALL SIGNALS PAUSED
-          </span>
-          <span style={{marginLeft:"auto", fontSize:10, color:"rgba(255,255,255,0.8)"}}>
-            {new Date(eventAlert.date).toLocaleTimeString()}
-          </span>
-        </div>
-      )}
-
-      {/* MAIN BODY */}
-      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
-
-        {/* LEFT PANEL */}
-        <div style={{width:210,borderRight:"1px solid #182A3C",display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0}}>
-          <div style={{padding:"9px 12px",borderBottom:"1px solid #182A3C",fontSize:9,letterSpacing:".15em",color:"#2A5A7A"}}>LIVE SIGNALS</div>
-          <div style={{flex:1,overflowY:"auto",padding:8}}>
-            {INSTRUMENTS.map(i => {
-              const s   = signals[i.id] || {};
-              const p   = prices[i.id];
-              const d   = priceDelta(i.id);
-              const sel = selected === i.id;
-              return (
-                <div key={i.id} onClick={()=>setSelected(i.id)} style={{padding:10,marginBottom:6,borderRadius:3,cursor:"pointer",border:`1px solid ${sel?i.color:"#182A3C"}`,background:sel?`${i.color}0C`:"#0C1824",transition:"all .2s",animation:"fadeUp .3s"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                    <div style={{display:"flex",alignItems:"center",gap:5}}>
-                      <span style={{color:i.color,fontSize:11}}>{i.icon}</span>
-                      <span style={{fontSize:10,fontWeight:600,color:"#D0E4F8"}}>{i.label}</span>
-                    </div>
-                    <span style={{fontSize:8,color:i.color,background:`${i.color}18`,padding:"1px 5px",borderRadius:2}}>{i.type}</span>
-                  </div>
-                  {/* Live price */}
-                  <div style={{marginBottom:5,display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
-                    <span style={{fontSize:12,fontWeight:700,color:"#E0F0FF"}}>{p ? (i.id==="BTCUSDT"?`$${p.toLocaleString()}`:`${p.toFixed(4)}`) : "Loading…"}</span>
-                    {d !== null && <span style={{fontSize:9,color:d>=0?"#00D4AA":"#FF4466"}}>{d>=0?"▲":"▼"}{Math.abs(d).toFixed(i.id==="BTCUSDT"?0:5)}</span>}
-                  </div>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                    <div style={{fontSize:10,fontWeight:700,color:dir(s.direction),background:dirBg(s.direction),padding:"2px 6px",borderRadius:2}}>{s.direction||"LOADING"}</div>
-                    <span style={{fontSize:10,color:s.confidence>=80?"#00D4AA":"#FFB800"}}>{s.confidence||"—"}%</span>
-                  </div>
-                  <div className="bar"><div className="fill" style={{width:`${s.confidence||0}%`,background:s.confidence>=80?"#00D4AA":"#FFB800"}}/></div>
-                  <div style={{marginTop:5,display:"flex",gap:2,flexWrap:"wrap"}}>
-                    {TIMEFRAMES.map(tf=>(
-                      <span key={tf} style={{fontSize:8,padding:"1px 3px",borderRadius:1,color:dir(s.tfSignals?.[tf]),background:dirBg(s.tfSignals?.[tf]),border:`1px solid ${dir(s.tfSignals?.[tf])}33`}}>{tf}</span>
-                    ))}
-                  </div>
+      <div style={styles.body}>
+        {/* SIDEBAR */}
+        <div style={styles.sidebar}>
+          {INSTRUMENTS.map(i => {
+            const s = signals[i.id];
+            const delta = priceDelta(i.id);
+            return (
+              <div key={i.id} style={styles.instCard(i.id)} onClick={() => setSelected(i.id)}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                  <span style={{ color: i.color, fontWeight: "700", fontSize: "11px" }}>{i.icon} {i.label}</span>
+                  <span style={{ fontSize: "9px", color: "#8b949e" }}>{i.type}</span>
                 </div>
-              );
-            })}
-          </div>
-          {/* News feed */}
-          <div style={{borderTop:"1px solid #182A3C",maxHeight:200,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-            <div style={{padding:"8px 12px",borderBottom:"1px solid #182A3C",fontSize:9,letterSpacing:".15em",color:"#2A5A7A"}}>LIVE NEWS</div>
-            <div style={{overflowY:"auto",flex:1}}>
-              {news.slice(0,6).map((n,i)=>(
-                <div key={i} style={{padding:"7px 10px",borderBottom:"1px solid #0F1E2E"}}>
-                  <div style={{fontSize:9,color:"#8AABB5",lineHeight:1.5,marginBottom:3}}>{n.title}</div>
-                  <div style={{display:"flex",justifyContent:"space-between"}}>
-                    <span style={{fontSize:8,color:"#2A4A6A"}}>{n.source}</span>
-                    <span style={{fontSize:8,color:n.sentiment>60?"#00D4AA":n.sentiment>40?"#FFB800":"#FF4466"}}>SENT {n.sentiment}</span>
-                  </div>
+                <div style={{ fontSize: "13px", fontWeight: "700", marginBottom: "4px" }}>
+                  {fmt(i.id, prices[i.id])}
+                  {delta !== null && <span style={{ fontSize: "10px", color: delta >= 0 ? "#3fb950" : "#f85149", marginLeft: "4px" }}>{delta >= 0 ? "▲" : "▼"}</span>}
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* CENTER */}
-        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-          {/* Instrument selector */}
-          <div style={{padding:"9px 14px",borderBottom:"1px solid #182A3C",display:"flex",gap:6,alignItems:"center"}}>
-            {INSTRUMENTS.map(i=>(
-              <button key={i.id} className={`ib${selected===i.id?" a":""}`} style={{"--c":i.color,"--bg":`${i.color}12`}} onClick={()=>setSelected(i.id)}>
-                {i.icon} {i.label}
-              </button>
-            ))}
-            <span style={{marginLeft:"auto",fontSize:9,color:"#2A5A7A"}}>
-              ENTRY: <span style={{color:"#D0E4F8"}}>{prices[selected] ? (selected==="BTCUSDT"?`$${prices[selected].toLocaleString()}`:`${prices[selected]?.toFixed(4)}`) : "—"}</span>
-            </span>
-          </div>
-
-          {/* Tabs */}
-          <div style={{borderBottom:"1px solid #182A3C",display:"flex",padding:"0 14px"}}>
-            {[["signals","STRATEGY MATRIX"],["analysis","AI DEEP ANALYSIS"],["trades","PAPER TRADE LOG"],["macro","MACRO DATA"],["calendar","ECONOMIC CALENDAR"]].map(([id,lbl])=>(
-              <button key={id} className={`tb${activeTab===id?" a":""}`} onClick={()=>setActiveTab(id)}>{lbl}</button>
-            ))}
-          </div>
-
-          <div style={{flex:1,overflowY:"auto",padding:14}}>
-            {/* ── SIGNALS TAB ── */}
-            {activeTab==="signals" && (
-              <div style={{animation:"fadeUp .3s"}}>
-                <div className="card" style={{padding:14,marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center",position:"relative",overflow:"hidden"}}>
-                  <div>
-                    {!getMarketStatus()[selected]?.open && (
-                  <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,background:"rgba(6,10,16,0.85)",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:3,zIndex:10,flexDirection:"column",gap:6}}>
-                    <div style={{fontSize:18}}>🔒</div>
-                    <div style={{fontSize:11,color:"#FF4466",fontWeight:700,letterSpacing:".1em"}}>MARKET CLOSED</div>
-                    <div style={{fontSize:9,color:"#3A5A7A"}}>Forex & Gold resume Monday 00:00 UTC</div>
-                    <div style={{fontSize:9,color:"#F7931A",marginTop:4}}>₿ BTC/USDT still trading 24/7</div>
+                {s && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={styles.badge(s.direction)}>{s.direction}</span>
+                    <span style={{ color: "#8b949e", fontSize: "10px" }}>{s.confidence}%</span>
                   </div>
                 )}
-                <div style={{fontSize:8,letterSpacing:".15em",color:"#2A5A7A",marginBottom:5}}>COMPOSITE SIGNAL — {inst?.label}</div>
-                    <div style={{fontSize:30,fontWeight:700,color:dir(sig.direction),fontFamily:"monospace"}}>{sig.direction||"LOADING…"}</div>
+                {!s && <div style={{ color: "#8b949e", fontSize: "10px" }}>Loading {brokerCandles[i.id]?.length || 0}/50</div>}
+                <div style={{ marginTop: "4px", fontSize: "9px", color: marketStatus[i.id]?.open ? "#3fb950" : "#f85149" }}>
+                  {marketStatus[i.id]?.open ? "● OPEN" : "● CLOSED"}
+                </div>
+              </div>
+            );
+          })}
+
+          <div style={{ marginTop: "8px", padding: "8px", background: "#161b22", borderRadius: "6px", fontSize: "10px" }}>
+            <div style={{ color: "#8b949e", marginBottom: "4px" }}>OPEN POSITIONS</div>
+            {openPositions.length === 0 ? (
+              <div style={{ color: "#8b949e" }}>No open trades</div>
+            ) : openPositions.map((p, i) => (
+              <div key={i} style={{ marginBottom: "4px", color: p.profit >= 0 ? "#3fb950" : "#f85149" }}>
+                {p.symbol} {p.type} {p.volume} | {p.profit?.toFixed(2)}€
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* MAIN */}
+        <div style={styles.main}>
+          <div style={styles.tabs}>
+            {["signals", "live trades", "ai analysis", "news", "calendar"].map(tab => (
+              <div key={tab} style={styles.tab(activeTab === tab)} onClick={() => setActiveTab(tab)}>
+                {tab.toUpperCase()}
+              </div>
+            ))}
+          </div>
+
+          <div style={styles.content}>
+            {/* Event Alert */}
+            {showEventBanner && (
+              <div style={styles.alertBanner}>
+                ⚠️ <strong>{eventAlert.name}</strong> — Signals paused. Trading resumes 30 min after event.
+              </div>
+            )}
+
+            {/* SIGNALS TAB */}
+            {activeTab === "signals" && (
+              <div>
+                <div style={{ ...styles.card, marginBottom: "12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                    <div>
+                      <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "4px" }}>COMPOSITE SIGNAL — {inst?.label}</div>
+                      <div style={{ fontSize: "28px", fontWeight: "900", color: sig.direction === "LONG" ? "#3fb950" : sig.direction === "SHORT" ? "#f85149" : "#8b949e" }}>
+                        {sig.direction || "LOADING..."}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ color: "#8b949e", fontSize: "10px" }}>CONFIDENCE</div>
+                      <div style={{ fontSize: "24px", fontWeight: "700", color: (sig.confidence || 0) >= 78 ? "#3fb950" : "#e3b341" }}>{sig.confidence || "—"}%</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ color: "#8b949e", fontSize: "10px" }}>RSI</div>
+                      <div style={{ fontSize: "20px", fontWeight: "700", color: (sig.rsi || 50) < 30 ? "#3fb950" : (sig.rsi || 50) > 70 ? "#f85149" : "#e0e0e0" }}>{sig.rsi?.toFixed(1) || "—"}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ color: "#8b949e", fontSize: "10px" }}>TREND</div>
+                      <div style={{ fontSize: "14px", fontWeight: "700", color: sig.bullTrend ? "#3fb950" : sig.bearTrend ? "#f85149" : "#8b949e" }}>
+                        {sig.bullTrend ? "▲ BULL" : sig.bearTrend ? "▼ BEAR" : "NEUTRAL"}
+                      </div>
+                    </div>
                   </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:8,color:"#2A5A7A",marginBottom:3}}>CONFIDENCE</div>
-                    <div style={{fontSize:28,fontWeight:700,color:sig.confidence>=80?"#00D4AA":"#FFB800"}}>{sig.confidence||"—"}%</div>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:8,color:"#2A5A7A",marginBottom:3}}>RSI</div>
-                    <div style={{fontSize:20,fontWeight:600,color:sig.rsi<35?"#00D4AA":sig.rsi>65?"#FF4466":"#FFB800"}}>{sig.rsi?.toFixed(1)||"—"}</div>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:8,color:"#2A5A7A",marginBottom:3}}>NEWS SENT</div>
-                    <div style={{fontSize:20,fontWeight:600,color:sentiment[selected]>60?"#00D4AA":sentiment[selected]>40?"#FFB800":"#FF4466"}}>{Math.round(sentiment[selected])}</div>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:8,color:"#2A5A7A",marginBottom:3}}>TF AGREE</div>
-                    <div style={{fontSize:20,fontWeight:600,color:"#4DB8FF"}}>{sig.tfSignals?Object.values(sig.tfSignals).filter(v=>v!=="NEUT").length:0}/6</div>
-                  </div>
+
+                  {/* SL/TP display */}
+                  {sig.direction && sig.direction !== "NEUTRAL" && (
+                    <div style={{ display: "flex", gap: "16px", padding: "10px", background: "#161b22", borderRadius: "6px", marginBottom: "12px" }}>
+                      <div><span style={{ color: "#8b949e", fontSize: "10px" }}>ENTRY </span><span style={{ color: "#58a6ff", fontWeight: "700" }}>{fmt(selected, prices[selected])}</span></div>
+                      <div><span style={{ color: "#8b949e", fontSize: "10px" }}>STOP LOSS </span><span style={{ color: "#f85149", fontWeight: "700" }}>{fmt(selected, sig.stopLoss)}</span></div>
+                      <div><span style={{ color: "#8b949e", fontSize: "10px" }}>TAKE PROFIT </span><span style={{ color: "#3fb950", fontWeight: "700" }}>{fmt(selected, sig.takeProfit)}</span></div>
+                      <div><span style={{ color: "#8b949e", fontSize: "10px" }}>ATR </span><span style={{ color: "#e3b341", fontWeight: "700" }}>{sig.atr?.toFixed(selected === "BTCUSDT" ? 0 : 4)}</span></div>
+                    </div>
+                  )}
                 </div>
 
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-                  <div className="card" style={{padding:14}}>
-                    <div style={{fontSize:8,letterSpacing:".15em",color:"#2A5A7A",marginBottom:10}}>STRATEGY SCORES (LIVE)</div>
-                    {Object.entries(sig.scores||{}).map(([k,v])=>(
-                      <div key={k} style={{marginBottom:7}}>
-                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                          <span style={{fontSize:9,color:"#6A8AAA"}}>{k}</span>
-                          <span style={{fontSize:9,fontWeight:600,color:v>=80?"#00D4AA":v>=60?"#FFB800":"#FF4466"}}>{v}</span>
-                        </div>
-                        <div className="bar"><div className="fill" style={{width:`${v}%`,background:v>=80?"#00D4AA":v>=60?"#FFB800":"#FF4466"}}/></div>
+                {/* Strategy scores */}
+                <div style={styles.card}>
+                  <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "12px", textTransform: "uppercase" }}>Strategy Scores (Real Indicators)</div>
+                  {sig.scores && Object.entries(sig.scores).map(([name, score]) => (
+                    <div key={name} style={{ marginBottom: "8px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}>
+                        <span style={{ color: "#c9d1d9", fontSize: "11px" }}>{name}</span>
+                        <span style={{ color: score >= 60 ? "#3fb950" : score <= 40 ? "#f85149" : "#e3b341", fontSize: "11px", fontWeight: "700" }}>{score}</span>
                       </div>
-                    ))}
-                    {!sig.scores && <div style={{color:"#2A5A7A",fontSize:9}}>Waiting for 30 price points to calculate indicators…</div>}
-                  </div>
-
-                  <div className="card" style={{padding:14}}>
-                    <div style={{fontSize:8,letterSpacing:".15em",color:"#2A5A7A",marginBottom:10}}>TIMEFRAME MATRIX</div>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:12}}>
-                      {TIMEFRAMES.map(tf=>{
-                        const v=sig.tfSignals?.[tf]||"NEUT";
-                        return(
-                          <div key={tf} style={{padding:"8px 6px",border:`1px solid ${dir(v)}33`,borderRadius:2,background:dirBg(v),textAlign:"center"}}>
-                            <div style={{fontSize:8,color:"#3A6A8A",marginBottom:3}}>{tf}</div>
-                            <div style={{fontSize:9,fontWeight:600,color:dir(v)}}>{v}</div>
-                          </div>
-                        );
-                      })}
+                      <div style={{ background: "#21262d", borderRadius: "3px", height: "6px" }}>
+                        <div style={styles.scoreBar(score)} />
+                      </div>
                     </div>
-                    <div style={{padding:10,background:"#080E18",borderRadius:2,border:"1px solid #182A3C"}}>
-                      <div style={{fontSize:8,color:"#2A5A7A",marginBottom:5}}>LEVELS (LIVE PRICE-BASED)</div>
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-                        {[
-                          {l:"ENTRY",  v: prices[selected] ? (selected==="BTCUSDT"?`$${prices[selected].toLocaleString()}`:`${prices[selected]?.toFixed(4)}`) : "—", c:"#E0F0FF"},
-                          {l:"STOP",   v: prices[selected] ? (selected==="BTCUSDT"?`$${(prices[selected]*0.985).toFixed(0)}`:`${(prices[selected]-0.0080).toFixed(4)}`) : "—", c:"#FF4466"},
-                          {l:"TARGET", v: prices[selected] ? (selected==="BTCUSDT"?`$${(prices[selected]*1.025).toFixed(0)}`:`${(prices[selected]+0.016).toFixed(4)}`) : "—", c:"#00D4AA"},
-                        ].map(s=>(
-                          <div key={s.l}>
-                            <div style={{fontSize:8,color:"#2A5A7A"}}>{s.l}</div>
-                            <div style={{fontSize:10,fontWeight:600,color:s.c}}>{s.v}</div>
+                  ))}
+                  {!sig.scores && (
+                    <div style={{ color: "#8b949e" }}>
+                      Collecting price data... {brokerCandles[selected]?.length || 0}/50 points
+                    </div>
+                  )}
+                {sig.scores && sig.direction === "NEUTRAL" && sig.smc && !sig.smc.confirmed && (
+                  <div style={{ color: "#e3b341", marginTop: "8px", fontSize: "11px", padding: "8px", background: "rgba(227,179,65,0.1)", borderRadius: "4px" }}>
+                    ⚠️ Signal filtered by Smart Money Concepts — no valid OB, FVG or structure confirmation.
+                  </div>
+                )}
+                {sig.direction === "NEUTRAL" && (
+                  <div style={{ color: "#8b949e", fontSize: "11px", marginTop: "8px" }}>
+                    No trade setup currently meets all filters.
+                  </div>
+                )}
+                </div>
+
+                {/* EMA levels */}
+                {sig.ema9 && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "8px" }}>EMA LEVELS</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "8px" }}>
+                      {[["EMA 9", sig.ema9], ["EMA 21", sig.ema21], ["EMA 50", sig.ema50], ["EMA 200", sig.ema200]].map(([label, val]) => (
+                        <div key={label} style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>{label}</div>
+                          <div style={{ fontWeight: "700", fontSize: "12px" }}>{val ? fmt(selected, val) : "—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* SMC Analysis */}
+                {sig.smc && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "12px", textTransform: "uppercase" }}>
+                      Smart Money Concepts
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
+                      <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ color: "#8b949e", fontSize: "9px" }}>STRUCTURE BIAS</div>
+                        <div style={{ fontWeight: "700", color: sig.smc.bias === "BULLISH" ? "#3fb950" : sig.smc.bias === "BEARISH" ? "#f85149" : "#8b949e" }}>
+                          {sig.smc.bias || "NEUTRAL"}
+                        </div>
+                      </div>
+                      <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ color: "#8b949e", fontSize: "9px" }}>SMC CONFIRMED</div>
+                        <div style={{ fontWeight: "700", color: sig.smc.confirmed ? "#3fb950" : "#f85149" }}>
+                          {sig.smc.confirmed ? "✅ YES" : "❌ NO"}
+                        </div>
+                      </div>
+                      {sig.smc.bos && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>BOS</div>
+                          <div style={{ fontWeight: "700", color: sig.smc.bos.type === "BULLISH" ? "#3fb950" : "#f85149" }}>
+                            {sig.smc.bos.type} @ {fmt(selected, sig.smc.bos.level)}
                           </div>
+                        </div>
+                      )}
+                      {sig.smc.choch && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>CHoCH</div>
+                          <div style={{ fontWeight: "700", color: sig.smc.choch.type === "BULLISH" ? "#3fb950" : "#f85149" }}>
+                            {sig.smc.choch.type} @ {fmt(selected, sig.smc.choch.level)}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {/* Order Blocks */}
+                    <div style={{ marginBottom: "8px" }}>
+                      <div style={{ color: "#8b949e", fontSize: "9px", marginBottom: "4px" }}>ORDER BLOCKS</div>
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        {sig.smc.bullishOB && (
+                          <div style={{ background: "rgba(63,185,80,0.1)", border: "1px solid #3fb95040", padding: "6px 10px", borderRadius: "4px", fontSize: "10px" }}>
+                            <span style={{ color: "#3fb950" }}>Bull OB </span>
+                            <span>{fmt(selected, sig.smc.bullishOB.low)} – {fmt(selected, sig.smc.bullishOB.high)}</span>
+                          </div>
+                        )}
+                        {sig.smc.bearishOB && (
+                          <div style={{ background: "rgba(248,81,73,0.1)", border: "1px solid #f8514940", padding: "6px 10px", borderRadius: "4px", fontSize: "10px" }}>
+                            <span style={{ color: "#f85149" }}>Bear OB </span>
+                            <span>{fmt(selected, sig.smc.bearishOB.low)} – {fmt(selected, sig.smc.bearishOB.high)}</span>
+                          </div>
+                        )}
+                        {!sig.smc.bullishOB && !sig.smc.bearishOB && (
+                          <span style={{ color: "#8b949e", fontSize: "10px" }}>No order blocks detected</span>
+                        )}
+                      </div>
+                    </div>
+                    {/* Fair Value Gaps */}
+                    <div>
+                      <div style={{ color: "#8b949e", fontSize: "9px", marginBottom: "4px" }}>FAIR VALUE GAPS</div>
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        {sig.smc.bullishFVG && (
+                          <div style={{ background: "rgba(63,185,80,0.1)", border: "1px solid #3fb95040", padding: "6px 10px", borderRadius: "4px", fontSize: "10px" }}>
+                            <span style={{ color: "#3fb950" }}>Bull FVG </span>
+                            <span>{fmt(selected, sig.smc.bullishFVG.bottom)} – {fmt(selected, sig.smc.bullishFVG.top)}</span>
+                          </div>
+                        )}
+                        {sig.smc.bearishFVG && (
+                          <div style={{ background: "rgba(248,81,73,0.1)", border: "1px solid #f8514940", padding: "6px 10px", borderRadius: "4px", fontSize: "10px" }}>
+                            <span style={{ color: "#f85149" }}>Bear FVG </span>
+                            <span>{fmt(selected, sig.smc.bearishFVG.bottom)} – {fmt(selected, sig.smc.bearishFVG.top)}</span>
+                          </div>
+                        )}
+                        {!sig.smc.bullishFVG && !sig.smc.bearishFVG && (
+                          <span style={{ color: "#8b949e", fontSize: "10px" }}>No FVGs detected</span>
+                        )}
+                      </div>
+                    </div>
+                    {/* SMC reasons */}
+                    {sig.smc.reasons && sig.smc.reasons.length > 0 && (
+                      <div style={{ marginTop: "8px", padding: "8px", background: "#161b22", borderRadius: "4px" }}>
+                        <div style={{ color: "#8b949e", fontSize: "9px", marginBottom: "4px" }}>CONFIRMATIONS</div>
+                        {sig.smc.reasons.map((r, i) => (
+                          <div key={i} style={{ color: "#c9d1d9", fontSize: "10px", marginBottom: "2px" }}>• {r}</div>
                         ))}
                       </div>
-                      <div style={{marginTop:6,display:"flex",gap:12}}>
-                        <div><div style={{fontSize:8,color:"#2A5A7A"}}>R:R RATIO</div><div style={{fontSize:10,color:"#4DB8FF"}}>1:2.0</div></div>
-                        <div><div style={{fontSize:8,color:"#2A5A7A"}}>EMA9</div><div style={{fontSize:10,color:"#C0D4E8"}}>{sig.ema9?.toFixed(selected==="BTCUSDT"?0:4)||"—"}</div></div>
-                        <div><div style={{fontSize:8,color:"#2A5A7A"}}>EMA21</div><div style={{fontSize:10,color:"#C0D4E8"}}>{sig.ema21?.toFixed(selected==="BTCUSDT"?0:4)||"—"}</div></div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* LIVE TRADES TAB */}
+            {activeTab === "live trades" && (
+              <div>
+                {/* Open positions */}
+                <div style={styles.card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", textTransform: "uppercase" }}>Open Positions ({openPositions.length})</div>
+                    <button onClick={fetchLiveTrades} style={{ background: "#21262d", border: "1px solid #30363d", color: "#c9d1d9", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "10px" }}>Refresh</button>
+                  </div>
+                  {openPositions.length === 0 ? (
+                    <div style={{ color: "#8b949e", textAlign: "center", padding: "20px" }}>No open positions</div>
+                  ) : openPositions.map((pos, i) => (
+                    <div key={i} style={styles.positionCard}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <span style={{ fontWeight: "700", color: "#58a6ff" }}>{pos.symbol}</span>
+                          <span style={{ margin: "0 8px", color: pos.type === "POSITION_TYPE_BUY" ? "#3fb950" : "#f85149", fontWeight: "700" }}>{pos.type === "POSITION_TYPE_BUY" ? "BUY" : "SELL"}</span>
+                          <span style={{ color: "#8b949e" }}>{pos.volume} lots</span>
+                        </div>
+                        <span style={{ fontWeight: "700", color: (pos.profit || 0) >= 0 ? "#3fb950" : "#f85149", fontSize: "14px" }}>
+                          {(pos.profit || 0) >= 0 ? "+" : ""}{(pos.profit || 0).toFixed(2)}€
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", gap: "16px", marginTop: "6px", fontSize: "10px", color: "#8b949e" }}>
+                        <span>Entry: {pos.openPrice}</span>
+                        <span>Current: {pos.currentPrice}</span>
+                        {pos.stopLoss && <span style={{ color: "#f85149" }}>SL: {pos.stopLoss}</span>}
+                        {pos.takeProfit && <span style={{ color: "#3fb950" }}>TP: {pos.takeProfit}</span>}
                       </div>
                     </div>
+                  ))}
+                </div>
+
+                {/* Trade history stats */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "12px", marginBottom: "12px" }}>
+                  {[
+                    ["Win Rate", `${winRate}%`, "#3fb950"],
+                    ["Total Trades", closedTrades.length, "#58a6ff"],
+                    ["Net P&L", `${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}€`, totalPnl >= 0 ? "#3fb950" : "#f85149"],
+                    ["Wins", wins, "#3fb950"],
+                  ].map(([label, value, color]) => (
+                    <div key={label} style={{ ...styles.card, marginBottom: 0, textAlign: "center" }}>
+                      <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "4px" }}>{label}</div>
+                      <div style={{ fontWeight: "700", fontSize: "18px", color }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Closed trades */}
+                <div style={styles.card}>
+                  <div style={{ color: "#8b949e", fontSize: "10px", textTransform: "uppercase", marginBottom: "12px" }}>
+                    Trade History ({closedTrades.length} trades)
                   </div>
+                  <div style={{ ...styles.tradeRow, color: "#8b949e", fontSize: "10px", borderBottom: "1px solid #30363d" }}>
+                    <span>SYMBOL</span><span>TYPE</span><span>LOTS</span><span>OPEN</span><span>CLOSE</span><span>P&L</span>
+                  </div>
+                  {closedTrades.length === 0 ? (
+                    <div style={{ color: "#8b949e", textAlign: "center", padding: "20px" }}>No closed trades yet</div>
+                  ) : closedTrades.slice(0, 50).map((t, i) => (
+                    <div key={i} style={styles.tradeRow}>
+                      <span style={{ color: "#58a6ff", fontWeight: "700" }}>{t.symbol}</span>
+                      <span style={{ color: t.type === "DEAL_TYPE_BUY" ? "#3fb950" : "#f85149" }}>{t.type === "DEAL_TYPE_BUY" ? "BUY" : "SELL"}</span>
+                      <span>{t.volume}</span>
+                      <span style={{ color: "#8b949e" }}>{t.openPrice}</span>
+                      <span>{t.closePrice || t.price}</span>
+                      <span style={{ fontWeight: "700", color: (t.profit || 0) >= 0 ? "#3fb950" : "#f85149" }}>
+                        {(t.profit || 0) >= 0 ? "+" : ""}{(t.profit || 0).toFixed(2)}€
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
-            {/* ── AI ANALYSIS TAB ── */}
-            {activeTab==="analysis" && (
-              <div style={{animation:"fadeUp .3s"}}>
-                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                  <button className="aibtn" onClick={runAI} disabled={isAiLoading}>
-                    {isAiLoading?"⟳ ANALYZING WITH LIVE DATA…":"⚡ DEEP AI ANALYSIS"}
+            {/* AI ANALYSIS TAB */}
+            {activeTab === "ai analysis" && (
+              <div style={styles.card}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                  <div style={{ color: "#8b949e", fontSize: "10px" }}>AI DEEP ANALYSIS — {inst?.label}</div>
+                  <button onClick={runAI} disabled={isAiLoading} style={{ background: isAiLoading ? "#21262d" : "#1f6feb", border: "none", color: "#fff", padding: "6px 14px", borderRadius: "6px", cursor: isAiLoading ? "not-allowed" : "pointer", fontSize: "11px", fontWeight: "700" }}>
+                    {isAiLoading ? "ANALYZING..." : "RUN AI ANALYSIS"}
                   </button>
-                  <span style={{fontSize:9,color:"#2A5A7A"}}>Claude · {inst?.label} · Live price + indicators + news</span>
                 </div>
-                {!aiText && !isAiLoading && (
-                  <div className="card" style={{padding:28,textAlign:"center",color:"#2A5A7A"}}>
-                    <div style={{fontSize:20,marginBottom:8}}>⚡</div>
-                    <div style={{fontSize:10}}>Click "DEEP AI ANALYSIS" — Claude will analyse the live price, all 6 technical indicators, news sentiment, and macro data to give you a specific grade and trade levels for {inst?.label}.</div>
-                  </div>
-                )}
-                {isAiLoading && <div className="card" style={{padding:24,textAlign:"center",fontSize:10,color:"#4DB8FF",animation:"pulse 1s infinite"}}>Feeding live data to AI engine…</div>}
-                {aiText && (
-                  <div className="card" style={{padding:16,animation:"fadeUp .3s"}}>
-                    <div style={{fontSize:8,letterSpacing:".15em",color:"#2A5A7A",marginBottom:10}}>AI ANALYSIS — {inst?.label} — {new Date().toLocaleTimeString()}</div>
-                    {aiText.split("\n").filter(l=>l.trim()).map((p,i)=>(
-                      <p key={i} style={{fontSize:10,lineHeight:1.8,color:"#9ABACE",marginBottom:8}}>{p}</p>
-                    ))}
-                  </div>
+                {aiAnalysis ? (
+                  <div style={{ lineHeight: "1.6", color: "#c9d1d9", fontSize: "13px", whiteSpace: "pre-wrap" }}>{aiAnalysis}</div>
+                ) : (
+                  <div style={{ color: "#8b949e", textAlign: "center", padding: "40px" }}>Click "Run AI Analysis" for a deep market read powered by Claude</div>
                 )}
               </div>
             )}
 
-            {/* ── PAPER TRADES TAB ── */}
-            {activeTab==="trades" && (
-              <div style={{animation:"fadeUp .3s"}}>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:12}}>
-                  {[
-                    {l:"WIN RATE",  v:`${winRate}%`,           c:Number(winRate)>=75?"#00D4AA":"#FFB800"},
-                    {l:"TRADES",    v:trades.length,            c:"#C0D4E8"},
-                    {l:"NET P&L",   v:`$${netPnl.toFixed(0)}`, c:netPnl>=0?"#00D4AA":"#FF4466"},
-                    {l:"WINS",      v:trades.filter(t=>t.win).length, c:"#00D4AA"},
-                  ].map(s=>(
-                    <div key={s.l} className="card" style={{padding:"9px 12px"}}>
-                      <div style={{fontSize:8,color:"#2A5A7A",marginBottom:3}}>{s.l}</div>
-                      <div style={{fontSize:15,fontWeight:700,color:s.c}}>{s.v}</div>
+            {/* NEWS TAB */}
+            {activeTab === "news" && (
+              <div>
+                {news.length === 0 ? (
+                  <div style={{ ...styles.card, color: "#8b949e", textAlign: "center" }}>Loading news...</div>
+                ) : news.map((article, i) => (
+                  <div key={i} style={{ ...styles.card, marginBottom: "8px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ color: "#c9d1d9", fontWeight: "600", marginBottom: "4px", fontSize: "12px" }}>{article.title}</div>
+                        <div style={{ color: "#8b949e", fontSize: "10px" }}>{article.source} · {article.inst}</div>
+                      </div>
                     </div>
-                  ))}
-                </div>
-                <div className="card" style={{overflow:"hidden"}}>
-                  <div style={{padding:"8px 12px",borderBottom:"1px solid #182A3C",display:"grid",gridTemplateColumns:"60px 80px 60px 90px 55px 65px",gap:8,fontSize:8,letterSpacing:".1em",color:"#2A5A7A"}}>
-                    <span>ID</span><span>PAIR</span><span>DIR</span><span>ENTRY</span><span>CONF</span><span>P&L</span>
                   </div>
-                  {trades.length===0 && <div style={{padding:20,textAlign:"center",color:"#2A5A7A",fontSize:9}}>Waiting for high-confidence signals (≥78%) to log paper trades…</div>}
-                  {trades.map(t=>(
-                    <div key={t.id} className="row" style={{padding:"7px 12px",borderBottom:"1px solid #0C1824",display:"grid",gridTemplateColumns:"60px 80px 60px 90px 55px 65px",gap:8,alignItems:"center",animation:"fadeUp .3s"}}>
-                      <span style={{color:"#2A5A7A"}}>{t.id}</span>
-                      <span style={{color:INSTRUMENTS.find(i=>i.id===t.instrument)?.color,fontSize:9}}>{t.label}</span>
-                      <span style={{color:dir(t.direction),fontSize:9}}>{t.direction}</span>
-                      <span style={{color:"#5A7A9A",fontSize:9}}>{t.instrument==="BTCUSDT"?`$${t.entry.toLocaleString()}`:`${t.entry.toFixed(4)}`}</span>
-                      <span style={{color:t.confidence>=80?"#00D4AA":"#FFB800"}}>{t.confidence}%</span>
-                      <span style={{fontWeight:600,color:t.pnl>=0?"#00D4AA":"#FF4466"}}>{t.pnl>=0?"+":""}${t.pnl}</span>
-                    </div>
-                  ))}
-                </div>
+                ))}
               </div>
             )}
 
-            {/* ── CALENDAR TAB ── */}
-            {activeTab==="calendar" && (
-              <div style={{animation:"fadeUp .3s"}}>
-                <div style={{fontSize:9,color:"#2A5A7A",marginBottom:12}}>
-                  High-impact economic events for the next 7 days. Bot auto-pauses 30 minutes before each event.
-                </div>
-                {calendar.length === 0 && (
-                  <div className="card" style={{padding:20,textAlign:"center",color:"#2A5A7A",fontSize:9}}>
-                    Loading economic calendar...
-                  </div>
-                )}
-                <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                  {calendar.slice(0,15).map((e,i) => {
-                    const eventTime = new Date(e.date);
-                    const isPast    = eventTime < new Date();
-                    const isSoon    = !isPast && (eventTime - new Date()) < 30*60*1000;
-                    return (
-                      <div key={i} className="card" style={{
-                        padding:"10px 14px",
-                        borderLeft: isSoon ? "3px solid #FF4466" : isPast ? "3px solid #2A4A6A" : "3px solid #FFB800",
-                        opacity: isPast ? 0.5 : 1
-                      }}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                          <span style={{fontSize:11,fontWeight:600,color:isSoon?"#FF4466":isPast?"#3A6A8A":"#E0F0FF"}}>{e.name}</span>
-                          <span style={{fontSize:9,color:isSoon?"#FF4466":"#FFB800",fontWeight:isSoon?700:400}}>
-                            {isSoon ? "⚠️ SOON" : isPast ? "DONE" : "UPCOMING"}
-                          </span>
+            {/* CALENDAR TAB */}
+            {activeTab === "calendar" && (
+              <div>
+                {calendarEvents.length === 0 ? (
+                  <div style={{ ...styles.card, color: "#8b949e", textAlign: "center" }}>Loading calendar...</div>
+                ) : calendarEvents.map((ev, i) => {
+                  const evDate = new Date(ev.date);
+                  const isToday = evDate.toDateString() === new Date().toDateString();
+                  return (
+                    <div key={i} style={{ ...styles.card, marginBottom: "8px", borderLeft: `3px solid ${isToday ? "#f85149" : "#21262d"}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontWeight: "700", color: isToday ? "#f85149" : "#c9d1d9", marginBottom: "4px" }}>{ev.name}</div>
+                          <div style={{ color: "#8b949e", fontSize: "10px" }}>{evDate.toLocaleString()} · {ev.country}</div>
                         </div>
-                        <div style={{display:"flex",gap:16,fontSize:9,color:"#5A7A9A"}}>
-                          <span>🌍 {e.country}</span>
-                          <span>🕐 {eventTime.toLocaleDateString()} {eventTime.toLocaleTimeString()}</span>
-                          {e.forecast && <span>Forecast: {e.forecast}</span>}
-                          {e.actual && <span style={{color:"#00D4AA"}}>Actual: {e.actual}</span>}
+                        <div style={{ textAlign: "right", fontSize: "10px" }}>
+                          {ev.forecast && <div style={{ color: "#e3b341" }}>Forecast: {ev.forecast}</div>}
+                          {ev.previous && <div style={{ color: "#8b949e" }}>Previous: {ev.previous}</div>}
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* ── MACRO TAB ── */}
-            {activeTab==="macro" && (
-              <div style={{animation:"fadeUp .3s"}}>
-                <div style={{fontSize:9,color:"#2A5A7A",marginBottom:12}}>
-                  Real economic indicators. Connect FRED API key for live data updates.
-                </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                  {Object.entries(macro).map(([k,v])=>(
-                    <div key={k} className="card" style={{padding:12}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                        <span style={{fontSize:9,color:"#6A8AAA"}}>{k}</span>
-                        <span style={{fontSize:11,fontWeight:600,color:"#D0E4F8"}}>{v.value}</span>
-                      </div>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                        <span style={{fontSize:8,color:"#2A5A7A"}}>SENTIMENT SCORE</span>
-                        <span style={{fontSize:8,color:v.score>60?"#00D4AA":v.score>40?"#FFB800":"#FF4466"}}>{v.score}/100</span>
-                      </div>
-                      <div className="bar"><div className="fill" style={{width:`${v.score}%`,background:v.score>60?"#00D4AA":v.score>40?"#FFB800":"#FF4466"}}/></div>
                     </div>
-                  ))}
-                </div>
-                <div className="card" style={{padding:14,marginTop:12}}>
-                  <div style={{fontSize:9,letterSpacing:".12em",color:"#2A5A7A",marginBottom:8}}>HOW TO CONNECT LIVE MACRO DATA</div>
-                  {[
-                    {step:"1", text:"Get free FRED API key: fred.stlouisfed.org/docs/api/api_key.html"},
-                    {step:"2", text:'Replace YOUR_FRED_KEY at top of file with your key'},
-                    {step:"3", text:"Get free NewsAPI key: newsapi.org → Replace YOUR_NEWSAPI_KEY"},
-                    {step:"4", text:"BTC/USDT is already live via Binance WebSocket (no key needed)"},
-                    {step:"5", text:"GBP/USD & Gold update every 30-60s via Frankfurter (no key needed)"},
-                  ].map(s=>(
-                    <div key={s.step} style={{display:"flex",gap:10,marginBottom:7,alignItems:"flex-start"}}>
-                      <span style={{color:"#00D4AA",fontSize:9,flexShrink:0}}>{s.step}.</span>
-                      <span style={{fontSize:9,color:"#7A9ABE",lineHeight:1.6}}>{s.text}</span>
-                    </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
             )}
           </div>
         </div>
 
-        {/* RIGHT: LOG */}
-        <div style={{width:220,borderLeft:"1px solid #182A3C",display:"flex",flexDirection:"column",flexShrink:0}}>
-          <div style={{padding:"9px 12px",borderBottom:"1px solid #182A3C",fontSize:9,letterSpacing:".15em",color:"#2A5A7A"}}>SYSTEM LOG</div>
-          <div ref={logRef} style={{flex:1,overflowY:"auto",padding:"8px 10px"}}>
-            {log.map((e,i)=>(
-              <div key={i} style={{marginBottom:5,animation:i===log.length-1?"fadeUp .3s":"none"}}>
-                <span style={{fontSize:8,color:"#1A3A5A"}}>{e.t} </span>
-                <span style={{fontSize:9,lineHeight:1.5,color:e.type==="success"?"#00D4AA":e.type==="error"?"#FF4466":e.type==="signal"?"#FFB800":"#3A6A8A"}}>{e.msg}</span>
+        {/* LOG PANEL */}
+        <div style={styles.logPanel}>
+          <div style={styles.logHeader}>SYSTEM LOG</div>
+          <div style={styles.logBody} ref={logRef}>
+            {log.map((entry, i) => (
+              <div key={i} style={styles.logEntry(entry.type)}>
+                <span style={{ color: "#484f58", marginRight: "6px" }}>{entry.time}</span>
+                {entry.msg}
               </div>
             ))}
-            {log.length===0 && <div style={{color:"#1A3A5A",fontSize:9}}>Starting…</div>}
-          </div>
-          <div style={{padding:"8px 10px",borderTop:"1px solid #182A3C",fontSize:8,color:"#1A3A5A"}}>
-            <span style={{animation:"blink 1s infinite",color:"#00D4AA"}}>█</span> DATA FEEDS ACTIVE
           </div>
         </div>
       </div>
