@@ -17,10 +17,19 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'Missing env vars', candles: [] });
   }
 
-  const symbol = String(req.query.symbol || 'BTCUSD').toUpperCase();
+  const rawSymbol = String(req.query.symbol || 'BTCUSD').trim();
   const rawTf = String(req.query.timeframe || 'M1').toUpperCase();
   var rawLimit = parseInt(req.query.limit || '200', 10);
   var limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 1000) : 200;
+
+  const symbolMap = {
+    BTCUSD: 'BTCUSD',
+    GBPUSD: 'GBPUSD',
+    XAUUSD: 'XAUUSD.s',
+    'XAUUSD.S': 'XAUUSD.s',
+    'XAUUSD.s': 'XAUUSD.s'
+  };
+  const symbol = symbolMap[rawSymbol] || symbolMap[rawSymbol.toUpperCase()];
 
   const timeframeMap = {
     M1: '1m', M2: '2m', M3: '3m', M4: '4m', M5: '5m',
@@ -29,8 +38,8 @@ module.exports = async (req, res) => {
     H6: '6h', H8: '8h', H12: '12h', D1: '1d', W1: '1w', MN1: '1mn'
   };
 
-  const allowed = ['BTCUSD', 'XAUUSD', 'GBPUSD'];
-  if (!allowed.includes(symbol)) {
+  const allowed = ['BTCUSD', 'XAUUSD.s', 'GBPUSD'];
+  if (!symbol || !allowed.includes(symbol)) {
     return res.status(400).json({ error: 'Invalid symbol', candles: [] });
   }
 

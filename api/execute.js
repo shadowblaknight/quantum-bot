@@ -7,18 +7,30 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const TOKEN = process.env.METAAPI_TOKEN;
-  const ACCOUNT_ID = process.env.METAAPI_ACCOUNT_ID;
+  var TOKEN = process.env.METAAPI_TOKEN;
+  var ACCOUNT_ID = process.env.METAAPI_ACCOUNT_ID;
   if (!TOKEN || !ACCOUNT_ID) return res.status(500).json({ error: 'Missing env vars' });
 
-  var body = req.body || {};
+  var body;
+  try {
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
   var instrument = body.instrument;
   var direction = body.direction;
   var stopLoss = body.stopLoss;
   var takeProfit = body.takeProfit;
   var entry = body.entry;
 
-  var allowedInstruments = { BTCUSDT: 'BTCUSD', XAUUSD: 'XAUUSD', GBPUSD: 'GBPUSD' };
+  // Instrument to broker symbol mapping
+  // Note: Gold is XAUUSD.s on PU Prime
+  var allowedInstruments = {
+    BTCUSDT: 'BTCUSD',
+    XAUUSD:  'XAUUSD.s',
+    GBPUSD:  'GBPUSD'
+  };
+
   if (!instrument || !allowedInstruments[instrument]) {
     return res.status(400).json({ error: 'Invalid instrument' });
   }
@@ -36,7 +48,7 @@ module.exports = async (req, res) => {
   if (!Number.isFinite(en)) {
     return res.status(400).json({ error: 'Entry price must be a valid number' });
   }
-  if (direction === 'LONG' && !(sl < en && tp > en)) {
+  if (direction === 'LONG'  && !(sl < en && tp > en)) {
     return res.status(400).json({ error: 'Invalid LONG levels: SL below entry, TP above entry' });
   }
   if (direction === 'SHORT' && !(sl > en && tp < en)) {
@@ -44,12 +56,10 @@ module.exports = async (req, res) => {
   }
 
   var slDistance = Math.abs(en - sl);
-  if (slDistance <= 0) {
-    return res.status(400).json({ error: 'Invalid stop loss distance' });
-  }
+  if (slDistance <= 0) return res.status(400).json({ error: 'Invalid stop loss distance' });
 
   // ── Fetch real account balance ──
-  var accountBalance = 10000; // safe fallback
+  var accountBalance = 10000;
   try {
     var accRes = await fetch(
       'https://mt-client-api-v1.london.agiliumtrade.ai/users/current/accounts/' + ACCOUNT_ID + '/account-information',
@@ -63,31 +73,39 @@ module.exports = async (req, res) => {
     }
   } catch (e) {}
 
-  // ── Risk-based lot sizing ──
-  var riskPercent = 0.005; // 0.5% per trade
+  // ── Risk-based lot sizing (1% per trade) ──
+  var riskPercent = 0.01;
   var riskAmount = accountBalance * riskPercent;
-  var volume = 0.01; // safe default
+  var volume = 0.01;
 
   if (instrument === 'GBPUSD') {
-    // Standard forex: ~$10 per pip per lot, pip = 0.0001
+    // Standard forex: pip = 0.0001, pip value = $10 per lot
     var pipSize = 0.0001;
     var pipValuePerLot = 10;
     var stopLossPips = slDistance / pipSize;
-    var calculated = riskAmount / (stopLossPips * pipValuePerLot);
-    volume = Math.floor(Math.min(Math.max(calculated, 0.01), 0.10) * 100) / 100;
-  } else if (instrument === 'XAUUSD') {
-    // Fixed until PU Prime contract spec confirmed
-    volume = 0.01;
-  } else if (instrument === 'BTCUSDT') {
-    // Fixed until PU Prime contract spec confirmed
-    volume = 0.01;
+    var calcGBP = riskAmount / (stopLossPips * pipValuePerLot);
+    volume = Math.floor(Math.min(Math.max(calcGBP, 0.01), 0.10) * 100) / 100;
+  }
+
+  if (instrument === 'XAUUSD') {
+    // Gold: contract size = 100 oz, profit in USD
+    // 1 lot moves $100 per $1 price move
+    var calcGold = riskAmount / (slDistance * 100);
+    volume = Math.floor(Math.min(Math.max(calcGold, 0.01), 0.50) * 100) / 100;
+  }
+
+  if (instrument === 'BTCUSDT') {
+    // BTC: contract size = 1 BTC, profit in USD
+    // 1 lot moves $1 per $1 price move
+    var calcBTC = riskAmount / slDistance;
+    volume = Math.floor(Math.min(Math.max(calcBTC, 0.01), 0.10) * 100) / 100;
   }
 
   var symbol = allowedInstruments[instrument];
   var actionType = direction === 'LONG' ? 'ORDER_TYPE_BUY' : 'ORDER_TYPE_SELL';
 
   var formatPrice = function(sym, val) {
-    var d = sym === 'GBPUSD' ? 5 : sym === 'XAUUSD' ? 2 : sym === 'BTCUSD' ? 2 : 5;
+    var d = sym === 'GBPUSD' ? 5 : sym === 'XAUUSD.s' ? 2 : sym === 'BTCUSD' ? 2 : 5;
     return parseFloat(Number(val).toFixed(d));
   };
 

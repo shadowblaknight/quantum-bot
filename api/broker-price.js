@@ -17,11 +17,19 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'Missing env vars' });
   }
 
-  const allowed = ['BTCUSD', 'XAUUSD', 'GBPUSD'];
-  const symbol = req.query && req.query.symbol;
+  const rawSymbol = String((req.query && req.query.symbol) || '').trim();
+  const symbolMap = {
+    BTCUSD: 'BTCUSD',
+    GBPUSD: 'GBPUSD',
+    XAUUSD: 'XAUUSD.s',
+    'XAUUSD.S': 'XAUUSD.s',
+    'XAUUSD.s': 'XAUUSD.s'
+  };
+  const symbol = symbolMap[rawSymbol] || symbolMap[rawSymbol.toUpperCase()];
+  const allowed = ['BTCUSD', 'XAUUSD.s', 'GBPUSD'];
 
   if (!symbol || !allowed.includes(symbol)) {
-    return res.status(400).json({ error: 'Invalid symbol. Use BTCUSD, XAUUSD, or GBPUSD' });
+    return res.status(400).json({ error: 'Invalid symbol. Use BTCUSD, XAUUSD.s, or GBPUSD', price: null });
   }
 
   try {
@@ -43,7 +51,11 @@ module.exports = async (req, res) => {
       return res.status(502).json({ error: 'Invalid price data from broker', price: null });
     }
 
-    const decimals = symbol === 'GBPUSD' ? 5 : symbol === 'XAUUSD' ? 2 : symbol === 'BTCUSD' ? 2 : 5;
+    const decimals =
+      symbol === 'GBPUSD' ? 5 :
+      symbol === 'XAUUSD.s' ? 2 :
+      symbol === 'BTCUSD' ? 2 :
+      5;
     const mid = parseFloat(((bid + ask) / 2).toFixed(decimals));
 
     return res.status(200).json({ price: mid, bid: bid, ask: ask, symbol: symbol, source: 'puprime' });

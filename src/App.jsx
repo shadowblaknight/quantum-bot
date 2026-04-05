@@ -107,6 +107,137 @@ const calcATR = (prices, period = 14) => {
 };
 
 
+
+// ─── SESSION TACTICS ENGINE ──────────────────────────────────────────────────
+
+// Session time constants (UTC hours)
+const SESSION_TIMES = {
+  ASIAN_START:  0,
+  ASIAN_END:    8,
+  LONDON_OPEN:  8,
+  LONDON_END:   16,
+  NY_OPEN:      13,
+  NY_END:       21,
+};
+
+// Get current session info
+const getSessionInfo = () => {
+  const now = new Date();
+  const utcHour = now.getUTCHours();
+  const utcMin  = now.getUTCMinutes();
+  const utcTime = utcHour + utcMin / 60;
+  const utcDay  = now.getUTCDay(); // 0=Sun, 6=Sat
+
+  // Weekend check
+  if (utcDay === 0 || utcDay === 6) {
+    return { session: 'WEEKEND', isLondonOpen: false, isNYOpen: false, isAsian: false, tradingAllowed: false };
+  }
+
+  const isAsian    = utcTime >= SESSION_TIMES.ASIAN_START  && utcTime < SESSION_TIMES.ASIAN_END;
+  const isLondon   = utcTime >= SESSION_TIMES.LONDON_OPEN  && utcTime < SESSION_TIMES.LONDON_END;
+  const isNY       = utcTime >= SESSION_TIMES.NY_OPEN      && utcTime < SESSION_TIMES.NY_END;
+  const isOverlap  = utcTime >= SESSION_TIMES.NY_OPEN      && utcTime < SESSION_TIMES.LONDON_END;
+
+  // Session open windows: first 30 minutes
+  const isLondonOpen = utcTime >= SESSION_TIMES.LONDON_OPEN && utcTime < SESSION_TIMES.LONDON_OPEN + 0.5;
+  const isNYOpen     = utcTime >= SESSION_TIMES.NY_OPEN     && utcTime < SESSION_TIMES.NY_OPEN + 0.5;
+
+  let session = 'OFF_HOURS';
+  if (isOverlap)    session = 'LONDON_NY_OVERLAP';
+  else if (isNY)    session = 'NEW_YORK';
+  else if (isLondon) session = 'LONDON';
+  else if (isAsian)  session = 'ASIAN';
+
+  return {
+    session,
+    isLondonOpen,
+    isNYOpen,
+    isAsian,
+    isLondon,
+    isNY,
+    isOverlap,
+    tradingAllowed: isLondon || isNY, // only trade London and NY
+    utcTime
+  };
+};
+
+// Calculate Asian session High/Low from candles
+const getAsianRange = (candles) => {
+  if (!candles || candles.length < 10) return null;
+
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const asianEnd = new Date(todayStart);
+  asianEnd.setUTCHours(8, 0, 0, 0);
+
+  // Filter candles within today's Asian session
+  const asianCandles = candles.filter(c => {
+    const t = new Date(c.time);
+    return t >= todayStart && t < asianEnd;
+  });
+
+  if (asianCandles.length < 3) return null;
+
+  const high = Math.max(...asianCandles.map(c => c.high));
+  const low  = Math.min(...asianCandles.map(c => c.low));
+
+  return { high, low, mid: (high + low) / 2, candleCount: asianCandles.length };
+};
+
+// Session-based entry filter
+const getSessionFilter = (candles, direction, currentPrice) => {
+  const sessionInfo = getSessionInfo();
+
+  if (!sessionInfo.tradingAllowed) {
+    return { allowed: false, reason: 'Outside trading hours (London/NY only)' };
+  }
+
+  const asianRange = getAsianRange(candles);
+
+  // At London or NY open - look for Asian range breakout
+  if (sessionInfo.isLondonOpen || sessionInfo.isNYOpen) {
+    const sessionName = sessionInfo.isLondonOpen ? 'London' : 'New York';
+
+    if (asianRange) {
+      // LONG: price breaking above Asian High
+      if (direction === 'LONG' && currentPrice > asianRange.high) {
+        return {
+          allowed: true,
+          reason: `${sessionName} open - Asian High breakout`,
+          asianRange,
+          sessionInfo
+        };
+      }
+      // SHORT: price breaking below Asian Low
+      if (direction === 'SHORT' && currentPrice < asianRange.low) {
+        return {
+          allowed: true,
+          reason: `${sessionName} open - Asian Low breakout`,
+          asianRange,
+          sessionInfo
+        };
+      }
+      // No breakout at session open = wait
+      return {
+        allowed: false,
+        reason: `${sessionName} open - waiting for Asian range breakout (H:${asianRange.high.toFixed(4)} L:${asianRange.low.toFixed(4)})`,
+        asianRange,
+        sessionInfo
+      };
+    }
+  }
+
+  // During regular session hours (not open window) - allow if signal is strong
+  return {
+    allowed: true,
+    reason: `${sessionInfo.session} session`,
+    asianRange,
+    sessionInfo
+  };
+};
+
+
 // ─── SMART MONEY CONCEPTS ENGINE ─────────────────────────────────────────────
 
 // Break of Structure & Change of Character
@@ -433,8 +564,8 @@ const analyzeStrategies = (prices) => {
   const confidence = Math.min(95, Math.max(50, Math.round(50 + agreementScore * 7.5 + smcBoost)));
 
   // SL/TP based on ATR
-  const slMultiplier = 1.5;
-  const tpMultiplier = 3.0;
+  const slMultiplier = 3.0; // 3x ATR for wider, safer SL
+  const tpMultiplier = 6.0; // 6x ATR = 1:2 risk/reward with 3x SL
   const slDistance = atr ? atr * slMultiplier : last * 0.005;
   const tpDistance = atr ? atr * tpMultiplier : last * 0.010;
 
@@ -462,6 +593,7 @@ export default function TradingBotLive() {
   const [closedTrades, setClosedTrades] = useState([]); // Closed MT5 trades
   const [openPositions,setOpenPositions]= useState([]); // Current open positions
   const [brokerCandles, setBrokerCandles] = useState({ BTCUSDT: [], XAUUSD: [], GBPUSD: [] });
+  const [sessionInfo, setSessionInfo] = useState(getSessionInfo());
   const [selected,     setSelected]     = useState("BTCUSDT");
   const [activeTab,    setActiveTab]    = useState("signals");
   const [eventAlert,   setEventAlert]   = useState(null);
@@ -503,7 +635,7 @@ export default function TradingBotLive() {
   // ── Price feeds (all from PU Prime broker via MetaAPI) ──
   useEffect(() => {
     // Instrument to broker symbol mapping
-    const symbolMap = { BTCUSDT: 'BTCUSD', XAUUSD: 'XAUUSD', GBPUSD: 'GBPUSD' };
+    const symbolMap = { BTCUSDT: 'BTCUSD', XAUUSD: 'XAUUSD.s', GBPUSD: 'GBPUSD' };
 
     // Fetch broker candles for signal engine
     const fetchBrokerCandles = async (instId) => {
@@ -596,7 +728,10 @@ export default function TradingBotLive() {
 
   // ── Market status ──
   useEffect(() => {
-    const interval = setInterval(() => setMarketStatus(getMarketStatus()), 60000);
+    const interval = setInterval(() => {
+      setMarketStatus(getMarketStatus());
+      setSessionInfo(getSessionInfo());
+    }, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -711,6 +846,22 @@ export default function TradingBotLive() {
         return;
       }
 
+      // Session filter - London and NY opens preferred
+      let sessionFilter = null;
+      if (inst.type !== "CRYPTO") {
+        sessionFilter = getSessionFilter(
+          brokerCandles[inst.id],
+          sig.direction,
+          prices[inst.id]
+        );
+        if (!sessionFilter.allowed) {
+          if (shouldLogBlock(`${inst.id}-session`)) {
+            addLog(`Session filter: ${sessionFilter.reason}`, "warn");
+          }
+          return;
+        }
+      }
+
       // Check market hours
       const mStatus = marketStatus[inst.id];
       if (!mStatus?.open && inst.type !== "CRYPTO") return;
@@ -724,9 +875,18 @@ export default function TradingBotLive() {
 
       // Symbol normalization - handle broker suffixes like BTCUSDm, XAUUSD.
       const alreadyOpen = openPositions.some(p => {
-        const brokerSym = (p.symbol || "").replace(/[^A-Z]/gi, "").toUpperCase();
-        const targetSym = (inst.id === "BTCUSDT" ? "BTCUSD" : inst.id).toUpperCase();
-        return brokerSym === targetSym || brokerSym.startsWith(targetSym);
+        const raw = (p.symbol || "").toUpperCase();
+        const normalized =
+          raw === "XAUUSD.S" ? "XAUUSD" :
+          raw.startsWith("BTCUSD") ? "BTCUSD" :
+          raw.startsWith("GBPUSD") ? "GBPUSD" :
+          raw.startsWith("XAUUSD") ? "XAUUSD" :
+          raw;
+        const targetSym =
+          inst.id === "BTCUSDT" ? "BTCUSD" :
+          inst.id === "XAUUSD"  ? "XAUUSD" :
+          inst.id;
+        return normalized === targetSym;
       });
       if (alreadyOpen) return;
 
@@ -739,7 +899,7 @@ export default function TradingBotLive() {
       // Lock this instrument
       pendingTradeRef.current[inst.id] = true;
 
-      addLog(`Signal: ${inst.label} ${sig.direction} ${sig.confidence}% | RSI:${sig.rsi?.toFixed(1)} | SL:${sig.stopLoss?.toFixed(inst.id==="BTCUSDT"?0:4)} TP:${sig.takeProfit?.toFixed(inst.id==="BTCUSDT"?0:4)}`, "signal");
+      addLog(`Session: ${sessionFilter ? sessionFilter.reason : "crypto"} | Signal: ${inst.label} ${sig.direction} ${sig.confidence}% | RSI:${sig.rsi?.toFixed(1)} | SL:${sig.stopLoss?.toFixed(inst.id==="BTCUSDT"?0:4)} TP:${sig.takeProfit?.toFixed(inst.id==="BTCUSDT"?0:4)}`, "signal");
 
       fetch("/api/execute", {
         method: "POST",
@@ -768,7 +928,7 @@ export default function TradingBotLive() {
         addLog(`❌ Execute error: ${e.message}`, "error");
       });
     });
-  }, [signals, prices, eventAlert, marketStatus, openPositions, addLog, fetchLiveTrades, shouldLogBlock]);
+  }, [signals, prices, brokerCandles, eventAlert, marketStatus, openPositions, addLog, fetchLiveTrades, shouldLogBlock]);
 
   // ── AI Analysis ──
   const runAI = async () => {
@@ -892,7 +1052,7 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
           <span style={{ ...styles.statValue, color: "#00D4AA" }}>{fmt("GBPUSD", prices.GBPUSD)}</span>
         </div>
         <div style={{ marginLeft: "auto", color: "#e3b341", fontSize: "11px" }}>
-          {mStatus?.session} {showEventBanner && `⚠️ ${eventAlert.name}`}
+          {sessionInfo.session} {showEventBanner && `⚠️ ${eventAlert.name}`}
         </div>
       </div>
 
@@ -1039,6 +1199,31 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                     </div>
                   </div>
                 )}
+
+                {/* Session Info */}
+                <div style={styles.card}>
+                  <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "8px" }}>SESSION TACTICS</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                    <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                      <div style={{ color: "#8b949e", fontSize: "9px" }}>CURRENT SESSION</div>
+                      <div style={{ fontWeight: "700", color: sessionInfo.isOverlap ? "#f7931a" : sessionInfo.isLondon || sessionInfo.isNY ? "#3fb950" : "#8b949e", fontSize: "11px" }}>
+                        {sessionInfo.session}
+                      </div>
+                    </div>
+                    <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                      <div style={{ color: "#8b949e", fontSize: "9px" }}>LONDON OPEN</div>
+                      <div style={{ fontWeight: "700", color: sessionInfo.isLondonOpen ? "#3fb950" : "#8b949e" }}>
+                        {sessionInfo.isLondonOpen ? "✅ ACTIVE" : "08:00 UTC"}
+                      </div>
+                    </div>
+                    <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                      <div style={{ color: "#8b949e", fontSize: "9px" }}>NY OPEN</div>
+                      <div style={{ fontWeight: "700", color: sessionInfo.isNYOpen ? "#3fb950" : "#8b949e" }}>
+                        {sessionInfo.isNYOpen ? "✅ ACTIVE" : "13:00 UTC"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
                 {/* SMC Analysis */}
                 {sig.smc && (
