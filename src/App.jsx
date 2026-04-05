@@ -475,6 +475,56 @@ const getSMCConfirmation = (candles, direction) => {
   };
 };
 
+
+// ─── PULLBACK FILTER ─────────────────────────────────────────────────────────
+// Prevents entering at the top/bottom of a move - waits for retracement
+const hasPullback = (candles, direction) => {
+  if (!candles || candles.length < 10) return false;
+
+  const n = candles.length;
+  const recent = candles.slice(n - 15); // last 15 candles
+
+  // Find the swing point (highest high for LONG entry, lowest low for SHORT)
+  let swingIdx = 0;
+  if (direction === 'LONG') {
+    // Find recent swing high
+    let maxHigh = -Infinity;
+    for (let i = 0; i < recent.length - 2; i++) {
+      if (recent[i].high > maxHigh) { maxHigh = recent[i].high; swingIdx = i; }
+    }
+    const swingHigh = maxHigh;
+    const swingLow = Math.min(...recent.slice(swingIdx).map(c => c.low));
+    const currentClose = recent[recent.length - 1].close;
+    const swingRange = swingHigh - swingLow;
+
+    if (swingRange <= 0) return false;
+
+    // Price must have retraced at least 30% from the swing high
+    const retracePct = (swingHigh - currentClose) / swingRange;
+    return retracePct >= 0.30;
+  }
+
+  if (direction === 'SHORT') {
+    // Find recent swing low
+    let minLow = Infinity;
+    for (let i = 0; i < recent.length - 2; i++) {
+      if (recent[i].low < minLow) { minLow = recent[i].low; swingIdx = i; }
+    }
+    const swingLow = minLow;
+    const swingHigh = Math.max(...recent.slice(swingIdx).map(c => c.high));
+    const currentClose = recent[recent.length - 1].close;
+    const swingRange = swingHigh - swingLow;
+
+    if (swingRange <= 0) return false;
+
+    // Price must have retraced at least 30% from the swing low
+    const retracePct = (currentClose - swingLow) / swingRange;
+    return retracePct >= 0.30;
+  }
+
+  return false;
+};
+
 // ─── REAL SIGNAL ENGINE (NO MATH.RANDOM) ──────────────────────────────────────
 const analyzeStrategies = (prices) => {
   if (!prices || prices.length < 50) return null;
@@ -545,6 +595,21 @@ const analyzeStrategies = (prices) => {
   // Extra confirmation: RSI must not be extreme
   if (direction === "LONG"  && rsi > 75) direction = "NEUTRAL";
   if (direction === "SHORT" && rsi < 25) direction = "NEUTRAL";
+
+  // Anti-chasing filter: reject if move is already extended
+  // Check last 3 candles - if all moving same direction, likely late entry
+  if (direction !== "NEUTRAL" && prices.length >= 5) {
+    const recent = prices.slice(-5);
+    const moves = [];
+    for (let i = 1; i < recent.length; i++) {
+      moves.push(recent[i] - recent[i-1]);
+    }
+    const allBull = moves.every(m => m > 0);
+    const allBear = moves.every(m => m < 0);
+    // If 4+ consecutive candles already moved strongly in signal direction = too late
+    if (direction === "LONG"  && allBull) direction = "NEUTRAL";
+    if (direction === "SHORT" && allBear) direction = "NEUTRAL";
+  }
 
   // Step 2: SMC Confirmation (strictly required)
   let smc = null;
@@ -624,10 +689,10 @@ export default function TradingBotLive() {
 
   const fetchClosedTrades = useCallback(async () => {
     try {
-      const r = await fetch("/api/trades");
+      const r = await fetch("/api/history");
       if (r.ok) {
         const d = await r.json();
-        setClosedTrades(d.trades || []);
+        setClosedTrades(d.deals || []);
       }
     } catch(e) {}
   }, []);
@@ -896,6 +961,18 @@ export default function TradingBotLive() {
       // Require valid SL/TP
       if (!Number.isFinite(sig.stopLoss) || !Number.isFinite(sig.takeProfit)) { addLog("Trade blocked: missing SL/TP", "warn"); return; }
 
+      // Pullback filter - don't chase the trend
+      const candles = brokerCandles[inst.id];
+      if (candles && candles.length >= 10) {
+        const pullback = hasPullback(candles, sig.direction);
+        if (!pullback) {
+          if (shouldLogBlock(`${inst.id}-pullback`)) {
+            addLog(`${inst.label}: waiting for pullback before entry`, "warn");
+          }
+          return;
+        }
+      }
+
       // Lock this instrument
       pendingTradeRef.current[inst.id] = true;
 
@@ -918,7 +995,10 @@ export default function TradingBotLive() {
         if (d.success) {
           lastTradeRef.current[inst.id] = now; // set cooldown ONLY on success
           addLog(`✅ Trade executed: ${inst.label} ${sig.direction} ${d.volume || "?"} lots @ ${prices[inst.id]}`, "success");
+
+          // Refresh positions and history from broker (source of truth)
           setTimeout(fetchLiveTrades, 2000);
+          setTimeout(fetchClosedTrades, 3000);
         } else {
           addLog(`❌ Execution failed: ${d.error || "unknown"}`, "error");
         }
@@ -928,7 +1008,7 @@ export default function TradingBotLive() {
         addLog(`❌ Execute error: ${e.message}`, "error");
       });
     });
-  }, [signals, prices, brokerCandles, eventAlert, marketStatus, openPositions, addLog, fetchLiveTrades, shouldLogBlock]);
+  }, [signals, prices, brokerCandles, eventAlert, marketStatus, openPositions, addLog, fetchLiveTrades, fetchClosedTrades, shouldLogBlock]);
 
   // ── AI Analysis ──
   const runAI = async () => {
@@ -1378,10 +1458,10 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                   ) : closedTrades.slice(0, 50).map((t, i) => (
                     <div key={i} style={styles.tradeRow}>
                       <span style={{ color: "#58a6ff", fontWeight: "700" }}>{t.symbol}</span>
-                      <span style={{ color: t.type === "DEAL_TYPE_BUY" ? "#3fb950" : "#f85149" }}>{t.type === "DEAL_TYPE_BUY" ? "BUY" : "SELL"}</span>
+                      <span style={{ color: t.type === "BUY" ? "#3fb950" : "#f85149" }}>{t.type}</span>
                       <span>{t.volume}</span>
-                      <span style={{ color: "#8b949e" }}>{t.openPrice}</span>
-                      <span>{t.closePrice || t.price}</span>
+                      <span style={{ color: "#8b949e" }}>{t.openPrice ?? "—"}</span>
+                      <span>{t.closePrice ?? "—"}</span>
                       <span style={{ fontWeight: "700", color: (t.profit || 0) >= 0 ? "#3fb950" : "#f85149" }}>
                         {(t.profit || 0) >= 0 ? "+" : ""}{(t.profit || 0).toFixed(2)}€
                       </span>
