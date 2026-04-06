@@ -98,6 +98,23 @@ const calcBollinger = (prices, period = 20) => {
 
 // ATR for stop loss calculation
 const calcATR = (prices, period = 14) => {
+  // Real True Range ATR using candle high/low/close
+  if (prices.candles && prices.candles.length >= period + 1) {
+    const candles = prices.candles;
+    const trs = [];
+    for (let i = 1; i < candles.length; i++) {
+      const high = candles[i].high;
+      const low  = candles[i].low;
+      const prevClose = candles[i - 1].close;
+      trs.push(Math.max(
+        high - low,
+        Math.abs(high - prevClose),
+        Math.abs(low  - prevClose)
+      ));
+    }
+    return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+  }
+  // Fallback: close-to-close if candles unavailable
   if (prices.length < period + 1) return null;
   const trs = [];
   for (let i = 1; i < prices.length; i++) {
@@ -126,37 +143,44 @@ const getSessionInfo = () => {
   const utcHour = now.getUTCHours();
   const utcMin  = now.getUTCMinutes();
   const utcTime = utcHour + utcMin / 60;
-  const utcDay  = now.getUTCDay(); // 0=Sun, 6=Sat
+  const utcDay  = now.getUTCDay();
 
-  // Weekend check
-  if (utcDay === 0 || utcDay === 6) {
-    return { session: 'WEEKEND', isLondonOpen: false, isNYOpen: false, isAsian: false, tradingAllowed: false };
+  // Saturday all day + Sunday before 22:00 UTC = weekend, closed
+  if (utcDay === 6 || (utcDay === 0 && utcTime < 22)) {
+    return {
+      session: "WEEKEND",
+      isLondonOpen: false, isNYOpen: false,
+      isAsian: false, isLondon: false, isNY: false, isOverlap: false,
+      isSundayReopen: false,
+      tradingAllowed: false,
+      utcTime
+    };
   }
 
-  const isAsian    = utcTime >= SESSION_TIMES.ASIAN_START  && utcTime < SESSION_TIMES.ASIAN_END;
-  const isLondon   = utcTime >= SESSION_TIMES.LONDON_OPEN  && utcTime < SESSION_TIMES.LONDON_END;
-  const isNY       = utcTime >= SESSION_TIMES.NY_OPEN      && utcTime < SESSION_TIMES.NY_END;
-  const isOverlap  = utcTime >= SESSION_TIMES.NY_OPEN      && utcTime < SESSION_TIMES.LONDON_END;
+  // Sunday 22:00+ UTC = Sydney/forex reopens (counts as Asian session)
+  const isSundayReopen = utcDay === 0 && utcTime >= 22;
+  const isAsian   = (utcTime >= 0 && utcTime < 8) || isSundayReopen;
+  const isLondon  = utcTime >= 8  && utcTime < 16;
+  const isNY      = utcTime >= 13 && utcTime < 21;
+  const isOverlap = utcTime >= 13 && utcTime < 16;
 
-  // Session open windows: first 30 minutes
-  const isLondonOpen = utcTime >= SESSION_TIMES.LONDON_OPEN && utcTime < SESSION_TIMES.LONDON_OPEN + 0.5;
-  const isNYOpen     = utcTime >= SESSION_TIMES.NY_OPEN     && utcTime < SESSION_TIMES.NY_OPEN + 0.5;
+  // Session open windows (first 30 min)
+  const isLondonOpen = utcTime >= 8  && utcTime < 8.5;
+  const isNYOpen     = utcTime >= 13 && utcTime < 13.5;
 
-  let session = 'OFF_HOURS';
-  if (isOverlap)    session = 'LONDON_NY_OVERLAP';
-  else if (isNY)    session = 'NEW_YORK';
-  else if (isLondon) session = 'LONDON';
-  else if (isAsian)  session = 'ASIAN';
+  let session = "OFF_HOURS";
+  if (isSundayReopen)   session = "SYDNEY_OPEN";
+  else if (isOverlap)   session = "LONDON_NY_OVERLAP";
+  else if (isNY)        session = "NEW_YORK";
+  else if (isLondon)    session = "LONDON";
+  else if (isAsian)     session = "ASIAN";
 
   return {
     session,
-    isLondonOpen,
-    isNYOpen,
-    isAsian,
-    isLondon,
-    isNY,
-    isOverlap,
-    tradingAllowed: isLondon || isNY, // only trade London and NY
+    isLondonOpen, isNYOpen,
+    isAsian, isLondon, isNY, isOverlap,
+    isSundayReopen,
+    tradingAllowed: isLondon || isNY || isSundayReopen, // London, NY, and Sunday forex reopen
     utcTime
   };
 };
@@ -190,7 +214,7 @@ const getSessionFilter = (candles, direction, currentPrice) => {
   const sessionInfo = getSessionInfo();
 
   if (!sessionInfo.tradingAllowed) {
-    return { allowed: false, reason: 'Outside trading hours (London/NY only)' };
+    return { allowed: false, reason: 'Outside London/NY/Sunday reopen hours' };
   }
 
   const asianRange = getAsianRange(candles);
@@ -238,6 +262,262 @@ const getSessionFilter = (candles, direction, currentPrice) => {
 };
 
 
+
+// ─── MULTI-TIMEFRAME BIAS ENGINE (M15) ───────────────────────────────────────
+
+const calcM15Bias = (m15Candles) => {
+  if (!m15Candles || m15Candles.length < 20) {
+    return { bias: null, reason: 'Insufficient M15 data', ema20: null, ema50: null };
+  }
+
+  const closes = m15Candles.map(c => c.close);
+  const n = closes.length;
+
+  // EMA calculation helper
+  const calcEMA = (data, period) => {
+    if (data.length < period) return null;
+    const k = 2 / (period + 1);
+    let ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < data.length; i++) {
+      ema = data[i] * k + ema * (1 - k);
+    }
+    return ema;
+  };
+
+  const ema20 = calcEMA(closes, 20);
+  const ema50 = calcEMA(closes, 50);
+  const lastClose = closes[n - 1];
+
+  // Find M15 swing structure (last 30 candles)
+  const lookback = Math.min(30, m15Candles.length);
+  const recent = m15Candles.slice(-lookback);
+  let swingHighs = [];
+  let swingLows = [];
+
+  for (let i = 2; i < recent.length - 2; i++) {
+    if (recent[i].high > recent[i-1].high && recent[i].high > recent[i-2].high &&
+        recent[i].high > recent[i+1].high && recent[i].high > recent[i+2].high) {
+      swingHighs.push(recent[i].high);
+    }
+    if (recent[i].low < recent[i-1].low && recent[i].low < recent[i-2].low &&
+        recent[i].low < recent[i+1].low && recent[i].low < recent[i+2].low) {
+      swingLows.push(recent[i].low);
+    }
+  }
+
+  // Higher highs + higher lows = bullish structure
+  const bullishStructure = swingHighs.length >= 2 && swingLows.length >= 2 &&
+    swingHighs[swingHighs.length-1] > swingHighs[swingHighs.length-2] &&
+    swingLows[swingLows.length-1] > swingLows[swingLows.length-2];
+
+  // Lower highs + lower lows = bearish structure
+  const bearishStructure = swingHighs.length >= 2 && swingLows.length >= 2 &&
+    swingHighs[swingHighs.length-1] < swingHighs[swingHighs.length-2] &&
+    swingLows[swingLows.length-1] < swingLows[swingLows.length-2];
+
+  // EMA stack confirmation
+  const bullishEMA = ema20 && ema50 && ema20 > ema50 && lastClose > ema20;
+  const bearishEMA = ema20 && ema50 && ema20 < ema50 && lastClose < ema20;
+
+  // Combine structure + EMA for bias
+  let bias = null;
+  let reason = '';
+
+  if (bullishStructure && bullishEMA) {
+    bias = 'BULLISH';
+    reason = 'M15 HH/HL structure + EMA20 > EMA50';
+  } else if (bearishStructure && bearishEMA) {
+    bias = 'BEARISH';
+    reason = 'M15 LH/LL structure + EMA20 < EMA50';
+  } else if (bullishStructure) {
+    bias = 'BULLISH';
+    reason = 'M15 HH/HL structure';
+  } else if (bearishStructure) {
+    bias = 'BEARISH';
+    reason = 'M15 LH/LL structure';
+  } else if (bullishEMA) {
+    bias = 'BULLISH';
+    reason = 'M15 EMA stack bullish';
+  } else if (bearishEMA) {
+    bias = 'BEARISH';
+    reason = 'M15 EMA stack bearish';
+  } else {
+    bias = null;
+    reason = 'M15 no clear bias';
+  }
+
+  return { bias, reason, ema20, ema50, swingHighs, swingLows };
+};
+
+
+// ─── TIER 2: LIQUIDITY SWEEP DETECTION ───────────────────────────────────────
+
+const calcLiquiditySweep = (candles) => {
+  if (!candles || candles.length < 10) return { swept: false, direction: null };
+
+  const n = candles.length;
+  const last = candles[n - 1];
+  const lookback = candles.slice(-20);
+
+  // Find recent swing highs and lows
+  let recentHigh = -Infinity;
+  let recentLow = Infinity;
+  for (let i = 0; i < lookback.length - 2; i++) {
+    if (lookback[i].high > recentHigh) recentHigh = lookback[i].high;
+    if (lookback[i].low < recentLow) recentLow = lookback[i].low;
+  }
+
+  // Bullish sweep: wick below recent low then closes back above
+  // Price grabbed sell-side liquidity then reversed up
+  const bullishSweep =
+    last.low < recentLow &&
+    last.close > recentLow &&
+    last.close > last.open &&
+    (last.high - last.close) < (last.close - last.low); // body closer to top
+
+  // Bearish sweep: wick above recent high then closes back below
+  // Price grabbed buy-side liquidity then reversed down
+  const bearishSweep =
+    last.high > recentHigh &&
+    last.close < recentHigh &&
+    last.close < last.open &&
+    (last.close - last.low) < (last.high - last.close); // body closer to bottom
+
+  if (bullishSweep) return { swept: true, direction: 'BULLISH', level: recentLow };
+  if (bearishSweep) return { swept: true, direction: 'BEARISH', level: recentHigh };
+  return { swept: false, direction: null };
+};
+
+// ─── TIER 2: VOLUME CONFIRMATION ─────────────────────────────────────────────
+
+const calcVolumeConfirmation = (candles, direction) => {
+  if (!candles || candles.length < 20) return { confirmed: false, reason: 'No volume data' };
+
+  const n = candles.length;
+  const recent = candles.slice(-20);
+  const avgVolume = recent.reduce((s, c) => s + c.volume, 0) / recent.length;
+
+  if (avgVolume === 0) return { confirmed: false, reason: 'Zero volume (broker may not provide)' };
+
+  const lastCandle = candles[n - 1];
+  const last3 = candles.slice(-3);
+
+  // Volume spike on structure break = strong move
+  const hasVolumeSpike = lastCandle.volume > avgVolume * 1.5;
+
+  // Low volume on pullback = weak retracement, likely to continue
+  const pullbackCandles = candles.slice(-5, -1);
+  const avgPullbackVol = pullbackCandles.reduce((s, c) => s + c.volume, 0) / pullbackCandles.length;
+  const lowVolumePullback = avgPullbackVol < avgVolume * 0.8;
+
+  // Directional volume: more volume in signal direction
+  const bullishVolume = last3.filter(c => c.close > c.open).reduce((s, c) => s + c.volume, 0);
+  const bearishVolume = last3.filter(c => c.close < c.open).reduce((s, c) => s + c.volume, 0);
+  const directionalConfirm = direction === 'LONG' ? bullishVolume > bearishVolume : bearishVolume > bullishVolume;
+
+  const confirmed = hasVolumeSpike || (lowVolumePullback && directionalConfirm);
+  const reason = hasVolumeSpike ? 'Volume spike confirms move' :
+    lowVolumePullback ? 'Low volume pullback + directional bias' : 'Weak volume';
+
+  return { confirmed, reason, avgVolume, lastVolume: lastCandle.volume, hasVolumeSpike, lowVolumePullback };
+};
+
+// ─── TIER 2: CONFLUENCE SCORING ───────────────────────────────────────────────
+
+const calcConfluenceScore = (direction, m15bias, smc, sweep, volume, rsi, atr, closes) => {
+  let score = 0;
+  const factors = [];
+
+  // Convert LONG/SHORT to BULLISH/BEARISH for comparisons
+  const directionBias = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
+
+  // M15 trend aligned (+2)
+  if (m15bias && m15bias === directionBias) { score += 2; factors.push('M15 aligned'); }
+
+  // BOS/CHoCH on M1 (+2)
+  if (smc?.bos?.type === directionBias || smc?.choch?.type === directionBias) {
+    score += 2; factors.push('M1 BOS/CHoCH');
+  }
+
+  // Price in Order Block (+2)
+  if (smc?.bullishOB && direction === 'LONG') { score += 2; factors.push('Bullish OB'); }
+  if (smc?.bearishOB && direction === 'SHORT') { score += 2; factors.push('Bearish OB'); }
+
+  // FVG present (+1)
+  if (smc?.bullishFVG && direction === 'LONG') { score += 1; factors.push('Bullish FVG'); }
+  if (smc?.bearishFVG && direction === 'SHORT') { score += 1; factors.push('Bearish FVG'); }
+
+  // Liquidity sweep in signal direction (+2)
+  if (sweep?.swept && sweep.direction === directionBias) { score += 2; factors.push('Liquidity sweep'); }
+
+  // RSI not extreme (+1)
+  if (rsi && ((direction === 'LONG' && rsi > 30 && rsi < 65) ||
+              (direction === 'SHORT' && rsi < 70 && rsi > 35))) {
+    score += 1; factors.push('RSI healthy');
+  }
+
+  // Volume confirms (+1)
+  if (volume?.confirmed) { score += 1; factors.push('Volume confirmed'); }
+
+  // ATR in healthy range (+1): not too low (sleeping) not too high (chaotic)
+  if (atr && closes?.length > 0) {
+    const lastPrice = closes[closes.length - 1];
+    const atrPct = (atr / lastPrice) * 100;
+    if (atrPct > 0.05 && atrPct < 2.0) { score += 1; factors.push('ATR healthy'); }
+  }
+
+  return { score, factors, maxScore: 13 };
+};
+
+// ─── TIER 3: ATR VOLATILITY FILTER ────────────────────────────────────────────
+
+const calcVolatilityFilter = (atr, lastPrice, instType) => {
+  if (!atr || !lastPrice) return { healthy: true, reason: 'No ATR data' };
+
+  const atrPct = (atr / lastPrice) * 100;
+
+  // Thresholds differ by instrument type
+  const thresholds = {
+    CRYPTO:    { min: 0.05, max: 3.0 },
+    COMMODITY: { min: 0.03, max: 1.5 },
+    FOREX:     { min: 0.01, max: 0.8 },
+  };
+
+  const t = thresholds[instType] || thresholds.FOREX;
+
+  if (atrPct < t.min) return { healthy: false, reason: `Market too quiet (ATR ${atrPct.toFixed(3)}%)` };
+  if (atrPct > t.max) return { healthy: false, reason: `Market too volatile (ATR ${atrPct.toFixed(3)}%)` };
+  return { healthy: true, reason: `ATR healthy (${atrPct.toFixed(3)}%)`, atrPct };
+};
+
+// ─── TIER 3: PARTIAL TP & TRAILING SL LEVELS ─────────────────────────────────
+
+const calcAdvancedLevels = (direction, entry, atr) => {
+  if (!atr || !entry) return null;
+  if (direction !== "LONG" && direction !== "SHORT") return null;
+
+  const sl  = atr * 1.5;
+  const tp1 = atr * 1.5;
+  const tp2 = atr * 3.0;
+
+  if (direction === "LONG") {
+    return {
+      stopLoss:  entry - sl,
+      partialTP: entry + tp1,
+      fullTP:    entry + tp2,
+      breakeven: entry,
+      trailBy:   atr,
+    };
+  }
+  return {
+    stopLoss:  entry + sl,
+    partialTP: entry - tp1,
+    fullTP:    entry - tp2,
+    breakeven: entry,
+    trailBy:   atr,
+  };
+};
+
 // ─── SMART MONEY CONCEPTS ENGINE ─────────────────────────────────────────────
 
 // Break of Structure & Change of Character
@@ -268,8 +548,6 @@ const calcBOSCHOCH = (candles) => {
 
   const lastCandle = candles[n - 1];
   const lastClose = lastCandle.close;
-  const lastHigh = lastCandle.high;
-  const lastLow = lastCandle.low;
 
   let bos = null;
   let choch = null;
@@ -611,11 +889,24 @@ const analyzeStrategies = (prices) => {
     if (direction === "SHORT" && allBear) direction = "NEUTRAL";
   }
 
-  // Step 2: SMC Confirmation (strictly required)
+  // Step 2: M15 Higher Timeframe Bias (no counter-trend trades)
+  const m15 = calcM15Bias(prices.m15Candles);
+  const directionToBias = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
+  if (direction !== "NEUTRAL" && m15.bias && m15.bias !== directionToBias) {
+    direction = "NEUTRAL";
+  }
+
+  // Step 3: ATR Volatility Filter (no sleeping or chaotic markets)
+  const instType = prices.instType || "FOREX";
+  const volatility = calcVolatilityFilter(atr, last, instType);
+  if (direction !== "NEUTRAL" && !volatility.healthy) {
+    direction = "NEUTRAL";
+  }
+
+  // Step 4: SMC Confirmation (strictly required)
   let smc = null;
   if (direction !== "NEUTRAL") {
     if (!prices.candles || prices.candles.length < 30) {
-      // No candles = no SMC = no trade
       direction = "NEUTRAL";
     } else {
       smc = getSMCConfirmation(prices.candles, direction);
@@ -623,19 +914,34 @@ const analyzeStrategies = (prices) => {
     }
   }
 
-  // Confidence based on agreement strength + SMC score boost
+  // Step 5: Liquidity Sweep (bonus confirmation)
+  const sweep = prices.candles ? calcLiquiditySweep(prices.candles) : { swept: false };
+
+  // Step 6: Volume Confirmation (bonus - broker may not provide)
+  const volume = prices.candles ? calcVolumeConfirmation(prices.candles, direction) : { confirmed: false };
+
+  // Step 7: Confluence Score (>= 6/13 required)
+  const confluence = calcConfluenceScore(direction, m15.bias, smc, sweep, volume, rsi, atr, prices);
+  if (direction !== "NEUTRAL" && confluence.score < 6) {
+    direction = "NEUTRAL";
+  }
+
+  // Recompute bias AFTER all filters (direction may have changed to NEUTRAL)
+  const finalDirectionBias = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
+
+  // Confidence: all factors combined (only boosted if direction still valid)
   const agreementScore = direction === "LONG" ? bullCount : direction === "SHORT" ? bearCount : 0;
-  const smcBoost = smc && smc.confirmed ? Math.min(smc.score * 2, 10) : 0;
-  const confidence = Math.min(95, Math.max(50, Math.round(50 + agreementScore * 7.5 + smcBoost)));
+  const smcBoost   = smc && smc.confirmed ? Math.min(smc.score * 2, 10) : 0;
+  const m15Boost   = finalDirectionBias && m15.bias === finalDirectionBias ? 5 : 0;
+  const sweepBoost = finalDirectionBias && sweep.swept && sweep.direction === finalDirectionBias ? 5 : 0;
+  const confidence = Math.min(95, Math.max(50, Math.round(50 + agreementScore * 7.5 + smcBoost + m15Boost + sweepBoost)));
 
-  // SL/TP based on ATR
-  const slMultiplier = 3.0; // 3x ATR for wider, safer SL
-  const tpMultiplier = 6.0; // 6x ATR = 1:2 risk/reward with 3x SL
-  const slDistance = atr ? atr * slMultiplier : last * 0.005;
-  const tpDistance = atr ? atr * tpMultiplier : last * 0.010;
-
-  const stopLoss   = direction === "LONG"  ? last - slDistance : last + slDistance;
-  const takeProfit = direction === "LONG"  ? last + tpDistance : last - tpDistance;
+  // Advanced SL/TP: partial TP + trailing
+  const levels = calcAdvancedLevels(direction, last, atr);
+  const stopLoss   = levels ? levels.stopLoss : null;
+  const takeProfit = levels ? levels.fullTP   : null;
+  const slDistance = stopLoss   != null ? Math.abs(last - stopLoss)   : null;
+  const tpDistance = takeProfit != null ? Math.abs(last - takeProfit) : null;
 
   return {
     scores, direction, confidence,
@@ -643,7 +949,7 @@ const analyzeStrategies = (prices) => {
     ema9, ema21, ema50, ema200,
     stopLoss, takeProfit, slDistance, tpDistance,
     bullTrend, bearTrend,
-    smc // SMC analysis results
+    smc, m15, sweep, volume, confluence, volatility, levels
   };
 };
 
@@ -658,6 +964,7 @@ export default function TradingBotLive() {
   const [closedTrades, setClosedTrades] = useState([]); // Closed MT5 trades
   const [openPositions,setOpenPositions]= useState([]); // Current open positions
   const [brokerCandles, setBrokerCandles] = useState({ BTCUSDT: [], XAUUSD: [], GBPUSD: [] });
+  const [m15Candles, setM15Candles] = useState({ BTCUSDT: [], XAUUSD: [], GBPUSD: [] });
   const [sessionInfo, setSessionInfo] = useState(getSessionInfo());
   const [selected,     setSelected]     = useState("BTCUSDT");
   const [activeTab,    setActiveTab]    = useState("signals");
@@ -706,11 +1013,11 @@ export default function TradingBotLive() {
     const fetchBrokerCandles = async (instId) => {
       const symbol = symbolMap[instId];
       try {
+        // Fetch M1 candles (entry timing + indicators)
         const r = await fetch(`/api/broker-candles?symbol=${symbol}&timeframe=M1&limit=200`);
         const d = await r.json();
         if (d.candles && d.candles.length >= 50) {
           setBrokerCandles(prev => ({ ...prev, [instId]: d.candles }));
-          // Update price from latest candle close
           const lastClose = d.candles[d.candles.length - 1].close;
           if (Number.isFinite(lastClose)) {
             setPrices(prev => {
@@ -719,16 +1026,26 @@ export default function TradingBotLive() {
             });
           }
         } else {
-          // Candles unavailable - clear ALL stale data for this instrument
-          addLog(`${symbol} candles unavailable - signals cleared`, "warn");
+          addLog(`${symbol} M1 candles unavailable - signals cleared`, "warn");
           setPrices(prev => ({ ...prev, [instId]: null }));
           setBrokerCandles(prev => ({ ...prev, [instId]: [] }));
+          setM15Candles(prev => ({ ...prev, [instId]: [] }));
           setSignals(prev => { const n = {...prev}; delete n[instId]; return n; });
         }
+
+        // Fetch M15 candles (higher timeframe bias)
+        try {
+          const r15 = await fetch(`/api/broker-candles?symbol=${symbol}&timeframe=M15&limit=100`);
+          const d15 = await r15.json();
+          if (d15.candles && d15.candles.length >= 20) {
+            setM15Candles(prev => ({ ...prev, [instId]: d15.candles }));
+          }
+        } catch(e) {}
       } catch(e) {
         addLog(`${symbol} candles error - signals cleared`, "warn");
         setPrices(prev => ({ ...prev, [instId]: null }));
         setBrokerCandles(prev => ({ ...prev, [instId]: [] }));
+        setM15Candles(prev => ({ ...prev, [instId]: [] }));
         setSignals(prev => { const n = {...prev}; delete n[instId]; return n; });
       }
     };
@@ -783,13 +1100,15 @@ export default function TradingBotLive() {
       // Need at least 50 candles for indicators
       if (!candles || candles.length < 50) return;
       const closes = candles.map(c => c.close);
-      // Attach full candles for SMC
+      // Attach M1 candles for SMC + M15 candles for HTF bias
       closes.candles = candles;
+      closes.m15Candles = m15Candles[inst.id] || [];
+      closes.instType = inst.type; // CRYPTO / COMMODITY / FOREX for ATR thresholds
       const sig = analyzeStrategies(closes);
       if (sig) newSignals[inst.id] = sig;
     });
     setSignals(newSignals); // always update - clears stale signals when instruments fail
-  }, [brokerCandles]);
+  }, [brokerCandles, m15Candles]);
 
   // ── Market status ──
   useEffect(() => {
@@ -1048,14 +1367,14 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
   };
 
   // ── Helpers ──
-  const fmt = (id, p) => p ? (id === "BTCUSDT" ? p.toLocaleString("en", { maximumFractionDigits: 0 }) : p.toFixed(id === "GBPUSD" ? 4 : 2)) : "—";
+  const fmt = (id, p) => p != null ? (id === "BTCUSDT" ? p.toLocaleString("en", { maximumFractionDigits: 0 }) : p.toFixed(id === "GBPUSD" ? 4 : 2)) : "—";
   const priceDelta = (id) => {
     if (!prices[id] || !prevPrices[id]) return null;
     return prices[id] - prevPrices[id];
   };
   const sig = signals[selected] || {};
   const inst = INSTRUMENTS.find(i => i.id === selected);
-  const mStatus = marketStatus[selected];
+  // mStatus accessed via marketStatus[selected] inline
 
   // Compute event visibility once - used by both banner and header
   const nowTs = Date.now();
@@ -1304,6 +1623,136 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                     </div>
                   </div>
                 </div>
+
+                {/* Confluence Score */}
+                {sig.confluence && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "12px" }}>CONFLUENCE SCORE</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "10px" }}>
+                      <div style={{ fontSize: "32px", fontWeight: "800",
+                        color: sig.confluence.score >= 8 ? "#3fb950" : sig.confluence.score >= 6 ? "#e3b341" : "#f85149" }}>
+                        {sig.confluence.score}<span style={{ fontSize: "16px", color: "#8b949e" }}>/{sig.confluence.maxScore}</span>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ height: "6px", background: "#21262d", borderRadius: "3px" }}>
+                          <div style={{ height: "100%", borderRadius: "3px", width: `${(sig.confluence.score / sig.confluence.maxScore) * 100}%`,
+                            background: sig.confluence.score >= 8 ? "#3fb950" : sig.confluence.score >= 6 ? "#e3b341" : "#f85149",
+                            transition: "width 0.3s" }} />
+                        </div>
+                        <div style={{ color: "#8b949e", fontSize: "9px", marginTop: "4px" }}>
+                          {sig.confluence.score >= 8 ? "Strong setup" : sig.confluence.score >= 6 ? "Valid setup" : "Below threshold (min 6)"}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                      {sig.confluence.factors.map((f, i) => (
+                        <span key={i} style={{ background: "rgba(63,185,80,0.15)", color: "#3fb950",
+                          border: "1px solid #3fb95040", padding: "2px 8px", borderRadius: "10px", fontSize: "10px" }}>
+                          ✓ {f}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Volatility + Liquidity + Volume row */}
+                {(sig.volatility || sig.sweep || sig.volume) && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "10px" }}>MARKET CONDITIONS</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                      {sig.volatility && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>VOLATILITY</div>
+                          <div style={{ fontWeight: "700", fontSize: "11px",
+                            color: sig.volatility.healthy ? "#3fb950" : "#f85149" }}>
+                            {sig.volatility.healthy ? "✅ Healthy" : "❌ Blocked"}
+                          </div>
+                          <div style={{ color: "#8b949e", fontSize: "9px", marginTop: "2px" }}>{sig.volatility.reason}</div>
+                        </div>
+                      )}
+                      {sig.sweep && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>LIQ. SWEEP</div>
+                          <div style={{ fontWeight: "700", fontSize: "11px",
+                            color: sig.sweep.swept ? "#3fb950" : "#8b949e" }}>
+                            {sig.sweep.swept ? `✅ ${sig.sweep.direction}` : "— None"}
+                          </div>
+                        </div>
+                      )}
+                      {sig.volume && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>VOLUME</div>
+                          <div style={{ fontWeight: "700", fontSize: "11px",
+                            color: sig.volume.confirmed ? "#3fb950" : "#8b949e" }}>
+                            {sig.volume.confirmed ? "✅ Confirms" : "— Weak"}
+                          </div>
+                          <div style={{ color: "#8b949e", fontSize: "9px", marginTop: "2px" }}>{sig.volume.reason}</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Partial TP Levels */}
+                {sig.levels && sig.direction !== "NEUTRAL" && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "10px" }}>TRADE LEVELS (PARTIAL TP)</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                      {[
+                        ["Stop Loss",   sig.levels.stopLoss,  "#f85149"],
+                        ["Partial TP",  sig.levels.partialTP, "#e3b341"],
+                        ["Full TP",     sig.levels.fullTP,    "#3fb950"],
+                        ["Breakeven",   sig.levels.breakeven, "#58a6ff"],
+                      ].map(([label, val, color]) => (
+                        <div key={label} style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>{label}</div>
+                          <div style={{ fontWeight: "700", fontSize: "12px", color }}>{val ? fmt(selected, val) : "—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ color: "#8b949e", fontSize: "9px", marginTop: "8px" }}>
+                      Close 50% at Partial TP → move SL to Breakeven → let rest run to Full TP
+                    </div>
+                  </div>
+                )}
+
+                {/* M15 Higher Timeframe Bias */}
+                {sig.m15 && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "12px", textTransform: "uppercase" }}>
+                      M15 Higher Timeframe Bias
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                      <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ color: "#8b949e", fontSize: "9px" }}>M15 BIAS</div>
+                        <div style={{ fontWeight: "700", fontSize: "14px", color: sig.m15.bias === "BULLISH" ? "#3fb950" : sig.m15.bias === "BEARISH" ? "#f85149" : "#8b949e" }}>
+                          {sig.m15.bias || "UNCLEAR"}
+                        </div>
+                      </div>
+                      <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ color: "#8b949e", fontSize: "9px" }}>M1 ALIGNED</div>
+                        <div style={{ fontWeight: "700", color: (!sig.m15.bias || sig.m15.bias === (sig.direction === "LONG" ? "BULLISH" : sig.direction === "SHORT" ? "BEARISH" : null)) ? "#3fb950" : "#f85149" }}>
+                          {!sig.m15.bias ? "—" : sig.m15.bias === (sig.direction === "LONG" ? "BULLISH" : sig.direction === "SHORT" ? "BEARISH" : null) ? "✅ YES" : "❌ NO"}
+                        </div>
+                      </div>
+                      {sig.m15.ema20 && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>M15 EMA20</div>
+                          <div style={{ fontWeight: "700", fontSize: "12px" }}>{sig.m15.ema20?.toFixed(2)}</div>
+                        </div>
+                      )}
+                      {sig.m15.ema50 && (
+                        <div style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ color: "#8b949e", fontSize: "9px" }}>M15 EMA50</div>
+                          <div style={{ fontWeight: "700", fontSize: "12px" }}>{sig.m15.ema50?.toFixed(2)}</div>
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ marginTop: "8px", color: "#8b949e", fontSize: "10px", fontStyle: "italic" }}>
+                      {sig.m15.reason}
+                    </div>
+                  </div>
+                )}
 
                 {/* SMC Analysis */}
                 {sig.smc && (
