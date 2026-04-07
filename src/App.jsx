@@ -1584,8 +1584,8 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
         <div style={{ color: "#58a6ff", fontWeight: "900", fontSize: "16px", letterSpacing: "2px" }}>QUANTUM BOT</div>
         <div style={styles.statBox}><span style={styles.statLabel}>Win Rate</span><span style={{ ...styles.statValue, color: "#3fb950" }}>{winRate}%</span></div>
         <div style={styles.statBox}><span style={styles.statLabel}>Closed</span><span style={{ ...styles.statValue, color: "#58a6ff" }}>{closedTrades.length}</span></div>
-        <div style={styles.statBox}><span style={styles.statLabel}>Net P&L</span><span style={{ ...styles.statValue, color: totalPnl >= 0 ? "#3fb950" : "#f85149" }}>${totalPnl.toFixed(2)}</span></div>
-        <div style={styles.statBox}><span style={styles.statLabel}>Balance</span><span style={{ ...styles.statValue, color: "#58a6ff" }}>${accountBalance.toFixed(0)}</span></div>
+        <div style={styles.statBox}><span style={styles.statLabel}>Net P&L</span><span style={{ ...styles.statValue, color: (totalPnl||0) >= 0 ? "#3fb950" : "#f85149" }}>${(totalPnl||0).toFixed(2)}</span></div>
+        <div style={styles.statBox}><span style={styles.statLabel}>Balance</span><span style={{ ...styles.statValue, color: "#58a6ff" }}>{accountBalance != null ? `$${accountBalance.toFixed(0)}` : "Loading..."}</span></div>
         <div style={styles.statBox}><span style={styles.statLabel}>Today P&L</span><span style={{ ...styles.statValue, color: todayPnlDisplay >= 0 ? "#3fb950" : "#f85149" }}>${todayPnlDisplay.toFixed(2)}</span></div>
         <div style={styles.statBox}><span style={styles.statLabel}>Loss Streak</span><span style={{ ...styles.statValue, color: lossStreakDisplay >= 2 ? "#f85149" : "#3fb950" }}>{lossStreakDisplay}</span></div>
         <div style={styles.statBox}><span style={styles.statLabel}>Open</span><span style={{ ...styles.statValue, color: "#e3b341" }}>{openPositions.length}</span></div>
