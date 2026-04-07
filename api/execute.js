@@ -90,7 +90,7 @@ module.exports = async (req, res) => {
   var allowedInstruments = {
     BTCUSDT: 'BTCUSD',
     XAUUSD:  'XAUUSD.s',
-    GBPUSD:  'GBPUSD'
+    GBPUSD:  'GBPUSD.s'
   };
 
   if (!instrument || !allowedInstruments[instrument]) {
