@@ -719,7 +719,7 @@ export default function TradingBotLive() {
   const [isAiLoading,    setIsAiLoading]     = useState(false);
   const [aiAnalysis,     setAiAnalysis]      = useState("");
   const [calendarEvents, setCalendarEvents]  = useState([]);
-  const [accountBalance, setAccountBalance]  = useState(10000); // updated from /api/account
+  const [accountBalance, setAccountBalance]  = useState(null);
   const lastTradeRef = useRef({});
   const logRef       = useRef(null);
 
@@ -744,19 +744,33 @@ export default function TradingBotLive() {
   }, []);
 
   // Fetch account balance for accurate position sizing
-  useEffect(() => {
-    const fetchAccount = async () => {
-      try {
-        const r = await fetch("/api/account");
-        if (!r.ok) return;
-        const d = await r.json();
-        if (Number.isFinite(d.balance)) setAccountBalance(d.balance);
-      } catch(e) {}
-    };
-    fetchAccount();
-    const interval = setInterval(fetchAccount, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  // Fetch account balance for accurate position sizing
+useEffect(() => {
+  const fetchAccount = async () => {
+    try {
+      const r = await fetch("/api/account");
+      if (!r.ok) {
+        console.log("Account fetch failed:", r.status);
+        return;
+      }
+
+      const d = await r.json();
+      console.log("Account API response:", d);
+
+      const balance = Number(d.balance ?? d.equity ?? d.accountBalance);
+
+      if (Number.isFinite(balance) && balance > 0) {
+        setAccountBalance(balance);
+      }
+    } catch (e) {
+      console.log("Account fetch error:", e.message);
+    }
+  };
+
+  fetchAccount();
+  const interval = setInterval(fetchAccount, 30000);
+  return () => clearInterval(interval);
+}, []);
 
   // Price feeds
   useEffect(() => {
@@ -930,7 +944,12 @@ export default function TradingBotLive() {
         const pullback = hasPullback(candles, sig.direction);
         if (!pullback) { if (shouldLogBlock(`${inst.id}-pullback`)) addLog(`${inst.label}: waiting for pullback before entry`, "warn"); return; }
       }
-
+      if (!Number.isFinite(accountBalance) || accountBalance <= 0) {
+        if (shouldLogBlock(`${inst.id}-balance-missing`)) {
+          addLog("Trade blocked: account balance not loaded", "warn");
+        }
+        return;
+      }
       // ── Risk Engine ──
       const lossStreak = getConsecutiveLosses(closedTrades);
       const todayPnl   = getTodayPnl(closedTrades);
@@ -1004,7 +1023,7 @@ Kill Zone: ${sig.debug?.inKillZone}
 Long Score: ${sig.debug?.longScore} | Short Score: ${sig.debug?.shortScore}
 Suggested SL: ${sig.stopLoss?.toFixed(4)} | TP: ${sig.takeProfit?.toFixed(4)}
 Open positions: ${openPositions.length}
-Account Balance: $${accountBalance.toFixed(2)}
+Account Balance: ${accountBalance != null ? `$${accountBalance.toFixed(2)}` : "Not loaded"}
 News: ${news.slice(0,3).map(n=>n.title).join(" | ")}
 
 Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Final recommendation. Be direct and specific.`;
