@@ -117,7 +117,7 @@ module.exports = async (req, res) => {
   // Uses broker digits after spec is loaded (Step 6); falls back to hardcoded defaults before that
   var formatPrice = function(sym, val) {
     var brokerDigits = spec && Number.isFinite(Number(spec.digits)) ? Number(spec.digits) : null;
-    var decimals = brokerDigits || (sym === 'GBPUSD' ? 5 : sym === 'XAUUSD.s' ? 2 : sym === 'BTCUSD' ? 2 : 5);
+    var decimals = brokerDigits || (sym === 'GBPUSD.s' ? 5 : sym === 'XAUUSD.s' ? 2 : sym === 'BTCUSD' ? 2 : 5);
     return parseFloat(Number(val).toFixed(decimals));
   };
 

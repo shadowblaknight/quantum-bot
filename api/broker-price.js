@@ -20,16 +20,16 @@ module.exports = async (req, res) => {
   const rawSymbol = String((req.query && req.query.symbol) || '').trim();
   const symbolMap = {
     BTCUSD: 'BTCUSD',
-    GBPUSD: 'GBPUSD',
+    GBPUSD: 'GBPUSD.s',
     XAUUSD: 'XAUUSD.s',
     'XAUUSD.S': 'XAUUSD.s',
-    'XAUUSD.s': 'XAUUSD.s'
+    'GBPUSD.S': 'GBPUSD.s'
   };
   const symbol = symbolMap[rawSymbol] || symbolMap[rawSymbol.toUpperCase()];
-  const allowed = ['BTCUSD', 'XAUUSD.s', 'GBPUSD'];
+  const allowed = ['BTCUSD', 'XAUUSD.s', 'GBPUSD.s'];
 
   if (!symbol || !allowed.includes(symbol)) {
-    return res.status(400).json({ error: 'Invalid symbol. Use BTCUSD, XAUUSD.s, or GBPUSD', price: null });
+    return res.status(400).json({ error: 'Invalid symbol. Use BTCUSD, XAUUSD.s, or GBPUSD.s', price: null });
   }
 
   try {
@@ -52,7 +52,7 @@ module.exports = async (req, res) => {
     }
 
     const decimals =
-      symbol === 'GBPUSD' ? 5 :
+      symbol === 'GBPUSD.s' ? 5 :
       symbol === 'XAUUSD.s' ? 2 :
       symbol === 'BTCUSD' ? 2 :
       5;

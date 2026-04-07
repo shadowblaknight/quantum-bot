@@ -24,10 +24,10 @@ module.exports = async (req, res) => {
 
   const symbolMap = {
     BTCUSD: 'BTCUSD',
-    GBPUSD: 'GBPUSD',
+    GBPUSD: 'GBPUSD.s',
     XAUUSD: 'XAUUSD.s',
     'XAUUSD.S': 'XAUUSD.s',
-    'XAUUSD.s': 'XAUUSD.s'
+    'GBPUSD.S': 'GBPUSD.s'
   };
   const symbol = symbolMap[rawSymbol] || symbolMap[rawSymbol.toUpperCase()];
 
@@ -38,7 +38,7 @@ module.exports = async (req, res) => {
     H6: '6h', H8: '8h', H12: '12h', D1: '1d', W1: '1w', MN1: '1mn'
   };
 
-  const allowed = ['BTCUSD', 'XAUUSD.s', 'GBPUSD'];
+  const allowed = ['BTCUSD', 'XAUUSD.s', 'GBPUSD.s'];
   if (!symbol || !allowed.includes(symbol)) {
     return res.status(400).json({ error: 'Invalid symbol', candles: [] });
   }
