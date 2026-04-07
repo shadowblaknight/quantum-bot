@@ -1144,7 +1144,66 @@ const analyzeStrategies = (prices) => {
         : "Valid setup",
   };
 };
+// ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
 
+// Daily loss limit: blocks trading if today P&L drops below -3% of balance
+const checkDailyLossLimit = (todayPnl, balance) => {
+  if (!Number.isFinite(todayPnl) || !Number.isFinite(balance) || balance <= 0) return false;
+  return todayPnl <= -(balance * 0.03);
+};
+
+// Dynamic position sizing: scales with confidence, halves after losses, stops at 3
+const calculatePositionSize = ({ balance, entry, stopLoss, confidence, confluenceScore, lossStreak }) => {
+  if (!Number.isFinite(entry) || !Number.isFinite(stopLoss) || entry === stopLoss) return 0;
+  if (!Number.isFinite(balance) || balance <= 0) return 0;
+
+  const slDistance = Math.abs(entry - stopLoss);
+
+  let riskPct = 0.01;
+  if (confidence >= 88 && confluenceScore >= 9) riskPct = 0.015;
+
+  if (lossStreak >= 2) riskPct *= 0.5;
+  if (lossStreak >= 3) return 0;
+
+  const riskAmount = balance * riskPct;
+  const rawVolume = riskAmount / slDistance;
+  const step = 0.01;
+
+  return Math.max(0.01, Math.round(rawVolume / step) * step);
+};
+
+// Consecutive loss counter from real closed trades
+const getConsecutiveLosses = (closedTrades = []) => {
+  if (!closedTrades.length) return 0;
+
+  let streak = 0;
+  for (let i = closedTrades.length - 1; i >= 0; i--) {
+    if (Number(closedTrades[i]?.profit || 0) < 0) streak++;
+    else break;
+  }
+
+  return streak;
+};
+
+// Today's P&L from real closed trades
+const getTodayPnl = (closedTrades = []) => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const d = now.getDate();
+
+  return closedTrades.reduce((sum, t) => {
+    const timeRaw = t.time || t.closeTime || t.createdAt || t.date;
+    if (!timeRaw) return sum;
+
+    const dt = new Date(timeRaw);
+    if (dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d) {
+      return sum + Number(t.profit || 0);
+    }
+
+    return sum;
+  }, 0);
+};
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export default function TradingBotLive() {
   const [prices,         setPrices]         = useState({ GBPUSD: null, BTCUSDT: null, XAUUSD: null });
