@@ -38,667 +38,1112 @@ const isNearMarketClose = () => {
   return false;
 };
 
-// ─── REAL INDICATOR CALCULATIONS ──────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// UPGRADED BRAIN / SIGNAL ENGINE
+// Copy-paste this over your current signal-engine section
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── INDICATORS ──────────────────────────────────────────────────────────────
 const calcEMA = (arr, period) => {
-  if (arr.length < period) return null;
+  if (!arr || arr.length < period) return null;
   const k = 2 / (period + 1);
   let ema = arr.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < arr.length; i++) ema = arr[i] * k + ema * (1 - k);
+  for (let i = period; i < arr.length; i++) {
+    ema = arr[i] * k + ema * (1 - k);
+  }
   return ema;
 };
 
 const calcRSI = (prices, period = 14) => {
-  if (prices.length < period + 1) return 50;
+  if (!prices || prices.length < period + 1) return 50;
+
   const changes = prices.slice(1).map((p, i) => p - prices[i]);
-  let avgGain = 0, avgLoss = 0;
+  let avgGain = 0;
+  let avgLoss = 0;
+
   for (let i = 0; i < period; i++) {
     if (changes[i] > 0) avgGain += changes[i];
     else avgLoss -= changes[i];
   }
-  avgGain /= period; avgLoss /= period;
+
+  avgGain /= period;
+  avgLoss /= period;
+
   for (let i = period; i < changes.length; i++) {
     avgGain = (avgGain * (period - 1) + Math.max(changes[i], 0)) / period;
     avgLoss = (avgLoss * (period - 1) + Math.max(-changes[i], 0)) / period;
   }
+
   if (avgLoss === 0) return 100;
   return 100 - (100 / (1 + avgGain / avgLoss));
 };
 
 const calcMACD = (prices) => {
-  if (prices.length < 26) return { macd: 0, signal: 0, hist: 0 };
-  const ema12 = calcEMA(prices, 12);
-  const ema26 = calcEMA(prices, 26);
-  if (!ema12 || !ema26) return { macd: 0, signal: 0, hist: 0 };
-  const macdLine = ema12 - ema26;
-  const macdValues = [];
+  if (!prices || prices.length < 26) return { macd: 0, signal: 0, hist: 0 };
+
+  const macdSeries = [];
   for (let i = 26; i <= prices.length; i++) {
-    const e12 = calcEMA(prices.slice(0, i), 12);
-    const e26 = calcEMA(prices.slice(0, i), 26);
-    if (e12 && e26) macdValues.push(e12 - e26);
+    const slice = prices.slice(0, i);
+    const ema12 = calcEMA(slice, 12);
+    const ema26 = calcEMA(slice, 26);
+    if (ema12 != null && ema26 != null) macdSeries.push(ema12 - ema26);
   }
-  const signalLine = macdValues.length >= 9 ? calcEMA(macdValues, 9) : macdLine;
-  const histogram = macdLine - (signalLine || macdLine);
-  return { macd: macdLine, signal: signalLine || macdLine, hist: histogram };
+
+  if (!macdSeries.length) return { macd: 0, signal: 0, hist: 0 };
+
+  const macd = macdSeries[macdSeries.length - 1];
+  const signal = macdSeries.length >= 9 ? calcEMA(macdSeries, 9) : macd;
+  const hist = macd - signal;
+
+  return { macd, signal, hist };
 };
 
 const calcBollinger = (prices, period = 20) => {
-  if (prices.length < period) return { upper: 0, middle: 0, lower: 0, pct: 50 };
+  if (!prices || prices.length < period) {
+    return { upper: 0, middle: 0, lower: 0, pct: 50, std: 0 };
+  }
+
   const slice = prices.slice(-period);
-  const mean  = slice.reduce((a, b) => a + b, 0) / period;
-  const std   = Math.sqrt(slice.reduce((a, b) => a + (b - mean) ** 2, 0) / period);
-  const upper = mean + 2 * std, lower = mean - 2 * std;
-  const last  = prices[prices.length - 1];
-  const pct   = upper === lower ? 50 : ((last - lower) / (upper - lower)) * 100;
+  const mean = slice.reduce((a, b) => a + b, 0) / period;
+  const std = Math.sqrt(slice.reduce((a, b) => a + (b - mean) ** 2, 0) / period);
+  const upper = mean + 2 * std;
+  const lower = mean - 2 * std;
+  const last = prices[prices.length - 1];
+  const pct = upper === lower ? 50 : ((last - lower) / (upper - lower)) * 100;
+
   return { upper, middle: mean, lower, pct, std };
 };
 
 const calcATR = (prices, period = 14) => {
-  if (prices.candles && prices.candles.length >= period + 1) {
+  if (prices?.candles && prices.candles.length >= period + 1) {
     const candles = prices.candles;
     const trs = [];
+
     for (let i = 1; i < candles.length; i++) {
       const high = candles[i].high;
-      const low  = candles[i].low;
+      const low = candles[i].low;
       const prevClose = candles[i - 1].close;
-      trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+
+      trs.push(
+        Math.max(
+          high - low,
+          Math.abs(high - prevClose),
+          Math.abs(low - prevClose)
+        )
+      );
     }
+
     return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
   }
-  if (prices.length < period + 1) return null;
+
+  if (!prices || prices.length < period + 1) return null;
+
   const trs = [];
   for (let i = 1; i < prices.length; i++) {
     trs.push(Math.abs(prices[i] - prices[i - 1]));
   }
+
   return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
 };
 
-// ─── SESSION TACTICS ENGINE ──────────────────────────────────────────────────
-const SESSION_TIMES = {
-  ASIAN_START:  0, ASIAN_END: 8, LONDON_OPEN: 8, LONDON_END: 16, NY_OPEN: 13, NY_END: 21,
-};
-
+// ─── SESSION ENGINE ──────────────────────────────────────────────────────────
 const getSessionInfo = () => {
   const now = new Date();
   const utcHour = now.getUTCHours();
-  const utcMin  = now.getUTCMinutes();
+  const utcMin = now.getUTCMinutes();
   const utcTime = utcHour + utcMin / 60;
-  const utcDay  = now.getUTCDay();
+  const utcDay = now.getUTCDay();
+
   if (utcDay === 6 || (utcDay === 0 && utcTime < 22)) {
-    return { session: "WEEKEND", isLondonOpen: false, isNYOpen: false, isAsian: false, isLondon: false, isNY: false, isOverlap: false, isSundayReopen: false, tradingAllowed: false, utcTime };
+    return {
+      session: "WEEKEND",
+      isLondonOpen: false,
+      isNYOpen: false,
+      isAsian: false,
+      isLondon: false,
+      isNY: false,
+      isOverlap: false,
+      isSundayReopen: false,
+      tradingAllowed: false,
+      utcTime,
+    };
   }
+
   const isSundayReopen = utcDay === 0 && utcTime >= 22;
-  const isAsian   = (utcTime >= 0 && utcTime < 8) || isSundayReopen;
-  const isLondon  = utcTime >= 8  && utcTime < 16;
-  const isNY      = utcTime >= 13 && utcTime < 21;
+  const isAsian = (utcTime >= 0 && utcTime < 8) || isSundayReopen;
+  const isLondon = utcTime >= 8 && utcTime < 16;
+  const isNY = utcTime >= 13 && utcTime < 21;
   const isOverlap = utcTime >= 13 && utcTime < 16;
-  const isLondonOpen = utcTime >= 8  && utcTime < 8.5;
-  const isNYOpen     = utcTime >= 13 && utcTime < 13.5;
+
+  const isLondonOpen = utcTime >= 8 && utcTime < 8.5;
+  const isNYOpen = utcTime >= 13 && utcTime < 13.5;
+
   let session = "OFF_HOURS";
-  if (isSundayReopen)   session = "SYDNEY_OPEN";
-  else if (isOverlap)   session = "LONDON_NY_OVERLAP";
-  else if (isNY)        session = "NEW_YORK";
-  else if (isLondon)    session = "LONDON";
-  else if (isAsian)     session = "ASIAN";
-  return { session, isLondonOpen, isNYOpen, isAsian, isLondon, isNY, isOverlap, isSundayReopen, tradingAllowed: isLondon || isNY || isSundayReopen, utcTime };
+  if (isSundayReopen) session = "SYDNEY_OPEN";
+  else if (isOverlap) session = "LONDON_NY_OVERLAP";
+  else if (isNY) session = "NEW_YORK";
+  else if (isLondon) session = "LONDON";
+  else if (isAsian) session = "ASIAN";
+
+  return {
+    session,
+    isLondonOpen,
+    isNYOpen,
+    isAsian,
+    isLondon,
+    isNY,
+    isOverlap,
+    isSundayReopen,
+    tradingAllowed: isLondon || isNY || isSundayReopen,
+    utcTime,
+  };
 };
 
 const getAsianRange = (candles) => {
   if (!candles || candles.length < 10) return null;
+
   const now = new Date();
-  const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
-  const asianEnd = new Date(todayStart); asianEnd.setUTCHours(8, 0, 0, 0);
-  const asianCandles = candles.filter(c => { const t = new Date(c.time); return t >= todayStart && t < asianEnd; });
+  const todayStart = new Date(now);
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  const asianEnd = new Date(todayStart);
+  asianEnd.setUTCHours(8, 0, 0, 0);
+
+  const asianCandles = candles.filter((c) => {
+    const t = new Date(c.time);
+    return t >= todayStart && t < asianEnd;
+  });
+
   if (asianCandles.length < 3) return null;
-  const high = Math.max(...asianCandles.map(c => c.high));
-  const low  = Math.min(...asianCandles.map(c => c.low));
+
+  const high = Math.max(...asianCandles.map((c) => c.high));
+  const low = Math.min(...asianCandles.map((c) => c.low));
+
   return { high, low, mid: (high + low) / 2, candleCount: asianCandles.length };
 };
 
 const getSessionFilter = (candles, direction, currentPrice) => {
   const sessionInfo = getSessionInfo();
-  if (!sessionInfo.tradingAllowed) return { allowed: false, reason: "Outside London/NY/Sunday reopen hours" };
+
+  if (!sessionInfo.tradingAllowed) {
+    return { allowed: false, reason: "Outside London/NY/Sunday reopen hours" };
+  }
+
   const asianRange = getAsianRange(candles);
+
   if (sessionInfo.isLondonOpen || sessionInfo.isNYOpen) {
     const sessionName = sessionInfo.isLondonOpen ? "London" : "New York";
+
     if (asianRange) {
-      if (direction === "LONG"  && currentPrice > asianRange.high) return { allowed: true, reason: `${sessionName} open - Asian High breakout`, asianRange, sessionInfo };
-      if (direction === "SHORT" && currentPrice < asianRange.low)  return { allowed: true, reason: `${sessionName} open - Asian Low breakout`, asianRange, sessionInfo };
-      return { allowed: false, reason: `${sessionName} open - waiting for Asian range breakout (H:${asianRange.high.toFixed(4)} L:${asianRange.low.toFixed(4)})`, asianRange, sessionInfo };
+      if (direction === "LONG" && currentPrice > asianRange.high) {
+        return {
+          allowed: true,
+          reason: `${sessionName} open - Asian High breakout`,
+          asianRange,
+          sessionInfo,
+        };
+      }
+
+      if (direction === "SHORT" && currentPrice < asianRange.low) {
+        return {
+          allowed: true,
+          reason: `${sessionName} open - Asian Low breakout`,
+          asianRange,
+          sessionInfo,
+        };
+      }
+
+      return {
+        allowed: false,
+        reason: `${sessionName} open - waiting for Asian range breakout`,
+        asianRange,
+        sessionInfo,
+      };
     }
   }
-  return { allowed: true, reason: `${sessionInfo.session} session`, asianRange, sessionInfo };
+
+  return {
+    allowed: true,
+    reason: `${sessionInfo.session} session`,
+    asianRange,
+    sessionInfo,
+  };
 };
 
-// ─── MULTI-TIMEFRAME BIAS ENGINE (M15) ───────────────────────────────────────
+// ─── M15 BIAS ────────────────────────────────────────────────────────────────
 const calcM15Bias = (m15Candles) => {
-  if (!m15Candles || m15Candles.length < 20) return { bias: null, reason: "Insufficient M15 data", ema20: null, ema50: null };
-  const closes = m15Candles.map(c => c.close);
-  const n = closes.length;
-  const calcEMALocal = (data, period) => {
-    if (data.length < period) return null;
-    const k = 2 / (period + 1);
-    let ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
-    for (let i = period; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
-    return ema;
-  };
-  const ema20 = calcEMALocal(closes, 20);
-  const ema50 = calcEMALocal(closes, 50);
-  const lastClose = closes[n - 1];
-  const lookback = Math.min(30, m15Candles.length);
-  const recent = m15Candles.slice(-lookback);
-  let swingHighs = [], swingLows = [];
-  for (let i = 2; i < recent.length - 2; i++) {
-    if (recent[i].high > recent[i-1].high && recent[i].high > recent[i-2].high && recent[i].high > recent[i+1].high && recent[i].high > recent[i+2].high) swingHighs.push(recent[i].high);
-    if (recent[i].low < recent[i-1].low && recent[i].low < recent[i-2].low && recent[i].low < recent[i+1].low && recent[i].low < recent[i+2].low) swingLows.push(recent[i].low);
+  if (!m15Candles || m15Candles.length < 20) {
+    return { bias: null, reason: "Insufficient M15 data", ema20: null, ema50: null };
   }
-  const bullishStructure = swingHighs.length >= 2 && swingLows.length >= 2 && swingHighs[swingHighs.length-1] > swingHighs[swingHighs.length-2] && swingLows[swingLows.length-1] > swingLows[swingLows.length-2];
-  const bearishStructure = swingHighs.length >= 2 && swingLows.length >= 2 && swingHighs[swingHighs.length-1] < swingHighs[swingHighs.length-2] && swingLows[swingLows.length-1] < swingLows[swingLows.length-2];
+
+  const closes = m15Candles.map((c) => c.close);
+  const ema20 = calcEMA(closes, 20);
+  const ema50 = calcEMA(closes, 50);
+  const lastClose = closes[closes.length - 1];
+
+  let swingHighs = [];
+  let swingLows = [];
+  const recent = m15Candles.slice(-30);
+
+  for (let i = 2; i < recent.length - 2; i++) {
+    if (
+      recent[i].high > recent[i - 1].high &&
+      recent[i].high > recent[i - 2].high &&
+      recent[i].high > recent[i + 1].high &&
+      recent[i].high > recent[i + 2].high
+    ) {
+      swingHighs.push(recent[i].high);
+    }
+
+    if (
+      recent[i].low < recent[i - 1].low &&
+      recent[i].low < recent[i - 2].low &&
+      recent[i].low < recent[i + 1].low &&
+      recent[i].low < recent[i + 2].low
+    ) {
+      swingLows.push(recent[i].low);
+    }
+  }
+
+  const bullishStructure =
+    swingHighs.length >= 2 &&
+    swingLows.length >= 2 &&
+    swingHighs[swingHighs.length - 1] > swingHighs[swingHighs.length - 2] &&
+    swingLows[swingLows.length - 1] > swingLows[swingLows.length - 2];
+
+  const bearishStructure =
+    swingHighs.length >= 2 &&
+    swingLows.length >= 2 &&
+    swingHighs[swingHighs.length - 1] < swingHighs[swingHighs.length - 2] &&
+    swingLows[swingLows.length - 1] < swingLows[swingLows.length - 2];
+
   const bullishEMA = ema20 && ema50 && ema20 > ema50 && lastClose > ema20;
   const bearishEMA = ema20 && ema50 && ema20 < ema50 && lastClose < ema20;
-  let bias = null, reason = "";
-  if (bullishStructure && bullishEMA)      { bias = "BULLISH"; reason = "M15 HH/HL structure + EMA20 > EMA50"; }
-  else if (bearishStructure && bearishEMA) { bias = "BEARISH"; reason = "M15 LH/LL structure + EMA20 < EMA50"; }
-  else if (bullishStructure)               { bias = "BULLISH"; reason = "M15 HH/HL structure"; }
-  else if (bearishStructure)               { bias = "BEARISH"; reason = "M15 LH/LL structure"; }
-  else if (bullishEMA)                     { bias = "BULLISH"; reason = "M15 EMA stack bullish"; }
-  else if (bearishEMA)                     { bias = "BEARISH"; reason = "M15 EMA stack bearish"; }
-  else                                     { bias = null;      reason = "M15 no clear bias"; }
-  return { bias, reason, ema20, ema50, swingHighs, swingLows };
-};
 
-// ─── TIER 2: LIQUIDITY SWEEP ─────────────────────────────────────────────────
-const calcLiquiditySweep = (candles) => {
-  if (!candles || candles.length < 10) return { swept: false, direction: null };
-  const n = candles.length, last = candles[n - 1], lookback = candles.slice(-20);
-  let recentHigh = -Infinity, recentLow = Infinity;
-  for (let i = 0; i < lookback.length - 2; i++) {
-    if (lookback[i].high > recentHigh) recentHigh = lookback[i].high;
-    if (lookback[i].low < recentLow)  recentLow  = lookback[i].low;
+  if (bullishStructure && bullishEMA) {
+    return { bias: "BULLISH", reason: "M15 HH/HL + EMA20 > EMA50", ema20, ema50 };
   }
-  const bullishSweep = last.low < recentLow && last.close > recentLow && last.close > last.open && (last.high - last.close) < (last.close - last.low);
-  const bearishSweep = last.high > recentHigh && last.close < recentHigh && last.close < last.open && (last.close - last.low) < (last.high - last.close);
-  if (bullishSweep) return { swept: true, direction: "BULLISH", level: recentLow };
-  if (bearishSweep) return { swept: true, direction: "BEARISH", level: recentHigh };
-  return { swept: false, direction: null };
-};
 
-// ─── TIER 2: VOLUME CONFIRMATION ─────────────────────────────────────────────
-const calcVolumeConfirmation = (candles, direction) => {
-  if (!candles || candles.length < 20) return { confirmed: false, reason: "No volume data" };
-  const n = candles.length;
-  const recent = candles.slice(-20);
-  const avgVolume = recent.reduce((s, c) => s + c.volume, 0) / recent.length;
-  if (avgVolume === 0) return { confirmed: false, reason: "Zero volume (broker may not provide)" };
-  const lastCandle = candles[n - 1], last3 = candles.slice(-3);
-  const hasVolumeSpike = lastCandle.volume > avgVolume * 1.5;
-  const pullbackCandles = candles.slice(-5, -1);
-  const avgPullbackVol = pullbackCandles.reduce((s, c) => s + c.volume, 0) / pullbackCandles.length;
-  const lowVolumePullback = avgPullbackVol < avgVolume * 0.8;
-  const bullishVolume = last3.filter(c => c.close > c.open).reduce((s, c) => s + c.volume, 0);
-  const bearishVolume = last3.filter(c => c.close < c.open).reduce((s, c) => s + c.volume, 0);
-  const directionalConfirm = direction === "LONG" ? bullishVolume > bearishVolume : bearishVolume > bullishVolume;
-  const confirmed = hasVolumeSpike || (lowVolumePullback && directionalConfirm);
-  const reason = hasVolumeSpike ? "Volume spike confirms move" : lowVolumePullback ? "Low volume pullback + directional bias" : "Weak volume";
-  return { confirmed, reason, avgVolume, lastVolume: lastCandle.volume, hasVolumeSpike, lowVolumePullback };
-};
-
-// ─── TIER 2: CONFLUENCE SCORING ──────────────────────────────────────────────
-const calcConfluenceScore = (direction, m15bias, smc, sweep, volume, rsi, atr, closes) => {
-  let score = 0;
-  const factors = [];
-  const directionBias = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
-  if (m15bias && m15bias === directionBias) { score += 2; factors.push("M15 aligned"); }
-  if (smc?.bos?.type === directionBias || smc?.choch?.type === directionBias) { score += 2; factors.push("M1 BOS/CHoCH"); }
-  if (smc?.bullishOB && direction === "LONG")  { score += 2; factors.push("Bullish OB"); }
-  if (smc?.bearishOB && direction === "SHORT") { score += 2; factors.push("Bearish OB"); }
-  if (smc?.bullishFVG && direction === "LONG")  { score += 1; factors.push("Bullish FVG"); }
-  if (smc?.bearishFVG && direction === "SHORT") { score += 1; factors.push("Bearish FVG"); }
-  if (sweep?.swept && sweep.direction === directionBias) { score += 2; factors.push("Liquidity sweep"); }
-  if (rsi && ((direction === "LONG" && rsi > 30 && rsi < 65) || (direction === "SHORT" && rsi < 70 && rsi > 35))) { score += 1; factors.push("RSI healthy"); }
-  if (volume?.confirmed) { score += 1; factors.push("Volume confirmed"); }
-  if (atr && closes?.length > 0) {
-    const atrPct = (atr / closes[closes.length - 1]) * 100;
-    if (atrPct > 0.05 && atrPct < 2.0) { score += 1; factors.push("ATR healthy"); }
+  if (bearishStructure && bearishEMA) {
+    return { bias: "BEARISH", reason: "M15 LH/LL + EMA20 < EMA50", ema20, ema50 };
   }
-  return { score, factors, maxScore: 13 };
+
+  if (bullishEMA) return { bias: "BULLISH", reason: "M15 EMA stack bullish", ema20, ema50 };
+  if (bearishEMA) return { bias: "BEARISH", reason: "M15 EMA stack bearish", ema20, ema50 };
+
+  return { bias: null, reason: "M15 no clear bias", ema20, ema50 };
 };
 
-// ─── TIER 3: ATR VOLATILITY FILTER ───────────────────────────────────────────
-const calcVolatilityFilter = (atr, lastPrice, instType) => {
-  if (!atr || !lastPrice) return { healthy: true, reason: "No ATR data" };
-  const atrPct = (atr / lastPrice) * 100;
-  const thresholds = { CRYPTO: { min: 0.05, max: 3.0 }, COMMODITY: { min: 0.03, max: 1.5 }, FOREX: { min: 0.01, max: 0.8 } };
-  const t = thresholds[instType] || thresholds.FOREX;
-  if (atrPct < t.min) return { healthy: false, reason: `Market too quiet (ATR ${atrPct.toFixed(3)}%)` };
-  if (atrPct > t.max) return { healthy: false, reason: `Market too volatile (ATR ${atrPct.toFixed(3)}%)` };
-  return { healthy: true, reason: `ATR healthy (${atrPct.toFixed(3)}%)`, atrPct };
-};
-
-// ─── SMART MONEY CONCEPTS ENGINE ─────────────────────────────────────────────
+// ─── SMC ─────────────────────────────────────────────────────────────────────
 const calcBOSCHOCH = (candles) => {
-  if (!candles || candles.length < 10) return { bos: null, choch: null, bias: null };
-  const n = candles.length, lookback = Math.min(20, n), recent = candles.slice(n - lookback);
-  let swingHighs = [], swingLows = [];
+  if (!candles || candles.length < 10) {
+    return { bos: null, choch: null, bias: null, swingHighs: [], swingLows: [] };
+  }
+
+  const recent = candles.slice(-20);
+  let swingHighs = [];
+  let swingLows = [];
+
   for (let i = 2; i < recent.length - 2; i++) {
     const c = recent[i];
-    if (c.high > recent[i-1].high && c.high > recent[i-2].high && c.high > recent[i+1].high && c.high > recent[i+2].high) swingHighs.push({ price: c.high, idx: i });
-    if (c.low  < recent[i-1].low  && c.low  < recent[i-2].low  && c.low  < recent[i+1].low  && c.low  < recent[i+2].low)  swingLows.push({ price: c.low,  idx: i });
-  }
-  const lastClose = candles[n - 1].close;
-  let bos = null, choch = null;
-  if (swingHighs.length > 0) { const lSH = swingHighs[swingHighs.length - 1]; if (lastClose > lSH.price) bos = { type: "BULLISH", level: lSH.price, broken: true }; }
-  if (swingLows.length  > 0) {
-    const lSL = swingLows[swingLows.length - 1];
-    if (lastClose < lSL.price) {
-      if (bos?.type === "BULLISH") { choch = { type: "BEARISH", level: lSL.price }; bos = null; }
-      else bos = { type: "BEARISH", level: lSL.price, broken: true };
+
+    if (
+      c.high > recent[i - 1].high &&
+      c.high > recent[i - 2].high &&
+      c.high > recent[i + 1].high &&
+      c.high > recent[i + 2].high
+    ) {
+      swingHighs.push({ price: c.high, idx: i });
+    }
+
+    if (
+      c.low < recent[i - 1].low &&
+      c.low < recent[i - 2].low &&
+      c.low < recent[i + 1].low &&
+      c.low < recent[i + 2].low
+    ) {
+      swingLows.push({ price: c.low, idx: i });
     }
   }
-  if (swingHighs.length >= 2 && swingLows.length >= 2) {
-    const pH = swingHighs[swingHighs.length - 2], lH = swingHighs[swingHighs.length - 1];
-    const pL = swingLows[swingLows.length  - 2], lL = swingLows[swingLows.length  - 1];
-    const wasUp = lH.price > pH.price && lL.price > pL.price;
-    const wasDn = lH.price < pH.price && lL.price < pL.price;
-    if (wasUp && lastClose < lL.price) choch = { type: "BEARISH", level: lL.price };
-    else if (wasDn && lastClose > lH.price) choch = { type: "BULLISH", level: lH.price };
+
+  const lastClose = candles[candles.length - 1].close;
+  let bos = null;
+  let choch = null;
+
+  if (swingHighs.length > 0) {
+    const lastSwingHigh = swingHighs[swingHighs.length - 1];
+    if (lastClose > lastSwingHigh.price) {
+      bos = { type: "BULLISH", level: lastSwingHigh.price, broken: true };
+    }
   }
+
+  if (swingLows.length > 0) {
+    const lastSwingLow = swingLows[swingLows.length - 1];
+    if (lastClose < lastSwingLow.price) {
+      if (bos && bos.type === "BULLISH") {
+        choch = { type: "BEARISH", level: lastSwingLow.price };
+        bos = null;
+      } else {
+        bos = { type: "BEARISH", level: lastSwingLow.price, broken: true };
+      }
+    }
+  }
+
+  if (swingHighs.length >= 2 && swingLows.length >= 2) {
+    const prevHigh = swingHighs[swingHighs.length - 2];
+    const lastHigh = swingHighs[swingHighs.length - 1];
+    const prevLow = swingLows[swingLows.length - 2];
+    const lastLow = swingLows[swingLows.length - 1];
+
+    const wasUptrend = lastHigh.price > prevHigh.price && lastLow.price > prevLow.price;
+    const wasDowntrend = lastHigh.price < prevHigh.price && lastLow.price < prevLow.price;
+
+    if (wasUptrend && lastClose < lastLow.price) {
+      choch = { type: "BEARISH", level: lastLow.price };
+    } else if (wasDowntrend && lastClose > lastHigh.price) {
+      choch = { type: "BULLISH", level: lastHigh.price };
+    }
+  }
+
   let bias = null;
-  if (choch) bias = choch.type; else if (bos) bias = bos.type;
+  if (choch) bias = choch.type;
+  else if (bos) bias = bos.type;
+
   return { bos, choch, bias, swingHighs, swingLows };
 };
 
 const calcOrderBlocks = (candles) => {
-  if (!candles || candles.length < 5) return { bullishOB: null, bearishOB: null };
-  const n = candles.length, lookback = Math.min(30, n - 1);
-  let bullishOB = null, bearishOB = null;
-  for (let i = n - lookback; i < n - 1; i++) {
-    const c = candles[i], next = candles[i + 1];
-    if (!bullishOB && c.close < c.open && next.close > c.high * 1.001) bullishOB = { high: c.high, low: c.low, mid: (c.high + c.low) / 2, idx: i };
-    if (!bearishOB && c.close > c.open && next.close < c.low  * 0.999) bearishOB = { high: c.high, low: c.low, mid: (c.high + c.low) / 2, idx: i };
+  if (!candles || candles.length < 5) {
+    return { bullishOB: null, bearishOB: null };
+  }
+
+  let bullishOB = null;
+  let bearishOB = null;
+
+  for (let i = Math.max(0, candles.length - 30); i < candles.length - 1; i++) {
+    const c = candles[i];
+    const next = candles[i + 1];
+
+    const isBullishMove = next.close > c.high * 1.001;
+    const isBearishMove = next.close < c.low * 0.999;
+
+    if (!bullishOB && c.close < c.open && isBullishMove) {
+      bullishOB = {
+        high: c.high,
+        low: c.low,
+        mid: (c.high + c.low) / 2,
+        idx: i,
+      };
+    }
+
+    if (!bearishOB && c.close > c.open && isBearishMove) {
+      bearishOB = {
+        high: c.high,
+        low: c.low,
+        mid: (c.high + c.low) / 2,
+        idx: i,
+      };
+    }
+
     if (bullishOB && bearishOB) break;
   }
+
   return { bullishOB, bearishOB };
 };
 
 const calcFVG = (candles) => {
-  if (!candles || candles.length < 3) return { bullishFVG: null, bearishFVG: null };
-  const n = candles.length;
-  let bullishFVG = null, bearishFVG = null;
-  for (let i = n - 20; i < n - 2; i++) {
-    if (i < 0) continue;
-    const c1 = candles[i], c3 = candles[i + 2];
-    if (!bullishFVG && c3.low > c1.high) bullishFVG = { top: c3.low, bottom: c1.high, mid: (c3.low + c1.high) / 2, idx: i };
-    if (!bearishFVG && c3.high < c1.low) bearishFVG = { top: c1.low, bottom: c3.high, mid: (c1.low + c3.high) / 2, idx: i };
+  if (!candles || candles.length < 3) {
+    return { bullishFVG: null, bearishFVG: null };
+  }
+
+  let bullishFVG = null;
+  let bearishFVG = null;
+
+  for (let i = Math.max(0, candles.length - 20); i < candles.length - 2; i++) {
+    const c1 = candles[i];
+    const c3 = candles[i + 2];
+
+    if (!bullishFVG && c3.low > c1.high) {
+      bullishFVG = {
+        top: c3.low,
+        bottom: c1.high,
+        mid: (c3.low + c1.high) / 2,
+        idx: i,
+      };
+    }
+
+    if (!bearishFVG && c3.high < c1.low) {
+      bearishFVG = {
+        top: c1.low,
+        bottom: c3.high,
+        mid: (c1.low + c3.high) / 2,
+        idx: i,
+      };
+    }
+
     if (bullishFVG && bearishFVG) break;
   }
+
   return { bullishFVG, bearishFVG };
 };
 
 const getSMCConfirmation = (candles, direction) => {
-  if (!candles || candles.length < 30) return { confirmed: false, reason: "Not enough data" };
+  if (!candles || candles.length < 30) {
+    return { confirmed: false, reason: "Not enough data" };
+  }
+
   const lastPrice = candles[candles.length - 1].close;
-  const { bos, choch, bias } = calcBOSCHOCH(candles);
+  const { bos, choch, bias, swingHighs, swingLows } = calcBOSCHOCH(candles);
   const { bullishOB, bearishOB } = calcOrderBlocks(candles);
   const { bullishFVG, bearishFVG } = calcFVG(candles);
+
   let score = 0;
   const reasons = [];
+
   if (direction === "LONG") {
-    if (bias === "BULLISH") { score += 3; reasons.push("BOS/CHoCH bullish"); }
+    if (bias === "BULLISH") {
+      score += 3;
+      reasons.push("BOS/CHoCH bullish");
+    }
+
     if (bullishOB) {
-      const inOB   = lastPrice >= bullishOB.low * 0.999 && lastPrice <= bullishOB.high * 1.001;
+      const inOB = lastPrice >= bullishOB.low * 0.999 && lastPrice <= bullishOB.high * 1.001;
       const nearOB = lastPrice >= bullishOB.low * 0.995 && lastPrice <= bullishOB.high * 1.005;
-      if (inOB) { score += 3; reasons.push("Price inside bullish OB"); }
-      else if (nearOB) { score += 1; reasons.push("Price near bullish OB"); }
+      if (inOB) {
+        score += 3;
+        reasons.push("Price inside bullish OB");
+      } else if (nearOB) {
+        score += 1;
+        reasons.push("Price near bullish OB");
+      }
     }
-    if (bullishFVG && lastPrice <= bullishFVG.top * 1.002) { score += 2; reasons.push("Bullish FVG present"); }
-    if (choch?.type === "BEARISH") { score -= 3; reasons.push("CHoCH bearish conflict"); }
-  } else if (direction === "SHORT") {
-    if (bias === "BEARISH") { score += 3; reasons.push("BOS/CHoCH bearish"); }
-    if (bearishOB) {
-      const inOB   = lastPrice >= bearishOB.low * 0.999 && lastPrice <= bearishOB.high * 1.001;
-      const nearOB = lastPrice >= bearishOB.low * 0.995 && lastPrice <= bearishOB.high * 1.005;
-      if (inOB) { score += 3; reasons.push("Price inside bearish OB"); }
-      else if (nearOB) { score += 1; reasons.push("Price near bearish OB"); }
+
+    if (bullishFVG && lastPrice <= bullishFVG.top * 1.002) {
+      score += 2;
+      reasons.push("Bullish FVG present");
     }
-    if (bearishFVG && lastPrice >= bearishFVG.bottom * 0.998) { score += 2; reasons.push("Bearish FVG present"); }
-    if (choch?.type === "BULLISH") { score -= 3; reasons.push("CHoCH bullish conflict"); }
+
+    if (choch && choch.type === "BEARISH") {
+      score -= 3;
+      reasons.push("Bearish CHOCH conflict");
+    }
   }
-  return { confirmed: score >= 3, score, reasons, bias, bos, choch, bullishOB, bearishOB, bullishFVG, bearishFVG };
+
+  if (direction === "SHORT") {
+    if (bias === "BEARISH") {
+      score += 3;
+      reasons.push("BOS/CHoCH bearish");
+    }
+
+    if (bearishOB) {
+      const inOB = lastPrice >= bearishOB.low * 0.999 && lastPrice <= bearishOB.high * 1.001;
+      const nearOB = lastPrice >= bearishOB.low * 0.995 && lastPrice <= bearishOB.high * 1.005;
+      if (inOB) {
+        score += 3;
+        reasons.push("Price inside bearish OB");
+      } else if (nearOB) {
+        score += 1;
+        reasons.push("Price near bearish OB");
+      }
+    }
+
+    if (bearishFVG && lastPrice >= bearishFVG.bottom * 0.998) {
+      score += 2;
+      reasons.push("Bearish FVG present");
+    }
+
+    if (choch && choch.type === "BULLISH") {
+      score -= 3;
+      reasons.push("Bullish CHOCH conflict");
+    }
+  }
+
+  return {
+    confirmed: score >= 3,
+    score,
+    reasons,
+    bias,
+    bos,
+    choch,
+    bullishOB,
+    bearishOB,
+    bullishFVG,
+    bearishFVG,
+    swingHighs,
+    swingLows,
+  };
 };
 
-// ─── PULLBACK FILTER ─────────────────────────────────────────────────────────
+// ─── CONTEXT ─────────────────────────────────────────────────────────────────
+const calcLiquiditySweep = (candles) => {
+  if (!candles || candles.length < 10) return { swept: false, direction: null };
+
+  const last = candles[candles.length - 1];
+  const lookback = candles.slice(-20);
+
+  let recentHigh = -Infinity;
+  let recentLow = Infinity;
+
+  for (let i = 0; i < lookback.length - 2; i++) {
+    if (lookback[i].high > recentHigh) recentHigh = lookback[i].high;
+    if (lookback[i].low < recentLow) recentLow = lookback[i].low;
+  }
+
+  const bullishSweep =
+    last.low < recentLow &&
+    last.close > recentLow &&
+    last.close > last.open;
+
+  const bearishSweep =
+    last.high > recentHigh &&
+    last.close < recentHigh &&
+    last.close < last.open;
+
+  if (bullishSweep) return { swept: true, direction: "BULLISH", level: recentLow };
+  if (bearishSweep) return { swept: true, direction: "BEARISH", level: recentHigh };
+
+  return { swept: false, direction: null };
+};
+
+const calcVolumeConfirmation = (candles, direction) => {
+  if (!candles || candles.length < 20) {
+    return { confirmed: false, reason: "No volume data" };
+  }
+
+  const recent = candles.slice(-20);
+  const avgVolume = recent.reduce((s, c) => s + (c.volume || 0), 0) / recent.length;
+
+  if (avgVolume === 0) return { confirmed: false, reason: "Zero volume" };
+
+  const lastCandle = candles[candles.length - 1];
+  const last3 = candles.slice(-3);
+
+  const hasVolumeSpike = (lastCandle.volume || 0) > avgVolume * 1.5;
+  const bullishVolume = last3.filter((c) => c.close > c.open).reduce((s, c) => s + (c.volume || 0), 0);
+  const bearishVolume = last3.filter((c) => c.close < c.open).reduce((s, c) => s + (c.volume || 0), 0);
+
+  const directionalConfirm =
+    direction === "LONG" ? bullishVolume > bearishVolume : bearishVolume > bullishVolume;
+
+  return {
+    confirmed: hasVolumeSpike || directionalConfirm,
+    reason: hasVolumeSpike ? "Volume spike confirms move" : directionalConfirm ? "Directional volume bias" : "Weak volume",
+    avgVolume,
+    lastVolume: lastCandle.volume || 0,
+  };
+};
+
+const calcConfluenceScore = (direction, m15bias, smc, sweep, volume, rsi, atr, closes) => {
+  let score = 0;
+  const factors = [];
+
+  const directionBias =
+    direction === "LONG" ? "BULLISH" :
+    direction === "SHORT" ? "BEARISH" :
+    null;
+
+  if (m15bias && m15bias === directionBias) {
+    score += 2;
+    factors.push("M15 aligned");
+  }
+
+  if (smc?.bos?.type === directionBias || smc?.choch?.type === directionBias) {
+    score += 2;
+    factors.push("M1 BOS/CHoCH");
+  }
+
+  if (smc?.bullishOB && direction === "LONG") {
+    score += 2;
+    factors.push("Bullish OB");
+  }
+
+  if (smc?.bearishOB && direction === "SHORT") {
+    score += 2;
+    factors.push("Bearish OB");
+  }
+
+  if (smc?.bullishFVG && direction === "LONG") {
+    score += 1;
+    factors.push("Bullish FVG");
+  }
+
+  if (smc?.bearishFVG && direction === "SHORT") {
+    score += 1;
+    factors.push("Bearish FVG");
+  }
+
+  if (sweep?.swept && sweep.direction === directionBias) {
+    score += 2;
+    factors.push("Liquidity sweep");
+  }
+
+  if (
+    rsi &&
+    ((direction === "LONG" && rsi > 35 && rsi < 65) ||
+      (direction === "SHORT" && rsi < 65 && rsi > 35))
+  ) {
+    score += 1;
+    factors.push("RSI healthy");
+  }
+
+  // volume downgraded — small influence only
+  if (volume?.confirmed) {
+    score += 1;
+    factors.push("Volume confirms");
+  }
+
+  if (atr && closes?.length > 0) {
+    const lastPrice = closes[closes.length - 1];
+    const atrPct = (atr / lastPrice) * 100;
+    if (atrPct > 0.05 && atrPct < 2.0) {
+      score += 1;
+      factors.push("ATR healthy");
+    }
+  }
+
+  return { score, factors, maxScore: 12 };
+};
+
+const calcVolatilityFilter = (atr, lastPrice, instType) => {
+  if (!atr || !lastPrice) return { healthy: true, reason: "No ATR data" };
+
+  const atrPct = (atr / lastPrice) * 100;
+
+  const thresholds = {
+    CRYPTO: { min: 0.05, max: 1.8 },
+    COMMODITY: { min: 0.03, max: 1.0 },
+    FOREX: { min: 0.01, max: 0.6 },
+  };
+
+  const t = thresholds[instType] || thresholds.FOREX;
+
+  if (atrPct < t.min) return { healthy: false, reason: `Market too quiet (${atrPct.toFixed(3)}%)`, atrPct };
+  if (atrPct > t.max) return { healthy: false, reason: `Market too volatile (${atrPct.toFixed(3)}%)`, atrPct };
+
+  return { healthy: true, reason: `ATR healthy (${atrPct.toFixed(3)}%)`, atrPct };
+};
+
+// ─── ENTRY / LOCATION ────────────────────────────────────────────────────────
 const hasPullback = (candles, direction) => {
   if (!candles || candles.length < 10) return false;
-  const n = candles.length, recent = candles.slice(n - 15);
-  let swingIdx = 0;
+
+  const recent = candles.slice(-15);
+
   if (direction === "LONG") {
-    let maxHigh = -Infinity;
-    for (let i = 0; i < recent.length - 2; i++) { if (recent[i].high > maxHigh) { maxHigh = recent[i].high; swingIdx = i; } }
-    const swingLow = Math.min(...recent.slice(swingIdx).map(c => c.low));
-    const currentClose = recent[recent.length - 1].close;
-    const swingRange = maxHigh - swingLow;
-    if (swingRange <= 0) return false;
-    return (maxHigh - currentClose) / swingRange >= 0.30;
-  }
-  if (direction === "SHORT") {
-    let minLow = Infinity;
-    for (let i = 0; i < recent.length - 2; i++) { if (recent[i].low < minLow) { minLow = recent[i].low; swingIdx = i; } }
-    const swingHigh = Math.max(...recent.slice(swingIdx).map(c => c.high));
-    const currentClose = recent[recent.length - 1].close;
-    const swingRange = swingHigh - minLow;
-    if (swingRange <= 0) return false;
-    return (currentClose - minLow) / swingRange >= 0.30;
-  }
-  return false;
-};
+    let swingHigh = -Infinity;
+    let swingIdx = 0;
 
-// ─── ADVANCED LEVELS ─────────────────────────────────────────────────────────
-const calcAdvancedLevels = (direction, entry, atr) => {
-  if (!atr || !entry) return null;
-  if (direction !== "LONG" && direction !== "SHORT") return null;
-  const sl = atr * 1.5, tp1 = atr * 1.5, tp2 = atr * 3.0;
-  if (direction === "LONG") return { stopLoss: entry - sl, partialTP: entry + tp1, fullTP: entry + tp2, breakeven: entry, trailBy: atr };
-  return { stopLoss: entry + sl, partialTP: entry - tp1, fullTP: entry - tp2, breakeven: entry, trailBy: atr };
-};
-
-// ─── ENTRY QUALITY ENGINE ─────────────────────────────────────────────────────
-// Detects high-quality entry candle patterns: engulfing, pin bar, OB touch
-const getEntryQuality = (candles, direction, smc) => {
-  if (!candles || candles.length < 3) return false;
-  const last  = candles[candles.length - 1];
-  const prev  = candles[candles.length - 2];
-
-  if (direction === 'LONG') {
-    // Bullish engulfing
-    const bullEngulf = last.close > last.open && last.close > prev.high && last.open <= prev.close;
-    // Pin bar (long lower wick)
-    const pinBar = (last.close > last.open) && ((last.open - last.low) > (last.close - last.open) * 1.5);
-    // Price touching bullish OB zone
-    const inSMCZone = smc?.bullishOB && last.low <= smc.bullishOB.high && last.close >= smc.bullishOB.low;
-    return bullEngulf || pinBar || !!inSMCZone;
-  }
-  if (direction === 'SHORT') {
-    // Bearish engulfing
-    const bearEngulf = last.close < last.open && last.close < prev.low && last.open >= prev.close;
-    // Pin bar (long upper wick)
-    const pinBar = (last.close < last.open) && ((last.high - last.open) > (last.open - last.close) * 1.5);
-    // Price touching bearish OB zone
-    const inSMCZone = smc?.bearishOB && last.high >= smc.bearishOB.low && last.close <= smc.bearishOB.high;
-    return bearEngulf || pinBar || !!inSMCZone;
-  }
-  return false;
-};
-
-// ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
-// Daily loss limit: blocks trading if today P&L drops below -3% of balance
-const checkDailyLossLimit = (todayPnl, balance) => {
-  if (!Number.isFinite(todayPnl) || !Number.isFinite(balance) || balance <= 0) return false;
-  return todayPnl <= -(balance * 0.03);
-};
-
-// Dynamic position sizing: scales with confidence, halves after losses, stops at 3
-const calculatePositionSize = ({ balance, entry, stopLoss, confidence, confluenceScore, lossStreak }) => {
-  if (!Number.isFinite(entry) || !Number.isFinite(stopLoss) || entry === stopLoss) return 0;
-  if (!Number.isFinite(balance) || balance <= 0) return 0;
-  const slDistance = Math.abs(entry - stopLoss);
-  // Base risk: 1% of balance. Boost to 1.5% on very strong signals only
-  let riskPct = 0.01;
-  if (confidence >= 88 && confluenceScore >= 9) riskPct = 0.015;
-  // Reduce size after consecutive losses
-  if (lossStreak >= 2) riskPct *= 0.5;
-  if (lossStreak >= 3) return 0; // full stop after 3 losses
-  const riskAmount = balance * riskPct;
-  const rawVolume  = riskAmount / slDistance;
-  const step = 0.01; // broker minimum step
-  return Math.max(0.01, Math.round(rawVolume / step) * step);
-};
-
-// Consecutive loss counter from real closed trades
-const getConsecutiveLosses = (closedTrades = []) => {
-  if (!closedTrades.length) return 0;
-  let streak = 0;
-  for (let i = closedTrades.length - 1; i >= 0; i--) {
-    if (Number(closedTrades[i]?.profit || 0) < 0) streak++;
-    else break;
-  }
-  return streak;
-};
-
-// Today's P&L from real closed trades
-const getTodayPnl = (closedTrades = []) => {
-  const now = new Date();
-  const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
-  return closedTrades.reduce((sum, t) => {
-    const timeRaw = t.time || t.closeTime || t.createdAt || t.date;
-    if (!timeRaw) return sum;
-    const dt = new Date(timeRaw);
-    if (dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d) {
-      return sum + Number(t.profit || 0);
+    for (let i = 0; i < recent.length - 2; i++) {
+      if (recent[i].high > swingHigh) {
+        swingHigh = recent[i].high;
+        swingIdx = i;
+      }
     }
-    return sum;
-  }, 0);
+
+    const swingLow = Math.min(...recent.slice(swingIdx).map((c) => c.low));
+    const currentClose = recent[recent.length - 1].close;
+    const swingRange = swingHigh - swingLow;
+    if (swingRange <= 0) return false;
+
+    const retracePct = (swingHigh - currentClose) / swingRange;
+    return retracePct >= 0.30;
+  }
+
+  if (direction === "SHORT") {
+    let swingLow = Infinity;
+    let swingIdx = 0;
+
+    for (let i = 0; i < recent.length - 2; i++) {
+      if (recent[i].low < swingLow) {
+        swingLow = recent[i].low;
+        swingIdx = i;
+      }
+    }
+
+    const swingHigh = Math.max(...recent.slice(swingIdx).map((c) => c.high));
+    const currentClose = recent[recent.length - 1].close;
+    const swingRange = swingHigh - swingLow;
+    if (swingRange <= 0) return false;
+
+    const retracePct = (currentClose - swingLow) / swingRange;
+    return retracePct >= 0.30;
+  }
+
+  return false;
 };
 
-// ─── FINAL BOSS SIGNAL ENGINE ─────────────────────────────────────────────────
-const analyzeStrategies = (prices) => {
-  if (!prices || prices.length < 60 || !prices.candles) {
-    return { direction: "NEUTRAL", confidence: 0, reason: "Not enough data" };
-  }
+const isValidLongLocation = ({ last, ema21, atr, smc }) => {
+  const nearEMA =
+    ema21 != null &&
+    atr != null &&
+    Math.abs(last - ema21) <= atr * 0.6 &&
+    last <= ema21 * 1.002;
 
-  const candles  = prices.candles;
-  const closes   = prices;
-  const instType = prices.instType || "FOREX";
-  const last = closes[closes.length - 1];
-  const prev = closes[closes.length - 2];
+  const inBullishOB =
+    smc?.bullishOB &&
+    last >= smc.bullishOB.low &&
+    last <= smc.bullishOB.high;
 
-  const ema9   = calcEMA(closes, 9);
-  const ema21  = calcEMA(closes, 21);
-  const ema50  = calcEMA(closes, 50);
-  const ema200 = closes.length >= 200 ? calcEMA(closes, 200) : ema50;
-  const rsi    = calcRSI(closes);
-  const macd   = calcMACD(closes);
-  const bb     = calcBollinger(closes);
-  const atr    = calcATR(prices);
-  const m15    = calcM15Bias(prices.m15Candles || []);
+  const inBullishFVG =
+    smc?.bullishFVG &&
+    last >= smc.bullishFVG.bottom &&
+    last <= smc.bullishFVG.top;
 
-  if (!ema9 || !ema21 || !ema50 || !atr || !bb) {
-    return { direction: "NEUTRAL", confidence: 0, reason: "Indicators not ready", ema9, ema21, ema50, ema200, atr, rsi, macd, bb, m15 };
-  }
+  return {
+    valid: !!(nearEMA || inBullishOB || inBullishFVG),
+    nearEMA: !!nearEMA,
+    inBullishOB: !!inBullishOB,
+    inBullishFVG: !!inBullishFVG,
+  };
+};
 
-  // ── 1. Session / Kill Zone ──
-  const now = new Date();
-  const utc = now.getUTCHours() + now.getUTCMinutes() / 60;
-  const inKillZone = (utc >= 7 && utc <= 10) || (utc >= 12.5 && utc <= 15.5);
+const isValidShortLocation = ({ last, ema21, atr, smc }) => {
+  const nearEMA =
+    ema21 != null &&
+    atr != null &&
+    Math.abs(last - ema21) <= atr * 0.6 &&
+    last >= ema21 * 0.998;
 
-  // ── 2. Market Regime ──
-  const atrPct   = (atr / last) * 100;
-  const bbWidth  = bb.middle ? ((bb.upper - bb.lower) / bb.middle) * 100 : 0;
-  const emaSpread = Math.abs(ema21 - ema50);
-  const dead    = atrPct < 0.03;
-  const chaotic = atrPct > 2.5;
-  const flat    = emaSpread < atr * 0.3;
+  const inBearishOB =
+    smc?.bearishOB &&
+    last >= smc.bearishOB.low &&
+    last <= smc.bearishOB.high;
 
-  const bullTrend = ema9 > ema21 && ema21 > ema50 && last > ema21 && (ema200 ? last > ema200 * 0.995 : true);
-  const bearTrend = ema9 < ema21 && ema21 < ema50 && last < ema21 && (ema200 ? last < ema200 * 1.005 : true);
+  const inBearishFVG =
+    smc?.bearishFVG &&
+    last >= smc.bearishFVG.bottom &&
+    last <= smc.bearishFVG.top;
 
-  // ── 3. HTF Bias ──
-  const trend =
-    m15?.bias === "BULLISH" ? "LONG" :
-    m15?.bias === "BEARISH" ? "SHORT" :
-    bullTrend ? "LONG" : bearTrend ? "SHORT" : null;
+  return {
+    valid: !!(nearEMA || inBearishOB || inBearishFVG),
+    nearEMA: !!nearEMA,
+    inBearishOB: !!inBearishOB,
+    inBearishFVG: !!inBearishFVG,
+  };
+};
 
-  // ── 4. SMC + Sweep + Volume + Volatility ──
-  const smcLong  = getSMCConfirmation(candles, "LONG");
-  const smcShort = getSMCConfirmation(candles, "SHORT");
-  const smc      = trend === "LONG" ? smcLong : trend === "SHORT" ? smcShort : null;
-  const sweep    = calcLiquiditySweep(candles);
-  const volume   = trend ? calcVolumeConfirmation(candles, trend) : { confirmed: false, reason: "No direction" };
-  const volatility = calcVolatilityFilter(atr, last, instType);
+// ─── STRUCTURAL STOPS ────────────────────────────────────────────────────────
+const getRecentSwingLow = (candles, lookback = 12) => {
+  if (!candles || candles.length < 3) return null;
+  const recent = candles.slice(-lookback);
+  return Math.min(...recent.map((c) => c.low));
+};
 
-  // ── 5. Entry Location ──
-  const inEMAZoneLong  = last <= ema21 * 1.002 && last >= ema21 * 0.995;
-  const inEMAZoneShort = last >= ema21 * 0.998 && last <= ema21 * 1.005;
-  const inBullOB = smcLong?.bullishOB && last >= smcLong.bullishOB.low && last <= smcLong.bullishOB.high;
-  const inBearOB = smcShort?.bearishOB && last >= smcShort.bearishOB.low && last <= smcShort.bearishOB.high;
-  const entryQualityLong  = getEntryQuality(candles, "LONG",  smcLong);
-  const entryQualityShort = getEntryQuality(candles, "SHORT", smcShort);
+const getRecentSwingHigh = (candles, lookback = 12) => {
+  if (!candles || candles.length < 3) return null;
+  const recent = candles.slice(-lookback);
+  return Math.max(...recent.map((c) => c.high));
+};
 
-  // ── 6. Trigger Candle ──
-  const lastCandle = candles[candles.length - 1];
-  const prevCandle = candles[candles.length - 2];
-  const longTrigger  = lastCandle.close > lastCandle.open && lastCandle.close > prevCandle.high;
-  const shortTrigger = lastCandle.close < lastCandle.open && lastCandle.close < prevCandle.low;
+const calcAdvancedLevels = (direction, entry, atr, candles, smc) => {
+  if (!atr || !entry || !candles) return null;
+  if (direction !== "LONG" && direction !== "SHORT") return null;
 
-  // ── 7. Score Both Sides ──
-  const longConfluence  = calcConfluenceScore("LONG",  m15?.bias, smcLong,  sweep, volume, rsi, atr, closes);
-  const shortConfluence = calcConfluenceScore("SHORT", m15?.bias, smcShort, sweep, volume, rsi, atr, closes);
-
-  let longScore = 0, shortScore = 0;
-  const longReasons = [], shortReasons = [];
-
-  if (inKillZone) { longScore += 1; shortScore += 1; }
-  else { longReasons.push("Outside kill zone"); shortReasons.push("Outside kill zone"); }
-
-  if (!dead && !chaotic && !flat) { longScore += 2; shortScore += 2; }
-  else {
-    if (dead)    { longReasons.push("Dead market");        shortReasons.push("Dead market"); }
-    if (chaotic) { longReasons.push("Chaotic volatility"); shortReasons.push("Chaotic volatility"); }
-    if (flat)    { longReasons.push("Flat EMA structure"); shortReasons.push("Flat EMA structure"); }
-  }
-
-  if (trend === "LONG")  { longScore  += 4; longReasons.push("HTF bullish bias"); }
-  if (trend === "SHORT") { shortScore += 4; shortReasons.push("HTF bearish bias"); }
-
-  if (smcLong?.confirmed)  { longScore  += Math.min(4, smcLong.score);  longReasons.push(...smcLong.reasons); }
-  if (smcShort?.confirmed) { shortScore += Math.min(4, smcShort.score); shortReasons.push(...smcShort.reasons); }
-
-  if (sweep?.direction === "BULLISH") { longScore  += 3; longReasons.push("Bullish liquidity sweep"); }
-  if (sweep?.direction === "BEARISH") { shortScore += 3; shortReasons.push("Bearish liquidity sweep"); }
-
-  if (inBullOB || inEMAZoneLong)  { longScore  += 2; longReasons.push(inBullOB ? "Inside bullish OB" : "EMA pullback zone"); }
-  if (inBearOB || inEMAZoneShort) { shortScore += 2; shortReasons.push(inBearOB ? "Inside bearish OB" : "EMA pullback zone"); }
-
-  if (entryQualityLong)  { longScore  += 2; longReasons.push("Smart long entry"); }
-  if (entryQualityShort) { shortScore += 2; shortReasons.push("Smart short entry"); }
-
-  if (longTrigger)  { longScore  += 2; longReasons.push("Bullish trigger candle"); }
-  if (shortTrigger) { shortScore += 2; shortReasons.push("Bearish trigger candle"); }
-
-  if (rsi > 30 && rsi < 65) { longScore  += 1; longReasons.push("RSI healthy for long"); }
-  if (rsi < 70 && rsi > 35) { shortScore += 1; shortReasons.push("RSI healthy for short"); }
-
-  if (macd.hist > 0 && macd.macd > macd.signal) { longScore  += 1; longReasons.push("MACD bullish"); }
-  if (macd.hist < 0 && macd.macd < macd.signal) { shortScore += 1; shortReasons.push("MACD bearish"); }
-
-  if (volume?.confirmed) {
-    if (trend === "LONG")  longScore  += 1;
-    if (trend === "SHORT") shortScore += 1;
-  }
-  if (volatility?.healthy) { longScore += 1; shortScore += 1; }
-
-  const pullbackLong  = hasPullback(candles, "LONG");
-  const pullbackShort = hasPullback(candles, "SHORT");
-  if (pullbackLong)  { longScore  += 1; longReasons.push("Pullback confirmed"); }
-  if (pullbackShort) { shortScore += 1; shortReasons.push("Pullback confirmed"); }
-
-  // ── 8. Pick Direction (hard filters) ──
-  const rawDirection = longScore > shortScore ? "LONG" : shortScore > longScore ? "SHORT" : "NEUTRAL";
-  let direction = rawDirection;
-
-  if (!inKillZone)          direction = "NEUTRAL";
-  if (dead || chaotic || flat) direction = "NEUTRAL";
-  if (!volatility?.healthy) direction = "NEUTRAL";
+  const buffer = atr * 0.25;
 
   if (direction === "LONG") {
-    if (trend !== "LONG")                      direction = "NEUTRAL";
-    if (sweep.direction !== "BULLISH")         direction = "NEUTRAL";
-    if (!(inBullOB || inEMAZoneLong))          direction = "NEUTRAL";
-    if (!longTrigger)                          direction = "NEUTRAL";
-    if (!entryQualityLong)                     direction = "NEUTRAL";
-    if (!pullbackLong)                         direction = "NEUTRAL";
-    if ((longConfluence?.score || 0) < 6)      direction = "NEUTRAL";
-  }
-  if (direction === "SHORT") {
-    if (trend !== "SHORT")                     direction = "NEUTRAL";
-    if (sweep.direction !== "BEARISH")         direction = "NEUTRAL";
-    if (!(inBearOB || inEMAZoneShort))         direction = "NEUTRAL";
-    if (!shortTrigger)                         direction = "NEUTRAL";
-    if (!entryQualityShort)                    direction = "NEUTRAL";
-    if (!pullbackShort)                        direction = "NEUTRAL";
-    if ((shortConfluence?.score || 0) < 6)     direction = "NEUTRAL";
+    const swingLow = getRecentSwingLow(candles, 12);
+    const obLow = smc?.bullishOB?.low ?? null;
+    const structuralBase = Math.min(
+      swingLow ?? Number.POSITIVE_INFINITY,
+      obLow ?? Number.POSITIVE_INFINITY
+    );
+
+    const stopLoss =
+      Number.isFinite(structuralBase)
+        ? structuralBase - buffer
+        : entry - atr * 1.5;
+
+    const risk = Math.abs(entry - stopLoss);
+    const partialTP = entry + risk * 1.5;
+    const fullTP = entry + risk * 2.2;
+
+    return {
+      stopLoss,
+      partialTP,
+      fullTP,
+      breakeven: entry,
+      trailBy: atr,
+    };
   }
 
-  // ── 9. Structural SL / TP (RR >= 2 required) ──
-  let stopLoss = null, takeProfit = null, slDistance = null, tpDistance = null, rr = 0;
-  let levels = null, confluence = null, smcUsed = null;
+  const swingHigh = getRecentSwingHigh(candles, 12);
+  const obHigh = smc?.bearishOB?.high ?? null;
+  const structuralBase = Math.max(
+    swingHigh ?? Number.NEGATIVE_INFINITY,
+    obHigh ?? Number.NEGATIVE_INFINITY
+  );
+
+  const stopLoss =
+    Number.isFinite(structuralBase)
+      ? structuralBase + buffer
+      : entry + atr * 1.5;
+
+  const risk = Math.abs(stopLoss - entry);
+  const partialTP = entry - risk * 1.5;
+  const fullTP = entry - risk * 2.2;
+
+  return {
+    stopLoss,
+    partialTP,
+    fullTP,
+    breakeven: entry,
+    trailBy: atr,
+  };
+};
+
+// ─── MASTER BRAIN ────────────────────────────────────────────────────────────
+const analyzeStrategies = (prices) => {
+  if (!prices || prices.length < 50) return null;
+
+  const rsi = calcRSI(prices);
+  const macd = calcMACD(prices);
+  const bb = calcBollinger(prices);
+  const atr = calcATR(prices);
+
+  const ema9 = calcEMA(prices, 9);
+  const ema21 = calcEMA(prices, 21);
+  const ema50 = calcEMA(prices, 50);
+  const ema200 = prices.length >= 200 ? calcEMA(prices, 200) : null;
+
+  const last = prices[prices.length - 1];
+  const prev = prices[prices.length - 2];
+
+  if (!ema9 || !ema21 || !ema50 || !atr) return null;
+
+  const trendEMA = ema200 || ema50;
+  const bullTrend = last > trendEMA;
+  const bearTrend = last < trendEMA;
+
+  const scores = {
+    RSI: rsi < 30 ? 90 : rsi < 40 ? 70 : rsi > 70 ? 10 : rsi > 60 ? 30 : 50,
+    MACD:
+      macd.hist > 0 && macd.macd > macd.signal ? 80 :
+      macd.hist < 0 && macd.macd < macd.signal ? 20 :
+      macd.hist > 0 ? 65 :
+      macd.hist < 0 ? 35 :
+      50,
+    Bollinger:
+      bb.pct < 15 ? 85 :
+      bb.pct < 30 ? 65 :
+      bb.pct > 85 ? 15 :
+      bb.pct > 70 ? 35 :
+      50,
+    "EMA Cloud":
+      ema9 > ema21 && ema21 > ema50 ? 85 :
+      ema9 < ema21 && ema21 < ema50 ? 15 :
+      ema9 > ema21 ? 65 :
+      ema9 < ema21 ? 35 :
+      50,
+    Trend: bullTrend ? 75 : bearTrend ? 25 : 50,
+    Momentum:
+      (last - prev) > atr * 0.5 ? 75 :
+      (last - prev) < -atr * 0.5 ? 25 :
+      50,
+  };
+
+  Object.keys(scores).forEach((k) => {
+    scores[k] = Math.min(95, Math.max(5, Math.round(scores[k])));
+  });
+
+  const bullCount = Object.values(scores).filter((s) => s >= 60).length;
+  const bearCount = Object.values(scores).filter((s) => s <= 40).length;
+
+  let direction = "NEUTRAL";
+  if (bullCount >= 4) direction = "LONG";
+  else if (bearCount >= 4) direction = "SHORT";
+
+  if (direction === "LONG" && rsi > 72) direction = "NEUTRAL";
+  if (direction === "SHORT" && rsi < 28) direction = "NEUTRAL";
+
+  // anti-chase filter
+  if (direction !== "NEUTRAL" && prices.length >= 5) {
+    const recent = prices.slice(-5);
+    const moves = [];
+    for (let i = 1; i < recent.length; i++) moves.push(recent[i] - recent[i - 1]);
+
+    const allBull = moves.every((m) => m > 0);
+    const allBear = moves.every((m) => m < 0);
+
+    if (direction === "LONG" && allBull) direction = "NEUTRAL";
+    if (direction === "SHORT" && allBear) direction = "NEUTRAL";
+  }
+
+  // M15 bias must be clear and aligned
+  const m15 = calcM15Bias(prices.m15Candles);
+  const directionBias =
+    direction === "LONG" ? "BULLISH" :
+    direction === "SHORT" ? "BEARISH" :
+    null;
 
   if (direction !== "NEUTRAL") {
-    const recent = candles.slice(-20);
-    stopLoss =
-      direction === "LONG"
-        ? Math.min(...recent.map(c => c.low))  - atr * 0.2
-        : Math.max(...recent.map(c => c.high)) + atr * 0.2;
+    if (!m15.bias) direction = "NEUTRAL";
+    else if (m15.bias !== directionBias) direction = "NEUTRAL";
+  }
 
-    const risk = Math.abs(last - stopLoss);
-    if (risk > 0) {
-      takeProfit = direction === "LONG" ? last + risk * 2 : last - risk * 2;
-      slDistance = risk;
-      tpDistance = Math.abs(takeProfit - last);
-      rr = tpDistance / slDistance;
-      levels = calcAdvancedLevels(direction, last, atr);
-      confluence = direction === "LONG" ? longConfluence : shortConfluence;
-      smcUsed    = direction === "LONG" ? smcLong : smcShort;
-      if (rr < 2) {
-  direction = "NEUTRAL";
-  stopLoss = null;
-  takeProfit = null;
-  slDistance = null;
-  tpDistance = null;
-  levels = null;
-  confluence = null;
-}
+  // volatility must be healthy
+  const instType = prices.instType || "FOREX";
+  const volatility = calcVolatilityFilter(atr, last, instType);
+  if (direction !== "NEUTRAL" && !volatility.healthy) {
+    direction = "NEUTRAL";
+  }
+
+  // SMC structure must align
+  let smc = null;
+  if (direction !== "NEUTRAL") {
+    if (!prices.candles || prices.candles.length < 30) {
+      direction = "NEUTRAL";
     } else {
+      smc = getSMCConfirmation(prices.candles, direction);
+
+      const hasBias = smc.bias === directionBias;
+      const hasBOS = smc.bos && smc.bos.type === directionBias;
+      const hasCHOCH = smc.choch && smc.choch.type === directionBias;
+
+      // stricter than before: require real structure alignment
+      if (!hasBias && !hasBOS && !hasCHOCH) {
+        direction = "NEUTRAL";
+      }
+    }
+  }
+
+  const sweep = prices.candles ? calcLiquiditySweep(prices.candles) : { swept: false, direction: null };
+  const volume = prices.candles ? calcVolumeConfirmation(prices.candles, direction) : { confirmed: false, reason: "No volume" };
+
+  // mandatory pullback gate
+  let pullbackOk = false;
+  if (direction !== "NEUTRAL" && prices.candles) {
+    pullbackOk = hasPullback(prices.candles, direction);
+    if (!pullbackOk) direction = "NEUTRAL";
+  }
+
+  // entry location gate
+  let entryLocation = {
+    valid: false,
+    nearEMA: false,
+    inBullishOB: false,
+    inBullishFVG: false,
+    inBearishOB: false,
+    inBearishFVG: false,
+  };
+
+  if (direction === "LONG") {
+    entryLocation = isValidLongLocation({ last, ema21, atr, smc });
+    if (!entryLocation.valid) direction = "NEUTRAL";
+  }
+
+  if (direction === "SHORT") {
+    entryLocation = isValidShortLocation({ last, ema21, atr, smc });
+    if (!entryLocation.valid) direction = "NEUTRAL";
+  }
+
+  // late-entry distance filter
+  if (direction === "LONG" && Math.abs(last - ema21) > atr * 1.2) {
+    direction = "NEUTRAL";
+  }
+
+  if (direction === "SHORT" && Math.abs(last - ema21) > atr * 1.2) {
+    direction = "NEUTRAL";
+  }
+
+  // confluence hard gate again
+  const confluence = calcConfluenceScore(direction, m15.bias, smc, sweep, volume, rsi, atr, prices);
+  if (direction !== "NEUTRAL" && confluence.score < 8) {
+    direction = "NEUTRAL";
+  }
+
+  // recalc confluence after possible neutralization
+  const finalConfluence = calcConfluenceScore(direction, m15.bias, smc, sweep, volume, rsi, atr, prices);
+
+  // levels with structural SL
+  const levels = direction !== "NEUTRAL"
+    ? calcAdvancedLevels(direction, last, atr, prices.candles, smc)
+    : null;
+
+  const stopLoss = levels ? levels.stopLoss : null;
+  const takeProfit = levels ? levels.fullTP : null;
+  const slDistance = stopLoss != null ? Math.abs(last - stopLoss) : null;
+  const tpDistance = takeProfit != null ? Math.abs(last - takeProfit) : null;
+
+  // RR hard gate
+  let rr = 0;
+  if (direction !== "NEUTRAL" && slDistance && tpDistance) {
+    rr = tpDistance / slDistance;
+    if (rr < 1.8) {
       direction = "NEUTRAL";
     }
   }
 
-  // ── 10. Confidence ──
-  let confidence = 0;
-  if (direction === "LONG") {
-    confidence = 55 + Math.min(20, longScore * 2) + (longConfluence?.score || 0) + (rr >= 2 ? 5 : 0);
-  } else if (direction === "SHORT") {
-    confidence = 55 + Math.min(20, shortScore * 2) + (shortConfluence?.score || 0) + (rr >= 2 ? 5 : 0);
-  } else {
-    confidence = Math.max(longScore, shortScore) >= 6 ? 45 : 20;
-  }
-  confidence = Math.max(0, Math.min(95, Math.round(confidence)));
+  // confidence should reflect strictness
+  const finalBias =
+    direction === "LONG" ? "BULLISH" :
+    direction === "SHORT" ? "BEARISH" :
+    null;
 
-  const scores = {
-    Trend:      trend === "LONG" || trend === "SHORT" ? 85 : 35,
-    SMC:        Math.min(95, Math.max(smcLong?.score || 0, smcShort?.score || 0) * 12),
-    Liquidity:  sweep?.swept ? 85 : 20,
-    Volume:     volume?.confirmed ? 75 : 35,
-    Volatility: volatility?.healthy ? 80 : 25,
-    Entry:      direction === "NEUTRAL" ? 30 : 85,
-  };
+  const agreementScore =
+    direction === "LONG" ? bullCount :
+    direction === "SHORT" ? bearCount :
+    0;
 
-  const reason =
-    direction === "LONG"  ? `LONG | ${inBullOB ? "OB" : "EMA"} | RR ${rr.toFixed(2)}` :
-    direction === "SHORT" ? `SHORT | ${inBearOB ? "OB" : "EMA"} | RR ${rr.toFixed(2)}` :
-    "No trade setup meets all filters";
+  const m15Boost = finalBias && m15.bias === finalBias ? 6 : 0;
+  const structureBoost = smc && (smc.bos || smc.choch) ? 6 : 0;
+  const locationBoost = entryLocation.valid ? 8 : 0;
+  const pullbackBoost = pullbackOk ? 6 : 0;
+  const sweepBoost = finalBias && sweep.swept && sweep.direction === finalBias ? 4 : 0;
+
+  const confidence =
+    direction === "NEUTRAL"
+      ? 50
+      : Math.min(
+          95,
+          Math.max(
+            50,
+            Math.round(
+              45 +
+              agreementScore * 5 +
+              m15Boost +
+              structureBoost +
+              locationBoost +
+              pullbackBoost +
+              sweepBoost
+            )
+          )
+        );
 
   return {
-    direction, confidence, reason,
-    stopLoss, takeProfit, slDistance, tpDistance,
-    ema9, ema21, ema50, ema200, atr, rsi, macd, bb,
-    bullTrend, bearTrend,
+    scores,
+    direction,
+    confidence,
+    rsi,
+    macd,
+    bb,
+    atr,
+    ema9,
+    ema21,
+    ema50,
+    ema200,
+    stopLoss,
+    takeProfit,
+    slDistance,
+    tpDistance,
+    rr,
+    bullTrend,
+    bearTrend,
+    smc,
     m15,
-    smc: smcUsed || (rawDirection === "LONG" ? smcLong : rawDirection === "SHORT" ? smcShort : null),
-    sweep, volume, volatility, levels, confluence, scores,
-    debug: { longScore, shortScore, longReasons, shortReasons, inKillZone, atrPct, bbWidth, emaSpread, pullbackLong, pullbackShort, rawDirection }
+    sweep,
+    volume,
+    confluence: finalConfluence,
+    volatility,
+    levels,
+    pullbackOk,
+    entryLocation,
+    reason:
+      direction === "NEUTRAL"
+        ? "No trade setup meets all filters"
+        : "Valid setup",
   };
 };
-
 
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export default function TradingBotLive() {
@@ -905,7 +1350,7 @@ useEffect(() => {
   useEffect(() => {
     INSTRUMENTS.forEach(inst => {
       const sig = signals[inst.id];
-      if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 78) return;
+      if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 85) return;
 
       const nowTs   = Date.now();
       const eventTs = eventAlert?.date ? new Date(eventAlert.date).getTime() : 0;
