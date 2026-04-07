@@ -1048,7 +1048,7 @@ const analyzeStrategies = (prices) => {
 
   // confluence hard gate again
   const confluence = calcConfluenceScore(direction, m15.bias, smc, sweep, volume, rsi, atr, prices);
-  if (direction !== "NEUTRAL" && confluence.score < 8) {
+  if (direction !== "NEUTRAL" && confluence.score < 6) {
     direction = "NEUTRAL";
   }
 
@@ -1114,34 +1114,24 @@ const analyzeStrategies = (prices) => {
     scores,
     direction,
     confidence,
-    rsi,
-    macd,
-    bb,
-    atr,
-    ema9,
-    ema21,
-    ema50,
-    ema200,
-    stopLoss,
-    takeProfit,
-    slDistance,
-    tpDistance,
-    rr,
-    bullTrend,
-    bearTrend,
-    smc,
-    m15,
-    sweep,
-    volume,
+    rsi, macd, bb, atr,
+    ema9, ema21, ema50, ema200,
+    stopLoss, takeProfit, slDistance, tpDistance, rr,
+    bullTrend, bearTrend,
+    smc, m15, sweep, volume,
     confluence: finalConfluence,
-    volatility,
-    levels,
-    pullbackOk,
-    entryLocation,
-    reason:
-      direction === "NEUTRAL"
-        ? "No trade setup meets all filters"
-        : "Valid setup",
+    volatility, levels, pullbackOk, entryLocation,
+    reason: direction === "NEUTRAL" ? "No trade setup meets all filters" : "Valid setup",
+    debug: {
+      longScore: bullCount,
+      shortScore: bearCount,
+      inKillZone: (() => { const s = getSessionInfo(); return s.isLondon || s.isNY; })(),
+      rawDirection: bullCount >= 4 ? "LONG" : bearCount >= 4 ? "SHORT" : "NEUTRAL",
+      atrPct: atr && last ? (atr / last) * 100 : 0,
+      bbWidth: bb ? bb.std : 0,
+      longReasons: Object.entries(scores).filter(([,v]) => v >= 60).map(([k,v]) => `${k}: ${v}`),
+      shortReasons: Object.entries(scores).filter(([,v]) => v <= 40).map(([k,v]) => `${k}: ${v}`),
+    },
   };
 };
 // ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
