@@ -2362,22 +2362,64 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                 )}
 
                 {/* Confluence */}
-                {sig.confluence && (
+                {/* PATTERNS — v4 NEW */}
+                {sig.patterns && sig.patterns.patterns && sig.patterns.patterns.length > 0 && (
                   <div style={styles.card}>
-                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "12px" }}>CONFLUENCE SCORE</div>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "10px" }}>PATTERN RECOGNITION</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                      {sig.patterns.patterns.map((p, i) => (
+                        <div key={i} style={{ background: p.bias === "BULLISH" ? "rgba(63,185,80,0.1)" : "rgba(248,81,73,0.1)", border: `1px solid ${p.bias === "BULLISH" ? "#3fb95040" : "#f8514940"}`, padding: "8px 12px", borderRadius: "6px" }}>
+                          <div style={{ fontWeight: "700", fontSize: "11px", color: p.bias === "BULLISH" ? "#3fb950" : "#f85149" }}>{p.type.replace(/_/g, " ")}</div>
+                          <div style={{ color: "#8b949e", fontSize: "9px", marginTop: "2px" }}>{p.bias} {p.broken ? "— BROKEN ✅" : "— forming"}</div>
+                          {p.neckline && <div style={{ color: "#e3b341", fontSize: "9px" }}>Neckline: {p.neckline?.toFixed ? p.neckline.toFixed(4) : p.neckline}</div>}
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: "8px", fontSize: "10px", color: sig.patterns.bias === "BULLISH" ? "#3fb950" : sig.patterns.bias === "BEARISH" ? "#f85149" : "#8b949e" }}>
+                      Overall pattern bias: {sig.patterns.bias || "NEUTRAL"} ({sig.patterns.bullPatterns} bull / {sig.patterns.bearPatterns} bear)
+                    </div>
+                  </div>
+                )}
+
+                {/* S/R ZONES — v4 NEW */}
+                {sig.srZones && sig.srZones.zones && sig.srZones.zones.length > 0 && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "10px" }}>SMART S/R ZONES</div>
+                    {sig.srZones.atZone && (
+                      <div style={{ background: "rgba(88,166,255,0.1)", border: "1px solid #58a6ff40", padding: "8px", borderRadius: "6px", marginBottom: "8px" }}>
+                        <span style={{ color: "#58a6ff", fontWeight: "700", fontSize: "11px" }}>⚡ AT ZONE: </span>
+                        <span style={{ color: "#c9d1d9", fontSize: "11px" }}>{sig.srZones.atZone.type} @ {sig.srZones.atZone.price?.toFixed ? sig.srZones.atZone.price.toFixed(4) : sig.srZones.atZone.price} (strength: {sig.srZones.atZone.strength})</span>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                      {sig.srZones.zones.slice(0, 6).map((z, i) => (
+                        <div key={i} style={{ background: "#161b22", padding: "6px 8px", borderRadius: "4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: "9px", color: z.type === "RESISTANCE" ? "#f85149" : z.type === "SUPPORT" ? "#3fb950" : "#58a6ff" }}>{z.type}</span>
+                          <span style={{ fontSize: "10px", fontWeight: "700" }}>{z.price?.toFixed ? z.price.toFixed(4) : z.price}</span>
+                          <span style={{ fontSize: "9px", color: "#8b949e" }}>×{z.strength}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* CONFLUENCE WHY — v4 upgrade */}
+                {sig.confluence && sig.confluence.why && sig.confluence.why.length > 0 && (
+                  <div style={styles.card}>
+                    <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "10px" }}>CONFLUENCE BREAKDOWN</div>
                     <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "10px" }}>
-                      <div style={{ fontSize: "32px", fontWeight: "800", color: sig.confluence.score >= 8 ? "#3fb950" : sig.confluence.score >= 6 ? "#e3b341" : "#f85149" }}>
+                      <div style={{ fontSize: "32px", fontWeight: "800", color: sig.confluence.score >= 12 ? "#3fb950" : sig.confluence.score >= 8 ? "#e3b341" : "#f85149" }}>
                         {sig.confluence.score}<span style={{ fontSize: "16px", color: "#8b949e" }}>/{sig.confluence.maxScore}</span>
                       </div>
                       <div style={{ flex: 1 }}>
                         <div style={{ height: "6px", background: "#21262d", borderRadius: "3px" }}>
-                          <div style={{ height: "100%", borderRadius: "3px", width: `${(sig.confluence.score / sig.confluence.maxScore) * 100}%`, background: sig.confluence.score >= 8 ? "#3fb950" : sig.confluence.score >= 6 ? "#e3b341" : "#f85149" }} />
+                          <div style={{ height: "100%", borderRadius: "3px", width: `${Math.min(100, (sig.confluence.score / sig.confluence.maxScore) * 100)}%`, background: sig.confluence.score >= 12 ? "#3fb950" : sig.confluence.score >= 8 ? "#e3b341" : "#f85149" }} />
                         </div>
                       </div>
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
-                      {sig.confluence.factors.map((f, i) => (
-                        <span key={i} style={{ background: "rgba(63,185,80,0.15)", color: "#3fb950", border: "1px solid #3fb95040", padding: "2px 8px", borderRadius: "10px", fontSize: "10px" }}>{f}</span>
+                      {sig.confluence.why.map((w, i) => (
+                        <span key={i} style={{ background: w.includes("-") ? "rgba(248,81,73,0.1)" : "rgba(63,185,80,0.1)", color: w.includes("-") ? "#f85149" : "#3fb950", border: `1px solid ${w.includes("-") ? "#f8514940" : "#3fb95040"}`, padding: "2px 8px", borderRadius: "10px", fontSize: "10px" }}>{w}</span>
                       ))}
                     </div>
                   </div>
