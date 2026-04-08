@@ -1666,6 +1666,78 @@ useEffect(() => {
     return () => clearInterval(interval);
   }, [fetchLiveTrades, fetchClosedTrades]);
 
+  // ─── ADD THIS FUNCTION before the useEffect section ───────────────────────────
+// Place it right after fetchClosedTrades
+
+const manageTrades = useCallback(async () => {
+  if (openPositions.length === 0) return;
+
+  // Build position list with TP levels from signals
+  const managed = openPositions.map(pos => {
+    const raw = (pos.symbol || '').toUpperCase();
+    const instId =
+      raw.startsWith('BTCUSD') ? 'BTCUSDT' :
+      raw.startsWith('XAUUSD') ? 'XAUUSD'  :
+      raw.startsWith('GBPUSD') ? 'GBPUSD'  : null;
+
+    const sig = instId ? signals[instId] : null;
+    const multiTP = sig?.multiTP;
+
+    return {
+      id:           pos.id || pos.positionId,
+      symbol:       pos.symbol,
+      openPrice:    pos.openPrice,
+      currentPrice: pos.currentPrice,
+      stopLoss:     pos.stopLoss,
+      volume:       pos.volume,
+      direction:    pos.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT',
+      tp1:          multiTP?.tp1      ?? null,
+      tp2:          multiTP?.tp2      ?? null,
+      tp3:          multiTP?.tp3      ?? null,
+      breakeven:    multiTP?.breakeven ?? pos.openPrice,
+      atr:          sig?.atr          ?? null,
+    };
+  }).filter(p => p.id && p.tp1);
+
+  if (managed.length === 0) return;
+
+  try {
+    const r = await fetch('/api/manage-trades', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ positions: managed }),
+    });
+    const d = await r.json();
+
+    if (d.managed && d.managed.length > 0) {
+      d.managed.forEach(m => {
+        m.actions.forEach(a => {
+          if (a.type === 'PARTIAL_CLOSE_TP1')  addLog(`TP1 hit: ${m.symbol} — closed 50% @ ${a.price?.toFixed(2)} | SL → breakeven`, 'success');
+          if (a.type === 'PARTIAL_CLOSE_TP2')  addLog(`TP2 hit: ${m.symbol} — closed 30% @ ${a.price?.toFixed(2)} | trailing SL`, 'success');
+          if (a.type === 'FULL_CLOSE_TP3')     addLog(`TP3 hit: ${m.symbol} — closed remaining 20% @ ${a.price?.toFixed(2)} 🎯`, 'success');
+          if (a.type === 'SL_TO_BREAKEVEN')    addLog(`${m.symbol} SL moved to breakeven @ ${a.level?.toFixed(2)}`, 'info');
+          if (a.type === 'SL_TRAIL_AT_TP2')    addLog(`${m.symbol} SL trailing @ ${a.level?.toFixed(2)}`, 'info');
+        });
+      });
+      // Refresh positions after management
+      setTimeout(fetchLiveTrades, 1500);
+      setTimeout(fetchClosedTrades, 3000);
+    }
+  } catch(e) {
+    // Silent fail — trade management is best-effort
+  }
+}, [openPositions, signals, addLog, fetchLiveTrades, fetchClosedTrades]);
+
+
+useEffect(() => {
+  if (openPositions.length === 0) return;
+  // Run trade manager every 30 seconds when positions are open
+  const interval = setInterval(manageTrades, 30000);
+  // Also run immediately when positions change
+  manageTrades();
+  return () => clearInterval(interval);
+}, [openPositions, manageTrades]);
+
   // Log scroll
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
 
@@ -2001,7 +2073,7 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                   </div>
                 )}
 
-                // ADD these new UI sections inside the SIGNALS TAB, after the existing SMC card
+                
 
 {/* H4 BIAS — NEW */}
 {sig.h4 && (
