@@ -746,7 +746,7 @@ const hasPullback = (candles, direction) => {
     if (swingRange <= 0) return false;
 
     const retracePct = (swingHigh - currentClose) / swingRange;
-    return retracePct >= 0.30;
+    return retracePct >= 0.15;
   }
 
   if (direction === "SHORT") {
@@ -773,11 +773,16 @@ const hasPullback = (candles, direction) => {
 };
 
 const isValidLongLocation = ({ last, ema21, atr, smc }) => {
-  const nearEMA =
-    ema21 != null &&
-    atr != null &&
-    Math.abs(last - ema21) <= atr * 0.6 &&
-    last <= ema21 * 1.002;
+  const h4Strength = smc?.h4Strength || null;
+  const emaMultiplier =
+  h4Strength === "STRONG" ? 2.0 :
+  h4Strength === "MEDIUM" ? 1.2 : 0.6;
+
+ const nearEMA =
+  ema21 != null &&
+  atr != null &&
+  Math.abs(last - ema21) <= atr * emaMultiplier &&
+  last >= ema21 * 0.998;
 
   const inBullishOB =
     smc?.bullishOB &&
@@ -798,11 +803,16 @@ const isValidLongLocation = ({ last, ema21, atr, smc }) => {
 };
 
 const isValidShortLocation = ({ last, ema21, atr, smc }) => {
+  const h4Strength = smc?.h4Strength || null;
+  const emaMultiplier =
+  h4Strength === "STRONG" ? 2.0 :
+  h4Strength === "MEDIUM" ? 1.2 : 0.6;
+
   const nearEMA =
-    ema21 != null &&
-    atr != null &&
-    Math.abs(last - ema21) <= atr * 0.6 &&
-    last >= ema21 * 0.998;
+  ema21 != null &&
+  atr != null &&
+  Math.abs(last - ema21) <= atr * emaMultiplier &&
+  last <= ema21 * 1.002;
 
   const inBearishOB =
     smc?.bearishOB &&
