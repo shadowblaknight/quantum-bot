@@ -1176,8 +1176,8 @@ const analyzeStrategies = (prices) => {
   const bearCount = Object.values(scores).filter(s => s <= 40).length;
 
   let direction = "NEUTRAL";
-  if (bullCount >= 4) direction = "LONG";
-  else if (bearCount >= 4) direction = "SHORT";
+  if (bullCount >= 3) direction = "LONG";
+  else if (bearCount >= 3) direction = "SHORT";
 
   // RSI extreme filter
   if (direction === "LONG"  && rsi > 72) direction = "NEUTRAL";
