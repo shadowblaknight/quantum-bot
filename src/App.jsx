@@ -1147,7 +1147,334 @@ const calcDivergence = (candles, rsi) => {
   };
 };
 
-// ─── MASTER BRAIN v3 ─────────────────────────────────────────────────────────
+// ─── SMART BRAIN v4 ──────────────────────────────────────────────────────────
+// Changes from v3:
+// 1. Reduced from 12 hard gates to 7 smart gates
+// 2. Pattern recognition (Head & Shoulders, Double Top/Bottom, Triangle)
+// 3. Dynamic S/R with zone strength scoring
+// 4. Adaptive entry zone based on H4 strength
+// 5. Scoring system instead of binary pass/fail
+// 6. Targets 3-5 trades per day
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── PATTERN RECOGNITION ─────────────────────────────────────────────────────
+const detectPatterns = (candles) => {
+  if (!candles || candles.length < 30) return { patterns: [], bias: null };
+
+  const patterns = [];
+  const recent = candles.slice(-50);
+  const closes = recent.map(c => c.close);
+  const highs  = recent.map(c => c.high);
+  const lows   = recent.map(c => c.low);
+
+  // ── Head & Shoulders (bearish reversal) ──
+  const findHeadAndShoulders = () => {
+    const peaks = [];
+    for (let i = 2; i < recent.length - 2; i++) {
+      if (highs[i] > highs[i-1] && highs[i] > highs[i-2] &&
+          highs[i] > highs[i+1] && highs[i] > highs[i+2]) {
+        peaks.push({ idx: i, price: highs[i] });
+      }
+    }
+    if (peaks.length < 3) return null;
+    for (let i = 0; i < peaks.length - 2; i++) {
+      const left  = peaks[i];
+      const head  = peaks[i+1];
+      const right = peaks[i+2];
+      const isHead = head.price > left.price * 1.001 && head.price > right.price * 1.001;
+      const shouldersSymmetric = Math.abs(left.price - right.price) / left.price < 0.015;
+      if (isHead && shouldersSymmetric) {
+        // Find neckline
+        const neckline = Math.min(
+          Math.min(...lows.slice(left.idx, head.idx)),
+          Math.min(...lows.slice(head.idx, right.idx))
+        );
+        const currentClose = closes[closes.length - 1];
+        const broken = currentClose < neckline;
+        return { type: 'HEAD_AND_SHOULDERS', bias: 'BEARISH', neckline, broken, head: head.price, leftShoulder: left.price, rightShoulder: right.price };
+      }
+    }
+    return null;
+  };
+
+  // ── Inverse Head & Shoulders (bullish reversal) ──
+  const findInverseHnS = () => {
+    const troughs = [];
+    for (let i = 2; i < recent.length - 2; i++) {
+      if (lows[i] < lows[i-1] && lows[i] < lows[i-2] &&
+          lows[i] < lows[i+1] && lows[i] < lows[i+2]) {
+        troughs.push({ idx: i, price: lows[i] });
+      }
+    }
+    if (troughs.length < 3) return null;
+    for (let i = 0; i < troughs.length - 2; i++) {
+      const left  = troughs[i];
+      const head  = troughs[i+1];
+      const right = troughs[i+2];
+      const isHead = head.price < left.price * 0.999 && head.price < right.price * 0.999;
+      const shouldersSymmetric = Math.abs(left.price - right.price) / left.price < 0.015;
+      if (isHead && shouldersSymmetric) {
+        const neckline = Math.max(
+          Math.max(...highs.slice(left.idx, head.idx)),
+          Math.max(...highs.slice(head.idx, right.idx))
+        );
+        const currentClose = closes[closes.length - 1];
+        const broken = currentClose > neckline;
+        return { type: 'INVERSE_HEAD_AND_SHOULDERS', bias: 'BULLISH', neckline, broken, head: head.price };
+      }
+    }
+    return null;
+  };
+
+  // ── Double Top (bearish) ──
+  const findDoubleTop = () => {
+    const peaks = [];
+    for (let i = 2; i < recent.length - 2; i++) {
+      if (highs[i] > highs[i-1] && highs[i] > highs[i+1]) {
+        peaks.push({ idx: i, price: highs[i] });
+      }
+    }
+    for (let i = 0; i < peaks.length - 1; i++) {
+      const p1 = peaks[i], p2 = peaks[i+1];
+      const separation = p2.idx - p1.idx;
+      const similar = Math.abs(p1.price - p2.price) / p1.price < 0.008;
+      if (similar && separation >= 5 && separation <= 30) {
+        const valley = Math.min(...lows.slice(p1.idx, p2.idx));
+        const currentClose = closes[closes.length - 1];
+        return { type: 'DOUBLE_TOP', bias: 'BEARISH', resistance: (p1.price + p2.price) / 2, support: valley, broken: currentClose < valley };
+      }
+    }
+    return null;
+  };
+
+  // ── Double Bottom (bullish) ──
+  const findDoubleBottom = () => {
+    const troughs = [];
+    for (let i = 2; i < recent.length - 2; i++) {
+      if (lows[i] < lows[i-1] && lows[i] < lows[i+1]) {
+        troughs.push({ idx: i, price: lows[i] });
+      }
+    }
+    for (let i = 0; i < troughs.length - 1; i++) {
+      const t1 = troughs[i], t2 = troughs[i+1];
+      const separation = t2.idx - t1.idx;
+      const similar = Math.abs(t1.price - t2.price) / t1.price < 0.008;
+      if (similar && separation >= 5 && separation <= 30) {
+        const peak = Math.max(...highs.slice(t1.idx, t2.idx));
+        const currentClose = closes[closes.length - 1];
+        return { type: 'DOUBLE_BOTTOM', bias: 'BULLISH', support: (t1.price + t2.price) / 2, resistance: peak, broken: currentClose > peak };
+      }
+    }
+    return null;
+  };
+
+  // ── Ascending Triangle (bullish) ──
+  const findAscendingTriangle = () => {
+    const last20 = recent.slice(-20);
+    const topResistance = Math.max(...last20.map(c => c.high));
+    const recentHighs = last20.filter(c => c.high > topResistance * 0.998);
+    const risingLows = last20.slice(-10).map(c => c.low);
+    const isRising = risingLows[risingLows.length-1] > risingLows[0] * 1.002;
+    if (recentHighs.length >= 2 && isRising) {
+      return { type: 'ASCENDING_TRIANGLE', bias: 'BULLISH', resistance: topResistance };
+    }
+    return null;
+  };
+
+  // ── Descending Triangle (bearish) ──
+  const findDescendingTriangle = () => {
+    const last20 = recent.slice(-20);
+    const bottomSupport = Math.min(...last20.map(c => c.low));
+    const recentLows = last20.filter(c => c.low < bottomSupport * 1.002);
+    const risingHighs = last20.slice(-10).map(c => c.high);
+    const isFalling = risingHighs[risingHighs.length-1] < risingHighs[0] * 0.998;
+    if (recentLows.length >= 2 && isFalling) {
+      return { type: 'DESCENDING_TRIANGLE', bias: 'BEARISH', support: bottomSupport };
+    }
+    return null;
+  };
+
+  const hns    = findHeadAndShoulders();
+  const ihns   = findInverseHnS();
+  const dtop   = findDoubleTop();
+  const dbot   = findDoubleBottom();
+  const atri   = findAscendingTriangle();
+  const dtri   = findDescendingTriangle();
+
+  if (hns)  patterns.push(hns);
+  if (ihns) patterns.push(ihns);
+  if (dtop) patterns.push(dtop);
+  if (dbot) patterns.push(dbot);
+  if (atri) patterns.push(atri);
+  if (dtri) patterns.push(dtri);
+
+  // Overall pattern bias
+  const bullPatterns = patterns.filter(p => p.bias === 'BULLISH').length;
+  const bearPatterns = patterns.filter(p => p.bias === 'BEARISH').length;
+  const bias = bullPatterns > bearPatterns ? 'BULLISH' : bearPatterns > bullPatterns ? 'BEARISH' : null;
+
+  return { patterns, bias, bullPatterns, bearPatterns };
+};
+
+// ─── SMART S/R ZONES ─────────────────────────────────────────────────────────
+const calcSRZones = (candles, currentPrice) => {
+  if (!candles || candles.length < 20) return { zones: [], nearZone: null, atZone: null };
+
+  const zones = [];
+  const lookback = candles.slice(-100);
+  const atr = lookback.slice(-14).reduce((s, c) => s + (c.high - c.low), 0) / 14;
+
+  // Find pivot highs and lows
+  for (let i = 3; i < lookback.length - 3; i++) {
+    const c = lookback[i];
+    let isPivotHigh = true;
+    let isPivotLow  = true;
+
+    for (let j = i - 3; j <= i + 3; j++) {
+      if (j === i) continue;
+      if (lookback[j].high >= c.high) isPivotHigh = false;
+      if (lookback[j].low  <= c.low)  isPivotLow  = false;
+    }
+
+    if (isPivotHigh) {
+      const existing = zones.find(z => Math.abs(z.price - c.high) < atr * 0.5);
+      if (existing) { existing.strength++; existing.type = 'BOTH'; }
+      else zones.push({ price: c.high, type: 'RESISTANCE', strength: 1 });
+    }
+
+    if (isPivotLow) {
+      const existing = zones.find(z => Math.abs(z.price - c.low) < atr * 0.5);
+      if (existing) { existing.strength++; existing.type = 'BOTH'; }
+      else zones.push({ price: c.low, type: 'SUPPORT', strength: 1 });
+    }
+  }
+
+  // Add round number levels (psychological S/R)
+  const roundLevel = (price) => {
+    if (price > 1000) return Math.round(price / 100) * 100;
+    if (price > 100)  return Math.round(price / 10)  * 10;
+    if (price > 1)    return Math.round(price * 10)  / 10;
+    return Math.round(price * 100) / 100;
+  };
+
+  const nearest = roundLevel(currentPrice);
+  if (Math.abs(currentPrice - nearest) < atr * 2) {
+    const exists = zones.find(z => Math.abs(z.price - nearest) < atr * 0.3);
+    if (!exists) zones.push({ price: nearest, type: 'ROUND_NUMBER', strength: 2 });
+    else exists.strength += 2;
+  }
+
+  zones.sort((a, b) => b.strength - a.strength);
+
+  const nearZone = zones.find(z => Math.abs(currentPrice - z.price) < atr * 1.5);
+  const atZone   = zones.find(z => Math.abs(currentPrice - z.price) < atr * 0.4);
+
+  return { zones: zones.slice(0, 8), nearZone, atZone, atr };
+};
+
+// ─── SMART CONFLUENCE SCORER ──────────────────────────────────────────────────
+// Instead of binary pass/fail, everything scores points
+const calcSmartConfluence = (direction, { m15, h4, d1, smc, sweep, volume, rsi, atr, closes, patterns, srZones, regime, divergence, bb, macd }) => {
+  let score  = 0;
+  const why  = [];
+  const dirBias = direction === 'LONG' ? 'BULLISH' : 'BEARISH';
+
+  // ── Timeframe alignment (max 9 pts) ──
+  if (h4.bias === dirBias) {
+    const pts = h4.strength === 'STRONG' ? 4 : h4.strength === 'MEDIUM' ? 3 : 2;
+    score += pts; why.push(`H4 ${h4.strength} ${h4.bias} +${pts}`);
+  }
+  if (d1.trend === 'UP' && direction === 'LONG')  { score += 3; why.push('D1 uptrend +3'); }
+  if (d1.trend === 'DOWN' && direction === 'SHORT') { score += 3; why.push('D1 downtrend +3'); }
+  if (m15.bias === dirBias) { score += 2; why.push('M15 aligned +2'); }
+
+  // ── Pattern recognition (max 4 pts) ──
+  if (patterns) {
+    const alignedPatterns = patterns.patterns.filter(p => p.bias === dirBias);
+    if (alignedPatterns.length > 0) {
+      const pts = Math.min(4, alignedPatterns.length * 2);
+      score += pts;
+      why.push(`Pattern: ${alignedPatterns[0].type} +${pts}`);
+    }
+    // Pattern conflict penalty
+    const conflictPatterns = patterns.patterns.filter(p => p.bias !== dirBias && p.bias !== null);
+    if (conflictPatterns.length > 0) { score -= 2; why.push('Pattern conflict -2'); }
+  }
+
+  // ── S/R zones (max 3 pts) ──
+  if (srZones?.atZone) {
+    const zoneAligned =
+      (direction === 'LONG'  && (srZones.atZone.type === 'SUPPORT' || srZones.atZone.type === 'BOTH' || srZones.atZone.type === 'ROUND_NUMBER')) ||
+      (direction === 'SHORT' && (srZones.atZone.type === 'RESISTANCE' || srZones.atZone.type === 'BOTH' || srZones.atZone.type === 'ROUND_NUMBER'));
+    if (zoneAligned) { score += 3; why.push(`At S/R zone (strength ${srZones.atZone.strength}) +3`); }
+  } else if (srZones?.nearZone) {
+    score += 1; why.push('Near S/R zone +1');
+  }
+
+  // ── SMC structure (max 4 pts) ──
+  if (smc) {
+    if (smc.bias === dirBias)  { score += 2; why.push('SMC structure +2'); }
+    if (smc.bos?.type   === dirBias) { score += 1; why.push('BOS confirmed +1'); }
+    if (smc.choch?.type === dirBias) { score += 2; why.push('CHoCH +2'); }
+    if (direction === 'LONG'  && smc.bullishOB) { score += 1; why.push('Bullish OB +1'); }
+    if (direction === 'SHORT' && smc.bearishOB) { score += 1; why.push('Bearish OB +1'); }
+  }
+
+  // ── Momentum (max 3 pts) ──
+  if (direction === 'LONG') {
+    if (rsi > 30 && rsi < 60)    { score += 1; why.push('RSI healthy for long +1'); }
+    if (macd?.hist > 0)          { score += 1; why.push('MACD positive +1'); }
+    if (bb?.pct < 40)            { score += 1; why.push('BB low pullback +1'); }
+  } else {
+    if (rsi > 40 && rsi < 70)    { score += 1; why.push('RSI healthy for short +1'); }
+    if (macd?.hist < 0)          { score += 1; why.push('MACD negative +1'); }
+    if (bb?.pct > 60)            { score += 1; why.push('BB high pullback +1'); }
+  }
+
+  // ── Liquidity sweep (max 2 pts) ──
+  if (sweep?.swept && sweep.direction === dirBias) { score += 2; why.push('Liquidity sweep +2'); }
+
+  // ── Regime bonus ──
+  if (regime?.trending) { score += 1; why.push('Trending regime +1'); }
+
+  // ── Divergence penalty ──
+  if (direction === 'LONG'  && divergence?.bearish) { score -= 3; why.push('Bearish divergence -3'); }
+  if (direction === 'SHORT' && divergence?.bullish) { score -= 3; why.push('Bullish divergence -3'); }
+
+  return { score, why, maxScore: 28 };
+};
+
+// ─── ADAPTIVE ENTRY LOCATION ──────────────────────────────────────────────────
+const isGoodEntryLocation = (direction, { last, ema21, atr, smc, h4, srZones }) => {
+  if (!ema21 || !atr) return { valid: true, reason: 'No EMA data — allowing entry' };
+
+  // Adaptive multiplier based on H4 strength
+  const multiplier =
+    h4?.strength === 'STRONG' ? 2.5 :
+    h4?.strength === 'MEDIUM' ? 1.5 : 0.8;
+
+  const distance   = Math.abs(last - ema21);
+  const maxDist    = atr * multiplier;
+  const nearEMA    = distance <= maxDist;
+
+  // Also valid if at OB/FVG or S/R zone
+  const atOB =
+    (direction === 'LONG'  && smc?.bullishOB && last >= smc.bullishOB.low && last <= smc.bullishOB.high * 1.002) ||
+    (direction === 'SHORT' && smc?.bearishOB && last >= smc.bearishOB.low * 0.998 && last <= smc.bearishOB.high);
+
+  const atFVG =
+    (direction === 'LONG'  && smc?.bullishFVG && last >= smc.bullishFVG.bottom && last <= smc.bullishFVG.top) ||
+    (direction === 'SHORT' && smc?.bearishFVG && last >= smc.bearishFVG.bottom && last <= smc.bearishFVG.top);
+
+  const atSR = !!srZones?.atZone || !!srZones?.nearZone;
+
+  const valid = nearEMA || atOB || atFVG || atSR;
+  const reason = nearEMA ? `Near EMA21 (${(distance/atr).toFixed(1)}x ATR)` : atOB ? 'Inside Order Block' : atFVG ? 'Inside FVG' : atSR ? 'At S/R zone' : `Too far from EMA21 (${(distance/atr).toFixed(1)}x ATR)`;
+
+  return { valid, reason, nearEMA, atOB, atFVG, atSR, multiplier };
+};
+
+// ─── MASTER BRAIN v4 ─────────────────────────────────────────────────────────
 const analyzeStrategies = (prices) => {
   if (!prices || prices.length < 50) return null;
 
@@ -1172,12 +1499,12 @@ const analyzeStrategies = (prices) => {
 
   // ── Step 1: Base indicator scores ──
   const scores = {
-    RSI:        rsi < 30 ? 90 : rsi < 40 ? 70 : rsi > 70 ? 10 : rsi > 60 ? 30 : 50,
-    MACD:       macd.hist > 0 && macd.macd > macd.signal ? 80 : macd.hist < 0 && macd.macd < macd.signal ? 20 : macd.hist > 0 ? 65 : macd.hist < 0 ? 35 : 50,
-    Bollinger:  bb.pct < 15 ? 85 : bb.pct < 30 ? 65 : bb.pct > 85 ? 15 : bb.pct > 70 ? 35 : 50,
+    RSI:         rsi < 30 ? 90 : rsi < 40 ? 70 : rsi > 70 ? 10 : rsi > 60 ? 30 : 50,
+    MACD:        macd.hist > 0 && macd.macd > macd.signal ? 80 : macd.hist < 0 && macd.macd < macd.signal ? 20 : macd.hist > 0 ? 65 : macd.hist < 0 ? 35 : 50,
+    Bollinger:   bb.pct < 15 ? 85 : bb.pct < 30 ? 65 : bb.pct > 85 ? 15 : bb.pct > 70 ? 35 : 50,
     "EMA Cloud": ema9 > ema21 && ema21 > ema50 ? 85 : ema9 < ema21 && ema21 < ema50 ? 15 : ema9 > ema21 ? 65 : ema9 < ema21 ? 35 : 50,
-    Trend:      bullTrend ? 75 : bearTrend ? 25 : 50,
-    Momentum:   (last - prev) > atr * 0.5 ? 75 : (last - prev) < -atr * 0.5 ? 25 : 50,
+    Trend:       bullTrend ? 75 : bearTrend ? 25 : 50,
+    Momentum:    (last - prev) > atr * 0.5 ? 75 : (last - prev) < -atr * 0.5 ? 25 : 50,
   };
 
   Object.keys(scores).forEach(k => { scores[k] = Math.min(95, Math.max(5, Math.round(scores[k]))); });
@@ -1190,120 +1517,107 @@ const analyzeStrategies = (prices) => {
   else if (bearCount >= 3) direction = "SHORT";
 
   // RSI extreme filter
-  if (direction === "LONG"  && rsi > 72) direction = "NEUTRAL";
-  if (direction === "SHORT" && rsi < 28) direction = "NEUTRAL";
+  if (direction === "LONG"  && rsi > 75) direction = "NEUTRAL";
+  if (direction === "SHORT" && rsi < 25) direction = "NEUTRAL";
 
-  // Anti-chase
+  // Anti-chase (only block if ALL 5 candles same direction — less strict)
   if (direction !== "NEUTRAL" && prices.length >= 5) {
     const moves = [];
     for (let i = prices.length - 4; i < prices.length; i++) moves.push(prices[i] - prices[i-1]);
-    if (direction === "LONG"  && moves.every(m => m > 0)) direction = "NEUTRAL";
-    if (direction === "SHORT" && moves.every(m => m < 0)) direction = "NEUTRAL";
+    if (direction === "LONG"  && moves.every(m => m > atr * 0.3)) direction = "NEUTRAL";
+    if (direction === "SHORT" && moves.every(m => m < -atr * 0.3)) direction = "NEUTRAL";
   }
 
-  // ── Step 2: H4 Bias (NEW — catches big moves) ──
-  const h4 = calcH4Bias(prices.h4Candles);
-  const directionBias = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
-
-  if (direction !== "NEUTRAL") {
-    if (!h4.bias) {
-      // Allow WEAK only if strong indicator agreement
-      if (bullCount < 5 && bearCount < 5) direction = "NEUTRAL";
-    } else if (h4.bias !== directionBias) {
-      direction = "NEUTRAL"; // H4 says opposite — skip
-    }
-  }
-
-  // ── Step 3: Daily trend filter (NEW — no counter-trend) ──
-  const d1 = calcDailyTrend(prices.d1Candles);
-  if (direction === "LONG"  && d1.trend === "DOWN") direction = "NEUTRAL";
-  if (direction === "SHORT" && d1.trend === "UP")   direction = "NEUTRAL";
-
-  // ── Step 4: Volatility regime ──
-  const regime = calcVolatilityRegime(prices.candles, atr, last);
-
-  // Don't trade in strong ranging market without key level
-  const instType   = prices.instType || "FOREX";
+  // ── Step 2: Collect all context ──
+  const h4      = calcH4Bias(prices.h4Candles);
+  const d1      = calcDailyTrend(prices.d1Candles);
+  const m15     = calcM15Bias(prices.m15Candles);
+  const regime  = calcVolatilityRegime(prices.candles, atr, last);
+  const instType = prices.instType || "FOREX";
   const volatility = calcVolatilityFilter(atr, last, instType);
-  if (direction !== "NEUTRAL" && !volatility.healthy) direction = "NEUTRAL";
 
-  // ── Step 5: M15 bias ──
-  const m15 = calcM15Bias(prices.m15Candles);
-  if (direction !== "NEUTRAL") {
-    if (!m15.bias) direction = "NEUTRAL";
-    else if (m15.bias !== directionBias) direction = "NEUTRAL";
-  }
+  // Volatility still hard gate — don't trade in dead or explosive markets
+  if (!volatility.healthy) direction = "NEUTRAL";
 
-  // Recalc directionBias after filters
-  const dirBias2 = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
+  const dirBias = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
 
-  // ── Step 6: SMC confirmation ──
-  let smc = null;
-  if (direction !== "NEUTRAL") {
-    if (!prices.candles || prices.candles.length < 30) {
-      direction = "NEUTRAL";
-    } else {
-      smc = getSMCConfirmation(prices.candles, direction);
-      const hasBias  = smc.bias === dirBias2;
-      const hasBOS   = smc.bos   && smc.bos.type   === dirBias2;
-      const hasCHOCH = smc.choch && smc.choch.type === dirBias2;
-      if (!hasBias && !hasBOS && !hasCHOCH) direction = "NEUTRAL";
-    }
-  }
-
-  // ── Step 7: Key levels (NEW) ──
-  const keyLevels = prices.candles ? calcKeyLevels(prices.candles, last) : null;
-
-  // In ranging regime, require price to be at a key level
-  if (direction !== "NEUTRAL" && regime.ranging && keyLevels && !keyLevels.nearKey) {
+  // ── Step 3: H4 must not contradict ──
+  // Only hard block if H4 is STRONG in opposite direction
+  if (direction !== "NEUTRAL" && h4.bias && h4.bias !== dirBias && h4.strength === "STRONG") {
     direction = "NEUTRAL";
   }
 
-  // Key level bonus: if price is AT a support/resistance, boost confidence later
-  const atKeyLevel = keyLevels?.atSupport || keyLevels?.atResistance || keyLevels?.nearSupport || keyLevels?.nearResistance;
+  // D1 soft filter — only block if D1 confirmed opposite trend
+  if (direction === "LONG"  && d1.trend === "DOWN" && d1.reason?.includes("confirmed")) direction = "NEUTRAL";
+  if (direction === "SHORT" && d1.trend === "UP"   && d1.reason?.includes("confirmed")) direction = "NEUTRAL";
 
-  const sweep  = prices.candles ? calcLiquiditySweep(prices.candles) : { swept: false };
-  const volume = prices.candles ? calcVolumeConfirmation(prices.candles, direction) : { confirmed: false };
+  const dirBias2 = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
 
-  // ── Step 8: Pullback gate ──
+  // ── Step 4: SMC (soft — scores points, not hard gate) ──
+  let smc = null;
+  if (direction !== "NEUTRAL" && prices.candles && prices.candles.length >= 30) {
+    smc = getSMCConfirmation(prices.candles, direction);
+  }
+
+  // ── Step 5: Pattern detection ──
+  const patterns = prices.candles ? detectPatterns(prices.candles) : null;
+
+  // Hard pattern conflict: if strong reversal pattern against direction
+  if (direction === "LONG"  && patterns?.bias === "BEARISH" && patterns.bearPatterns >= 2) direction = "NEUTRAL";
+  if (direction === "SHORT" && patterns?.bias === "BULLISH" && patterns.bullPatterns >= 2) direction = "NEUTRAL";
+
+  // ── Step 6: S/R zones ──
+  const srZones   = prices.candles ? calcSRZones(prices.candles, last) : null;
+  const sweep     = prices.candles ? calcLiquiditySweep(prices.candles) : { swept: false };
+  const volume    = prices.candles ? calcVolumeConfirmation(prices.candles, direction) : { confirmed: false };
+  const divergence = prices.candles ? calcDivergence(prices.candles, rsi) : null;
+  const keyLevels = prices.candles ? calcKeyLevels(prices.candles, last) : null;
+
+  // ── Step 7: Smart confluence scoring ──
+  const confluence = direction !== "NEUTRAL" ? calcSmartConfluence(direction, {
+    m15, h4, d1, smc, sweep, volume, rsi, atr, closes: prices,
+    patterns, srZones, regime, divergence, bb, macd
+  }) : { score: 0, why: [], maxScore: 28 };
+
+  // Need score ≥ 8 out of 28 (much more achievable than before)
+  if (direction !== "NEUTRAL" && confluence.score < 8) direction = "NEUTRAL";
+
+  // ── Step 8: Adaptive entry location ──
+  let entryLocation = { valid: true };
+  if (direction !== "NEUTRAL") {
+    entryLocation = isGoodEntryLocation(direction, { last, ema21, atr, smc, h4, srZones });
+    if (!entryLocation.valid) direction = "NEUTRAL";
+  }
+
+  // ── Step 9: Pullback — relaxed ──
   let pullbackOk = false;
   if (direction !== "NEUTRAL" && prices.candles) {
-    pullbackOk = hasPullback(prices.candles, direction);
-    if (!pullbackOk) direction = "NEUTRAL";
+    // Try 15% first, then 30%
+    const recent = prices.candles.slice(-15);
+    if (direction === "LONG") {
+      const swingHigh = Math.max(...recent.map(c => c.high));
+      const swingLow  = Math.min(...recent.map(c => c.low));
+      const range     = swingHigh - swingLow;
+      if (range > 0) {
+        const retrace = (swingHigh - last) / range;
+        pullbackOk = retrace >= 0.15; // relaxed from 0.30
+      }
+    } else {
+      const swingHigh = Math.max(...recent.map(c => c.high));
+      const swingLow  = Math.min(...recent.map(c => c.low));
+      const range     = swingHigh - swingLow;
+      if (range > 0) {
+        const retrace = (last - swingLow) / range;
+        pullbackOk = retrace >= 0.15;
+      }
+    }
+    // Only block pullback if H4 is weak AND no pattern
+    if (!pullbackOk && h4.strength !== "STRONG" && !patterns?.patterns?.length) {
+      direction = "NEUTRAL";
+    }
   }
 
-  // ── Step 9: Entry location gate ──
-  let entryLocation = { valid: false };
-  if (direction === "LONG") {
-    entryLocation = isValidLongLocation({ last, ema21, atr, smc });
-    if (!entryLocation.valid) direction = "NEUTRAL";
-  }
-  if (direction === "SHORT") {
-    entryLocation = isValidShortLocation({ last, ema21, atr, smc });
-    if (!entryLocation.valid) direction = "NEUTRAL";
-  }
-
-  // Late-entry distance filter
-  if (direction !== "NEUTRAL" && Math.abs(last - ema21) > atr * 1.2) direction = "NEUTRAL";
-
-  // ── Step 10: Confluence score (NEW: includes H4 + D1 + key levels) ──
-  const confluence = calcConfluenceScore(direction, m15.bias, smc, sweep, volume, rsi, atr, prices);
-
-  // Add H4 bonus to confluence
-  let confluenceBonus = 0;
-  if (h4.bias === dirBias2)  confluenceBonus += 2;
-  if (h4.strength === "STRONG") confluenceBonus += 1;
-  if (d1.trend === "UP"   && direction === "LONG")  confluenceBonus += 1;
-  if (d1.trend === "DOWN" && direction === "SHORT") confluenceBonus += 1;
-  if (atKeyLevel) confluenceBonus += 2;
-
-  const totalScore = confluence.score + confluenceBonus;
-
-  // Gate: require 6 base OR 5 base + H4 strong
-  const passesGate = totalScore >= 6 || (confluence.score >= 5 && h4.strength === "STRONG");
-  if (direction !== "NEUTRAL" && !passesGate) direction = "NEUTRAL";
-
-  // ── Step 11: SL/TP with structural base ──
+  // ── Step 10: SL/TP ──
   const levels = direction !== "NEUTRAL"
     ? calcAdvancedLevels(direction, last, atr, prices.candles, smc)
     : null;
@@ -1313,22 +1627,18 @@ const analyzeStrategies = (prices) => {
   const slDistance = stopLoss   != null ? Math.abs(last - stopLoss)   : null;
   const tpDistance = takeProfit != null ? Math.abs(last - takeProfit) : null;
 
-  // Multi-TP levels (NEW — lets winners run like SignalXpert)
   const multiTP = direction !== "NEUTRAL" && stopLoss
     ? calcMultiTP(direction, last, stopLoss, atr, regime)
     : null;
 
-  // RR gate
+  // RR gate — relaxed to 1.5
   let rr = 0;
   if (direction !== "NEUTRAL" && slDistance && tpDistance) {
     rr = tpDistance / slDistance;
-    if (rr < 1.8) direction = "NEUTRAL";
+    if (rr < 1.5) direction = "NEUTRAL";
   }
 
-  // ── Step 12: Divergence check (NEW) ──
-  const divergence = prices.candles ? calcDivergence(prices.candles, rsi) : null;
-
-  // Kill bearish divergence on LONG, bullish on SHORT
+  // Divergence hard block
   if (direction === "LONG"  && divergence?.bearish) direction = "NEUTRAL";
   if (direction === "SHORT" && divergence?.bullish) direction = "NEUTRAL";
 
@@ -1336,26 +1646,26 @@ const analyzeStrategies = (prices) => {
   const finalBias  = direction === "LONG" ? "BULLISH" : direction === "SHORT" ? "BEARISH" : null;
   const agreeScore = direction === "LONG" ? bullCount : direction === "SHORT" ? bearCount : 0;
 
-  const m15Boost      = finalBias && m15.bias     === finalBias ? 5 : 0;
-  const h4Boost       = finalBias && h4.bias      === finalBias ? (h4.strength === "STRONG" ? 8 : 5) : 0;
-  const d1Boost       = (direction === "LONG" && d1.trend === "UP") || (direction === "SHORT" && d1.trend === "DOWN") ? 5 : 0;
-  const structBoost   = smc && (smc.bos || smc.choch) ? 5 : 0;
-  const locationBoost = entryLocation.valid ? 6 : 0;
-  const pullbackBoost = pullbackOk ? 5 : 0;
+  const h4Boost       = finalBias && h4.bias === finalBias ? (h4.strength === "STRONG" ? 10 : 6) : 0;
+  const d1Boost       = (direction === "LONG" && d1.trend === "UP") || (direction === "SHORT" && d1.trend === "DOWN") ? 6 : 0;
+  const m15Boost      = finalBias && m15.bias === finalBias ? 5 : 0;
+  const patternBoost  = patterns?.bias === finalBias ? 5 : 0;
+  const srBoost       = entryLocation.atSR ? 5 : entryLocation.nearEMA ? 3 : 0;
+  const structBoost   = smc && (smc.bos || smc.choch) ? 4 : 0;
   const sweepBoost    = finalBias && sweep.swept && sweep.direction === finalBias ? 4 : 0;
-  const keyLvlBoost   = atKeyLevel ? 4 : 0;
   const regimeBoost   = regime.trending ? 3 : 0;
 
   const confidence = direction === "NEUTRAL" ? 50 : Math.min(95, Math.max(
-    50,
+    55,
     Math.round(
-      40 +
-      agreeScore * 4 +
-      m15Boost + h4Boost + d1Boost +
-      structBoost + locationBoost + pullbackBoost +
-      sweepBoost + keyLvlBoost + regimeBoost
+      40 + agreeScore * 4 +
+      h4Boost + d1Boost + m15Boost +
+      patternBoost + srBoost + structBoost +
+      sweepBoost + regimeBoost
     )
   ));
+
+  const activePattern = patterns?.patterns?.[0] || null;
 
   return {
     scores, direction, confidence,
@@ -1365,27 +1675,33 @@ const analyzeStrategies = (prices) => {
     bullTrend, bearTrend,
     smc, m15, h4, d1,
     sweep, volume, divergence,
-    confluence: { ...confluence, score: totalScore, bonusScore: confluenceBonus },
-    volatility, regime, keyLevels,
+    confluence,
+    volatility, regime,
+    keyLevels, srZones, patterns,
     levels, multiTP,
     pullbackOk, entryLocation,
-    reason: direction === "NEUTRAL" ? "No trade setup meets all filters" : `${h4.strength || ""} H4 ${h4.bias || ""} + ${d1.trend || ""} D1 trend confirmed`,
+    activePattern,
+    reason: direction === "NEUTRAL"
+      ? "No trade setup meets all filters"
+      : `${h4.strength || ""} H4 ${h4.bias || ""} + ${activePattern ? activePattern.type : d1.trend + " D1"} confirmed`,
     debug: {
-      longScore:    bullCount,
-      shortScore:   bearCount,
-      h4Bias:       h4.bias,
-      h4Strength:   h4.strength,
-      d1Trend:      d1.trend,
-      regime:       regime.regime,
-      adx:          regime.adx,
-      atKeyLevel:   !!atKeyLevel,
-      inKillZone:   (() => { const s = getSessionInfo(); return s.isLondon || s.isNY; })(),
-      rawDirection: bullCount >= 4 ? "LONG" : bearCount >= 4 ? "SHORT" : "NEUTRAL",
-      atrPct:       atr && last ? (atr / last) * 100 : 0,
-      bbWidth:      bb ? bb.std : 0,
-      confluenceTotal: totalScore,
-      longReasons:  Object.entries(scores).filter(([,v]) => v >= 60).map(([k,v]) => `${k}: ${v}`),
-      shortReasons: Object.entries(scores).filter(([,v]) => v <= 40).map(([k,v]) => `${k}: ${v}`),
+      longScore:       bullCount,
+      shortScore:      bearCount,
+      h4Bias:          h4.bias,
+      h4Strength:      h4.strength,
+      d1Trend:         d1.trend,
+      regime:          regime.regime,
+      adx:             regime.adx,
+      confluenceScore: confluence.score,
+      confluenceWhy:   confluence.why,
+      patterns:        patterns?.patterns?.map(p => p.type) || [],
+      atSRZone:        !!entryLocation.atSR,
+      inKillZone:      (() => { const s = getSessionInfo(); return s.isLondon || s.isNY; })(),
+      rawDirection:    bullCount >= 3 ? "LONG" : bearCount >= 3 ? "SHORT" : "NEUTRAL",
+      atrPct:          atr && last ? (atr / last) * 100 : 0,
+      bbWidth:         bb ? bb.std : 0,
+      longReasons:     Object.entries(scores).filter(([,v]) => v >= 60).map(([k,v]) => `${k}: ${v}`),
+      shortReasons:    Object.entries(scores).filter(([,v]) => v <= 40).map(([k,v]) => `${k}: ${v}`),
     },
   };
 };
