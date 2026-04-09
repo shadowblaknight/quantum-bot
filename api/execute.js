@@ -149,7 +149,7 @@ module.exports = async (req, res) => {
     // ── Step 2: Spread check ──
     var mid = (bid + ask) / 2;
     var spreadPct = (spread / mid) * 100;
-    var maxSpreadPct = symbol === 'BTCUSD' ? 0.15 : symbol === 'XAUUSD.s' ? 0.05 : 0.003;
+    var maxSpreadPct = symbol === 'BTCUSD' ? 0.15 : symbol === 'XAUUSD.s' ? 0.05 : 0.025;
     if (spreadPct > maxSpreadPct) {
       auditLog('warn', 'SPREAD_BLOCKED', { symbol, spreadPct, maxSpreadPct });
       return res.status(400).json({
