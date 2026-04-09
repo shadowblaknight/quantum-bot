@@ -1804,6 +1804,140 @@ const getGradeLabel = (grade) => ({
   C: "C — Acceptable",
   D: "D — Skip",
 }[grade] || "—");
+// ─── SELF-LEARNING ENGINE ─────────────────────────────────────────────────────
+// Add this to App.jsx — the bot's memory and intelligence system
+// Gets smarter after every single trade
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── State (add with other useState declarations) ──
+// const [learnedStats, setLearnedStats] = useState({});
+
+// ── Fetch learned stats from Redis ──
+const fetchLearnedStats = useCallback(async () => {
+  try {
+    const r = await fetch('/api/trades?learn=true');
+    if (r.ok) {
+      const d = await r.json();
+      setLearnedStats(d.stats || {});
+    }
+  } catch (e) {}
+}, []);
+
+// ── Load on mount + refresh every 5 minutes ──
+useEffect(() => {
+  fetchLearnedStats();
+  const interval = setInterval(fetchLearnedStats, 300000);
+  return () => clearInterval(interval);
+}, [fetchLearnedStats]);
+
+// ── Build setup fingerprint (matches learn.js) ──
+const buildFingerprint = (inst, sig, session) => [
+  inst.id,
+  sig.direction,
+  sig.h4?.strength || 'UNKNOWN',
+  sig.d1?.trend    || 'UNKNOWN',
+  sig.entryCandle?.type || 'NONE',
+  sig.regime?.regime   || 'UNKNOWN',
+  session || 'UNKNOWN',
+].join(':');
+
+// ── Get historical win rate for this exact setup ──
+const getSetupWinRate = (fingerprint, learnedStats) => {
+  const data = learnedStats[fingerprint];
+  if (!data || data.total < 3) return null; // not enough data yet
+  return data.winRate; // 0-100
+};
+
+// ── Adjust risk based on learning ──
+// If we've seen this setup before and it wins >70% → increase size
+// If it wins <40% → reduce size or skip
+const getLearnedRiskMultiplier = (fingerprint, learnedStats) => {
+  const winRate = getSetupWinRate(fingerprint, learnedStats);
+  if (winRate === null) return 1.0; // no data — use normal size
+
+  if (winRate >= 75) return 1.5;   // proven winner → 50% more size
+  if (winRate >= 60) return 1.2;   // above average → 20% more
+  if (winRate >= 45) return 1.0;   // neutral
+  if (winRate >= 30) return 0.5;   // below average → half size
+  return 0;                         // proven loser → skip entirely
+};
+
+// ── Record trade result when position closes ──
+// Call this in the trade management / position monitoring logic
+const recordTradeResult = useCallback(async (position, sig, session) => {
+  if (!position || !sig) return;
+
+  const pips = position.profit || 0;
+  const won  = pips > 0;
+
+  // Calculate RR from actual result
+  const slDist = sig.slDistance || 1;
+  const rr     = Math.abs(pips) / slDist;
+
+  const payload = {
+    instrument:      position.symbol?.replace('.s', '').replace('.S', '') || 'UNKNOWN',
+    direction:       position.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT',
+    won,
+    pips,
+    rr:              parseFloat(rr.toFixed(2)),
+    h4Strength:      sig.h4?.strength,
+    h4Bias:          sig.h4?.bias,
+    d1Trend:         sig.d1?.trend,
+    m15Bias:         sig.m15?.bias,
+    patterns:        sig.patterns?.patterns?.map(p => p.type) || [],
+    entryCandle:     sig.entryCandle?.type,
+    regime:          sig.regime?.regime,
+    session,
+    confluenceScore: sig.confluence?.score,
+    grade:           getSetupGrade(sig),
+    rsi:             sig.rsi,
+  };
+
+  try {
+    await fetch('/api/trades?learn=true', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+
+    addLog(
+      `🧠 Learned: ${payload.instrument} ${won ? 'WIN' : 'LOSS'} ${pips > 0 ? '+' : ''}${pips.toFixed(2)} | ${payload.entryCandle || 'no candle'} | ${payload.h4Strength} H4`,
+      won ? 'success' : 'warn'
+    );
+
+    // Refresh stats
+    fetchLearnedStats();
+  } catch (e) {}
+}, [addLog, fetchLearnedStats]);
+
+// ── Watch for newly closed positions and record them ──
+const prevPositionsRef = useRef([]);
+useEffect(() => {
+  const prev    = prevPositionsRef.current;
+  const current = openPositions;
+
+  // Find positions that were open before but are now closed
+  const justClosed = prev.filter(p =>
+    !current.find(c => (c.id || c.positionId) === (p.id || p.positionId))
+  );
+
+  justClosed.forEach(closedPos => {
+    // Find the signal that generated this trade
+    const raw    = (closedPos.symbol || '').toUpperCase();
+    const instId =
+      raw.startsWith('BTCUSD') ? 'BTCUSDT' :
+      raw.startsWith('XAUUSD') ? 'XAUUSD'  :
+      raw.startsWith('GBPUSD') ? 'GBPUSD'  : null;
+
+    const sig     = instId ? signals[instId] : null;
+    const session = getSessionInfo().session;
+
+    if (sig) recordTradeResult(closedPos, sig, session);
+  });
+
+  prevPositionsRef.current = current;
+}, [openPositions, signals, recordTradeResult]);
+
 // ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
 
 // Daily loss limit: blocks trading if today P&L drops below -3% of balance
@@ -1886,6 +2020,7 @@ export default function TradingBotLive() {
   const [aiAnalysis,     setAiAnalysis]      = useState("");
   const [calendarEvents, setCalendarEvents]  = useState([]);
   const [accountBalance, setAccountBalance]  = useState(null);
+  const [learnedStats, setLearnedStats]      = useState({});
   const lastTradeRef = useRef({});
   const logRef       = useRef(null);
 
@@ -2245,6 +2380,26 @@ useEffect(() => {
       const suggestedVolume = (gradeRiskPct > 0 && slDist > 0)
         ? Math.max(0.01, Math.round((accountBalance * gradeRiskPct / slDist) / 0.01) * 0.01)
         : 0;
+        const sessionName  = getSessionInfo().session;
+  const fingerprint  = buildFingerprint(inst, sig, sessionName);
+  const multiplier   = getLearnedRiskMultiplier(fingerprint, learnedStats);
+  const winRate      = getSetupWinRate(fingerprint, learnedStats);
+
+  // Skip if historically losing setup
+  if (multiplier === 0) {
+    if (shouldLogBlock(`${inst.id}-learned-skip`, 300000))
+      addLog(`🧠 Skipping ${inst.label}: historically loses (${winRate}% win rate on this setup)`, "warn");
+    return;
+  }
+
+  // Adjust volume by learned multiplier
+  const finalVolume = Math.max(0.01,
+    Math.round((suggestedVolume * multiplier) / 0.01) * 0.01
+  );
+
+  if (winRate !== null) {
+    addLog(`🧠 ${inst.label}: ${winRate}% win rate on this setup → ${multiplier}x size`, "info");
+  }
       if (!Number.isFinite(suggestedVolume) || suggestedVolume <= 0) {
         if (shouldLogBlock(`${inst.id}-risk-engine`)) addLog(`Trade blocked: risk engine paused (${lossStreak} consecutive losses)`, "warn");
         return;
@@ -2262,7 +2417,7 @@ useEffect(() => {
           entry:      prices[inst.id],
           stopLoss:   sig.stopLoss,
           takeProfit: sig.takeProfit,
-          volume:     suggestedVolume,
+          volume:     finalVolume,
         })
       })
       .then(r => r.json())
@@ -2404,7 +2559,7 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
         {/* MAIN */}
         <div style={styles.main}>
           <div style={styles.tabs}>
-            {["signals", "live trades", "debug", "ai analysis", "news", "calendar"].map(tab => (
+            {["signals", "live trades", "debug", "ai analysis", "news", "calendar", "learning"].map(tab => (
               <div key={tab} style={styles.tab(activeTab === tab)} onClick={() => setActiveTab(tab)}>{tab.toUpperCase()}</div>
             ))}
           </div>
@@ -2840,6 +2995,118 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                 })}
               </div>
             )}
+            {/* ── LEARNING TAB — add "learning" to the tabs array ── */}
+{/* In the tabs array find: ["signals", "live trades", "debug", "ai analysis", "news", "calendar"] */}
+{/* Change to: ["signals", "live trades", "debug", "ai analysis", "news", "calendar", "learning"] */}
+
+{/* ── LEARNING TAB CONTENT ── */}
+{activeTab === "learning" && (
+  <div>
+    <div style={styles.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+        <div>
+          <div style={{ color: "#58a6ff", fontWeight: "900", fontSize: "16px" }}>🧠 QUANTUM BRAIN</div>
+          <div style={{ color: "#8b949e", fontSize: "10px", marginTop: "2px" }}>
+            Self-learning from every trade — gets smarter automatically
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ color: "#8b949e", fontSize: "10px" }}>PATTERNS LEARNED</div>
+          <div style={{ fontSize: "24px", fontWeight: "700", color: "#3fb950" }}>
+            {Object.keys(learnedStats).length}
+          </div>
+        </div>
+      </div>
+
+      {/* Stats overview */}
+      {Object.keys(learnedStats).length === 0 ? (
+        <div style={{ color: "#8b949e", textAlign: "center", padding: "40px" }}>
+          <div style={{ fontSize: "40px", marginBottom: "12px" }}>🧠</div>
+          <div style={{ fontSize: "14px", marginBottom: "8px" }}>No patterns learned yet</div>
+          <div style={{ fontSize: "11px" }}>The bot needs trades to learn from. Each closed trade teaches it something new.</div>
+        </div>
+      ) : (
+        <div>
+          {/* Sort by win rate — best setups first */}
+          {Object.entries(learnedStats)
+            .filter(([, d]) => d.total >= 2)
+            .sort((a, b) => (b[1].winRate || 0) - (a[1].winRate || 0))
+            .map(([fingerprint, data]) => {
+              const parts   = fingerprint.split(':');
+              const inst    = parts[0];
+              const dir     = parts[1];
+              const h4      = parts[2];
+              const d1      = parts[3];
+              const candle  = parts[4];
+              const regime  = parts[5];
+              const session = parts[6];
+              const wr      = data.winRate || 0;
+              const color   = wr >= 70 ? "#3fb950" : wr >= 50 ? "#e3b341" : "#f85149";
+              const label   = wr >= 70 ? "PROVEN WINNER" : wr >= 50 ? "MIXED" : "AVOID";
+
+              return (
+                <div key={fingerprint} style={{ background: "#161b22", border: `1px solid ${color}30`, borderRadius: "8px", padding: "12px", marginBottom: "8px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                      <span style={{ fontWeight: "700", color: inst === "GBPUSD" ? "#00D4AA" : inst === "BTCUSDT" ? "#F7931A" : "#FFD700" }}>{inst}</span>
+                      <span style={{ color: dir === "LONG" ? "#3fb950" : "#f85149", fontWeight: "700" }}>{dir}</span>
+                      <span style={{ background: "#21262d", padding: "2px 6px", borderRadius: "4px", fontSize: "10px" }}>{h4} H4</span>
+                      <span style={{ background: "#21262d", padding: "2px 6px", borderRadius: "4px", fontSize: "10px" }}>D1 {d1}</span>
+                      {candle !== "NONE" && <span style={{ background: "rgba(88,166,255,0.1)", color: "#58a6ff", padding: "2px 6px", borderRadius: "4px", fontSize: "10px" }}>{candle?.replace(/_/g, " ")}</span>}
+                      <span style={{ background: "#21262d", padding: "2px 6px", borderRadius: "4px", fontSize: "10px" }}>{session}</span>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: "20px", fontWeight: "900", color }}>{wr}%</div>
+                      <div style={{ fontSize: "9px", color }}>{label}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "16px", fontSize: "10px", color: "#8b949e" }}>
+                    <span>✅ {data.wins} wins</span>
+                    <span>❌ {data.losses} losses</span>
+                    <span>📊 {data.total} trades</span>
+                    {data.avgPips && <span style={{ color: parseFloat(data.avgPips) > 0 ? "#3fb950" : "#f85149" }}>avg {data.avgPips > 0 ? "+" : ""}{data.avgPips} pips</span>}
+                    {data.bestRR  && <span>best RR: {data.bestRR?.toFixed(1)}</span>}
+                  </div>
+                  {/* Win rate bar */}
+                  <div style={{ marginTop: "8px", background: "#21262d", borderRadius: "3px", height: "4px" }}>
+                    <div style={{ height: "100%", borderRadius: "3px", width: `${wr}%`, background: color, transition: "width 1s" }} />
+                  </div>
+                </div>
+              );
+            })
+          }
+
+          {/* Setups with < 2 trades */}
+          {Object.entries(learnedStats).filter(([, d]) => d.total < 2).length > 0 && (
+            <div style={{ color: "#8b949e", fontSize: "10px", marginTop: "12px", textAlign: "center" }}>
+              + {Object.entries(learnedStats).filter(([, d]) => d.total < 2).length} setups still collecting data (need 3+ trades)
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+
+    {/* Learning explanation card */}
+    <div style={styles.card}>
+      <div style={{ color: "#8b949e", fontSize: "10px", marginBottom: "12px" }}>HOW THE BOT LEARNS</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+        {[
+          ["🏆 Win Rate ≥ 75%", "Increases position size by 50%", "#3fb950"],
+          ["✅ Win Rate ≥ 60%", "Increases position size by 20%", "#58a6ff"],
+          ["➡️ Win Rate 45-60%", "Normal position size", "#e3b341"],
+          ["⚠️ Win Rate 30-45%", "Reduces position size by 50%", "#e3b341"],
+          ["❌ Win Rate < 30%", "Skips the setup entirely", "#f85149"],
+          ["📊 < 3 trades", "Still learning — normal size", "#8b949e"],
+        ].map(([label, desc, color]) => (
+          <div key={label} style={{ background: "#161b22", padding: "8px", borderRadius: "6px" }}>
+            <div style={{ fontWeight: "700", color, fontSize: "11px", marginBottom: "3px" }}>{label}</div>
+            <div style={{ color: "#8b949e", fontSize: "10px" }}>{desc}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+)}
           </div>
         </div>
 
