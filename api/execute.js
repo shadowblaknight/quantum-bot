@@ -165,7 +165,7 @@ module.exports = async (req, res) => {
 
   // ── Step 3: Validate SL/TP against live executable price ──
   // Symbol-specific tolerance based on typical tick sizes
-  var tickTolerance = symbol === 'BTCUSD' ? 50 : symbol === 'XAUUSD.s' ? 0.5 : 0.0003;
+  var tickTolerance = symbol === 'BTCUSD' ? 50 : symbol === 'XAUUSD.s' ? 0.5 : 0.00005;
   var fmtSL = formatPrice(symbol, sl);
   var fmtTP = formatPrice(symbol, tp);
   var fmtEN = formatPrice(symbol, execPrice);
