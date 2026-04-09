@@ -1705,6 +1705,105 @@ const analyzeStrategies = (prices) => {
     },
   };
 };
+// ─── SETUP GRADER ─────────────────────────────────────────────────────────────
+// Replaces confidence threshold with intelligent setup classification
+// Grade A = dream setup, Grade B = solid, Grade C = acceptable, Grade D = skip
+
+const getSetupGrade = (sig) => {
+  if (!sig || sig.direction === "NEUTRAL") return "D";
+
+  const dirBias   = sig.direction === "LONG" ? "BULLISH" : "BEARISH";
+  const h4Strong  = sig.h4?.strength === "STRONG"  && sig.h4?.bias === dirBias;
+  const h4Medium  = sig.h4?.strength === "MEDIUM"  && sig.h4?.bias === dirBias;
+  const h4Weak    = sig.h4?.strength === "WEAK"    && sig.h4?.bias === dirBias;
+  const d1Conf    = sig.d1?.reason?.includes("confirmed") &&
+                    ((sig.direction === "LONG"  && sig.d1?.trend === "UP") ||
+                     (sig.direction === "SHORT" && sig.d1?.trend === "DOWN"));
+  const d1Aligned = (sig.direction === "LONG"  && sig.d1?.trend === "UP") ||
+                    (sig.direction === "SHORT" && sig.d1?.trend === "DOWN");
+
+  // Pattern: broken neckline or confirmed reversal
+  const patternBroken = sig.patterns?.patterns?.some(p =>
+    p.bias === dirBias && p.broken === true
+  );
+  const patternForming = sig.patterns?.patterns?.some(p =>
+    p.bias === dirBias
+  );
+
+  // S/R zone alignment
+  const atSR   = sig.entryLocation?.atSR   === true;
+  const nearSR = sig.entryLocation?.nearEMA === true || !!sig.srZones?.nearZone;
+
+  // Other factors
+  const sweep  = sig.sweep?.swept && sig.sweep?.direction === dirBias;
+  const m15Ok  = sig.m15?.bias === dirBias;
+  const smcOk  = sig.smc?.bias === dirBias || sig.smc?.bos?.type === dirBias;
+  const choch  = sig.smc?.choch?.type === dirBias;
+  const rrGood = sig.rr >= 2.0;
+  const rrOk   = sig.rr >= 1.5;
+
+  // ── Grade A: Dream setup — execute with 2% risk ──
+  // All major factors align
+  if (h4Strong && d1Conf && patternBroken)           return "A"; // H&S/DT/DB broken + confirmed trend
+  if (h4Strong && d1Conf && atSR && smcOk)           return "A"; // Full confluence at key level
+  if (h4Strong && d1Conf && sweep && smcOk)          return "A"; // Liquidity sweep + structure
+  if (h4Strong && patternBroken && atSR)             return "A"; // Pattern at S/R + strong H4
+  if (choch && patternBroken && h4Strong)            return "A"; // CHoCH + pattern = reversal confirmed
+
+  // ── Grade B: Solid setup — execute with 1.5% risk ──
+  if (h4Strong && d1Aligned && patternForming)       return "B"; // Strong trend + forming pattern
+  if (h4Strong && patternBroken)                     return "B"; // Pattern broken + H4 strong
+  if (h4Medium && d1Conf && m15Ok && atSR)           return "B"; // Medium trend fully aligned at S/R
+  if (h4Medium && d1Conf && patternBroken)           return "B"; // Pattern confirmed in trend
+  if (patternBroken && atSR && m15Ok)                return "B"; // Pattern + S/R + M15
+  if (h4Strong && choch && m15Ok)                    return "B"; // CHoCH + strong H4 + M15
+  if (h4Strong && sweep && atSR)                     return "B"; // Sweep + S/R + strong H4
+  if (h4Strong && d1Aligned && smcOk && rrGood)      return "B"; // Good RR + trend + structure
+
+  // ── Grade C: Acceptable setup — execute with 1% risk ──
+  if (h4Strong && m15Ok && rrOk)                     return "C"; // Strong H4 + M15 + decent RR
+  if (h4Medium && patternBroken)                     return "C"; // Pattern in medium trend
+  if (h4Medium && atSR && m15Ok)                     return "C"; // Medium trend at S/R
+  if (sweep && patternForming && d1Aligned)          return "C"; // Sweep + pattern forming in trend
+  if (h4Medium && d1Aligned && smcOk && nearSR)      return "C"; // Aligned trend + SMC + near S/R
+  if (h4Weak   && d1Conf && patternBroken && atSR)   return "C"; // Even weak H4 if everything else perfect
+  if (h4Strong && rrGood && nearSR)                  return "C"; // Strong H4 + good RR + near S/R
+
+  // ── Grade D: Skip ──
+  return "D";
+};
+
+// ─── RISK BY GRADE ────────────────────────────────────────────────────────────
+const getRiskByGrade = (grade, lossStreak = 0) => {
+  const base = {
+    A: 0.020,  // 2% risk — dream setup
+    B: 0.015,  // 1.5% risk — solid
+    C: 0.010,  // 1% risk — acceptable
+    D: 0,      // skip
+  }[grade] || 0;
+
+  // Reduce risk after losses
+  if (lossStreak >= 3) return 0;
+  if (lossStreak >= 2) return base * 0.5;
+  if (lossStreak >= 1) return base * 0.75;
+
+  return base;
+};
+
+// ─── GRADE DISPLAY ────────────────────────────────────────────────────────────
+const getGradeColor = (grade) => ({
+  A: "#3fb950",   // green
+  B: "#58a6ff",   // blue
+  C: "#e3b341",   // yellow
+  D: "#f85149",   // red
+}[grade] || "#8b949e");
+
+const getGradeLabel = (grade) => ({
+  A: "A — Dream Setup",
+  B: "B — Solid Setup",
+  C: "C — Acceptable",
+  D: "D — Skip",
+}[grade] || "—");
 // ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
 
 // Daily loss limit: blocks trading if today P&L drops below -3% of balance
@@ -2083,7 +2182,11 @@ useEffect(() => {
   useEffect(() => {
     INSTRUMENTS.forEach(inst => {
       const sig = signals[inst.id];
-      if (!sig || sig.direction === "NEUTRAL" || sig.confidence < 85) return;
+       const grade = getSetupGrade(sig);
+       if (grade === "D") return;
+       if (shouldLogBlock(`${inst.id}-grade-${sig.direction}`, 120000)) {
+        addLog(`${inst.label} Grade ${grade}: ${getGradeLabel(grade)} | Conf: ${sig.confidence}%`, "signal");
+      }
 
       const nowTs   = Date.now();
       const eventTs = eventAlert?.date ? new Date(eventAlert.date).getTime() : 0;
@@ -2137,15 +2240,11 @@ useEffect(() => {
         return;
       }
 
-      const suggestedVolume = calculatePositionSize({
-        balance:         accountBalance,
-        entry:           prices[inst.id],
-        stopLoss:        sig.stopLoss,
-        confidence:      sig.confidence || 0,
-        confluenceScore: sig.confluence?.score || 0,
-        lossStreak
-      });
-
+      const gradeRiskPct = getRiskByGrade(grade, lossStreak);
+      const slDist = Math.abs((prices[inst.id] || 0) - (sig.stopLoss || 0));
+      const suggestedVolume = (gradeRiskPct > 0 && slDist > 0)
+        ? Math.max(0.01, Math.round((accountBalance * gradeRiskPct / slDist) / 0.01) * 0.01)
+        : 0;
       if (!Number.isFinite(suggestedVolume) || suggestedVolume <= 0) {
         if (shouldLogBlock(`${inst.id}-risk-engine`)) addLog(`Trade blocked: risk engine paused (${lossStreak} consecutive losses)`, "warn");
         return;
@@ -2322,6 +2421,28 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                     <div style={{ textAlign: "right" }}><div style={{ color: "#8b949e", fontSize: "10px" }}>RSI</div><div style={{ fontSize: "20px", fontWeight: "700", color: (sig.rsi || 50) < 30 ? "#3fb950" : (sig.rsi || 50) > 70 ? "#f85149" : "#e0e0e0" }}>{sig.rsi?.toFixed(1) || "—"}</div></div>
                     <div style={{ textAlign: "right" }}><div style={{ color: "#8b949e", fontSize: "10px" }}>KILL ZONE</div><div style={{ fontSize: "14px", fontWeight: "700", color: sig.debug?.inKillZone ? "#3fb950" : "#f85149" }}>{sig.debug?.inKillZone ? "ACTIVE" : "INACTIVE"}</div></div>
                   </div>
+                     {/* SETUP GRADE — add this inside the main signal card, right after the direction/confidence row */}
+                      {sig.direction && sig.direction !== "NEUTRAL" && (() => {
+                      const grade = getSetupGrade(sig);
+                      const color = getGradeColor(grade);
+                      const label = getGradeLabel(grade);
+                      const riskPct = { A: "2.0%", B: "1.5%", C: "1.0%", D: "Skip" }[grade];
+                     return (
+                     <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px", background: `${color}18`, border: `1px solid ${color}40`, borderRadius: "6px", marginBottom: "12px" }}>
+                     <div style={{ fontSize: "32px", fontWeight: "900", color }}>{grade}</div>
+                    <div>
+                     <div style={{ fontWeight: "700", color, fontSize: "13px" }}>{label}</div>
+                     <div style={{ color: "#8b949e", fontSize: "10px", marginTop: "2px" }}>Risk: {riskPct} of balance</div>
+                    </div>
+                     <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                     <div style={{ color: "#8b949e", fontSize: "9px" }}>WILL EXECUTE</div>
+                     <div style={{ fontWeight: "700", fontSize: "13px", color: grade !== "D" ? "#3fb950" : "#f85149" }}>
+                      {grade !== "D" ? "✅ YES" : "❌ NO"}
+                  </div>
+               </div>
+            </div>
+            );
+            })()}
                   {sig.direction && sig.direction !== "NEUTRAL" && (
                     <div style={{ display: "flex", gap: "16px", padding: "10px", background: "#161b22", borderRadius: "6px", marginBottom: "12px" }}>
                       <div><span style={{ color: "#8b949e", fontSize: "10px" }}>ENTRY </span><span style={{ color: "#58a6ff", fontWeight: "700" }}>{fmt(selected, prices[selected])}</span></div>
