@@ -2275,7 +2275,10 @@ useEffect(() => {
           setTimeout(fetchClosedTrades, 3000);
         } else {
           addLog(`Execution failed: ${d.error || "unknown"}`, "error");
+          if (d.error?.includes("Spread") || d.error?.includes("spread")) {
+          lastTradeRef.current[inst.id] = now;
         }
+       }
       })
       .catch(e => { pendingTradeRef.current[inst.id] = false; addLog(`Execute error: ${e.message}`, "error"); });
     });
