@@ -1804,6 +1804,33 @@ const getGradeLabel = (grade) => ({
   C: "C — Acceptable",
   D: "D — Skip",
 }[grade] || "—");
+const buildFingerprint = (inst, sig, session) => [
+  inst.id,
+  sig.direction,
+  sig.h4?.strength || 'UNKNOWN',
+  sig.d1?.trend    || 'UNKNOWN',
+  sig.entryCandle?.type || 'NONE',
+  sig.regime?.regime   || 'UNKNOWN',
+  session || 'UNKNOWN',
+].join(':');
+
+const getSetupWinRate = (fingerprint, learnedStats) => {
+  const data = learnedStats[fingerprint];
+  if (!data || data.total < 3) return null;
+  return data.winRate;
+};
+
+const getLearnedRiskMultiplier = (fingerprint, learnedStats) => {
+  const winRate = getSetupWinRate(fingerprint, learnedStats);
+  if (winRate === null) return 1.0;
+  if (winRate >= 75) return 1.5;
+  if (winRate >= 60) return 1.2;
+  if (winRate >= 45) return 1.0;
+  if (winRate >= 30) return 0.5;
+  return 0;
+};
+
+// ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
 
 // ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
 
