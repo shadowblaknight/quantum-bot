@@ -1804,139 +1804,6 @@ const getGradeLabel = (grade) => ({
   C: "C — Acceptable",
   D: "D — Skip",
 }[grade] || "—");
-// ─── SELF-LEARNING ENGINE ─────────────────────────────────────────────────────
-// Add this to App.jsx — the bot's memory and intelligence system
-// Gets smarter after every single trade
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── State (add with other useState declarations) ──
-// const [learnedStats, setLearnedStats] = useState({});
-
-// ── Fetch learned stats from Redis ──
-const fetchLearnedStats = useCallback(async () => {
-  try {
-    const r = await fetch('/api/trades?learn=true');
-    if (r.ok) {
-      const d = await r.json();
-      setLearnedStats(d.stats || {});
-    }
-  } catch (e) {}
-}, []);
-
-// ── Load on mount + refresh every 5 minutes ──
-useEffect(() => {
-  fetchLearnedStats();
-  const interval = setInterval(fetchLearnedStats, 300000);
-  return () => clearInterval(interval);
-}, [fetchLearnedStats]);
-
-// ── Build setup fingerprint (matches learn.js) ──
-const buildFingerprint = (inst, sig, session) => [
-  inst.id,
-  sig.direction,
-  sig.h4?.strength || 'UNKNOWN',
-  sig.d1?.trend    || 'UNKNOWN',
-  sig.entryCandle?.type || 'NONE',
-  sig.regime?.regime   || 'UNKNOWN',
-  session || 'UNKNOWN',
-].join(':');
-
-// ── Get historical win rate for this exact setup ──
-const getSetupWinRate = (fingerprint, learnedStats) => {
-  const data = learnedStats[fingerprint];
-  if (!data || data.total < 3) return null; // not enough data yet
-  return data.winRate; // 0-100
-};
-
-// ── Adjust risk based on learning ──
-// If we've seen this setup before and it wins >70% → increase size
-// If it wins <40% → reduce size or skip
-const getLearnedRiskMultiplier = (fingerprint, learnedStats) => {
-  const winRate = getSetupWinRate(fingerprint, learnedStats);
-  if (winRate === null) return 1.0; // no data — use normal size
-
-  if (winRate >= 75) return 1.5;   // proven winner → 50% more size
-  if (winRate >= 60) return 1.2;   // above average → 20% more
-  if (winRate >= 45) return 1.0;   // neutral
-  if (winRate >= 30) return 0.5;   // below average → half size
-  return 0;                         // proven loser → skip entirely
-};
-
-// ── Record trade result when position closes ──
-// Call this in the trade management / position monitoring logic
-const recordTradeResult = useCallback(async (position, sig, session) => {
-  if (!position || !sig) return;
-
-  const pips = position.profit || 0;
-  const won  = pips > 0;
-
-  // Calculate RR from actual result
-  const slDist = sig.slDistance || 1;
-  const rr     = Math.abs(pips) / slDist;
-
-  const payload = {
-    instrument:      position.symbol?.replace('.s', '').replace('.S', '') || 'UNKNOWN',
-    direction:       position.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT',
-    won,
-    pips,
-    rr:              parseFloat(rr.toFixed(2)),
-    h4Strength:      sig.h4?.strength,
-    h4Bias:          sig.h4?.bias,
-    d1Trend:         sig.d1?.trend,
-    m15Bias:         sig.m15?.bias,
-    patterns:        sig.patterns?.patterns?.map(p => p.type) || [],
-    entryCandle:     sig.entryCandle?.type,
-    regime:          sig.regime?.regime,
-    session,
-    confluenceScore: sig.confluence?.score,
-    grade:           getSetupGrade(sig),
-    rsi:             sig.rsi,
-  };
-
-  try {
-    await fetch('/api/trades?learn=true', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(payload),
-    });
-
-    addLog(
-      `🧠 Learned: ${payload.instrument} ${won ? 'WIN' : 'LOSS'} ${pips > 0 ? '+' : ''}${pips.toFixed(2)} | ${payload.entryCandle || 'no candle'} | ${payload.h4Strength} H4`,
-      won ? 'success' : 'warn'
-    );
-
-    // Refresh stats
-    fetchLearnedStats();
-  } catch (e) {}
-}, [addLog, fetchLearnedStats]);
-
-// ── Watch for newly closed positions and record them ──
-const prevPositionsRef = useRef([]);
-useEffect(() => {
-  const prev    = prevPositionsRef.current;
-  const current = openPositions;
-
-  // Find positions that were open before but are now closed
-  const justClosed = prev.filter(p =>
-    !current.find(c => (c.id || c.positionId) === (p.id || p.positionId))
-  );
-
-  justClosed.forEach(closedPos => {
-    // Find the signal that generated this trade
-    const raw    = (closedPos.symbol || '').toUpperCase();
-    const instId =
-      raw.startsWith('BTCUSD') ? 'BTCUSDT' :
-      raw.startsWith('XAUUSD') ? 'XAUUSD'  :
-      raw.startsWith('GBPUSD') ? 'GBPUSD'  : null;
-
-    const sig     = instId ? signals[instId] : null;
-    const session = getSessionInfo().session;
-
-    if (sig) recordTradeResult(closedPos, sig, session);
-  });
-
-  prevPositionsRef.current = current;
-}, [openPositions, signals, recordTradeResult]);
 
 // ─── RISK ENGINE HELPERS ─────────────────────────────────────────────────────
 
@@ -2228,6 +2095,76 @@ useEffect(() => {
 
   // ─── ADD THIS FUNCTION before the useEffect section ───────────────────────────
 // Place it right after fetchClosedTrades
+const fetchLearnedStats = useCallback(async () => {
+  try {
+    const r = await fetch('/api/trades?learn=true');
+    if (r.ok) {
+      const d = await r.json();
+      setLearnedStats(d.stats || {});
+    }
+  } catch (e) {}
+}, []);
+
+useEffect(() => {
+  fetchLearnedStats();
+  const interval = setInterval(fetchLearnedStats, 300000);
+  return () => clearInterval(interval);
+}, [fetchLearnedStats]);
+const recordTradeResult = useCallback(async (position, sig, session) => {
+  if (!position || !sig) return;
+  const pips = position.profit || 0;
+  const won  = pips > 0;
+  const slDist = sig.slDistance || 1;
+  const rr     = Math.abs(pips) / slDist;
+  const payload = {
+    instrument:      position.symbol?.replace('.s', '').replace('.S', '') || 'UNKNOWN',
+    direction:       position.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT',
+    won, pips,
+    rr:              parseFloat(rr.toFixed(2)),
+    h4Strength:      sig.h4?.strength,
+    h4Bias:          sig.h4?.bias,
+    d1Trend:         sig.d1?.trend,
+    m15Bias:         sig.m15?.bias,
+    patterns:        sig.patterns?.patterns?.map(p => p.type) || [],
+    entryCandle:     sig.entryCandle?.type,
+    regime:          sig.regime?.regime,
+    session,
+    confluenceScore: sig.confluence?.score,
+    grade:           getSetupGrade(sig),
+    rsi:             sig.rsi,
+  };
+  try {
+    await fetch('/api/trades?learn=true', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    addLog(
+      `🧠 Learned: ${payload.instrument} ${won ? 'WIN' : 'LOSS'} ${pips > 0 ? '+' : ''}${pips.toFixed(2)} | ${payload.entryCandle || 'no candle'} | ${payload.h4Strength} H4`,
+      won ? 'success' : 'warn'
+    );
+    fetchLearnedStats();
+  } catch (e) {}
+}, [addLog, fetchLearnedStats]);
+const prevPositionsRef = useRef([]);
+useEffect(() => {
+  const prev    = prevPositionsRef.current;
+  const current = openPositions;
+  const justClosed = prev.filter(p =>
+    !current.find(c => (c.id || c.positionId) === (p.id || p.positionId))
+  );
+  justClosed.forEach(closedPos => {
+    const raw    = (closedPos.symbol || '').toUpperCase();
+    const instId =
+      raw.startsWith('BTCUSD') ? 'BTCUSDT' :
+      raw.startsWith('XAUUSD') ? 'XAUUSD'  :
+      raw.startsWith('GBPUSD') ? 'GBPUSD'  : null;
+    const sig     = instId ? signals[instId] : null;
+    const session = getSessionInfo().session;
+    if (sig) recordTradeResult(closedPos, sig, session);
+  });
+  prevPositionsRef.current = current;
+}, [openPositions, signals, recordTradeResult]);
 
 const manageTrades = useCallback(async () => {
   if (openPositions.length === 0) return;
