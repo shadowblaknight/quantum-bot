@@ -2183,7 +2183,7 @@ useEffect(() => {
     INSTRUMENTS.forEach(inst => {
       const sig = signals[inst.id];
        const grade = getSetupGrade(sig);
-       if (grade === "D") return;
+       if (grade === "D" || grade === "C") return;
        if (shouldLogBlock(`${inst.id}-grade-${sig.direction}`, 120000)) {
         addLog(`${inst.label} Grade ${grade}: ${getGradeLabel(grade)} | Conf: ${sig.confidence}%`, "signal");
       }
