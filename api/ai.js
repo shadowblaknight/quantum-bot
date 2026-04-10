@@ -189,13 +189,34 @@ Make your decision. Be aggressive when the setup is clear. Respond JSON only.`;
 
     let decision;
     try {
-      const clean = raw.replace(/```json|```/g, '').trim();
-      decision = JSON.parse(clean);
-    } catch(e) {
-      return res.status(200).json({ decision: 'WAIT', reason: 'Parse error', raw });
-    }
+  // Try multiple extraction methods
+  let clean = raw.replace(/```json|```/g, '').trim();
+  
+  // If still not valid JSON, extract the JSON object
+  const jsonMatch = clean.match(/\{[\s\S]*\}/);
+  if (jsonMatch) clean = jsonMatch[0];
+  
+  decision = JSON.parse(clean);
+} catch(e) {
+  // Log the raw response to debug
+  console.error('Parse error. Raw response:', raw);
+  return res.status(200).json({ 
+    decision: 'WAIT', 
+    reason: `Parse error: ${raw?.slice(0, 100)}`, 
+    raw 
+  });
+}
 
     if (!['LONG', 'SHORT', 'WAIT'].includes(decision.decision)) decision.decision = 'WAIT';
+    decision.confidence = Number(decision.confidence) || 0;
+decision.risk       = decision.risk     || 'MEDIUM';
+decision.reason     = decision.reason   || 'No reason provided';
+decision.marketRead = decision.marketRead || '';
+decision.volume     = decision.volume   || null;
+decision.stopLoss   = decision.stopLoss || null;
+decision.takeProfit1 = decision.takeProfit1 || null;
+decision.takeProfit2 = decision.takeProfit2 || null;
+decision.takeProfit3 = decision.takeProfit3 || null;
 
     // Log sizing info
     console.log(JSON.stringify({

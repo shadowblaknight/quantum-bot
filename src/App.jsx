@@ -506,7 +506,7 @@ export default function TradingBotLive() {
       if (decision.decision) {
         setAiDecisions(prev => ({ ...prev, [inst.id]: decision }));
         setAiStatus(prev => ({ ...prev, [inst.id]: decision.decision }));
-        addLog(`🧠 ${inst.label}: ${decision.decision} (${decision.confidence}%) — ${decision.reason}`,
+        addLog(`🧠 ${inst.label}: ${decision.decision} (${decision.confidence || 0}%) — ${decision.reason || 'thinking...'}`,
           decision.decision === 'WAIT' ? 'info' : 'signal');
 
         // ── Execute if LONG or SHORT ──
