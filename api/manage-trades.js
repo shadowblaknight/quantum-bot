@@ -162,8 +162,10 @@ module.exports = async (req, res) => {
       // ── TP1 HIT: Close 50% + SL to breakeven ──
       if (!state.tp1Hit && profit_distance >= tp1_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.5) / 0.01) * 0.01);
-        const pnl = parseFloat((profit_distance * closeVolume * 100).toFixed(2));
-
+const pipValue = symbol?.includes('BTCUSD') ? 1 :
+                 symbol?.includes('XAUUSD') ? 100 :
+                 symbol?.includes('GBPUSD') ? 100000 : 100000;
+const pnl = parseFloat((profit_distance * closeVolume * pipValue).toFixed(2));
         const closeRes = await fetch(`${BASE}/trade`, {
           method: 'POST', headers,
           body: JSON.stringify({ actionType: 'POSITION_PARTIAL', positionId: id, volume: closeVolume, comment: 'QuantumBot:TP1_50pct' })
@@ -189,8 +191,10 @@ module.exports = async (req, res) => {
       // ── TP2 HIT: Close 30% more + trail SL ──
       if (state.tp1Hit && !state.tp2Hit && tp2_distance && profit_distance >= tp2_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.5 * 0.6) / 0.01) * 0.01);
-        const pnl = parseFloat((profit_distance * closeVolume * 100).toFixed(2));
-
+const pipValue = symbol?.includes('BTCUSD') ? 1 :
+                 symbol?.includes('XAUUSD') ? 100 :
+                 symbol?.includes('GBPUSD') ? 100000 : 100000;
+const pnl = parseFloat((profit_distance * closeVolume * pipValue).toFixed(2));
         const closeRes = await fetch(`${BASE}/trade`, {
           method: 'POST', headers,
           body: JSON.stringify({ actionType: 'POSITION_PARTIAL', positionId: id, volume: closeVolume, comment: 'QuantumBot:TP2_30pct' })
@@ -217,8 +221,10 @@ module.exports = async (req, res) => {
       // ── TP3 HIT: Close remaining 20% ──
       if (state.tp2Hit && !state.tp3Hit && tp3_distance && profit_distance >= tp3_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.2) / 0.01) * 0.01);
-        const pnl = parseFloat((profit_distance * closeVolume * 100).toFixed(2));
-
+const pipValue = symbol?.includes('BTCUSD') ? 1 :
+                 symbol?.includes('XAUUSD') ? 100 :
+                 symbol?.includes('GBPUSD') ? 100000 : 100000;
+const pnl = parseFloat((profit_distance * closeVolume * pipValue).toFixed(2));
         const closeRes = await fetch(`${BASE}/trade`, {
           method: 'POST', headers,
           body: JSON.stringify({ actionType: 'POSITION_CLOSE_ID', positionId: id, comment: 'QuantumBot:TP3_FULL' })
