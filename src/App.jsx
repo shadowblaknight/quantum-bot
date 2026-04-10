@@ -1915,6 +1915,8 @@ export default function TradingBotLive() {
   const [calendarEvents, setCalendarEvents]  = useState([]);
   const [accountBalance, setAccountBalance]  = useState(null);
   const [learnedStats, setLearnedStats]      = useState({});
+  const [tradeReports, setTradeReports]      = useState({ reports: [], analytics: {} });
+  const [notifications, setNotifications]    = useState([]);
   const lastTradeRef = useRef({});
   const logRef       = useRef(null);
 
@@ -2137,6 +2139,18 @@ useEffect(() => {
   const interval = setInterval(fetchLearnedStats, 300000);
   return () => clearInterval(interval);
 }, [fetchLearnedStats]);
+const fetchTradeReports = useCallback(async () => {
+  try {
+    const r = await fetch('/api/manage-trades');
+    if (r.ok) { const d = await r.json(); setTradeReports(d); }
+  } catch(e) {}
+}, []);
+
+useEffect(() => {
+  fetchTradeReports();
+  const interval = setInterval(fetchTradeReports, 30000);
+  return () => clearInterval(interval);
+}, [fetchTradeReports]);
 const recordTradeResult = useCallback(async (position, sig, session) => {
   if (!position || !sig) return;
   const pips = position.profit || 0;
@@ -2239,6 +2253,14 @@ const manageTrades = useCallback(async () => {
           if (a.type === 'PARTIAL_CLOSE_TP1')  addLog(`TP1 hit: ${m.symbol} — closed 50% @ ${a.price?.toFixed(2)} | SL → breakeven`, 'success');
           if (a.type === 'PARTIAL_CLOSE_TP2')  addLog(`TP2 hit: ${m.symbol} — closed 30% @ ${a.price?.toFixed(2)} | trailing SL`, 'success');
           if (a.type === 'FULL_CLOSE_TP3')     addLog(`TP3 hit: ${m.symbol} — closed remaining 20% @ ${a.price?.toFixed(2)} 🎯`, 'success');
+          if (['PARTIAL_CLOSE_TP1', 'PARTIAL_CLOSE_TP2', 'FULL_CLOSE_TP3'].includes(a.type)) {
+            setNotifications(prev => [...prev.slice(-4), {
+               id: Date.now(), symbol: m.symbol,
+               type: a.type, price: a.price, pnl: a.pnl,
+               time: new Date().toLocaleTimeString(),
+             }]);
+             fetchTradeReports();
+           }
           if (a.type === 'SL_TO_BREAKEVEN')    addLog(`${m.symbol} SL moved to breakeven @ ${a.level?.toFixed(2)}`, 'info');
           if (a.type === 'SL_TRAIL_AT_TP2')    addLog(`${m.symbol} SL trailing @ ${a.level?.toFixed(2)}`, 'info');
         });
@@ -2475,6 +2497,22 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
 
   return (
     <div style={styles.app}>
+       <div style={{ position:'fixed', top:'70px', right:'16px', zIndex:9999, display:'flex', flexDirection:'column', gap:'8px' }}>
+      {notifications.map(n => (
+        <div key={n.id} style={{ background:'#161b22',
+          border:`1px solid ${n.type === 'FULL_CLOSE_TP3' ? '#3fb950' : n.type === 'PARTIAL_CLOSE_TP2' ? '#58a6ff' : '#e3b341'}`,
+          borderRadius:'8px', padding:'12px 16px', minWidth:'260px',
+          boxShadow:'0 4px 20px rgba(0,0,0,0.5)', fontSize:'11px' }}>
+          <div style={{ fontWeight:'700', color:'#c9d1d9', marginBottom:'4px' }}>
+            {n.type === 'PARTIAL_CLOSE_TP1' ? '🎯 TP1 Hit — 50% closed' :
+             n.type === 'PARTIAL_CLOSE_TP2' ? '🎯 TP2 Hit — 30% closed' :
+             '🏆 TP3 Hit — Trade Complete!'}
+          </div>
+          <div style={{ color:'#8b949e' }}>{n.symbol} @ {n.price?.toFixed(2)} | +${n.pnl?.toFixed(2)}</div>
+          <div style={{ color:'#484f58', fontSize:'10px', marginTop:'2px' }}>{n.time}</div>
+        </div>
+      ))}
+    </div>
       {/* HEADER */}
       <div style={styles.header}>
         <div style={{ color: "#58a6ff", fontWeight: "900", fontSize: "16px", letterSpacing: "2px" }}>QUANTUM BOT</div>
@@ -2523,7 +2561,7 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
         {/* MAIN */}
         <div style={styles.main}>
           <div style={styles.tabs}>
-            {["signals", "live trades", "debug", "ai analysis", "news", "calendar", "learning"].map(tab => (
+            {["signals", "live trades", "debug", "ai analysis", "news", "calendar", "learning","reports"].map(tab => (
               <div key={tab} style={styles.tab(activeTab === tab)} onClick={() => setActiveTab(tab)}>{tab.toUpperCase()}</div>
             ))}
           </div>
@@ -2959,6 +2997,96 @@ Provide: 1) Market regime 2) Signal quality (A/B/C/D) 3) Risk assessment 4) Fina
                 })}
               </div>
             )}
+            {activeTab === "reports" && (
+  <div>
+    <div style={styles.card}>
+      <div style={{ color:"#58a6ff", fontWeight:"900", fontSize:"16px", marginBottom:"16px" }}>📊 TRADE REPORTS</div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:"12px", marginBottom:"16px" }}>
+        {[
+          ["Total Trades", tradeReports.analytics?.totalTrades || 0, "#58a6ff"],
+          ["Total P&L", `$${(tradeReports.analytics?.totalPnl || 0).toFixed(2)}`, (tradeReports.analytics?.totalPnl || 0) >= 0 ? "#3fb950" : "#f85149"],
+          ["Avg P&L", `$${(tradeReports.analytics?.avgPnl || 0).toFixed(2)}`, "#e3b341"],
+          ["SL Hits", tradeReports.analytics?.slHitCount || 0, "#f85149"],
+        ].map(([label, val, color]) => (
+          <div key={label} style={{ background:"#161b22", padding:"12px", borderRadius:"6px", textAlign:"center" }}>
+            <div style={{ color:"#8b949e", fontSize:"9px", marginBottom:"4px" }}>{label}</div>
+            <div style={{ fontWeight:"700", fontSize:"18px", color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ color:"#8b949e", fontSize:"10px", marginBottom:"10px" }}>TP HIT DISTRIBUTION</div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:"12px", marginBottom:"16px" }}>
+        {[
+          ["TP1 — 50% close", tradeReports.analytics?.tp1Count || 0, tradeReports.analytics?.tp1Pct || 0, "#e3b341"],
+          ["TP2 — 30% close", tradeReports.analytics?.tp2Count || 0, tradeReports.analytics?.tp2Pct || 0, "#58a6ff"],
+          ["TP3 — 20% final", tradeReports.analytics?.tp3Count || 0, tradeReports.analytics?.tp3Pct || 0, "#3fb950"],
+        ].map(([label, count, pct, color]) => (
+          <div key={label} style={{ background:"#161b22", padding:"12px", borderRadius:"6px" }}>
+            <div style={{ color:"#8b949e", fontSize:"9px", marginBottom:"6px" }}>{label}</div>
+            <div style={{ fontWeight:"900", fontSize:"28px", color }}>{pct}%</div>
+            <div style={{ color:"#8b949e", fontSize:"10px" }}>{count} trades</div>
+            <div style={{ marginTop:"8px", background:"#21262d", borderRadius:"3px", height:"4px" }}>
+              <div style={{ height:"100%", borderRadius:"3px", width:`${pct}%`, background:color }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {tradeReports.analytics?.byInstrument && Object.keys(tradeReports.analytics.byInstrument).length > 0 && (
+        <div>
+          <div style={{ color:"#8b949e", fontSize:"10px", marginBottom:"10px" }}>BY INSTRUMENT</div>
+          {Object.entries(tradeReports.analytics.byInstrument).map(([sym, data]) => (
+            <div key={sym} style={{ background:"#161b22", padding:"10px", borderRadius:"6px", marginBottom:"6px",
+              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontWeight:"700", color: sym.includes('XAU') ? "#FFD700" : sym.includes('BTC') ? "#F7931A" : "#00D4AA" }}>{sym}</span>
+              <span style={{ color:"#8b949e", fontSize:"10px" }}>{data.trades} trades</span>
+              <span style={{ color:"#e3b341", fontSize:"10px" }}>TP1: {data.tp1} | TP2: {data.tp2} | TP3: {data.tp3}</span>
+              <span style={{ fontWeight:"700", color: data.pnl >= 0 ? "#3fb950" : "#f85149" }}>${data.pnl?.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+
+    <div style={styles.card}>
+      <div style={{ color:"#8b949e", fontSize:"10px", marginBottom:"12px" }}>TRADE DETAIL LOG</div>
+      {(!tradeReports.reports || tradeReports.reports.length === 0) ? (
+        <div style={{ color:"#8b949e", textAlign:"center", padding:"30px" }}>No reports yet — appears after first TP hit</div>
+      ) : tradeReports.reports.map((r, i) => (
+        <div key={i} style={{ background:"#161b22", borderRadius:"6px", padding:"12px", marginBottom:"8px",
+          borderLeft:`3px solid ${r.finalExit === 'FULL_CLOSE_TP3' ? '#3fb950' : r.finalExit === 'SL_HIT' ? '#f85149' : '#e3b341'}` }}>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"8px" }}>
+            <div>
+              <span style={{ fontWeight:"700", color:"#c9d1d9" }}>{(r.symbol||'').replace('.s','')}</span>
+              <span style={{ margin:"0 8px", color: r.direction === "LONG" ? "#3fb950" : "#f85149", fontWeight:"700" }}>{r.direction}</span>
+              <span style={{ color:"#8b949e", fontSize:"10px" }}>@ {r.openPrice?.toFixed(2)}</span>
+            </div>
+            <span style={{ fontWeight:"700", color:(r.totalPnl||0) >= 0 ? "#3fb950" : "#f85149" }}>
+              {(r.totalPnl||0) >= 0 ? "+" : ""}${(r.totalPnl||0).toFixed(2)}
+            </span>
+          </div>
+          <div style={{ display:"flex", gap:"6px", flexWrap:"wrap" }}>
+            {(r.events||[]).map((ev, j) => (
+              <span key={j} style={{ padding:"2px 8px", borderRadius:"10px", fontSize:"10px",
+                background: ev.type.includes('TP3') ? "rgba(63,185,80,0.15)" : ev.type.includes('TP2') ? "rgba(88,166,255,0.15)" : "rgba(227,179,65,0.15)",
+                color: ev.type.includes('TP3') ? "#3fb950" : ev.type.includes('TP2') ? "#58a6ff" : "#e3b341" }}>
+                {ev.type === 'PARTIAL_CLOSE_TP1' ? '🎯 TP1 50%' :
+                 ev.type === 'PARTIAL_CLOSE_TP2' ? '🎯 TP2 30%' :
+                 ev.type === 'FULL_CLOSE_TP3'    ? '🏆 TP3 Full' : ev.type}
+                {ev.pnl ? ` +$${ev.pnl?.toFixed(2)}` : ''}
+              </span>
+            ))}
+          </div>
+          <div style={{ color:"#484f58", fontSize:"9px", marginTop:"6px" }}>
+            {r.openedAt ? new Date(r.openedAt).toLocaleString() : ''}
+            {r.closedAt ? ` → ${new Date(r.closedAt).toLocaleString()}` : ' (still open)'}
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
             {/* ── LEARNING TAB — add "learning" to the tabs array ── */}
 {/* In the tabs array find: ["signals", "live trades", "debug", "ai analysis", "news", "calendar"] */}
 {/* Change to: ["signals", "live trades", "debug", "ai analysis", "news", "calendar", "learning"] */}
