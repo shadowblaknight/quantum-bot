@@ -122,6 +122,7 @@ export default function TradingBotLive() {
   const logRef          = useRef(null);
   const lastBlockLogRef = useRef({});
   const prevPositionsRef = useRef([]);
+  const lastAICallRef   = useRef({});
 
   // ── Logging ──
   const addLog = useCallback((msg, type = "info") => {
@@ -403,13 +404,19 @@ export default function TradingBotLive() {
 
   // ── V5 BRAIN: Ask Claude for trading decision ──
   const runAIBrain = useCallback(async (inst) => {
-    const candles = brokerCandles[inst.id];
-    if (!candles || candles.length < 50 || !prices[inst.id]) return;
-    if (!accountBalance) return;
+  const candles = brokerCandles[inst.id];
+  if (!candles || candles.length < 50 || !prices[inst.id]) return;
+  if (!accountBalance) return;
 
-    setAiStatus(prev => ({ ...prev, [inst.id]: 'thinking' }));
+  const now = Date.now();
+  const lastCall = lastAICallRef.current[inst.id] || 0;
+  if (now - lastCall < 600000) return; // 10 min hard limit
 
-    const session = getSessionInfo();
+  lastAICallRef.current[inst.id] = now;
+
+  setAiStatus(prev => ({ ...prev, [inst.id]: 'thinking' }));
+
+  const session = getSessionInfo();
 
     // Format candle summary for Claude
     const summarizeCandles = (c, label) => {
@@ -589,21 +596,23 @@ export default function TradingBotLive() {
       closedTrades, openPositions, news, calendarEvents, eventAlert, marketStatus,
       previousDecisions, addLog, fetchLiveTrades, fetchClosedTrades]);
 
-  // ── Run AI brain every 60 seconds ──
   useEffect(() => {
-    const run = () => {
-  const session = getSessionInfo();
-  // V5: Gold only, London and NY sessions only
-  if (!session.isLondon && !session.isNY) return;
-  const gold = INSTRUMENTS.find(i => i.id === 'XAUUSD');
-  if (gold && brokerCandles['XAUUSD']?.length >= 50) {
-    runAIBrain(gold);
-  }
-};
-    const timer = setTimeout(run, 3000); // initial delay
-    const interval = setInterval(run, 600000);
-    return () => { clearTimeout(timer); clearInterval(interval); };
-  }, [runAIBrain, brokerCandles]);
+  const run = () => {
+    const session = getSessionInfo();
+    if (!session.isLondon && !session.isNY) return;
+
+    const gold = INSTRUMENTS.find(i => i.id === 'XAUUSD');
+    if (gold) runAIBrain(gold);
+  };
+
+  const timer = setTimeout(run, 3000);
+  const interval = setInterval(run, 600000);
+
+  return () => {
+    clearTimeout(timer);
+    clearInterval(interval);
+  };
+}, [runAIBrain]);
 
   // ── Log scroll ──
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
