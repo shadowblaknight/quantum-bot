@@ -591,11 +591,17 @@ export default function TradingBotLive() {
 
   // ── Run AI brain every 60 seconds ──
   useEffect(() => {
-    const run = () => INSTRUMENTS.forEach(inst => {
-      if (brokerCandles[inst.id]?.length >= 50) runAIBrain(inst);
-    });
+    const run = () => {
+  const session = getSessionInfo();
+  // V5: Gold only, London and NY sessions only
+  if (!session.isLondon && !session.isNY) return;
+  const gold = INSTRUMENTS.find(i => i.id === 'XAUUSD');
+  if (gold && brokerCandles['XAUUSD']?.length >= 50) {
+    runAIBrain(gold);
+  }
+};
     const timer = setTimeout(run, 3000); // initial delay
-    const interval = setInterval(run, 60000);
+    const interval = setInterval(run, 600000);
     return () => { clearTimeout(timer); clearInterval(interval); };
   }, [runAIBrain, brokerCandles]);
 
