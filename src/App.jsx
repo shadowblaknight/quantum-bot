@@ -39,22 +39,22 @@ const STYLES = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg:       #05080d;
-    --surface0: #080d14;
-    --surface1: #0c1420;
-    --surface2: #101c2c;
-    --border:   rgba(255,255,255,0.05);
-    --border2:  rgba(255,255,255,0.09);
-    --text:     #d8e8f4;
-    --muted:    #4a6680;
-    --faint:    #1e3248;
-    --gold:     #D4AF6A;
-    --gold2:    #F0C97A;
-    --green:    #3DD68C;
-    --red:      #FF5C6A;
-    --blue:     #5BA8FF;
-    --amber:    #FFB347;
-    --serif:    'JetBrains Mono', monospace;
+    --bg:       #1a1f2e;
+    --surface0: #222736;
+    --surface1: #272c3d;
+    --surface2: #2d3347;
+    --border:   rgba(255,255,255,0.07);
+    --border2:  rgba(255,255,255,0.12);
+    --text:     #dce8f5;
+    --muted:    #6b82a0;
+    --faint:    #3a4560;
+    --gold:     #d4a843;
+    --gold2:    #e8bf60;
+    --green:    #2ec97a;
+    --red:      #f04f5e;
+    --blue:     #4d9ef5;
+    --amber:    #f0a030;
+    --serif:    'Cormorant Garamond', Georgia, serif;
     --mono:     'JetBrains Mono', 'Courier New', monospace;
   }
 
@@ -66,25 +66,26 @@ const STYLES = `
   ::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 2px; }
 
   .panel {
-    background: linear-gradient(145deg, var(--surface1) 0%, var(--surface0) 100%);
+    background: var(--surface0);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: 4px;
     position: relative;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
   }
   .panel::after {
     content: '';
     position: absolute;
     inset: 0;
-    border-radius: 2px;
-    background: linear-gradient(135deg, rgba(212,175,106,0.03) 0%, transparent 50%);
+    border-radius: 4px;
+    background: linear-gradient(135deg, rgba(212,168,67,0.03) 0%, transparent 50%);
     pointer-events: none;
   }
 
   .panel-raised {
-    background: linear-gradient(145deg, var(--surface2) 0%, var(--surface1) 100%);
+    background: var(--surface1);
     border: 1px solid var(--border2);
-    border-radius: 2px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.4), 0 1px 0 rgba(255,255,255,0.04) inset;
+    border-radius: 4px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
   }
 
   .serif-num {
@@ -102,38 +103,39 @@ const STYLES = `
     transition: all 0.15s;
     white-space: nowrap;
   }
-  .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.02); }
-  .nav-item.active { color: var(--gold); border-left-color: var(--gold); background: rgba(212,175,106,0.04); }
+  .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .nav-item.active { color: var(--gold); border-left-color: var(--gold); background: rgba(212,168,67,0.06); }
 
   .badge {
-    display: inline-block; padding: 1px 7px; border-radius: 1px;
+    display: inline-block; padding: 1px 7px; border-radius: 2px;
     font-size: 9px; font-weight: 500; letter-spacing: 0.1em;
   }
-  .badge-long  { background: rgba(61,214,140,0.1);  color: var(--green); border: 1px solid rgba(61,214,140,0.2); }
-  .badge-short { background: rgba(255,92,106,0.1);  color: var(--red);   border: 1px solid rgba(255,92,106,0.2); }
-  .badge-wait  { background: rgba(74,102,128,0.1);  color: var(--muted); border: 1px solid rgba(74,102,128,0.2); }
+  .badge-long  { background: rgba(46,201,122,0.12); color: var(--green); border: 1px solid rgba(46,201,122,0.25); }
+  .badge-short { background: rgba(240,79,94,0.12);  color: var(--red);   border: 1px solid rgba(240,79,94,0.25); }
+  .badge-wait  { background: rgba(107,130,160,0.12);color: var(--muted); border: 1px solid rgba(107,130,160,0.2); }
 
   .ticker-row {
     padding: 11px 0; border-bottom: 1px solid var(--border);
     cursor: pointer; transition: background 0.1s;
   }
-  .ticker-row:hover { background: rgba(212,175,106,0.025); }
-  .ticker-row.selected { background: rgba(212,175,106,0.04); border-left: 2px solid var(--gold); margin-left: -1px; }
+  .ticker-row:hover { background: rgba(255,255,255,0.03); }
+  .ticker-row.selected { background: rgba(212,168,67,0.06); border-left: 2px solid var(--gold); margin-left: -1px; }
 
   .stat-box {
-    background: linear-gradient(135deg, var(--surface2), var(--surface1));
+    background: var(--surface0);
     border: 1px solid var(--border);
     padding: 14px 16px;
-    border-radius: 2px;
+    border-radius: 4px;
     position: relative; overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   }
   .stat-box::before {
-    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(212,175,106,0.2), transparent);
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(212,168,67,0.4), transparent);
   }
 
   .tbl-row { display: grid; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); }
-  .tbl-row:hover { background: rgba(255,255,255,0.01); }
+  .tbl-row:hover { background: rgba(255,255,255,0.02); }
   .tbl-head { color: var(--muted); font-size: 9px; letter-spacing: 0.1em; padding: 6px 0 10px; border-bottom: 1px solid var(--border2); }
 
   .tp-node {
@@ -146,12 +148,12 @@ const STYLES = `
   }
 
   .notif-card {
-    background: linear-gradient(135deg, var(--surface2), var(--surface1));
+    background: var(--surface1);
     border: 1px solid var(--border2);
-    border-radius: 2px;
+    border-radius: 4px;
     padding: 14px 18px;
     min-width: 300px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     animation: slideRight 0.25s ease;
     cursor: pointer;
   }
@@ -175,14 +177,14 @@ const STYLES = `
 
   .grid-bg {
     background-image:
-      linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
     background-size: 40px 40px;
   }
 
-  .glow-gold { box-shadow: 0 0 30px rgba(212,175,106,0.06); }
-  .glow-green { box-shadow: 0 0 30px rgba(61,214,140,0.06); }
-  .glow-red { box-shadow: 0 0 30px rgba(255,92,106,0.06); }
+  .glow-gold  { box-shadow: 0 0 24px rgba(212,168,67,0.08); }
+  .glow-green { box-shadow: 0 0 24px rgba(46,201,122,0.08); }
+  .glow-red   { box-shadow: 0 0 24px rgba(240,79,94,0.08); }
 
   .section-label {
     font-size: 8px; letter-spacing: 0.18em; color: var(--muted);
@@ -191,8 +193,9 @@ const STYLES = `
 
   .chart-tooltip {
     position: absolute; background: var(--surface2); border: 1px solid var(--border2);
-    padding: 6px 10px; border-radius: 2px; font-size: 9px; pointer-events: none;
+    padding: 6px 10px; border-radius: 4px; font-size: 9px; pointer-events: none;
     color: var(--text); white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
   }
 `;
 
@@ -243,12 +246,12 @@ function EquityChart({ data, w=700, h=160 }) {
         {/* grid */}
         {yLabels.map((yl,i)=>(
           <g key={i}>
-            <line x1={pad.l} y1={yl.y} x2={pad.l+W} y2={yl.y} stroke="rgba(255,255,255,0.04)" strokeDasharray="3 4"/>
-            <text x={pad.l-7} y={yl.y+3.5} textAnchor="end" fontSize="8" fill="rgba(74,102,128,0.8)" fontFamily="JetBrains Mono">{yl.v}</text>
+            <line x1={pad.l} y1={yl.y} x2={pad.l+W} y2={yl.y} stroke="rgba(255,255,255,0.05)" strokeDasharray="3 4"/>
+            <text x={pad.l-7} y={yl.y+3.5} textAnchor="end" fontSize="8" fill="rgba(107,130,160,0.9)" fontFamily="JetBrains Mono">{yl.v}</text>
           </g>
         ))}
         {/* zero line */}
-        <line x1={pad.l} y1={pad.t+H} x2={pad.l+W} y2={pad.t+H} stroke="rgba(255,255,255,0.06)"/>
+        <line x1={pad.l} y1={pad.t+H} x2={pad.l+W} y2={pad.t+H} stroke="rgba(255,255,255,0.07)"/>
         {/* area */}
         <path d={areaPath} fill="url(#ecg)"/>
         {/* line */}
@@ -259,7 +262,7 @@ function EquityChart({ data, w=700, h=160 }) {
         {/* hover */}
         {hover && <>
           <line x1={hover.x} y1={pad.t} x2={hover.x} y2={pad.t+H} stroke="rgba(212,175,106,0.25)" strokeDasharray="3 3"/>
-          <circle cx={hover.x} cy={hover.y} r="3.5" fill={color} stroke="var(--surface2)" strokeWidth="1.5"/>
+          <circle cx={hover.x} cy={hover.y} r="3.5" fill={color} stroke="var(--surface0)" strokeWidth="1.5"/>
         </>}
       </svg>
       {hover && (
@@ -294,8 +297,8 @@ function DrawdownChart({ data, w=700, h=80 }) {
       </defs>
       {yLabels.map((yl,i)=>(
         <g key={i}>
-          <line x1={pad.l} y1={yl.y} x2={pad.l+W} y2={yl.y} stroke="rgba(255,255,255,0.04)" strokeDasharray="3 4"/>
-          <text x={pad.l-7} y={yl.y+3.5} textAnchor="end" fontSize="8" fill="rgba(74,102,128,0.8)" fontFamily="JetBrains Mono">{yl.v}</text>
+          <line x1={pad.l} y1={yl.y} x2={pad.l+W} y2={yl.y} stroke="rgba(255,255,255,0.05)" strokeDasharray="3 4"/>
+          <text x={pad.l-7} y={yl.y+3.5} textAnchor="end" fontSize="8" fill="rgba(107,130,160,0.9)" fontFamily="JetBrains Mono">{yl.v}</text>
         </g>
       ))}
       <path d={areaPath} fill="url(#ddg)"/>
@@ -319,13 +322,13 @@ function SessionRing({ label, wr, trades, pnl, color, active }) {
               <stop offset="100%" stopColor={color}/>
             </linearGradient>
           </defs>
-          <circle cx="38" cy="38" r={r} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="4"/>
+          <circle cx="38" cy="38" r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="4"/>
           <circle cx="38" cy="38" r={r} fill="none" stroke={`url(#rg_${label})`} strokeWidth="4"
             strokeDasharray={`${arc.toFixed(2)} ${(circ-arc).toFixed(2)}`}
             strokeLinecap="round" transform="rotate(-90 38 38)"
             style={{transition:"stroke-dasharray 1.4s cubic-bezier(0.4,0,0.2,1)"}}/>
-          {/* Inner shadow ring */}
-          <circle cx="38" cy="38" r={r-6} fill="rgba(0,0,0,0.3)"/>
+          {/* Inner background */}
+          <circle cx="38" cy="38" r={r-6} fill="rgba(0,0,0,0.2)"/>
         </svg>
         <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
           <div className="serif-num" style={{fontSize:18,color:color}}>{wr}%</div>
@@ -701,7 +704,7 @@ export default function TradingBotLive() {
         <div style={{width:200,background:"var(--surface0)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column",flexShrink:0}}>
           {/* Wordmark */}
           <div style={{padding:"22px 18px 18px",borderBottom:"1px solid var(--border)"}}>
-            <div style={{fontFamily:"var(--serif)",fontSize:20,fontWeight:700,color:"var(--gold)",letterSpacing:"0.05em",lineHeight:1}}>Quantum</div>
+            <div style={{fontFamily:"var(--mono)",fontSize:16,fontWeight:700,color:"var(--gold)",letterSpacing:"0.08em",letterSpacing:"0.05em",lineHeight:1}}>Quantum</div>
             <div style={{fontSize:8,color:"var(--muted)",letterSpacing:"0.22em",marginTop:4}}>GOLD · AI · V5</div>
           </div>
 
