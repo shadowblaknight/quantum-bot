@@ -54,7 +54,7 @@ const STYLES = `
     --red:      #FF5C6A;
     --blue:     #5BA8FF;
     --amber:    #FFB347;
-    --serif:    'Cormorant Garamond', Georgia, serif;
+    --serif:    'JetBrains Mono', monospace;
     --mono:     'JetBrains Mono', 'Courier New', monospace;
   }
 
@@ -88,9 +88,9 @@ const STYLES = `
   }
 
   .serif-num {
-    font-family: var(--serif);
-    font-weight: 600;
-    letter-spacing: -0.02em;
+    font-family: var(--mono);
+    font-weight: 500;
+    letter-spacing: -0.03em;
     line-height: 1;
   }
 
