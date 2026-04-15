@@ -31,7 +31,7 @@ module.exports = async (req, res) => {
       fib_levels, fib_nearest,
       smc_bos, smc_order_block, smc_fvg,
       equilibrium_zone, equilibrium_position, weekly_bias, round_levels,
-      session, session_allowed,
+      session,
       news, calendar_events,
       open_positions, account_balance,
       today_pnl, today_trades, loss_streak, win_streak, overall_win_rate,
@@ -249,7 +249,7 @@ CRITICAL: Respond ONLY with valid JSON. No text, no markdown.
     const userPrompt = `Analyze XAU/USD now and make your decision.
 
 PRICE: $${price}
-SESSION: ${session} | Allowed: ${session_allowed}
+SESSION: ${session} | Market is OPEN and in active trading window
 
 ══ TIMEFRAME ANALYSIS ══
 Weekly:  ${candles_weekly}
@@ -302,7 +302,7 @@ Suggested volume: ${suggestedBase} lots
 ${prevContext}
 
 Count your confluences. Use ATR for SL/TP. Check Fib levels. Check SMC. Trade with the weekly bias.
-If confluence score < 60, say WAIT. Respond JSON only.`;
+If confluence score < 45, say WAIT. Score 45-59 = enter with 0.5× size. Score 60+ = full size. Respond JSON only.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -341,7 +341,7 @@ If confluence score < 60, say WAIT. Respond JSON only.`;
         decision.volume   = null;
       }
       // ── ATR gate: SL too tight means it will be hunted ──
-      if (decision.decision !== 'WAIT' && slD < atr * 1.0) {
+      if (decision.decision !== 'WAIT' && slD < atr * 0.5) {
         console.log(`ATR GATE BLOCKED: SL=${slD.toFixed(2)} < ATR=${atr.toFixed(2)}`);
         decision.decision = 'WAIT';
         decision.reason   = `SL too tight: ${slD.toFixed(1)} pips < ATR ${atr.toFixed(1)} pips minimum`;
@@ -353,7 +353,11 @@ If confluence score < 60, say WAIT. Respond JSON only.`;
       symbol, decision: decision.decision, confidence: decision.confidence,
       volume: decision.volume, slPips: decision.slPips, rrRatio: decision.rrRatio,
       confluences: decision.confluences?.length||0,
-      atr: atr.toFixed(2), suggestedBase, winRate, balance: balance.toFixed(0)
+      confluenceList: decision.confluences||[],
+      reason: decision.reason,
+      marketRead: decision.marketRead?.slice(0,100),
+      atr: atr.toFixed(2), suggestedBase, winRate, balance: balance.toFixed(0),
+      session, slD: decision.stopLoss ? Math.abs((decision.entry||price)-decision.stopLoss).toFixed(2) : null
     }));
 
     return res.status(200).json(decision);

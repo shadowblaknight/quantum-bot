@@ -340,9 +340,12 @@ export default function TradingBotLive(){
   useEffect(()=>{if(!openPositions.length)return;const i=setInterval(manageTrades,30000);manageTrades();return()=>clearInterval(i);},[openPositions,manageTrades]);
 
   const runAIBrain=useCallback(async(inst)=>{
-    const candles=brokerCandles[inst.id];if(!candles||candles.length<50||!prices[inst.id]||!accountBalance)return;
-    const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<600000)return;
-    lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));
+    const candles=brokerCandles[inst.id];
+    if(!candles||candles.length<50){addLog(`⚠ ${inst.label}: waiting for candles (${candles?.length||0}/50)`,"warn");return;}
+    if(!prices[inst.id]){addLog(`⚠ ${inst.label}: price not loaded`,"warn");return;}
+    if(!accountBalance){addLog(`⚠ ${inst.label}: balance not loaded`,"warn");return;}
+    const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<300000)return;
+    lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));addLog(`🧠 ${inst.label}: analysing market…`,'info');
     const session=getSessionInfo();
     const sumC=(c,label,lb=5)=>{if(!c||!c.length)return`${label}:no data`;const sl=c.slice(-lb),dir=sl[sl.length-1].close>sl[0].close?'↑':'↓';const chg=((sl[sl.length-1].close-sl[0].close)/sl[0].close*100).toFixed(3);const hi=Math.max(...sl.map(x=>x.high)).toFixed(inst.id==='BTCUSDT'?0:2);const lo=Math.min(...sl.map(x=>x.low)).toFixed(inst.id==='BTCUSDT'?0:2);const open=sl[0].close.toFixed(inst.id==='BTCUSDT'?0:2),close=sl[sl.length-1].close.toFixed(inst.id==='BTCUSDT'?0:2);return`${label}(${lb}): ${dir}${chg}% start:${open} now:${close} H:${hi} L:${lo}`;};
     const cls=candles.map(c=>c.close);
@@ -439,7 +442,7 @@ export default function TradingBotLive(){
       weekly_bias:    weeklyBias,
       round_levels:   roundLevels.join(', '),
       // ── Session & Context ──
-      session:session.session, session_allowed:session.tradingAllowed,
+      session:session.session, session_allowed:true,
       news:news.slice(0,3), calendar_events:calEvents.slice(0,3),
       open_positions:openPositions.map(p=>({symbol:p.symbol,type:p.type,profit:p.profit})),
       account_balance:accountBalance,
@@ -448,7 +451,8 @@ export default function TradingBotLive(){
       today_long_results:`${tl.filter(t=>(t.profit||0)>0).length}W/${tl.filter(t=>(t.profit||0)<=0).length}L (${tl.length} longs)`,
       today_short_results:`${ts.filter(t=>(t.profit||0)>0).length}W/${ts.filter(t=>(t.profit||0)<=0).length}L (${ts.length} shorts)`,
     };
-    try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[]})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');if(dec.decision!=='WAIT'&&dec.confidence>=55){
+    try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[]})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');
+          if(dec.decision==='WAIT'){addLog(`⏳ Confluences: ${dec.confluences?.join(', ')||'none listed'}`,'info');}if(dec.decision!=='WAIT'&&dec.confidence>=55){
           const n=Date.now();
           // Block 2: 5 min cooldown between trades
           if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<300000){
