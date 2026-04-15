@@ -348,57 +348,41 @@ export default function TradingBotLive(){
     lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));addLog(`🧠 ${inst.label}: analysing market…`,'info');
     const session=getSessionInfo();
     const sumC=(c,label,lb=5)=>{if(!c||!c.length)return`${label}:no data`;const sl=c.slice(-lb),dir=sl[sl.length-1].close>sl[0].close?'↑':'↓';const chg=((sl[sl.length-1].close-sl[0].close)/sl[0].close*100).toFixed(3);const hi=Math.max(...sl.map(x=>x.high)).toFixed(inst.id==='BTCUSDT'?0:2);const lo=Math.min(...sl.map(x=>x.low)).toFixed(inst.id==='BTCUSDT'?0:2);const open=sl[0].close.toFixed(inst.id==='BTCUSDT'?0:2),close=sl[sl.length-1].close.toFixed(inst.id==='BTCUSDT'?0:2);return`${label}(${lb}): ${dir}${chg}% start:${open} now:${close} H:${hi} L:${lo}`;};
-    const cls=candles.map(c=>c.close);
-    const highs=candles.map(c=>c.high);
-    const lows=candles.map(c=>c.low);
-
-    // ── RSI(14) ──
-    const rsi14=(()=>{if(cls.length<15)return 50;const ch=cls.slice(1).map((p,i)=>p-cls[i]);let g=0,l=0;for(let i=0;i<14;i++){if(ch[i]>0)g+=ch[i];else l-=ch[i];}g/=14;l/=14;for(let i=14;i<ch.length;i++){g=(g*13+Math.max(ch[i],0))/14;l=(l*13+Math.max(-ch[i],0))/14;}return l===0?100:100-(100/(1+g/l));})();
-
-    // ── EMAs ──
-    const calcEma=(src,period)=>{if(src.length<period)return null;const k=2/(period+1);let e=src.slice(0,period).reduce((a,b)=>a+b,0)/period;for(let i=period;i<src.length;i++)e=src[i]*k+e*(1-k);return e;};
-    const ema21=calcEma(cls,21);
-    const ema50=calcEma(cls,50);
-    const ema200=calcEma(cls,Math.min(200,cls.length));
-
-    // ── ATR(14) — critical for Gold SL sizing ──
+    // ── ATR(14) — for SL sizing ──
     const atr14=(()=>{if(candles.length<15)return null;const trs=candles.slice(1).map((c,i)=>{const prev=candles[i];return Math.max(c.high-c.low,Math.abs(c.high-prev.close),Math.abs(c.low-prev.close));});let atr=trs.slice(0,14).reduce((a,b)=>a+b,0)/14;for(let i=14;i<trs.length;i++)atr=(atr*13+trs[i])/14;return atr;})();
 
-    // ── MACD(12,26,9) ──
-    const macd=(()=>{const fast=calcEma(cls,12),slow=calcEma(cls,26);if(!fast||!slow)return null;const line=fast-slow;const signals=[];const macdSeries=[];for(let i=25;i<cls.length;i++){const f=calcEma(cls.slice(0,i+1),12),s=calcEma(cls.slice(0,i+1),26);if(f&&s)macdSeries.push(f-s);}const signal=calcEma(macdSeries,9);const histogram=signal?macdSeries[macdSeries.length-1]-signal:null;return{line:line.toFixed(3),signal:signal?.toFixed(3)||null,histogram:histogram?.toFixed(3)||null,bullish:histogram!=null&&histogram>0};})();
+    // ── Asian session high/low (00:00-07:00 UTC) ──
+    const asianRange=(()=>{const h1=h1C[inst.id]||[];if(!h1.length)return null;const now=new Date();const todayStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),0,0,0));const asianCandles=h1.filter(c=>{const t=new Date(c.time||c.openTime);return t>=todayStart&&t.getUTCHours()<7;});if(!asianCandles.length)return null;const hi=Math.max(...asianCandles.map(c=>c.high));const lo=Math.min(...asianCandles.map(c=>c.low));return{high:hi.toFixed(2),low:lo.toFixed(2),range:(hi-lo).toFixed(2)};})();
 
-    // ── Bollinger Bands(20,2) ──
-    const bbands=(()=>{if(cls.length<20)return null;const slice=cls.slice(-20);const mean=slice.reduce((a,b)=>a+b,0)/20;const std=Math.sqrt(slice.reduce((s,v)=>s+Math.pow(v-mean,2),0)/20);const upper=mean+2*std,lower=mean-2*std;const pct=((prices[inst.id]-lower)/(upper-lower)*100);return{upper:upper.toFixed(2),mid:mean.toFixed(2),lower:lower.toFixed(2),width:((upper-lower)/mean*100).toFixed(2),pct:pct.toFixed(1),squeeze:(upper-lower)/mean<0.005};})();
+    // ── Previous Day High/Low ──
+    const prevDay=(()=>{const d1=d1C[inst.id]||[];if(d1.length<2)return null;const pd=d1[d1.length-2];return{high:pd.high.toFixed(2),low:pd.low.toFixed(2)};})();
 
-    // ── Fibonacci levels from H4 swing ──
-    const fib=(()=>{const h4=h4C[inst.id]||[];if(h4.length<10)return null;const recent=h4.slice(-20);const swingH=Math.max(...recent.map(c=>c.high));const swingL=Math.min(...recent.map(c=>c.low));const rng=swingH-swingL;const p=prices[inst.id];const levels={fib236:(swingH-rng*0.236).toFixed(2),fib382:(swingH-rng*0.382).toFixed(2),fib500:(swingH-rng*0.500).toFixed(2),fib618:(swingH-rng*0.618).toFixed(2),fib786:(swingH-rng*0.786).toFixed(2),swingH:swingH.toFixed(2),swingL:swingL.toFixed(2)};const nearestFib=Object.entries(levels).reduce((a,[k,v])=>Math.abs(parseFloat(v)-p)<Math.abs(parseFloat(a[1])-p)?[k,v]:a,['none','0']);return{...levels,nearest:nearestFib[0],nearestDist:Math.abs(parseFloat(nearestFib[1])-p).toFixed(2)};})();
+    // ── Previous Week High/Low ──
+    const prevWeek=(()=>{const wk=wkC[inst.id]||[];if(wk.length<2)return null;const pw=wk[wk.length-2];return{high:pw.high.toFixed(2),low:pw.low.toFixed(2)};})();
 
-    // ── SMC: Break of Structure + Order Blocks ──
-    const smc=(()=>{const h1=h1C[inst.id]||[];if(h1.length<10)return null;const recent=h1.slice(-20);// BOS: higher high or lower low
-    let bos='NONE',choch='NONE';
-    const prevH=Math.max(...recent.slice(0,-3).map(c=>c.high));
-    const prevL=Math.min(...recent.slice(0,-3).map(c=>c.low));
-    const lastH=Math.max(...recent.slice(-3).map(c=>c.high));
-    const lastL=Math.min(...recent.slice(-3).map(c=>c.low));
-    if(lastH>prevH)bos='BULLISH_BOS';
-    else if(lastL<prevL)bos='BEARISH_BOS';
-    // Order block: last bearish candle before bullish move or vice versa
-    let obLevel=null,obType=null;
-    for(let i=recent.length-4;i>=1;i--){const c=recent[i],next=recent[i+1];if(c.close<c.open&&next.close>next.open&&next.close>c.high){obLevel=((c.high+c.low)/2).toFixed(2);obType='BULLISH_OB';break;}if(c.close>c.open&&next.close<next.open&&next.close<c.low){obLevel=((c.high+c.low)/2).toFixed(2);obType='BEARISH_OB';break;}}
-    // FVG: gap between candle i-1 high and candle i+1 low
-    let fvg=null;
-    for(let i=recent.length-3;i>=1;i--){const gap=recent[i+1].low-recent[i-1].high;if(gap>0.5){fvg={type:'BULLISH_FVG',top:recent[i+1].low.toFixed(2),bottom:recent[i-1].high.toFixed(2)};break;}const gap2=recent[i-1].low-recent[i+1].high;if(gap2>0.5){fvg={type:'BEARISH_FVG',top:recent[i-1].low.toFixed(2),bottom:recent[i+1].high.toFixed(2)};break;}}
-    return{bos,orderBlock:obLevel?{level:obLevel,type:obType}:null,fvg};})();
+    // ── Liquidity Sweep Detection (M5 + M15) ──
+    const sweepDetect=(()=>{const m5=m5C[inst.id]||[];const m15=m15C[inst.id]||[];const src=m5.length>=10?m5:m15;if(src.length<6)return null;const recent=src.slice(-10);const p=prices[inst.id];if(!p||!asianRange)return null;const asH=parseFloat(asianRange.high),asL=parseFloat(asianRange.low);const pdH=prevDay?parseFloat(prevDay.high):null,pdL=prevDay?parseFloat(prevDay.low):null;
+    // Check if price swept above Asian High then came back below (Bearish sweep)
+    const sweptHigh=recent.some(c=>c.high>asH)&&p<asH;
+    const sweptPDH=pdH&&recent.some(c=>c.high>pdH)&&p<pdH;
+    // Check if price swept below Asian Low then came back above (Bullish sweep)
+    const sweptLow=recent.some(c=>c.low<asL)&&p>asL;
+    const sweptPDL=pdL&&recent.some(c=>c.low<pdL)&&p>pdL;
+    if(sweptHigh||sweptPDH){const lvl=sweptPDH&&pdH?pdH:asH;return{detected:true,direction:'BEARISH_SWEEP',level:lvl.toFixed(2),description:`Price swept ${sweptPDH?'PDH':'Asian High'} @ ${lvl.toFixed(2)} then returned below`};}
+    if(sweptLow||sweptPDL){const lvl=sweptPDL&&pdL?pdL:asL;return{detected:true,direction:'BULLISH_SWEEP',level:lvl.toFixed(2),description:`Price swept ${sweptPDL?'PDL':'Asian Low'} @ ${lvl.toFixed(2)} then returned above`};}
+    return{detected:false,direction:'NONE',level:null,description:'No liquidity sweep detected'};})();
 
-    // ── Equilibrium zone from H4 ──
-    const h4=h4C[inst.id]||[];
-    const eq=(()=>{if(h4.length<10)return null;const r=h4.slice(-20),hi=Math.max(...r.map(c=>c.high)),lo=Math.min(...r.map(c=>c.low)),pos=((prices[inst.id]-lo)/(hi-lo))*100;return{position:Math.round(pos),zone:pos>62.5?'PREMIUM':pos<37.5?'DISCOUNT':'EQUILIBRIUM'};})();
+    // ── FVG Detection (M5 for precision entry) ──
+    const fvgDetect=(()=>{const m5=m5C[inst.id]||[];const h1=h1C[inst.id]||[];const src=m5.length>=10?m5.slice(-15):h1.slice(-15);let fvg=null;for(let i=src.length-3;i>=1;i--){const gap=src[i+1]?.low-src[i-1]?.high;if(gap>0.3){fvg={type:'BULLISH_FVG',top:src[i+1].low.toFixed(2),bottom:src[i-1].high.toFixed(2),mid:((src[i+1].low+src[i-1].high)/2).toFixed(2)};break;}const gap2=src[i-1]?.low-src[i+1]?.high;if(gap2>0.3){fvg={type:'BEARISH_FVG',top:src[i-1].low.toFixed(2),bottom:src[i+1].high.toFixed(2),mid:((src[i-1].low+src[i+1].high)/2).toFixed(2)};break;}}return fvg;})();
 
-    // ── Weekly bias ──
-    const weeklyBias=(()=>{const wk=wkC[inst.id]||[];if(wk.length<3)return'UNKNOWN';const last=wk[wk.length-1],prev=wk[wk.length-2];return last.close>prev.close?'BULLISH':'BEARISH';})();
+    // ── BOS on H1 ──
+    const bos=(()=>{const h1=h1C[inst.id]||[];if(h1.length<10)return'NONE';const r=h1.slice(-15);const pH=Math.max(...r.slice(0,-3).map(c=>c.high)),pL=Math.min(...r.slice(0,-3).map(c=>c.low));const lH=Math.max(...r.slice(-3).map(c=>c.high)),lL=Math.min(...r.slice(-3).map(c=>c.low));return lH>pH?'BULLISH_BOS':lL<pL?'BEARISH_BOS':'NONE';})();
 
-    // ── Support / Resistance from M15 round numbers ──
-    const roundLevels=(()=>{const p=prices[inst.id];if(!p)return[];const base=Math.round(p/10)*10;return[-30,-20,-10,0,10,20,30].map(o=>(base+o).toFixed(0));})();
+    // ── Kill Zone check ──
+    const utcH=session.utcTime||new Date().getUTCHours();
+    const inLondonKZ=utcH>=7&&utcH<10;
+    const inNYKZ=utcH>=13&&utcH<16;
+    const inKillZone=inLondonKZ||inNYKZ;
 
     const todayPnl=getTodayPnl(closedTrades),lossStreak=getConsecLosses(closedTrades);
     const todayT=closedTrades.filter(t=>{const d=new Date(t.time||t.closeTime||'');return d.toDateString()===new Date().toDateString();});
@@ -408,42 +392,38 @@ export default function TradingBotLive(){
 
     const snap={
       symbol:inst.id, price:prices[inst.id],
-      // ── 7 Timeframes ──
-      candles_weekly: sumC(wkC[inst.id],'W1',8),
-      candles_d1:     sumC(d1C[inst.id],'D1',10),
-      candles_h4:     sumC(h4C[inst.id],'H4',20),
-      candles_h1:     sumC(h1C[inst.id],'H1',24),
-      candles_m15:    sumC(m15C[inst.id],'M15',10),
-      candles_m5:     sumC(m5C[inst.id],'M5',10),
-      candles_m1:     sumC(candles,'M1',10),
-      // ── Indicators ──
-      rsi14:          rsi14?.toFixed(1),
-      ema21:          ema21?.toFixed(2),
-      ema50:          ema50?.toFixed(2),
-      ema200:         ema200?.toFixed(2),
-      price_vs_ema21: ema21?(prices[inst.id]>ema21?'ABOVE':'BELOW'):'UNKNOWN',
-      price_vs_ema50: ema50?(prices[inst.id]>ema50?'ABOVE':'BELOW'):'UNKNOWN',
-      ema_alignment:  (ema21&&ema50&&ema200)?(ema21>ema50&&ema50>ema200?'BULLISH_STACK':ema21<ema50&&ema50<ema200?'BEARISH_STACK':'MIXED'):'UNKNOWN',
-      atr14:          atr14?.toFixed(2),
-      atr_sl_guide:   atr14?`SL = 1.5×ATR = ${(atr14*1.5).toFixed(2)} pips | TP1 = 2×ATR = ${(atr14*2).toFixed(2)} | TP3 = 4×ATR = ${(atr14*4).toFixed(2)}`:null,
-      macd:           macd?`line:${macd.line} signal:${macd.signal} hist:${macd.histogram} (${macd.bullish?'BULLISH':'BEARISH'})`:null,
-      bbands:         bbands?`U:${bbands.upper} M:${bbands.mid} L:${bbands.lower} W:${bbands.width}% pos:${bbands.pct}%${bbands.squeeze?' SQUEEZE':''}`:null,
-      bb_position:    bbands?.pct,
-      // ── Fibonacci ──
-      fib_levels:     fib?`SwH:${fib.swingH} 23.6%:${fib.fib236} 38.2%:${fib.fib382} 50%:${fib.fib500} 61.8%:${fib.fib618} 78.6%:${fib.fib786} SwL:${fib.swingL}`:null,
-      fib_nearest:    fib?`nearest level: ${fib.nearest} (${fib.nearestDist} pips away)`:null,
-      // ── SMC ──
-      smc_bos:        smc?.bos,
-      smc_order_block:smc?.orderBlock?`${smc.orderBlock.type} @ ${smc.orderBlock.level}`:null,
-      smc_fvg:        smc?.fvg?`${smc.fvg.type} ${smc.fvg.bottom}–${smc.fvg.top}`:null,
-      // ── Structure ──
-      equilibrium_zone:     eq?.zone,
-      equilibrium_position: eq?.position,
-      weekly_bias:    weeklyBias,
-      round_levels:   roundLevels.join(', '),
-      // ── Session & Context ──
+      utc_hour: new Date().getUTCHours(),
+      in_kill_zone: inKillZone,
+      kill_zone: inLondonKZ?'LONDON_KZ':inNYKZ?'NY_KZ':'NONE',
+      // ── ICT Liquidity Levels ──
+      asian_high:       asianRange?.high||null,
+      asian_low:        asianRange?.low||null,
+      asian_range_pips: asianRange?.range||null,
+      pdh: prevDay?.high||null,
+      pdl: prevDay?.low||null,
+      pwh: prevWeek?.high||null,
+      pwl: prevWeek?.low||null,
+      // ── Sweep ──
+      liquidity_sweep:  sweepDetect?.detected?sweepDetect.description:'No sweep detected',
+      sweep_direction:  sweepDetect?.direction||'NONE',
+      sweep_level:      sweepDetect?.level||null,
+      // ── FVG + BOS ──
+      smc_fvg:          fvgDetect?`${fvgDetect.type} ${fvgDetect.bottom}–${fvgDetect.top} (mid:${fvgDetect.mid})`:null,
+      smc_bos:          bos,
+      smc_order_block:  null,
+      // ── ATR only (for SL sizing) ──
+      atr14:            atr14?.toFixed(2),
+      atr_sl_guide:     atr14?`SL=beyond sweep level (~${(atr14*1.5).toFixed(1)} min) | TP1=${(atr14*2).toFixed(1)} | TP2=${(atr14*3).toFixed(1)} | TP3=${(atr14*4.5).toFixed(1)}`:null,
+      // ── Context candles (bias only) ──
+      candles_weekly: sumC(wkC[inst.id],'W1',4),
+      candles_d1:     sumC(d1C[inst.id],'D1',5),
+      candles_h4:     sumC(h4C[inst.id],'H4',10),
+      candles_h1:     sumC(h1C[inst.id],'H1',8),
+      candles_m15:    sumC(m15C[inst.id],'M15',6),
+      candles_m5:     sumC(m5C[inst.id],'M5',6),
+      // ── Account ──
       session:session.session, session_allowed:true,
-      news:news.slice(0,3), calendar_events:calEvents.slice(0,3),
+      news:news.slice(0,2), calendar_events:calEvents.slice(0,2),
       open_positions:openPositions.map(p=>({symbol:p.symbol,type:p.type,profit:p.profit})),
       account_balance:accountBalance,
       today_pnl:todayPnl?.toFixed(2), today_trades:todayT.length,
@@ -452,7 +432,7 @@ export default function TradingBotLive(){
       today_short_results:`${ts.filter(t=>(t.profit||0)>0).length}W/${ts.filter(t=>(t.profit||0)<=0).length}L (${ts.length} shorts)`,
     };
     try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[]})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');
-          if(dec.decision==='WAIT'){addLog(`⏳ Confluences: ${dec.confluences?.join(', ')||'none listed'}`,'info');}if(dec.decision!=='WAIT'&&dec.confidence>=55){
+          if(dec.decision==='WAIT'){addLog(`⏳ S1:${dec.step1_killzone||'?'} S2:${dec.step2_sweep||'?'} S3:${dec.step3_fvg||'?'} S4:${dec.step4_entry||'?'}`,'info');}if(dec.decision!=='WAIT'&&dec.confidence>=55){
           const n=Date.now();
           // Block 2: 5 min cooldown between trades
           if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<300000){
