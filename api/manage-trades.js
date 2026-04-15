@@ -28,14 +28,89 @@ module.exports = async (req, res) => {
 
   // ── Telegram helper ──
   const sendTelegram = async (msg) => {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chat  = process.env.TELEGRAM_CHAT_ID;
+    if (!token || !chat) return;
     try {
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHAT_ID, text: msg, parse_mode: 'HTML' }),
+        body: JSON.stringify({ chat_id: chat, text: msg, parse_mode: 'HTML', disable_notification: false }),
       });
-    } catch(e) {}
+    } catch(e) { console.error('Telegram error:', e.message); }
   };
+
+  // ── Rich Telegram message builders ──
+  const tgEntry = (sym, dir, price, sl, tp1, tp2, tp3, vol, conf, reason) => {
+    const emoji = dir === 'LONG' ? '📈🟢' : '📉🔴';
+    const slPips = Math.abs(price - sl).toFixed(2);
+    const rr = tp3 ? (Math.abs(tp3 - price) / Math.abs(price - sl)).toFixed(1) : '—';
+    return `${emoji} <b>NEW TRADE — ${sym}</b>
+━━━━━━━━━━━━━━━━━━━━
+Direction: <b>${dir}</b>  |  Size: <b>${vol} lots</b>
+Entry:  <b>$${parseFloat(price).toFixed(2)}</b>
+SL:     <b>$${parseFloat(sl).toFixed(2)}</b> (${slPips} pips)
+TP1:    <b>$${parseFloat(tp1).toFixed(2)}</b> → 50% close
+TP2:    <b>$${parseFloat(tp2||0).toFixed(2)}</b> → 30% close
+TP3:    <b>$${parseFloat(tp3||0).toFixed(2)}</b> → 20% runner
+R/R:    <b>1:${rr}</b>
+━━━━━━━━━━━━━━━━━━━━
+Confidence: <b>${conf||'—'}%</b>
+💬 ${reason||''}
+⏰ ${new Date().toUTCString()}`;
+  };
+
+  const tgTP1 = (sym, dir, price, pnl, entry, tp2, tp3) => {
+    const progress = tp2 ? Math.abs(price - entry) / Math.abs(tp3 - entry) * 100 : 0;
+    return `🎯 <b>TP1 HIT — ${sym}</b>
+━━━━━━━━━━━━━━━━━━━━
+${dir} @ entry $${parseFloat(entry).toFixed(2)}
+Closed 50% @ <b>$${parseFloat(price).toFixed(2)}</b>
+Secured: <b>+$${parseFloat(pnl).toFixed(2)}</b>
+🛡️ Stop moved to <b>BREAKEVEN</b>
+━━━━━━━━━━━━━━━━━━━━
+Next target TP2: <b>$${parseFloat(tp2||0).toFixed(2)}</b>
+Progress to TP3: ${progress.toFixed(0)}%`;
+  };
+
+  const tgTP2 = (sym, dir, price, pnl, entry, tp1pnl, tp3) => {
+    return `🎯🎯 <b>TP2 HIT — ${sym}</b>
+━━━━━━━━━━━━━━━━━━━━
+${dir} @ entry $${parseFloat(entry).toFixed(2)}
+Closed 30% @ <b>$${parseFloat(price).toFixed(2)}</b>
+This close: <b>+$${parseFloat(pnl).toFixed(2)}</b>
+Total secured: <b>+$${(parseFloat(pnl)+(tp1pnl||0)).toFixed(2)}</b>
+🔒 Stop trailed to protect profits
+━━━━━━━━━━━━━━━━━━━━
+🏃 20% runner still open → TP3: <b>$${parseFloat(tp3||0).toFixed(2)}</b>`;
+  };
+
+  const tgTP3 = (sym, dir, price, pnl, entry, totalPnl) => {
+    return `🏆 <b>TRADE COMPLETE — ${sym}</b>
+━━━━━━━━━━━━━━━━━━━━
+${dir} @ entry $${parseFloat(entry).toFixed(2)}
+Closed 100% @ <b>$${parseFloat(price).toFixed(2)}</b>
+━━━━━━━━━━━━━━━━━━━━
+TP1: ✅  TP2: ✅  TP3: ✅
+<b>TOTAL P&L: +$${parseFloat(totalPnl||pnl).toFixed(2)}</b>
+━━━━━━━━━━━━━━━━━━━━
+🤖 Quantum Bot V5.2 | ${new Date().toUTCString()}`;
+  };
+
+  const tgSLHit = (sym, dir, price, pnl, entry, tp1Hit) => {
+    return `🛑 <b>STOP LOSS HIT — ${sym}</b>
+━━━━━━━━━━━━━━━━━━━━
+${dir} @ entry $${parseFloat(entry).toFixed(2)}
+Stopped @ <b>$${parseFloat(price).toFixed(2)}</b>
+${tp1Hit ? '✅ TP1 was secured before SL' : '❌ No TPs hit'}
+P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
+━━━━━━━━━━━━━━━━━━━━
+🤖 Bot continues monitoring market`;
+  };
+
+  const tgWait = (reason, conf) =>
+    `⏸ <b>WAIT</b> — Confidence: ${conf||'—'}%
+💬 ${reason||'Setup not clear enough'}`;
 
   // ══════════════════════════════════════════════════════════════════════════
   // GET — fetch reports + analytics
@@ -153,7 +228,16 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!TOKEN || !ACCOUNT_ID) return res.status(500).json({ error: 'Missing env vars' });
 
-  const { positions } = req.body || {};
+  const body = req.body || {};
+
+  // ── Handle entry notification ──
+  if (body.telegramEntry) {
+    const { symbol, direction, price, sl, tp1, tp2, tp3, volume, confidence, reason } = body.telegramEntry;
+    await sendTelegram(tgEntry(symbol, direction, price, sl, tp1, tp2, tp3, volume, confidence, reason));
+    return res.status(200).json({ ok: true });
+  }
+
+  const { positions } = body;
   if (!Array.isArray(positions) || positions.length === 0) {
     return res.status(200).json({ managed: [], message: 'No positions to manage' });
   }
@@ -258,7 +342,7 @@ module.exports = async (req, res) => {
             tp1, tp2, tp3, eventType: 'PARTIAL_CLOSE_TP1', price: currentPrice, pnl });
 
           // Send Telegram
-          await sendTelegram(`🎯 <b>TP1 HIT</b>\n${symbol} ${direction}\nPrice: ${currentPrice?.toFixed(2)}\n+$${pnl}\n50% closed`);
+          await sendTelegram(tgTP1(symbol, direction, currentPrice, pnl, openPrice, tp2, tp3));
 
           // Move SL to breakeven
           if (breakeven && stopLoss !== breakeven) {
@@ -294,7 +378,8 @@ module.exports = async (req, res) => {
           await saveReport({ positionId: id, symbol, direction, openPrice, volume: closeVolume,
             tp1, tp2, tp3, eventType: 'PARTIAL_CLOSE_TP2', price: currentPrice, pnl });
 
-          await sendTelegram(`🎯🎯 <b>TP2 HIT</b>\n${symbol} ${direction}\nPrice: ${currentPrice?.toFixed(2)}\n+$${pnl}\n30% closed`);
+          const tp1pnl = result.actions.find(a=>a.type==='PARTIAL_CLOSE_TP1')?.pnl || 0;
+          await sendTelegram(tgTP2(symbol, direction, currentPrice, pnl, openPrice, tp1pnl, tp3));
 
           // Smart trail: 25% of TP1→TP2 distance
           const trailDistance = pos.atr || Math.abs(tp2 - openPrice) * 0.25;
@@ -325,7 +410,20 @@ module.exports = async (req, res) => {
             tp1, tp2, tp3, eventType: 'FULL_CLOSE_TP3', price: currentPrice, pnl });
           if (redis) { try { await redis.del(stateKey); } catch(e) {} }
 
-          await sendTelegram(`🏆 <b>TP3 — TRADE COMPLETE</b>\n${symbol} ${direction}\nFull position closed @ ${currentPrice?.toFixed(2)}\n+$${pnl}`);
+          const totalPnlFinal = (result.actions.reduce((s,a)=>s+(a.pnl||0),0));
+          await sendTelegram(tgTP3(symbol, direction, currentPrice, pnl, openPrice, totalPnlFinal));
+        }
+      }
+
+      // ── SL HIT detection: price went through SL ──
+      if (!state.tp3Hit && stopLoss && profit_distance < 0) {
+        const slDist = Math.abs(stopLoss - openPrice);
+        if (Math.abs(profit_distance) >= slDist * 0.95) {
+          const pnl = parseFloat((profit_distance * volume * 100).toFixed(2));
+          await saveReport({ positionId: id, symbol, direction, openPrice, volume,
+            tp1, tp2, tp3, eventType: 'SL_HIT', price: currentPrice, pnl });
+          await sendTelegram(tgSLHit(symbol, direction, currentPrice, pnl, openPrice, state.tp1Hit));
+          if (redis) { try { await redis.del(stateKey); } catch(e) {} }
         }
       }
 

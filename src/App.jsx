@@ -448,7 +448,38 @@ export default function TradingBotLive(){
       today_long_results:`${tl.filter(t=>(t.profit||0)>0).length}W/${tl.filter(t=>(t.profit||0)<=0).length}L (${tl.length} longs)`,
       today_short_results:`${ts.filter(t=>(t.profit||0)>0).length}W/${ts.filter(t=>(t.profit||0)<=0).length}L (${ts.length} shorts)`,
     };
-    try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[]})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');if(dec.decision!=='WAIT'&&dec.confidence>=55){const n=Date.now();if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<300000)return;if(pendingRef.current[inst.id])return;const evTs=eventAlert?.date?new Date(eventAlert.date).getTime():0;if(evTs>n&&evTs<n+30*60*1000){addLog(`Blocked: ${eventAlert.name}`,"warn");return;}if(isNearClose()&&inst.type!=="CRYPTO"){addLog("Blocked: near close","warn");return;}if(!marketStatus[inst.id]?.open&&inst.type!=="CRYPTO")return;const ao=openPositions.some(p=>{const raw=(p.symbol||"").toUpperCase();const norm=raw==="XAUUSD.S"?"XAUUSD":raw.startsWith("BTCUSD")?"BTCUSD":raw.startsWith("GBPUSD")?"GBPUSD":raw.startsWith("XAUUSD")?"XAUUSD":raw;return norm===(inst.id==="BTCUSDT"?"BTCUSD":inst.id);});if(ao){addLog(`${inst.label}: already open`,"warn");return;}if(openPositions.length>=3){addLog("Max 3 positions","warn");return;}if(!dec.stopLoss||!dec.takeProfit3){addLog(`No SL/TP`,"warn");return;}if(!Number.isFinite(accountBalance)||accountBalance<=0)return;if(getTodayPnl(closedTrades)<=-(accountBalance*0.05)){addLog("Daily limit","error");return;}const vol=dec.volume||0.08;pendingRef.current[inst.id]=true;addLog(`EXECUTE ${inst.label} ${dec.decision} ${vol}L`,"signal");setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
+    try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[]})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');if(dec.decision!=='WAIT'&&dec.confidence>=55){
+          const n=Date.now();
+          // Block 2: 5 min cooldown between trades
+          if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<300000){
+            addLog(`⏸ ${inst.label}: cooldown active (${Math.round((300000-(n-lastTradeRef.current[inst.id]))/1000)}s left)`,"info");return;}
+          // Block 3: pending trade
+          if(pendingRef.current[inst.id]){addLog(`⏸ ${inst.label}: execution already pending`,"warn");return;}
+          // Block 4: upcoming event
+          const evTs=eventAlert?.date?new Date(eventAlert.date).getTime():0;
+          if(evTs>n&&evTs<n+30*60*1000){addLog(`⛔ Blocked: ${eventAlert.name} in ${Math.round((evTs-n)/60000)}min`,"warn");return;}
+          // Block 5: near market close Friday
+          if(isNearClose()&&inst.type!=="CRYPTO"){addLog(`⛔ Blocked: Friday market close`,"warn");return;}
+          // Block 6: market closed — LOG IT (was silent before!)
+          if(!marketStatus[inst.id]?.open&&inst.type!=="CRYPTO"){addLog(`⛔ Blocked: ${inst.label} market is CLOSED (${marketStatus[inst.id]?.session})`,"warn");return;}
+          // Block 7: already open on this symbol
+          const ao=openPositions.some(p=>{const raw=(p.symbol||"").toUpperCase();const norm=raw==="XAUUSD.S"?"XAUUSD":raw.startsWith("BTCUSD")?"BTCUSD":raw.startsWith("GBPUSD")?"GBPUSD":raw.startsWith("XAUUSD")?"XAUUSD":raw;return norm===(inst.id==="BTCUSDT"?"BTCUSD":inst.id);});
+          if(ao){addLog(`⛔ ${inst.label}: position already open — waiting for close`,"warn");return;}
+          // Block 8: max positions
+          if(openPositions.length>=3){addLog(`⛔ Max 3 positions open (${openPositions.length})`,"warn");return;}
+          // Block 9: no SL/TP from Claude
+          if(!dec.stopLoss||!dec.takeProfit3){addLog(`⛔ ${inst.label}: Claude returned no SL or TP3 — skipping`,"warn");return;}
+          // Block 10: balance unknown — LOG IT (was silent before!)
+          if(!Number.isFinite(accountBalance)||accountBalance<=0){addLog(`⛔ Blocked: account balance unknown or zero`,"warn");return;}
+          // Block 11: daily loss limit
+          if(getTodayPnl(closedTrades)<=-(accountBalance*0.05)){addLog(`⛔ Daily -5% limit hit — trading stopped for today`,"error");return;}const vol=dec.volume||0.08;pendingRef.current[inst.id]=true;addLog(`EXECUTE ${inst.label} ${dec.decision} ${vol}L`,"signal");
+          // Telegram entry notification
+          fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({telegramEntry:{
+              symbol:inst.id, direction:dec.decision, price:prices[inst.id],
+              sl:dec.stopLoss, tp1:dec.takeProfit1, tp2:dec.takeProfit2, tp3:dec.takeProfit3,
+              volume:vol, confidence:dec.confidence, reason:dec.reason
+            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
   },[brokerCandles,prices,m5C,m15C,h1C,h4C,d1C,wkC,accountBalance,closedTrades,openPositions,news,calEvents,eventAlert,marketStatus,prevDecisions,addLog,fetchPos,fetchHist]);
 
   useEffect(()=>{const run=()=>{const s=getSessionInfo();if(!s.isLondon&&!s.isNY)return;const g=INSTRUMENTS.find(i=>i.id==='XAUUSD');if(g&&brokerCandles['XAUUSD']?.length>=50)runAIBrain(g);};const t=setTimeout(run,3000),i=setInterval(run,600000);return()=>{clearTimeout(t);clearInterval(i);};},[runAIBrain,brokerCandles]);
