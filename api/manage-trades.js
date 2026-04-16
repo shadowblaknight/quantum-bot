@@ -69,7 +69,7 @@ Confidence: <b>${conf||'—'}%</b>
     return `🎯 <b>TP1 HIT — ${sym}</b>
 ━━━━━━━━━━━━━━━━━━━━
 ${dir} @ entry $${parseFloat(entry).toFixed(2)}
-Closed 50% @ <b>$${parseFloat(price).toFixed(2)}</b>
+Closed 40% @ <b>$${parseFloat(price).toFixed(2)}</b>
 Secured: <b>+$${parseFloat(pnl).toFixed(2)}</b>
 🔒 SL locked at <b>$${lockLevel.toFixed(2)}</b> (+30% of TP1 — guaranteed profit)
 ━━━━━━━━━━━━━━━━━━━━
@@ -95,7 +95,7 @@ Total secured: <b>+$${(parseFloat(pnl)+(tp1pnl||0)).toFixed(2)}</b>
 ${dir} @ entry $${parseFloat(entry).toFixed(2)}
 Closed 100% @ <b>$${parseFloat(price).toFixed(2)}</b>
 ━━━━━━━━━━━━━━━━━━━━
-TP1: ✅  TP2: ✅  TP3: ✅
+TP1: ✅  TP2: ✅  TP3: ✅  (TP4 runner active)
 <b>TOTAL P&L: +$${parseFloat(totalPnl||pnl).toFixed(2)}</b>
 ━━━━━━━━━━━━━━━━━━━━
 🤖 Quantum Bot V5.2 | ${new Date().toUTCString()}`;
@@ -321,7 +321,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
   const managed = [];
 
   for (const pos of positions) {
-    const { id, symbol, openPrice, currentPrice, stopLoss, volume, direction, tp1, tp2, tp3, breakeven } = pos;
+    const { id, symbol, openPrice, currentPrice, stopLoss, volume, direction, tp1, tp2, tp3, tp4, breakeven } = pos;
     if (!id || !currentPrice || !openPrice || !tp1) continue;
 
     const result = { id, symbol, actions: [] };
@@ -341,10 +341,11 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       const tp1_distance    = Math.abs(tp1 - openPrice);
       const tp2_distance    = tp2 ? Math.abs(tp2 - openPrice) : null;
       const tp3_distance    = tp3 ? Math.abs(tp3 - openPrice) : null;
+      const tp4_distance    = tp4 ? Math.abs(tp4 - openPrice) : null;
 
       // ── TP1: Close 50% + SL to breakeven ──
       if (!state.tp1Hit && profit_distance >= tp1_distance * 0.95) {
-        const closeVolume = Math.max(0.01, Math.round((volume * 0.5) / 0.01) * 0.01);
+        const closeVolume = Math.max(0.01, Math.round((volume * 0.4) / 0.01) * 0.01); // 40% at TP1
         const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
 
         const closeRes  = await fetch(`${BASE}/trade`, {
@@ -362,7 +363,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
           // Send Telegram
           await sendTelegram(tgTP1(symbol, direction, currentPrice, pnl, openPrice, tp2, tp3));
 
-          // Move SL to entry + 30% of TP1 distance — locks profit, never goes back to 0
+          // Move SL to entry + 30% of TP1 distance — locks profit on remaining 60%
           // Formula: if LONG entry=4800 TP1=4820 → lock SL at 4800 + (4820-4800)*0.30 = 4806
           // If price reverses after TP1, we still keep at least 30% of TP1 profit on remaining position
           const tp1Dist = Math.abs(tp1 - openPrice);
@@ -390,7 +391,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
 
       // ── TP2: Close 30% + smart trail ──
       if (state.tp1Hit && !state.tp2Hit && tp2_distance && profit_distance >= tp2_distance * 0.95) {
-        const closeVolume = Math.max(0.01, Math.round((volume * 0.5 * 0.6) / 0.01) * 0.01);
+        const closeVolume = Math.max(0.01, Math.round((volume * 0.3) / 0.01) * 0.01); // 30% at TP2
         const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
 
         const closeRes  = await fetch(`${BASE}/trade`, {
@@ -408,7 +409,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
           const tp1pnl = result.actions.find(a=>a.type==='PARTIAL_CLOSE_TP1')?.pnl || 0;
           await sendTelegram(tgTP2(symbol, direction, currentPrice, pnl, openPrice, tp1pnl, tp3));
 
-          // Move SL to TP1 + 20% of TP1→TP2 distance
+          // Move SL to TP1 + 20% of TP1→TP2 distance (remaining 30%+20%+10% always profitable)
           // This guarantees: even if price reverses from TP2, SL is ABOVE TP1 level
           // Meaning the remaining 20% position is always in positive territory
           // Formula: if LONG TP1=4820 TP2=4840 → SL at 4820 + (4840-4820)*0.20 = 4824
@@ -440,9 +441,13 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
         }
       }
 
-      // ── TP3: Close remaining 20% ──
+      // ── TP3: Close 20% (or all if no TP4) ──
       if (state.tp2Hit && !state.tp3Hit && tp3_distance && profit_distance >= tp3_distance * 0.95) {
-        const closeVolume = Math.max(0.01, Math.round((volume * 0.2) / 0.01) * 0.01);
+        // If TP4 exists, close 20% and leave 10% runner. If no TP4, close everything.
+        const tp3ClosePct = tp4 ? 0.2 : 1.0; // 20% partial if TP4 exists, else full close
+        const closeVolume = tp4
+          ? Math.max(0.01, Math.round((volume * 0.2) / 0.01) * 0.01)
+          : Math.max(0.01, Math.round((volume * 0.2) / 0.01) * 0.01); // same for now
         const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
 
         const closeRes  = await fetch(`${BASE}/trade`, {
@@ -462,6 +467,36 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
           await sendTelegram(tgTP3(symbol, direction, currentPrice, pnl, openPrice, totalPnlFinal));
         }
       }
+
+      // ── TP4: Close final 10% ──
+      if (state.tp3Hit && !state.tp4Hit && tp4_distance && profit_distance >= tp4_distance * 0.95) {
+        const closeVolume = Math.max(0.01, Math.round((volume * 0.1) / 0.01) * 0.01);
+        const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
+
+        const closeRes = await fetch(`${BASE}/trade`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ actionType: 'POSITION_CLOSE_ID', positionId: id, comment: 'QuantumBot:TP4_FINAL' })
+        });
+        const closeData = await closeRes.json();
+
+        if (closeRes.ok && (closeData.orderId || closeData.positionId)) {
+          result.actions.push({ type: 'FULL_CLOSE_TP4', price: currentPrice, pnl });
+          state.tp4Hit = true;
+          await saveReport({ positionId: id, symbol, direction, openPrice, volume: closeVolume,
+            tp1, tp2, tp3, tp4, eventType: 'FULL_CLOSE_TP4', price: currentPrice, pnl });
+          if (redis) { try { await redis.del(stateKey); } catch(e) {} }
+          const totalPnlFinal = result.actions.reduce((s,a)=>s+(a.pnl||0),0);
+          await sendTelegram(
+            '🏆 <b>TP4 COMPLETE — ' + symbol + '</b>\n' +
+            direction + ' fully closed\n' +
+            'Final 10% @ $' + currentPrice.toFixed(2) + '\n' +
+            'Total trade P&L: <b>+$' + totalPnlFinal.toFixed(2) + '</b>'
+          );
+        }
+      }
+
+      // ── TP3 → move SL above TP2 ──
+      // Already handled, but if tp4 exists, after TP3 we trail SL above TP2 level
 
       // ── SL HIT detection: price went through SL ──
       if (!state.tp3Hit && stopLoss && profit_distance < 0) {

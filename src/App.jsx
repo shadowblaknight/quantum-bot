@@ -412,7 +412,8 @@ export default function TradingBotLive(){
       const tp1=stored?.tp1||dec?.takeProfit1||null;
       const tp2=stored?.tp2||dec?.takeProfit2||null;
       const tp3=stored?.tp3||dec?.takeProfit3||null;
-      return{id:pos.id||pos.positionId,symbol:pos.symbol,openPrice:pos.openPrice,currentPrice:pos.currentPrice,stopLoss:pos.stopLoss,volume:pos.volume,direction:pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',tp1,tp2,tp3,breakeven:pos.openPrice,atr:null};}).filter(p=>p.id&&p.tp1);if(!managed.length)return;try{const r=await fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({positions:managed})});const d=await r.json();if(d.managed?.length>0){d.managed.forEach(m=>m.actions.forEach(a=>{if(a.type==='PARTIAL_CLOSE_TP1')addLog(`TP1 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='PARTIAL_CLOSE_TP2')addLog(`TP2 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='FULL_CLOSE_TP3')addLog(`TP3 COMPLETE ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='SL_TO_BREAKEVEN')addLog(`BE lock ${m.symbol}`,'info');if(['PARTIAL_CLOSE_TP1','PARTIAL_CLOSE_TP2','FULL_CLOSE_TP3'].includes(a.type)){setNotifs(p=>[...p.slice(-3),{id:Date.now(),symbol:m.symbol,type:a.type,price:a.price,pnl:a.pnl,time:new Date().toLocaleTimeString()}]);fetchReports();}}));setTimeout(fetchPos,1500);setTimeout(fetchHist,3000);}}catch(e){}},[openPositions,aiDecisions,addLog,fetchPos,fetchHist,fetchReports]);
+      const tp4=stored?.tp4||dec?.takeProfit4||null;
+      return{id:pos.id||pos.positionId,symbol:pos.symbol,openPrice:pos.openPrice,currentPrice:pos.currentPrice,stopLoss:pos.stopLoss,volume:pos.volume,direction:pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',tp1,tp2,tp3,tp4,breakeven:pos.openPrice,atr:null};}).filter(p=>p.id&&p.tp1);if(!managed.length)return;try{const r=await fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({positions:managed})});const d=await r.json();if(d.managed?.length>0){d.managed.forEach(m=>m.actions.forEach(a=>{if(a.type==='PARTIAL_CLOSE_TP1')addLog(`TP1 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='PARTIAL_CLOSE_TP2')addLog(`TP2 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='FULL_CLOSE_TP3')addLog(`TP3 COMPLETE ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='SL_TO_BREAKEVEN')addLog(`BE lock ${m.symbol}`,'info');if(['PARTIAL_CLOSE_TP1','PARTIAL_CLOSE_TP2','FULL_CLOSE_TP3'].includes(a.type)){setNotifs(p=>[...p.slice(-3),{id:Date.now(),symbol:m.symbol,type:a.type,price:a.price,pnl:a.pnl,time:new Date().toLocaleTimeString()}]);fetchReports();}}));setTimeout(fetchPos,1500);setTimeout(fetchHist,3000);}}catch(e){}},[openPositions,aiDecisions,addLog,fetchPos,fetchHist,fetchReports]);
   useEffect(()=>{if(!openPositions.length)return;const i=setInterval(manageTrades,30000);manageTrades();return()=>clearInterval(i);},[openPositions,manageTrades]);
 
   const runAIBrain=useCallback(async(inst)=>{
@@ -602,6 +603,7 @@ export default function TradingBotLive(){
                 volume:vol,
                 strategy:dec.strategy||'UNKNOWN',
                 confidence:dec.confidence||0,
+                tp4:dec.takeProfit4||null,
                 openedAt:Date.now(),
               }}));
               setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
@@ -660,14 +662,18 @@ export default function TradingBotLive(){
     const safeTP3 = tp3Valid ? tp3 : null;
     const range=Math.abs((safeTP3||safeTP1||entry)-entry)||1;
     const progress=Math.min(100,Math.max(0,(Math.abs(curr-entry)/range)*100));
+    const rawTP4=dec.tp4||dec.takeProfit4||null;
+    const tp4Valid=rawTP4&&(dir==='LONG'?rawTP4>entry:rawTP4<entry);
+    const safeTP4=tp4Valid?rawTP4:null;
     return{
       dir,entry,curr,
       sl:dec.stopLoss||pos.stopLoss,
-      tp1:safeTP1, tp2:safeTP2, tp3:safeTP3,
+      tp1:safeTP1, tp2:safeTP2, tp3:safeTP3, tp4:safeTP4,
       progress,
       tp1Hit:safeTP1?(dir==='LONG'?curr>=safeTP1:curr<=safeTP1):false,
       tp2Hit:safeTP2?(dir==='LONG'?curr>=safeTP2:curr<=safeTP2):false,
       tp3Hit:safeTP3?(dir==='LONG'?curr>=safeTP3:curr<=safeTP3):false,
+      tp4Hit:safeTP4?(dir==='LONG'?curr>=safeTP4:curr<=safeTP4):false,
     };
   };
 
@@ -931,7 +937,7 @@ export default function TradingBotLive(){
                             {tp&&(
                               <>
                                 <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6,marginBottom:8}}>
-                                  {[["TP1 · 50%",tp.tp1,tp.tp1Hit,"#c9882a"],["TP2 · 30%",tp.tp2,tp.tp2Hit,"#3b6cf0"],["TP3 · 20%",tp.tp3,tp.tp3Hit,"#0ea56b"]].map(([l,v,hit,c])=>(
+                                  {[["TP1 · 40%",tp.tp1,tp.tp1Hit,"#c9882a"],["TP2 · 30%",tp.tp2,tp.tp2Hit,"#3b6cf0"],["TP3 · 20%",tp.tp3,tp.tp3Hit,"#0ea56b"],["TP4 · 10%",tp.tp4,tp.tp4Hit,"#7c3aed"]].filter(([,v])=>v!=null).map(([l,v,hit,c])=>(
                                     <div key={l} style={{background:hit?`${c}12`:"white",border:`1px solid ${hit?c:"var(--border)"}`,borderRadius:6,padding:"6px 8px",transition:"all 0.3s"}}>
                                       <div style={{fontSize:9,color:hit?c:"var(--text3)",marginBottom:1}}>{l}{hit&&" ✓"}</div>
                                       <div style={{fontSize:11,fontWeight:700,color:hit?c:"var(--text)"}}>{v?.toFixed?.(2)||"—"}</div>

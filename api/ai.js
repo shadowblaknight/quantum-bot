@@ -36,11 +36,11 @@ module.exports = async (req, res) => {
     // Per-instrument risk profiles
     const RISK = {
       // Gold: avg move 6-12 pips. SL tight beyond structure. TP1 must be reachable at 1:1.
-      XAUUSD:  { riskPct:0.01, pipVal:100, minSL:8,  maxSL:20,  maxLot:0.50, slMult:0.8, tp1Mult:1.0, tp2Mult:2.0, tp3Mult:3.5, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
+      XAUUSD:  { riskPct:0.01, pipVal:100, minSL:8,  maxSL:20,  maxLot:0.50, slMult:0.8, tp1Mult:0.5, tp2Mult:1.0, tp3Mult:1.5, tp4Mult:2.0, tp1Pct:40, tp2Pct:30, tp3Pct:20, tp4Pct:10 },
       // BTC: moves $200-600/session. SL needs room. TP1 at 1.2× gives quick partial.
-      BTCUSDT: { riskPct:0.005,pipVal:1,   minSL:150,maxSL:400, maxLot:0.30, slMult:0.8, tp1Mult:1.0, tp2Mult:1.8, tp3Mult:3.0, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
+      BTCUSDT: { riskPct:0.005,pipVal:1,   minSL:150,maxSL:300, maxLot:0.30, slMult:0.8, tp1Mult:0.5, tp2Mult:1.0, tp3Mult:1.5, tp4Mult:2.0, tp1Pct:40, tp2Pct:30, tp3Pct:20, tp4Pct:10 },
       // GBP: tight intraday moves 8-20 pips. TP1 at 1:1, TP2 at 1:1.8.
-      GBPUSD:  { riskPct:0.01, pipVal:10,  minSL:6,  maxSL:20,  maxLot:2.00, slMult:0.8, tp1Mult:1.0, tp2Mult:1.8, tp3Mult:3.0, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
+      GBPUSD:  { riskPct:0.01, pipVal:10,  minSL:6,  maxSL:15,  maxLot:2.00, slMult:0.8, tp1Mult:0.5, tp2Mult:1.0, tp3Mult:1.5, tp4Mult:2.0, tp1Pct:40, tp2Pct:30, tp3Pct:20, tp4Pct:10 },
     };
     const R = RISK[instrument] || RISK.XAUUSD;
 
@@ -49,6 +49,7 @@ module.exports = async (req, res) => {
     const tp1Pips = Math.round(slPips * R.tp1Mult);
     const tp2Pips = Math.round(slPips * R.tp2Mult);
     const tp3Pips = Math.round(slPips * R.tp3Mult);
+    const tp4Pips = R.tp4Mult ? Math.round(slPips * R.tp4Mult) : null;
 
     // Lot sizing
     const riskDollar = balance * R.riskPct;
@@ -88,7 +89,7 @@ module.exports = async (req, res) => {
       GBPUSD:  'GBP/USD: 50-150pips/day. 1pip=$10/lot. BOE/Fed sensitive. Best: London open 07-10 UTC and NY open 13-16 UTC.',
     };
 
-    const slTpGuide = 'SL/TP FOR ' + instrument + ': SL=' + slPips + 'p  TP1=' + tp1Pips + 'p(close 50%)  TP2=' + tp2Pips + 'p(close 30%)  TP3=' + tp3Pips + 'p(let 20% run)  Vol=' + fullVol + 'L';
+    const slTpGuide = 'SL/TP FOR ' + instrument + ': SL=' + slPips + 'p  TP1=' + tp1Pips + 'p(close ' + (R.tp1Pct||50) + '%)  TP2=' + tp2Pips + 'p(close ' + (R.tp2Pct||30) + '%)  TP3=' + tp3Pips + 'p(close ' + (R.tp3Pct||20) + '%)' + (tp4Pips ? '  TP4=' + tp4Pips + 'p(close ' + (R.tp4Pct||10) + '%)' : '') + '  Vol=' + fullVol + 'L';
 
     const sizingGuide = 'SIZING FOR ' + instrument + ' (live calculation):\n' +
       'Risk/trade: $' + riskDollar.toFixed(2) + ' | Win streak ' + winStrk + ' x' + winScale + ' | Loss streak ' + lossStrk + ' x' + lossScale + '\n' +
@@ -98,7 +99,7 @@ module.exports = async (req, res) => {
       'Confidence 80-100: ' + Math.min(R.maxLot,Math.round(fullVol*1.25/0.01)*0.01) + ' lots\n' +
       'Max: ' + R.maxLot + ' lots. NEVER null when confidence>=35 and LONG/SHORT.';
 
-    const jsonSchema = '{\n  "decision": "LONG or SHORT or WAIT",\n  "confidence": 0-100,\n  "entry": price or null,\n  "stopLoss": price or null,\n  "takeProfit1": price or null,\n  "takeProfit2": price or null,\n  "takeProfit3": price or null,\n  "volume": lots,\n  "strategy": "TACTIC1+TACTIC2 from the label list",\n  "reason": "what you see and why",\n  "risk": "LOW or MEDIUM or HIGH",\n  "slPips": number,\n  "rrRatio": number\n}';
+    const jsonSchema = '{\n  "decision": "LONG or SHORT or WAIT",\n  "confidence": 0-100,\n  "entry": price or null,\n  "stopLoss": price or null,\n  "takeProfit1": price or null,\n  "takeProfit2": price or null,\n  "takeProfit3": price or null,\n  "takeProfit4": price or null (Gold TP4=20p, close last 10%),\n  "volume": lots,\n  "strategy": "TACTIC1+TACTIC2 from the label list",\n  "reason": "what you see and why",\n  "risk": "LOW or MEDIUM or HIGH",\n  "slPips": number,\n  "rrRatio": number\n}';
 
     const crownMode = !!crownedStrategy;
 
