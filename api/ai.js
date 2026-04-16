@@ -26,13 +26,21 @@ module.exports = async (req, res) => {
     const balance  = Number(snap.account_balance) || 10000;
     const lossStrk = Number(snap.inst_loss_streak ?? snap.loss_streak) || 0;
     const winStrk  = Number(snap.inst_win_streak  ?? snap.win_streak)  || 0;
-    const atr      = parseFloat(snap.atr14) || (instrument==='XAUUSD'?15:instrument==='BTCUSDT'?300:0.0012);
+    // Normalize ATR to pip units per instrument
+    // Gold: ATR already in pips (e.g. 12.5 = 12.5 pips)
+    // BTC:  ATR already in price units = pip units (e.g. 250 = $250)
+    // GBP:  ATR in price units (e.g. 0.001) → convert to pips (×10000 = 10 pips)
+    const rawAtr = parseFloat(snap.atr14) || (instrument==='XAUUSD'?12:instrument==='BTCUSDT'?250:0.001);
+    const atr    = instrument==='GBPUSD' ? Math.round(rawAtr * 10000) : rawAtr;
 
     // Per-instrument risk profiles
     const RISK = {
-      XAUUSD:  { riskPct:0.01, pipVal:100, minSL:10, maxSL:40,  maxLot:0.50, slMult:1.5, tp1Mult:2.0, tp2Mult:3.5, tp3Mult:5.5, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
-      BTCUSDT: { riskPct:0.005,pipVal:1,   minSL:200,maxSL:1200,maxLot:0.30, slMult:2.0, tp1Mult:1.8, tp2Mult:3.5, tp3Mult:6.0, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
-      GBPUSD:  { riskPct:0.01, pipVal:10,  minSL:8,  maxSL:35,  maxLot:2.00, slMult:1.2, tp1Mult:1.8, tp2Mult:3.0, tp3Mult:5.0, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
+      // Gold: avg move 6-12 pips. SL tight beyond structure. TP1 must be reachable at 1:1.
+      XAUUSD:  { riskPct:0.01, pipVal:100, minSL:8,  maxSL:20,  maxLot:0.50, slMult:0.8, tp1Mult:1.0, tp2Mult:2.0, tp3Mult:3.5, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
+      // BTC: moves $200-600/session. SL needs room. TP1 at 1.2× gives quick partial.
+      BTCUSDT: { riskPct:0.005,pipVal:1,   minSL:150,maxSL:400, maxLot:0.30, slMult:0.8, tp1Mult:1.0, tp2Mult:1.8, tp3Mult:3.0, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
+      // GBP: tight intraday moves 8-20 pips. TP1 at 1:1, TP2 at 1:1.8.
+      GBPUSD:  { riskPct:0.01, pipVal:10,  minSL:6,  maxSL:20,  maxLot:2.00, slMult:0.8, tp1Mult:1.0, tp2Mult:1.8, tp3Mult:3.0, tp1Pct:50, tp2Pct:30, tp3Pct:20 },
     };
     const R = RISK[instrument] || RISK.XAUUSD;
 
