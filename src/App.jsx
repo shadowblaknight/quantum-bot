@@ -292,6 +292,9 @@ export default function TradingBotLive(){
   const [aiDecisions,setAiDecisions]=useState({});
   const [prevDecisions,setPrevDecisions]=useState({});
   const [aiStatus,setAiStatus]=useState({});
+  const [blacklist,setBlacklist]=useState([]);
+  const [instStreaks,setInstStreaks]=useState({XAUUSD:{wins:0,losses:0},BTCUSDT:{wins:0,losses:0},GBPUSD:{wins:0,losses:0}});
+  const [crownLocks,setCrownLocks]=useState({});  // { XAUUSD:'ICT_FVG+TREND_H4', ... }
   const lastTradeRef=useRef({});
   const pendingRef=useRef({});
   const logRef=useRef(null);
@@ -311,7 +314,7 @@ export default function TradingBotLive(){
   const addLog=useCallback((msg,type="info")=>{const now=new Date(),time=`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}:${now.getSeconds().toString().padStart(2,"0")}`;setLog(p=>[...p.slice(-80),{time,msg,type}]);},[]);
   const fetchPos=useCallback(async()=>{try{const r=await fetch("/api/positions");if(r.ok){const d=await r.json();setOpenPositions(d.positions||[]);}}catch(e){}},[]);
   const fetchHist=useCallback(async()=>{try{const r=await fetch("/api/history");if(r.ok){const d=await r.json();setClosedTrades(d.deals||[]);}}catch(e){}},[]);
-  const fetchLearn=useCallback(async()=>{try{const r=await fetch("/api/trades?learn=true");if(r.ok){const d=await r.json();setLearnedStats(d.stats||{});}}catch(e){}},[]);
+  const fetchLearn=useCallback(async()=>{try{const r=await fetch("/api/trades?learn=true");if(r.ok){const d=await r.json();setLearnedStats(d.lab||{});setBlacklist(d.blacklist||[]);setCrownLocks(d.crownLocks||{});}}catch(e){}},[]);
   const fetchReports=useCallback(async()=>{try{const r=await fetch("/api/manage-trades");if(r.ok){const d=await r.json();setTradeReports(d);}}catch(e){}},[]);
 
   useEffect(()=>{const f=async()=>{try{const r=await fetch("/api/account");if(!r.ok)return;const d=await r.json();const b=Number(d.balance??d.equity??d.accountBalance);if(Number.isFinite(b)&&b>0)setAccountBalance(b);}catch(e){}};f();const i=setInterval(f,30000);return()=>clearInterval(i);},[]);
@@ -332,7 +335,10 @@ export default function TradingBotLive(){
   useEffect(()=>{fetchLearn();const i=setInterval(fetchLearn,300000);return()=>clearInterval(i);},[fetchLearn]);
   useEffect(()=>{fetchReports();const i=setInterval(fetchReports,30000);return()=>clearInterval(i);},[fetchReports]);
 
-  const recordResult=useCallback(async(position,dec,session)=>{if(!position||!dec)return;const pips=position.profit||0,won=pips>0;const payload={instrument:position.symbol?.replace('.s','').replace('.S','')||'UNKNOWN',direction:position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',won,pips,rr:parseFloat((Math.abs(pips)/Math.max(1,Math.abs(pips))).toFixed(2)),session,grade:dec.confidence>=80?'A':dec.confidence>=65?'B':'C',confluenceScore:dec.confidence,regime:'AI_DECISION'};try{await fetch('/api/trades?learn=true',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});addLog(`${payload.instrument} ${won?'WIN':'LOSS'} ${pips>=0?'+':''}${pips.toFixed(2)}`,won?'success':'warn');setPrevDecisions(p=>{const ex=[...(p[payload.instrument]||[])];const last=ex[ex.length-1];if(last&&!last.outcome)ex[ex.length-1]={...last,outcome:won?'WIN':'LOSS',pnl:pips};return{...p,[payload.instrument]:ex};});fetchLearn();}catch(e){}},[addLog,fetchLearn]);
+  const recordResult=useCallback(async(position,dec,session)=>{if(!position||!dec)return;const pips=position.profit||0,won=pips>0;const payload={instrument:position.symbol?.replace('.s','').replace('.S','')||'UNKNOWN',direction:position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',won,pnl:pips,pips,rr:parseFloat((Math.abs(pips)/Math.max(1,Math.abs(pips))).toFixed(2)),strategy:dec.strategy||'UNKNOWN',session,confidence:dec.confidence||0};try{await fetch('/api/trades?learn=true',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});addLog(`${payload.instrument} ${won?'WIN':'LOSS'} ${pips>=0?'+':''}${pips.toFixed(2)}`,won?'success':'warn');setPrevDecisions(p=>{const ex=[...(p[payload.instrument]||[])];const last=ex[ex.length-1];if(last&&!last.outcome)ex[ex.length-1]={...last,outcome:won?'WIN':'LOSS',pnl:pips};return{...p,[payload.instrument]:ex};});
+      // Update per-instrument streak
+      setInstStreaks(prev=>{const inst=payload.instrument;const s=prev[inst]||{wins:0,losses:0};return{...prev,[inst]:{wins:won?s.wins+1:0,losses:won?0:s.losses+1}};});
+      fetchLearn();}catch(e){}},[addLog,fetchLearn]);
 
   useEffect(()=>{const prev=prevPosRef.current,cur=openPositions;prev.filter(p=>!cur.find(c=>(c.id||c.positionId)===(p.id||p.positionId))).forEach(cp=>{const raw=(cp.symbol||'').toUpperCase();const id=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;if(id&&aiDecisions[id])recordResult(cp,aiDecisions[id],getSessionInfo().session);});prevPosRef.current=cur;},[openPositions,aiDecisions,recordResult]);
 
@@ -345,11 +351,25 @@ export default function TradingBotLive(){
     if(!prices[inst.id]){addLog(`⚠ ${inst.label}: price not loaded`,"warn");return;}
     if(!accountBalance){addLog(`⚠ ${inst.label}: balance not loaded`,"warn");return;}
     const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<300000)return;
-    lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));addLog(`🧠 ${inst.label}: analysing market…`,'info');
+    lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));addLog(`${crownLocks[inst.id]?'👑':'🧠'} ${inst.label} ${crownLocks[inst.id]?`CROWN: ${crownLocks[inst.id]}`:'V8: reading market…'}`,'info');
+    // Filter blacklisted strategies from learnedStats before sending
+    const filteredPatterns=Object.fromEntries(Object.entries(learnedStats).filter(([strat])=>!blacklist.includes(strat)));
     const session=getSessionInfo();
     const sumC=(c,label,lb=5)=>{if(!c||!c.length)return`${label}:no data`;const sl=c.slice(-lb),dir=sl[sl.length-1].close>sl[0].close?'↑':'↓';const chg=((sl[sl.length-1].close-sl[0].close)/sl[0].close*100).toFixed(3);const hi=Math.max(...sl.map(x=>x.high)).toFixed(inst.id==='BTCUSDT'?0:2);const lo=Math.min(...sl.map(x=>x.low)).toFixed(inst.id==='BTCUSDT'?0:2);const open=sl[0].close.toFixed(inst.id==='BTCUSDT'?0:2),close=sl[sl.length-1].close.toFixed(inst.id==='BTCUSDT'?0:2);return`${label}(${lb}): ${dir}${chg}% start:${open} now:${close} H:${hi} L:${lo}`;};
-    // ── ATR(14) — for SL sizing ──
+    const cls=candles.map(c=>c.close);
+    // ── ATR(14) ──
     const atr14=(()=>{if(candles.length<15)return null;const trs=candles.slice(1).map((c,i)=>{const prev=candles[i];return Math.max(c.high-c.low,Math.abs(c.high-prev.close),Math.abs(c.low-prev.close));});let atr=trs.slice(0,14).reduce((a,b)=>a+b,0)/14;for(let i=14;i<trs.length;i++)atr=(atr*13+trs[i])/14;return atr;})();
+    // ── EMAs ──
+    const calcEma=(src,p)=>{if(src.length<p)return null;const k=2/(p+1);let e=src.slice(0,p).reduce((a,b)=>a+b,0)/p;for(let i=p;i<src.length;i++)e=src[i]*k+e*(1-k);return e;};
+    const ema21=calcEma(cls,21),ema50=calcEma(cls,50),ema200=calcEma(cls,Math.min(200,cls.length));
+    // ── RSI(14) ──
+    const rsi14=(()=>{if(cls.length<15)return 50;const ch=cls.slice(1).map((p,i)=>p-cls[i]);let g=0,l=0;for(let i=0;i<14;i++){if(ch[i]>0)g+=ch[i];else l-=ch[i];}g/=14;l/=14;for(let i=14;i<ch.length;i++){g=(g*13+Math.max(ch[i],0))/14;l=(l*13+Math.max(-ch[i],0))/14;}return l===0?100:100-(100/(1+g/l));})();
+    // ── MACD ──
+    const macd=(()=>{const ms=[];for(let i=25;i<cls.length;i++){const f=calcEma(cls.slice(0,i+1),12),s=calcEma(cls.slice(0,i+1),26);if(f&&s)ms.push(f-s);}const sig=calcEma(ms,9);const hist=sig?ms[ms.length-1]-sig:null;const fast=calcEma(cls,12),slow=calcEma(cls,26);if(!fast||!slow)return null;return{line:(fast-slow).toFixed(3),signal:sig?.toFixed(3)||null,histogram:hist?.toFixed(3)||null,bullish:hist!=null&&hist>0};})();
+    // ── Bollinger ──
+    const bbands=(()=>{if(cls.length<20)return null;const sl=cls.slice(-20);const mean=sl.reduce((a,b)=>a+b,0)/20;const std=Math.sqrt(sl.reduce((s,v)=>s+Math.pow(v-mean,2),0)/20);const upper=mean+2*std,lower=mean-2*std;const pct=((prices[inst.id]-lower)/(upper-lower)*100);return{upper:upper.toFixed(inst.id==='BTCUSDT'?0:2),mid:mean.toFixed(inst.id==='BTCUSDT'?0:2),lower:lower.toFixed(inst.id==='BTCUSDT'?0:2),width:((upper-lower)/mean*100).toFixed(2),pct:pct.toFixed(1),squeeze:(upper-lower)/mean<(inst.id==='BTCUSDT'?0.01:0.005)};})();
+    // ── Fibonacci ──
+    const fib=(()=>{const h4=h4C[inst.id]||[];if(h4.length<10)return null;const r=h4.slice(-20);const swH=Math.max(...r.map(c=>c.high)),swL=Math.min(...r.map(c=>c.low)),rng=swH-swL,p=prices[inst.id];const dp=inst.id==='BTCUSDT'?0:inst.id==='GBPUSD'?5:2;const levels={fib236:(swH-rng*0.236).toFixed(dp),fib382:(swH-rng*0.382).toFixed(dp),fib500:(swH-rng*0.500).toFixed(dp),fib618:(swH-rng*0.618).toFixed(dp),fib786:(swH-rng*0.786).toFixed(dp),swingH:swH.toFixed(dp),swingL:swL.toFixed(dp)};const nf=Object.entries(levels).reduce((a,[k,v])=>Math.abs(parseFloat(v)-p)<Math.abs(parseFloat(a[1])-p)?[k,v]:a,['none','0']);return{...levels,nearest:nf[0],nearestDist:Math.abs(parseFloat(nf[1])-p).toFixed(dp)};})();
 
     // ── Asian session high/low (00:00-07:00 UTC) ──
     const asianRange=(()=>{const h1=h1C[inst.id]||[];if(!h1.length)return null;const now=new Date();const todayStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),0,0,0));const asianCandles=h1.filter(c=>{const t=new Date(c.time||c.openTime);return t>=todayStart&&t.getUTCHours()<7;});if(!asianCandles.length)return null;const hi=Math.max(...asianCandles.map(c=>c.high));const lo=Math.min(...asianCandles.map(c=>c.low));return{high:hi.toFixed(2),low:lo.toFixed(2),range:(hi-lo).toFixed(2)};})();
@@ -390,49 +410,75 @@ export default function TradingBotLive(){
     const ws=(()=>{let s=0;for(let i=closedTrades.length-1;i>=0;i--){if(Number(closedTrades[i]?.profit||0)>0)s++;else break;}return s;})();
     const tl=todayT.filter(t=>t.type==='BUY'),ts=todayT.filter(t=>t.type==='SELL');
 
+    const dp=inst.id==='BTCUSDT'?0:inst.id==='GBPUSD'?5:2;
     const snap={
       symbol:inst.id, price:prices[inst.id],
       utc_hour: new Date().getUTCHours(),
       in_kill_zone: inKillZone,
       kill_zone: inLondonKZ?'LONDON_KZ':inNYKZ?'NY_KZ':'NONE',
-      // ── ICT Liquidity Levels ──
-      asian_high:       asianRange?.high||null,
-      asian_low:        asianRange?.low||null,
-      asian_range_pips: asianRange?.range||null,
-      pdh: prevDay?.high||null,
-      pdl: prevDay?.low||null,
-      pwh: prevWeek?.high||null,
-      pwl: prevWeek?.low||null,
-      // ── Sweep ──
-      liquidity_sweep:  sweepDetect?.detected?sweepDetect.description:'No sweep detected',
-      sweep_direction:  sweepDetect?.direction||'NONE',
-      sweep_level:      sweepDetect?.level||null,
-      // ── FVG + BOS ──
-      smc_fvg:          fvgDetect?`${fvgDetect.type} ${fvgDetect.bottom}–${fvgDetect.top} (mid:${fvgDetect.mid})`:null,
-      smc_bos:          bos,
-      smc_order_block:  null,
-      // ── ATR only (for SL sizing) ──
-      atr14:            atr14?.toFixed(2),
-      atr_sl_guide:     atr14?`SL=beyond sweep level (~${(atr14*1.5).toFixed(1)} min) | TP1=${(atr14*2).toFixed(1)} | TP2=${(atr14*3).toFixed(1)} | TP3=${(atr14*4.5).toFixed(1)}`:null,
-      // ── Context candles (bias only) ──
-      candles_weekly: sumC(wkC[inst.id],'W1',4),
-      candles_d1:     sumC(d1C[inst.id],'D1',5),
-      candles_h4:     sumC(h4C[inst.id],'H4',10),
-      candles_h1:     sumC(h1C[inst.id],'H1',8),
-      candles_m15:    sumC(m15C[inst.id],'M15',6),
-      candles_m5:     sumC(m5C[inst.id],'M5',6),
-      // ── Account ──
+      // ── ICT levels ──
+      asian_high:asianRange?.high||null, asian_low:asianRange?.low||null, asian_range_pips:asianRange?.range||null,
+      pdh:prevDay?.high||null, pdl:prevDay?.low||null, pwh:prevWeek?.high||null, pwl:prevWeek?.low||null,
+      liquidity_sweep:sweepDetect?.detected?sweepDetect.description:'No sweep detected',
+      sweep_direction:sweepDetect?.direction||'NONE', sweep_level:sweepDetect?.level||null,
+      // ── All indicators ──
+      rsi14: rsi14?.toFixed(1),
+      ema21: ema21?.toFixed(dp), ema50: ema50?.toFixed(dp), ema200: ema200?.toFixed(dp),
+      ema_alignment: (ema21&&ema50&&ema200)?(ema21>ema50&&ema50>ema200?'BULLISH_STACK':ema21<ema50&&ema50<ema200?'BEARISH_STACK':'MIXED'):'UNKNOWN',
+      price_vs_ema21: ema21?(prices[inst.id]>ema21?'ABOVE':'BELOW'):'UNKNOWN',
+      price_vs_ema50: ema50?(prices[inst.id]>ema50?'ABOVE':'BELOW'):'UNKNOWN',
+      macd: macd?`line:${macd.line} signal:${macd.signal} hist:${macd.histogram} (${macd.bullish?'BULLISH':'BEARISH'})`:null,
+      bbands: bbands?`U:${bbands.upper} M:${bbands.mid} L:${bbands.lower} W:${bbands.width}% pos:${bbands.pct}%${bbands.squeeze?' SQUEEZE':''}`:null,
+      bb_position: bbands?.pct,
+      atr14: atr14?.toFixed(dp),
+      atr_sl_guide: atr14?`SL_min=${(atr14*1.2).toFixed(dp)} TP1=${(atr14*2).toFixed(dp)} TP2=${(atr14*3).toFixed(dp)} TP3=${(atr14*4.5).toFixed(dp)}`:null,
+      // ── Fibonacci + SMC ──
+      fib_levels: fib?`SwH:${fib.swingH} 23.6:${fib.fib236} 38.2:${fib.fib382} 50:${fib.fib500} 61.8:${fib.fib618} 78.6:${fib.fib786} SwL:${fib.swingL}`:null,
+      fib_nearest: fib?`${fib.nearest} (${fib.nearestDist} away)`:null,
+      smc_fvg: fvgDetect?`${fvgDetect.type} ${fvgDetect.bottom}–${fvgDetect.top} mid:${fvgDetect.mid}`:null,
+      smc_bos: bos,
+      smc_order_block: (()=>{
+        // Order Block: last bearish candle before a bullish displacement (bullish OB)
+        //              last bullish candle before a bearish displacement (bearish OB)
+        const h1=h1C[inst.id]||[];
+        if(h1.length<6)return null;
+        const r=h1.slice(-15);
+        for(let i=r.length-4;i>=1;i--){
+          const c=r[i],n1=r[i+1],n2=r[i+2];
+          if(!c||!n1||!n2)continue;
+          // Bullish OB: bearish candle followed by 2 bullish candles displacing higher
+          if(c.close<c.open && n1.close>n1.open && n2.close>n2.open && n2.close>c.high){
+            return `BULLISH_OB zone:${c.low.toFixed(inst.id==='GBPUSD'?5:2)}-${c.high.toFixed(inst.id==='GBPUSD'?5:2)}`;
+          }
+          // Bearish OB: bullish candle followed by 2 bearish candles displacing lower
+          if(c.close>c.open && n1.close<n1.open && n2.close<n2.open && n2.close<c.low){
+            return `BEARISH_OB zone:${c.low.toFixed(inst.id==='GBPUSD'?5:2)}-${c.high.toFixed(inst.id==='GBPUSD'?5:2)}`;
+          }
+        }
+        return null;
+      })(),
+      equilibrium_zone: (()=>{if(h4C[inst.id]?.length<10)return null;const r=h4C[inst.id].slice(-20),hi=Math.max(...r.map(c=>c.high)),lo=Math.min(...r.map(c=>c.low)),pos=((prices[inst.id]-lo)/(hi-lo))*100;return pos>62.5?'PREMIUM':pos<37.5?'DISCOUNT':'EQUILIBRIUM';})(),
+      weekly_bias: (()=>{const wk=wkC[inst.id]||[];if(wk.length<2)return'UNKNOWN';return wk[wk.length-1].close>wk[wk.length-2].close?'BULLISH':'BEARISH';})(),
+      round_levels: (()=>{const p=prices[inst.id];if(!p)return'';const step=inst.id==='BTCUSDT'?1000:inst.id==='XAUUSD'?10:0.01;const base=Math.round(p/step)*step;return[-3,-2,-1,0,1,2,3].map(o=>(base+o*step).toFixed(dp)).join(', ');})(),
+      // ── Candles ──
+      candles_weekly:sumC(wkC[inst.id],'W1',6), candles_d1:sumC(d1C[inst.id],'D1',8),
+      candles_h4:sumC(h4C[inst.id],'H4',15), candles_h1:sumC(h1C[inst.id],'H1',12),
+      candles_m15:sumC(m15C[inst.id],'M15',8), candles_m5:sumC(m5C[inst.id],'M5',8),
+      candles_m1:sumC(candles,'M1',10),
+      // ── Session + Account ──
       session:session.session, session_allowed:true,
-      news:news.slice(0,2), calendar_events:calEvents.slice(0,2),
+      news:news.slice(0,3), calendar_events:calEvents.slice(0,3),
       open_positions:openPositions.map(p=>({symbol:p.symbol,type:p.type,profit:p.profit})),
       account_balance:accountBalance,
       today_pnl:todayPnl?.toFixed(2), today_trades:todayT.length,
       loss_streak:lossStreak, win_streak:ws, overall_win_rate:wr,
+      inst_win_streak:instStreaks[inst.id]?.wins||0,
+      inst_loss_streak:instStreaks[inst.id]?.losses||0,
       today_long_results:`${tl.filter(t=>(t.profit||0)>0).length}W/${tl.filter(t=>(t.profit||0)<=0).length}L (${tl.length} longs)`,
       today_short_results:`${ts.filter(t=>(t.profit||0)>0).length}W/${ts.filter(t=>(t.profit||0)<=0).length}L (${ts.length} shorts)`,
     };
-    try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[]})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');
-          if(dec.decision==='WAIT'){addLog(`⏳ S1:${dec.step1_killzone||'?'} S2:${dec.step2_sweep||'?'} S3:${dec.step3_fvg||'?'} S4:${dec.step4_entry||'?'}`,'info');}if(dec.decision!=='WAIT'&&dec.confidence>=55){
+    try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[],learnedPatterns:filteredPatterns,blacklistedStrategies:blacklist,crownedStrategy:crownLocks[inst.id]||null})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');
+          if(dec.decision==='WAIT'){addLog(`⏳ WAIT [${dec.confidence||0}%] — ${dec.reason?.slice(0,80)||'no reason'}`,'info');}if(dec.decision!=='WAIT'&&dec.confidence>=35){
           const n=Date.now();
           // Block 2: 5 min cooldown between trades
           if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<300000){
@@ -463,10 +509,21 @@ export default function TradingBotLive(){
               symbol:inst.id, direction:dec.decision, price:prices[inst.id],
               sl:dec.stopLoss, tp1:dec.takeProfit1, tp2:dec.takeProfit2, tp3:dec.takeProfit3,
               volume:vol, confidence:dec.confidence, reason:dec.reason
-            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
+            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
   },[brokerCandles,prices,m5C,m15C,h1C,h4C,d1C,wkC,accountBalance,closedTrades,openPositions,news,calEvents,eventAlert,marketStatus,prevDecisions,addLog,fetchPos,fetchHist]);
 
-  useEffect(()=>{const run=()=>{const s=getSessionInfo();if(!s.isLondon&&!s.isNY)return;const g=INSTRUMENTS.find(i=>i.id==='XAUUSD');if(g&&brokerCandles['XAUUSD']?.length>=50)runAIBrain(g);};const t=setTimeout(run,3000),i=setInterval(run,600000);return()=>{clearTimeout(t);clearInterval(i);};},[runAIBrain,brokerCandles]);
+  useEffect(()=>{
+    const run=()=>{
+      const s=getSessionInfo();
+      if(!s.isLondon&&!s.isNY&&!s.isOverlap)return;
+      INSTRUMENTS.forEach(inst=>{
+        const c=brokerCandles[inst.id];
+        if(c&&c.length>=50&&prices[inst.id])runAIBrain(inst);
+      });
+    };
+    const t=setTimeout(run,4000),i=setInterval(run,300000);
+    return()=>{clearTimeout(t);clearInterval(i)};
+  },[runAIBrain,brokerCandles,prices]);
   useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;},[log]);
 
   // Computed
@@ -496,7 +553,7 @@ export default function TradingBotLive(){
     {id:"overview",icon:"⊞",label:"Live Trade"},
     {id:"sessions",icon:"◎",label:"Session Stats"},
     {id:"reports",icon:"▤",label:"Reports"},
-    {id:"journal",icon:"≡",label:"Journal"},
+    {id:"journal",icon:"🧪",label:"Strategy Lab"},
     {id:"brain",icon:"◉",label:"Brain"},
   ];
 
@@ -553,7 +610,12 @@ export default function TradingBotLive(){
                   <span style={{fontSize:13,fontWeight:600,color:"#fff"}}>{fmtPrice(inst.id,prices[inst.id])}</span>
                   {d!=null&&<span style={{fontSize:9,color:d>=0?"#0ea56b":"#e8334a"}}>{d>=0?"▲":"▼"}{Math.abs(d).toFixed(inst.id==="GBPUSD"?4:2)}</span>}
                 </div>
-                {ai?.decision&&ai.decision!=='WAIT'&&<span className={`badge badge-${ai.decision.toLowerCase()}`} style={{marginTop:3,fontSize:9}}>{ai.decision}</span>}
+                {(instStreaks[inst.id]?.wins>=2||instStreaks[inst.id]?.losses>=2)&&(
+                  <div style={{fontSize:9,color:instStreaks[inst.id]?.wins>=2?"#0ea56b":"#e8334a",marginTop:1}}>
+                    {instStreaks[inst.id]?.wins>=2?`🔥 ${instStreaks[inst.id].wins}W streak → bigger lots`:`❄️ ${instStreaks[inst.id].losses}L streak → smaller lots`}
+                  </div>
+                )}
+                {crownLocks[inst.id]&&<span style={{fontSize:9,marginTop:3,display:'block',color:'#c9882a',fontWeight:700}}>👑 {crownLocks[inst.id].split('+').length} tactics locked</span>}{ai?.decision&&ai.decision!=='WAIT'&&<span className={`badge badge-${ai.decision.toLowerCase()}`} style={{marginTop:3,fontSize:9}}>{ai.decision}</span>}
               </div>
             );})}
           </div>
@@ -847,26 +909,195 @@ export default function TradingBotLive(){
               </div>
             )}
 
-            {/* ══════ JOURNAL ══════ */}
-            {page==="journal"&&(
-              <div className="card">
-                <div className="stitle">Trade Journal — {closedTrades.length} entries</div>
-                <div className="tbl-head tbl-row" style={{gridTemplateColumns:"110px 60px 50px 90px 90px 100px 85px"}}><span>Instrument</span><span>Side</span><span>Size</span><span>Open</span><span>Close</span><span>Time</span><span>P&L</span></div>
-                {closedTrades.length===0?<div style={{color:"var(--text3)",padding:"20px 0",fontSize:11,textAlign:"center"}}>No entries</div>
-                  :closedTrades.slice(0,100).map((t,i)=>(
-                    <div key={i} className="tbl-row" style={{gridTemplateColumns:"110px 60px 50px 90px 90px 100px 85px"}}>
-                      <span style={{fontWeight:600,color:"var(--Au)"}}>{(t.symbol||'').replace('.s','')}</span>
-                      <span><span className={`badge badge-${displaySide(t.type).toLowerCase()}`}>{displaySide(t.type)}</span></span>
-                      <span style={{color:"var(--text2)"}}>{t.volume}</span>
-                      <span style={{color:"var(--text2)",fontSize:11}}>{t.openPrice??'—'}</span>
-                      <span style={{color:"var(--text2)",fontSize:11}}>{t.closePrice??'—'}</span>
-                      <span style={{color:"var(--text3)",fontSize:10}}>{t.time?new Date(t.time).toLocaleTimeString():"—"}</span>
-                      <span style={{fontWeight:700,color:pnlColor(t.profit||0)}}>{pnlStr(t.profit||0)}</span>
+            {/* ══════ STRATEGY LAB (replaces journal) ══════ */}
+            {page==="journal"&&(()=>{
+              const INST_COLORS={XAUUSD:"#d4a843",BTCUSDT:"#fb923c",GBPUSD:"#60a5fa"};
+              const INST_LABELS={XAUUSD:"XAU/USD",BTCUSDT:"BTC",GBPUSD:"GBP/USD"};
+              const ALL_INST=["XAUUSD","BTCUSDT","GBPUSD"];
+              const labEntries=Object.entries(learnedStats);
+              const totalCombos=labEntries.length;
+              const tripleCrowns=labEntries.filter(([,d])=>d.crowns>=3);
+              const doubleCrowns=labEntries.filter(([,d])=>d.crowns===2);
+              const singleCrowns=labEntries.filter(([,d])=>d.crowns===1);
+              const globalBL=blacklist||[];
+
+              // Sort: blacklisted last, then by total trades desc
+              const sorted=labEntries.sort((a,b)=>{
+                const ablk=globalBL.includes(a[0]),bblk=globalBL.includes(b[0]);
+                if(ablk&&!bblk)return 1;if(!ablk&&bblk)return-1;
+                return(b[1].total||0)-(a[1].total||0);
+              });
+
+              return(
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+                {/* Header stats */}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+                  {[
+                    ["Combinations Tried",totalCombos,"#3b6cf0"],
+                    ["👑 Instruments Locked",Object.values(crownLocks).filter(Boolean).length,"#c9882a"],
+                    ["🏅 Crown Strategies",tripleCrowns.length+doubleCrowns.length+singleCrowns.length,"#0ea56b"],
+                    ["⛔ Blacklisted",globalBL.length,"#e8334a"],
+                  ].map(([l,v,c])=>(
+                    <div key={l} className="card-sm">
+                      <div style={{fontSize:10,fontWeight:600,color:"var(--text3)",marginBottom:4}}>{l}</div>
+                      <div style={{fontSize:24,fontWeight:800,color:c}}>{v}</div>
                     </div>
-                  ))
-                }
+                  ))}
+                </div>
+
+                {/* Crown Lock Status Panel */}
+                {Object.keys(crownLocks).length>0&&(
+                  <div style={{background:"linear-gradient(135deg,#1a2744 0%,#2a3d6e 100%)",borderRadius:12,padding:"16px 20px"}}>
+                    <div style={{fontSize:11,fontWeight:600,color:"rgba(255,255,255,0.5)",letterSpacing:"0.1em",marginBottom:10}}>CROWN LOCK STATUS</div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+                      {["XAUUSD","BTCUSDT","GBPUSD"].map(inst=>{
+                        const locked=crownLocks[inst];
+                        const colors={XAUUSD:"#d4a843",BTCUSDT:"#fb923c",GBPUSD:"#60a5fa"};
+                        const labels={XAUUSD:"XAU/USD",BTCUSDT:"BTC/USDT",GBPUSD:"GBP/USD"};
+                        return(
+                          <div key={inst} style={{background:locked?"rgba(201,136,42,0.15)":"rgba(255,255,255,0.05)",borderRadius:8,padding:"10px 12px",border:`1px solid ${locked?"rgba(201,136,42,0.4)":"rgba(255,255,255,0.1)"}`}}>
+                            <div style={{fontSize:10,fontWeight:600,color:colors[inst],marginBottom:4}}>{labels[inst]}</div>
+                            {locked?(
+                              <>
+                                <div style={{fontSize:9,color:"#c9882a",fontWeight:700,marginBottom:4}}>👑 LOCKED</div>
+                                <div style={{fontSize:9,color:"rgba(255,255,255,0.7)",lineHeight:1.4,wordBreak:"break-all"}}>{locked}</div>
+                              </>
+                            ):(
+                              <div style={{fontSize:9,color:"rgba(255,255,255,0.3)"}}>🔍 Exploring — no crown yet</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Legend */}
+                <div style={{display:"flex",gap:16,flexWrap:"wrap",padding:"8px 14px",background:"#f8f9fc",borderRadius:8,border:"1px solid var(--border)"}}>
+                  {[
+                    ["👑👑👑 Triple Crown","Works on all 3 instruments (5+ wins each)","#c9882a"],
+                    ["👑👑 Double Crown","Works on 2 instruments","#3b6cf0"],
+                    ["👑 Single Crown","5+ wins on 1 instrument","#0ea56b"],
+                    ["🚫 Banned","3 consec losses on that instrument — never again","#e8334a"],
+                    ["⛔ Blacklisted","Failed all 3 instruments — globally banned","#7c3aed"],
+                  ].map(([l,d,c])=>(
+                    <div key={l} style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <span style={{fontSize:11,fontWeight:600,color:c}}>{l}</span>
+                      <span style={{fontSize:10,color:"var(--text3)"}}>{d}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Strategy cards */}
+                {totalCombos===0?(
+                  <div className="card" style={{textAlign:"center",padding:"40px 20px"}}>
+                    <div style={{fontSize:32,marginBottom:12}}>🧪</div>
+                    <div style={{fontSize:14,fontWeight:600,color:"var(--text)",marginBottom:6}}>Strategy Lab is empty</div>
+                    <div style={{fontSize:12,color:"var(--text3)"}}>The bot needs to execute trades to populate this lab. Once deployed, every trade gets recorded here automatically.</div>
+                  </div>
+                ):(
+                  sorted.map(([strat,data])=>{
+                    const isBlacklisted=globalBL.includes(strat);
+                    const crowns=data.crowns||0;
+                    const crownEmoji=crowns>=3?"👑👑👑":crowns===2?"👑👑":crowns===1?"👑":"";
+                    const overallWR=data.overallWinRate;
+                    const wrColor=overallWR>=65?"#0ea56b":overallWR>=50?"#c9882a":"#e8334a";
+
+                    return(
+                      <div key={strat} className="card" style={{opacity:isBlacklisted?0.5:1,borderLeft:`4px solid ${isBlacklisted?"#7c3aed":crowns>=3?"#c9882a":crowns>=2?"#3b6cf0":crowns>=1?"#0ea56b":"var(--border)"}`}}>
+                        {/* Strategy header */}
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                          <div style={{flex:1}}>
+                            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:4}}>
+                              {crownEmoji&&<span style={{fontSize:14}}>{crownEmoji}</span>}
+                          {data.isLocked&&<span style={{fontSize:10,fontWeight:700,background:"rgba(201,136,42,0.15)",color:"#c9882a",padding:"2px 8px",borderRadius:4,border:"1px solid rgba(201,136,42,0.3)"}}>🔒 ACTIVE LOCK</span>}
+                              <span style={{fontSize:12,fontWeight:700,color:"var(--text)",lineHeight:1.3}}>{strat}</span>
+                              {isBlacklisted&&<span style={{fontSize:10,fontWeight:700,background:"#f3e8ff",color:"#7c3aed",padding:"2px 8px",borderRadius:4}}>⛔ GLOBALLY BLACKLISTED</span>}
+                            </div>
+                            <div style={{display:"flex",gap:12,fontSize:11,color:"var(--text3)"}}>
+                              <span>Total: <strong style={{color:"var(--text)"}}>{data.total||0}</strong></span>
+                              <span style={{color:"#0ea56b"}}>✓ {data.totalWins||0} wins</span>
+                              <span style={{color:"#e8334a"}}>✗ {data.totalLosses||0} losses</span>
+                              {overallWR!=null&&<span style={{fontWeight:700,color:wrColor}}>{overallWR}% overall</span>}
+                            </div>
+                          </div>
+                          <div style={{textAlign:"right"}}>
+                            {overallWR!=null&&(
+                              <div style={{width:54,height:54,borderRadius:"50%",border:`3px solid ${wrColor}`,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+                                <div style={{fontSize:13,fontWeight:800,color:wrColor,lineHeight:1}}>{overallWR}%</div>
+                                <div style={{fontSize:8,color:"var(--text3)"}}>WR</div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Per-instrument breakdown */}
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                          {ALL_INST.map(inst=>{
+                            const d=data.instruments?.[inst];
+                            const isBanned=d?.banned;
+                            const hasCrown=d?.crown;
+                            const wr=d?.winRate;
+                            const bdrColor=isBanned?"#e8334a":hasCrown?"#0ea56b":"var(--border)";
+                            return(
+                              <div key={inst} style={{
+                                background:isBanned?"#fdecea":hasCrown?"#e8f5f0":"#f8f9fc",
+                                borderRadius:8,padding:"10px 12px",
+                                border:`1px solid ${bdrColor}`,
+                                opacity:d?1:0.4
+                              }}>
+                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                                  <span style={{fontSize:11,fontWeight:700,color:INST_COLORS[inst]}}>{INST_LABELS[inst]}</span>
+                                  <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                                    {hasCrown&&!isBanned&&<span style={{fontSize:12}}>👑</span>}
+                                    {isBanned&&<span style={{fontSize:10,background:"#fdecea",color:"#e8334a",padding:"1px 5px",borderRadius:3,fontWeight:700}}>🚫 BANNED</span>}
+                                  </div>
+                                </div>
+                                {d?(
+                                  <>
+                                    <div style={{display:"flex",gap:8,fontSize:11,marginBottom:5}}>
+                                      <span style={{color:"#0ea56b",fontWeight:600}}>✓{d.wins}</span>
+                                      <span style={{color:"#e8334a",fontWeight:600}}>✗{d.losses}</span>
+                                      <span style={{color:"var(--text3)"}}>Σ{d.total}</span>
+                                    </div>
+                                    {wr!=null&&(
+                                      <div style={{height:4,background:"#e8ecf5",borderRadius:2}}>
+                                        <div style={{height:"100%",width:`${wr}%`,background:wr>=65?"#0ea56b":wr>=50?"#c9882a":"#e8334a",borderRadius:2,transition:"width 1s ease"}}/>
+                                      </div>
+                                    )}
+                                    {wr!=null&&<div style={{fontSize:10,fontWeight:700,color:wr>=65?"#0ea56b":wr>=50?"#c9882a":"#e8334a",marginTop:3}}>{wr}% win rate</div>}
+                                    {d.avgPnl!=null&&<div style={{fontSize:9,color:"var(--text3)",marginTop:1}}>avg {d.avgPnl>=0?"+":""}${d.avgPnl}/trade</div>}
+                                    {isBanned&&<div style={{fontSize:9,color:"#e8334a",marginTop:3,fontWeight:600}}>3 consecutive losses — banned on {INST_LABELS[inst]}</div>}
+                                  </>
+                                ):(
+                                  <div style={{fontSize:10,color:"var(--text3)"}}>Not tested yet</div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Recent results bar */}
+                        {data.total>0&&(()=>{
+                          const recentAll=ALL_INST.flatMap(inst=>(data.instruments?.[inst]?.trades||[])).sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,8);
+                          return recentAll.length>0&&(
+                            <div style={{marginTop:10,display:"flex",gap:3,alignItems:"center"}}>
+                              <span style={{fontSize:9,color:"var(--text3)",marginRight:4}}>Recent:</span>
+                              {recentAll.map((t,i)=>(
+                                <div key={i} title={`${t.won?"WIN":"LOSS"} ${t.pnl>=0?"+":""}$${t.pnl?.toFixed(2)||0} ${t.session||""}`}
+                                  style={{width:14,height:14,borderRadius:3,background:t.won?"#0ea56b":"#e8334a",cursor:"help",flexShrink:0}}/>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })
+                )}
               </div>
-            )}
+              );
+            })()}
 
             {/* ══════ BRAIN — MATCH ANALYSIS ══════ */}
             {page==="brain"&&(()=>{

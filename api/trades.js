@@ -1,187 +1,228 @@
 /* eslint-disable */
+// api/trades.js — V8 Strategy Lab + Crown Lock System
 const { Redis } = require('@upstash/redis');
+
+const INSTRUMENTS = ['XAUUSD', 'BTCUSDT', 'GBPUSD'];
+const CROWN_THRESHOLD   = 5;   // wins needed for crown
+const DETHRONE_LOSSES   = 3;   // consec losses after crown = dethrone
+const BAN_LOSSES        = 3;   // consec losses = banned on instrument
+const BLACKLIST_TRIGGER = 3;   // banned on all 3 = global blacklist
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-admin-token');
   if (req.method === 'OPTIONS') return res.status(200).end();
-
-  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN)
     return res.status(500).json({ error: 'Missing Redis env vars' });
-  }
 
-  const redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+  const redis   = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
   const url     = req.url || '';
   const isLearn = url.includes('learn=true');
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // SELF-LEARNING ROUTES  /api/trades?learn=true
-  // ══════════════════════════════════════════════════════════════════════════
   if (isLearn) {
 
+    // ── GET: full strategy lab ──────────────────────────────────────────
     if (req.method === 'GET') {
       try {
-        const specificKeys = await redis.keys('qbot:learn:*');
-        const stats = {};
+        const keys = await redis.keys('qbot:strat:*');
+        const lab  = {};
 
-        for (const key of specificKeys) {
-          if (key.includes('broad:')) continue; // skip broad keys
-          const data = await redis.get(key);
-          if (!data) continue;
-          const d     = typeof data === 'string' ? JSON.parse(data) : data;
-          const label = key.replace('qbot:learn:', '');
-          const total = (d.wins || 0) + (d.losses || 0);
-          stats[label] = {
-            wins:     d.wins    || 0,
-            losses:   d.losses  || 0,
-            total,
-            winRate:  total > 0 ? Math.round(((d.wins||0)/total)*100) : null,
-            avgPips:  total > 0 && d.totalPips != null ? parseFloat((d.totalPips/total).toFixed(1)) : null,
-            bestRR:   d.bestRR   || null,
-            lastSeen: d.lastSeen || null,
-            trades:   d.trades   || [],
+        for (const key of keys) {
+          if (key.includes('blacklist:') || key.includes('crown:')) continue;
+          const raw = await redis.get(key);
+          if (!raw) continue;
+          const d     = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          const parts = key.replace('qbot:strat:', '').split(':');
+          const inst  = parts[0];
+          const strat = parts.slice(1).join(':');
+          if (!INSTRUMENTS.includes(inst)) continue;
+          if (!lab[strat]) lab[strat] = {};
+
+          const total = (d.wins||0) + (d.losses||0);
+          const wr    = total > 0 ? Math.round(((d.wins||0)/total)*100) : null;
+
+          // Ban: 3 consecutive losses
+          const recentResults = (d.trades||[]).slice(-3).map(t=>t.won);
+          const banned = recentResults.length >= BAN_LOSSES && recentResults.every(r=>r===false);
+
+          // Crown: 5+ wins AND not currently banned
+          const hasCrown = (d.wins||0) >= CROWN_THRESHOLD && !banned;
+
+          // Post-crown dethrone: if crowned, track losses since crown was earned
+          const dethroned = hasCrown && (d.postCrownLosses||0) >= DETHRONE_LOSSES;
+
+          lab[strat][inst] = {
+            wins: d.wins||0, losses: d.losses||0, total, winRate: wr,
+            avgPnl: d.totalPnl && total>0 ? parseFloat((d.totalPnl/total).toFixed(2)) : null,
+            crown: hasCrown && !dethroned,
+            dethroned, banned,
+            consecutiveLosses: d.consecutiveLosses||0,
+            postCrownLosses: d.postCrownLosses||0,
+            lastSeen: d.lastSeen,
+            trades: (d.trades||[]).slice(-5),
           };
         }
 
-        // ── ANALYTICS ENGINE ──
-        const now = new Date();
-        const isTdy = (d) => new Date(d).toDateString() === now.toDateString();
-        const isWk  = (d) => (now - new Date(d)) / 864e5 <= 7;
-        const isMth = (d) => { const dt = new Date(d); return dt.getMonth()===now.getMonth() && dt.getFullYear()===now.getFullYear(); };
+        // ── Load crown locks per instrument ────────────────────────────
+        // crown lock = which strategy is THE primary for each instrument
+        const crownLocks = {};
+        for (const inst of INSTRUMENTS) {
+          const ck = `qbot:strat:crown:${inst}`;
+          const cr = await redis.get(ck).catch(()=>null);
+          if (cr) crownLocks[inst] = typeof cr==='string' ? JSON.parse(cr) : cr;
+        }
 
-        // Flatten all individual trades
-        const allTrades = [];
-        Object.values(stats).forEach(s => {
-          (s.trades || []).forEach(t => allTrades.push(t));
-        });
+        // ── Global blacklist ────────────────────────────────────────────
+        const blRaw     = await redis.get('qbot:strat:blacklist:global').catch(()=>null);
+        const blacklist = blRaw ? (typeof blRaw==='string'?JSON.parse(blRaw):blRaw) : [];
 
-        const computeStats = (arr) => {
-          const wins = arr.filter(t => t.won).length;
-          const pnl  = arr.reduce((s,t) => s+(t.pips||0), 0);
-          const avgWin  = wins > 0 ? arr.filter(t=>t.won).reduce((s,t)=>s+(t.pips||0),0)/wins : 0;
-          const losses  = arr.filter(t => !t.won);
-          const avgLoss = losses.length > 0 ? losses.reduce((s,t)=>s+(t.pips||0),0)/losses.length : 0;
-          return {
-            total:    arr.length,
-            wins,
-            losses:   arr.length - wins,
-            winRate:  arr.length > 0 ? Math.round((wins/arr.length)*100) : 0,
-            pnl:      parseFloat(pnl.toFixed(2)),
-            avgWin:   parseFloat(avgWin.toFixed(2)),
-            avgLoss:  parseFloat(avgLoss.toFixed(2)),
+        // ── Build summary ───────────────────────────────────────────────
+        const summary = {};
+        for (const [strat, instData] of Object.entries(lab)) {
+          const instKeys    = Object.keys(instData);
+          const totalWins   = instKeys.reduce((s,k)=>s+(instData[k].wins||0),0);
+          const totalLosses = instKeys.reduce((s,k)=>s+(instData[k].losses||0),0);
+          const total       = totalWins + totalLosses;
+          const crownCount  = instKeys.filter(k=>instData[k].crown).length;
+          const bannedOn    = instKeys.filter(k=>instData[k].banned);
+          const isLocked    = Object.values(crownLocks).includes(strat);
+
+          summary[strat] = {
+            instruments: instData,
+            totalWins, totalLosses, total,
+            overallWinRate: total>0?Math.round((totalWins/total)*100):null,
+            crowns: crownCount,
+            bannedOn,
+            isBlacklisted: blacklist.includes(strat),
+            isLocked,
           };
-        };
+        }
 
-        // ── Session breakdown ──
-        const sessionStats = {};
-        ['LONDON','NEW_YORK','LONDON_NY_OVERLAP','ASIA'].forEach(s => {
-          const filtered = allTrades.filter(t => t.session === s);
-          if (filtered.length > 0) sessionStats[s] = computeStats(filtered);
-        });
-
-        // ── TP flow ──
-        const tp1 = allTrades.filter(t => t.tp1Hit).length;
-        const tp2 = allTrades.filter(t => t.tp2Hit).length;
-        const tp3 = allTrades.filter(t => t.tp3Hit).length;
-        const be  = allTrades.filter(t => t.beMoved).length;
-
-        const tpFlow = {
-          tp1Rate:      allTrades.length > 0 ? Math.round((tp1/allTrades.length)*100) : 0,
-          tp2FromTp1:   tp1 > 0 ? Math.round((tp2/tp1)*100) : 0,
-          tp3FromTp2:   tp2 > 0 ? Math.round((tp3/tp2)*100) : 0,
-          beRate:       tp1 > 0 ? Math.round((be/tp1)*100) : 0,
-        };
+        // ── Flatten trades for analytics ────────────────────────────────
+        const now      = new Date();
+        const allT     = Object.values(lab).flatMap(s=>Object.values(s).flatMap(d=>d.trades||[]));
+        const isTdy    = d => new Date(d).toDateString()===now.toDateString();
+        const isWk     = d => (now-new Date(d))/864e5<=7;
+        const isMth    = d => { const dt=new Date(d); return dt.getMonth()===now.getMonth()&&dt.getFullYear()===now.getFullYear(); };
+        const cmp      = arr => { const w=arr.filter(t=>t.won).length; return { trades:arr.length,wins:w,losses:arr.length-w,winRate:arr.length>0?Math.round((w/arr.length)*100):0,pnl:parseFloat((arr.reduce((s,t)=>s+(t.pnl||0),0)).toFixed(2)) }; };
+        const sessStat = {};
+        allT.forEach(t=>{ const s=t.session||'UNKNOWN'; if(!sessStat[s])sessStat[s]={trades:0,wins:0,pnl:0}; sessStat[s].trades++;if(t.won)sessStat[s].wins++;sessStat[s].pnl+=(t.pnl||0); });
+        const sessOut  = {};
+        Object.entries(sessStat).forEach(([s,d])=>{ sessOut[s]={...d,winRate:d.trades>0?Math.round((d.wins/d.trades)*100):0,pnl:parseFloat(d.pnl.toFixed(2))}; });
+        const tpFlow   = { tp1Pct:allT.length?Math.round(allT.filter(t=>t.tp1Hit).length/allT.length*100):0, tp2Pct:allT.filter(t=>t.tp1Hit).length?Math.round(allT.filter(t=>t.tp2Hit).length/allT.filter(t=>t.tp1Hit).length*100):0, tp3Pct:allT.filter(t=>t.tp2Hit).length?Math.round(allT.filter(t=>t.tp3Hit).length/allT.filter(t=>t.tp2Hit).length*100):0 };
 
         return res.status(200).json({
-          stats,
-          totalPatterns: Object.keys(stats).length,
-          analytics: {
-            all:      computeStats(allTrades),
-            daily:    computeStats(allTrades.filter(t => isTdy(t.date))),
-            weekly:   computeStats(allTrades.filter(t => isWk(t.date))),
-            monthly:  computeStats(allTrades.filter(t => isMth(t.date))),
-            sessions: sessionStats,
-            tpFlow,
-          },
+          lab: summary,
+          crownLocks,   // { XAUUSD: "ICT_FVG+TREND_H4", BTCUSDT: null, GBPUSD: null }
+          blacklist,
+          totalStrategiesTried: Object.keys(summary).length,
+          analytics: { all:cmp(allT), daily:cmp(allT.filter(t=>isTdy(t.date))), weekly:cmp(allT.filter(t=>isWk(t.date))), monthly:cmp(allT.filter(t=>isMth(t.date))), sessions:sessOut, tpFlow },
         });
       } catch(e) {
         return res.status(500).json({ error: e.message });
       }
     }
 
+    // ── POST: record a strategy result ──────────────────────────────────
     if (req.method === 'POST') {
       try {
-        const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-        const {
-          instrument, direction, won, pips, rr,
-          h4Strength, d1Trend, entryCandle,
-          regime, session, confluenceScore, grade, rsi,
-          tp1Hit, tp2Hit, tp3Hit, beMoved,
-        } = body;
+        const body = typeof req.body==='string' ? JSON.parse(req.body) : (req.body||{});
+        const { instrument, direction, won, pnl, pips, rr, strategy, session,
+                tp1Hit, tp2Hit, tp3Hit, beMoved, confidence } = body;
 
-        if (!instrument || !direction || won === undefined) {
+        if (!instrument || !direction || !strategy || won===undefined)
           return res.status(400).json({ error: 'Missing required fields' });
-        }
 
-        const fingerprint = [
-          instrument,
-          direction,
-          h4Strength  || 'UNKNOWN',
-          d1Trend     || 'UNKNOWN',
-          entryCandle || 'NONE',
-          regime      || 'UNKNOWN',
-          session     || 'UNKNOWN',
-        ].join(':');
-
-        const broadFingerprint = [instrument, direction, h4Strength||'UNKNOWN', d1Trend||'UNKNOWN'].join(':');
         const now = new Date().toISOString();
+        const key = `qbot:strat:${instrument}:${strategy}`;
+        const existing = await redis.get(key).catch(()=>null);
+        const cur = existing ? (typeof existing==='string'?JSON.parse(existing):existing)
+                             : { wins:0, losses:0, totalPnl:0, consecutiveLosses:0, postCrownLosses:0, trades:[] };
 
-        const key      = `qbot:learn:${fingerprint}`;
-        const existing = await redis.get(key);
-        const current  = existing
-          ? (typeof existing === 'string' ? JSON.parse(existing) : existing)
-          : { wins: 0, losses: 0, totalPips: 0, bestRR: 0, trades: [] };
+        const newConsec = won ? 0 : (cur.consecutiveLosses||0)+1;
+        const wasCrowned = (cur.wins||0) >= CROWN_THRESHOLD;
+
+        // Post-crown losses: only count losses that happen AFTER crown was earned
+        const newPostCrownLosses = wasCrowned
+          ? (won ? 0 : (cur.postCrownLosses||0)+1)
+          : 0;
 
         const updated = {
-          wins:      won ? (current.wins||0)+1 : (current.wins||0),
-          losses:    won ? (current.losses||0) : (current.losses||0)+1,
-          totalPips: (current.totalPips||0)+(pips||0),
-          bestRR:    Math.max(current.bestRR||0, rr||0),
-          lastSeen:  now,
-          trades: [...(current.trades||[]).slice(-9), {
-            won, pips, rr, grade, confluenceScore, rsi,
-            session:  session  || 'UNKNOWN',
-            tp1Hit:   tp1Hit   || false,
-            tp2Hit:   tp2Hit   || false,
-            tp3Hit:   tp3Hit   || false,
-            beMoved:  beMoved  || false,
-            date: now,
+          wins:              won ? (cur.wins||0)+1 : (cur.wins||0),
+          losses:            won ? (cur.losses||0) : (cur.losses||0)+1,
+          totalPnl:          parseFloat(((cur.totalPnl||0)+(pnl||0)).toFixed(2)),
+          consecutiveLosses: newConsec,
+          postCrownLosses:   newPostCrownLosses,
+          lastSeen:          now,
+          trades: [...(cur.trades||[]).slice(-9), {
+            won, pnl:pnl||0, pips:pips||0, rr:rr||0, direction,
+            session:session||'UNKNOWN', tp1Hit:!!tp1Hit, tp2Hit:!!tp2Hit,
+            tp3Hit:!!tp3Hit, beMoved:!!beMoved, confidence:confidence||0, date:now
           }],
         };
 
-        await redis.set(key, JSON.stringify(updated), { ex: 60*60*24*90 });
+        await redis.set(key, JSON.stringify(updated), { ex: 60*60*24*120 });
 
-        // Broad fingerprint
-        const broadKey     = `qbot:learn:broad:${broadFingerprint}`;
-        const broadExist   = await redis.get(broadKey);
-        const broadCurrent = broadExist
-          ? (typeof broadExist === 'string' ? JSON.parse(broadExist) : broadExist)
-          : { wins: 0, losses: 0, totalPips: 0 };
+        const newTotalWins = updated.wins;
+        const justCrowned  = !wasCrowned && newTotalWins >= CROWN_THRESHOLD;
+        const dethroned    = wasCrowned  && newPostCrownLosses >= DETHRONE_LOSSES;
+        const banned       = newConsec   >= BAN_LOSSES;
 
-        await redis.set(broadKey, JSON.stringify({
-          wins:      won ? (broadCurrent.wins||0)+1 : (broadCurrent.wins||0),
-          losses:    won ? (broadCurrent.losses||0) : (broadCurrent.losses||0)+1,
-          totalPips: (broadCurrent.totalPips||0)+(pips||0),
-          lastSeen:  now,
-        }), { ex: 60*60*24*90 });
+        // ── Crown lock: earn it ──────────────────────────────────────────
+        let crownLockSet = false;
+        if (justCrowned) {
+          const ck    = `qbot:strat:crown:${instrument}`;
+          const curCr = await redis.get(ck).catch(()=>null);
+          // Only lock if no strategy is already crowned on this instrument
+          if (!curCr) {
+            await redis.set(ck, JSON.stringify(strategy), { ex: 60*60*24*365 });
+            crownLockSet = true;
+            console.log(`👑 CROWN LOCKED: ${strategy} on ${instrument}`);
+          }
+        }
+
+        // ── Crown dethrone ───────────────────────────────────────────────
+        let dethroneOccurred = false;
+        if (dethroned) {
+          const ck    = `qbot:strat:crown:${instrument}`;
+          const curCr = await redis.get(ck).catch(()=>null);
+          const lockedStrat = curCr ? (typeof curCr==='string'?JSON.parse(curCr):curCr) : null;
+          if (lockedStrat === strategy) {
+            await redis.del(ck);
+            dethroneOccurred = true;
+            console.log(`💔 CROWN DETHRONED: ${strategy} on ${instrument} (${DETHRONE_LOSSES} consecutive losses post-crown)`);
+          }
+        }
+
+        // ── Global blacklist: banned on all 3 ───────────────────────────
+        let globallyBlacklisted = false;
+        if (!won && banned) {
+          const others = INSTRUMENTS.filter(i=>i!==instrument);
+          const checks = await Promise.all(others.map(async inst=>{
+            const r = await redis.get(`qbot:strat:${inst}:${strategy}`).catch(()=>null);
+            if (!r) return false;
+            const d = typeof r==='string'?JSON.parse(r):r;
+            return (d.consecutiveLosses||0) >= BAN_LOSSES;
+          }));
+          if (checks.every(b=>b)) {
+            const blRaw = await redis.get('qbot:strat:blacklist:global').catch(()=>null);
+            const bl    = blRaw ? (typeof blRaw==='string'?JSON.parse(blRaw):blRaw) : [];
+            if (!bl.includes(strategy)) {
+              bl.push(strategy);
+              await redis.set('qbot:strat:blacklist:global', JSON.stringify(bl), { ex: 60*60*24*180 });
+              globallyBlacklisted = true;
+              console.log(`⛔ BLACKLISTED: ${strategy}`);
+            }
+          }
+        }
 
         const total = updated.wins + updated.losses;
         return res.status(200).json({
-          success: true, fingerprint,
+          success: true, strategy, instrument,
           result: won ? 'WIN' : 'LOSS',
-          newStats: { wins: updated.wins, losses: updated.losses, total,
-            winRate: total > 0 ? Math.round((updated.wins/total)*100) : null },
+          stats: { wins:updated.wins, losses:updated.losses, total, winRate:total>0?Math.round((updated.wins/total)*100):null },
+          justCrowned, crownLockSet, dethroneOccurred, banned, globallyBlacklisted,
         });
       } catch(e) {
         return res.status(500).json({ error: e.message });
@@ -191,51 +232,35 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // TRADE STORAGE ROUTES  /api/trades
-  // ══════════════════════════════════════════════════════════════════════════
+  // ── Standard trade storage ─────────────────────────────────────────────
   try {
     if (req.method === 'GET') {
       const trades = (await redis.get('quantum:trades')) || [];
-      const stats  = (await redis.get('quantum:stats'))  || { total:0, wins:0, pnl:0, winRate:'0.0' };
+      const stats  = (await redis.get('quantum:stats'))  || { total:0,wins:0,pnl:0,winRate:'0.0' };
       return res.status(200).json({ trades, stats });
     }
-
     if (req.method === 'POST') {
       const trade = req.body || {};
-      const pnl   = Number(trade.pnl);
-      const allowed = ['GBPUSD','BTCUSDT','XAUUSD'];
-      if (!allowed.includes(trade.instrument))          return res.status(400).json({ error: 'Invalid instrument' });
-      if (!['LONG','SHORT'].includes(trade.direction))  return res.status(400).json({ error: 'Invalid direction' });
-      if (!Number.isFinite(pnl))                        return res.status(400).json({ error: 'Invalid pnl value' });
-
-      const normalizedTrade = { ...trade, pnl, win: trade.win===true||trade.win==='true', id:`P${Date.now()}`, savedAt: new Date().toISOString() };
-      const existing = (await redis.get('quantum:trades')) || [];
-      const updated  = [normalizedTrade, ...existing].slice(0,500);
-      await redis.set('quantum:trades', updated);
-
-      const stats      = (await redis.get('quantum:stats')) || { total:0, wins:0, pnl:0 };
-      stats.total     += 1;
-      if (normalizedTrade.win) stats.wins += 1;
-      stats.pnl        = Number((Number(stats.pnl||0)+pnl).toFixed(2));
-      stats.winRate    = ((stats.wins/stats.total)*100).toFixed(1);
-      stats.lastUpdate = new Date().toISOString();
-      await redis.set('quantum:stats', stats);
-
-      return res.status(200).json({ success: true, trade: normalizedTrade, stats });
+      const p     = Number(trade.pnl);
+      if (!INSTRUMENTS.includes(trade.instrument)) return res.status(400).json({ error:'Invalid instrument' });
+      if (!['LONG','SHORT'].includes(trade.direction)) return res.status(400).json({ error:'Invalid direction' });
+      if (!Number.isFinite(p)) return res.status(400).json({ error:'Invalid pnl' });
+      const t = { ...trade, pnl:p, win:trade.win===true||trade.win==='true', id:`P${Date.now()}`, savedAt:new Date().toISOString() };
+      const ex = (await redis.get('quantum:trades')) || [];
+      await redis.set('quantum:trades', [t,...ex].slice(0,500));
+      const st = (await redis.get('quantum:stats')) || { total:0,wins:0,pnl:0 };
+      st.total++; if(t.win)st.wins++; st.pnl=Number((Number(st.pnl||0)+p).toFixed(2)); st.winRate=((st.wins/st.total)*100).toFixed(1); st.lastUpdate=new Date().toISOString();
+      await redis.set('quantum:stats', st);
+      return res.status(200).json({ success:true, trade:t, stats:st });
     }
-
     if (req.method === 'DELETE') {
-      if (!process.env.ADMIN_DELETE_TOKEN) return res.status(500).json({ error: 'Missing admin delete token' });
-      if (req.headers['x-admin-token'] !== process.env.ADMIN_DELETE_TOKEN) return res.status(403).json({ error: 'Forbidden' });
-      await redis.set('quantum:trades', []);
-      await redis.set('quantum:stats', { total:0, wins:0, pnl:0, winRate:'0.0' });
-      return res.status(200).json({ success: true });
+      if (!process.env.ADMIN_DELETE_TOKEN) return res.status(500).json({ error:'Missing admin token' });
+      if (req.headers['x-admin-token']!==process.env.ADMIN_DELETE_TOKEN) return res.status(403).json({ error:'Forbidden' });
+      await redis.set('quantum:trades', []); await redis.set('quantum:stats', { total:0,wins:0,pnl:0,winRate:'0.0' });
+      return res.status(200).json({ success:true });
     }
-
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(405).json({ error:'Method not allowed' });
   } catch(e) {
-    console.error('Redis error:', e);
-    return res.status(500).json({ error: e.message||'Server error' });
+    return res.status(500).json({ error: e.message });
   }
 };
