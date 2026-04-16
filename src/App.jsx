@@ -360,7 +360,7 @@ export default function TradingBotLive(){
   useEffect(()=>{const f=async()=>{try{const r=await fetch("/api/account");if(!r.ok)return;const d=await r.json();const b=Number(d.balance??d.equity??d.accountBalance);if(Number.isFinite(b)&&b>0)setAccountBalance(b);}catch(e){}};f();const i=setInterval(f,30000);return()=>clearInterval(i);},[]);
 
   useEffect(()=>{
-    const sm={BTCUSDT:"BTCUSD",XAUUSD:"XAUUSD.s",GBPUSD:"GBPUSD"};
+    const sm={BTCUSDT:"BTCUSD",XAUUSD:"XAUUSD.s",GBPUSD:"GBPUSD.s"};
     const fc=async(id)=>{const sym=sm[id];try{const r=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=M1&limit=200`);const d=await r.json();if(d.candles?.length>=50){setBrokerCandles(p=>({...p,[id]:d.candles}));const lc=d.candles[d.candles.length-1].close;if(Number.isFinite(lc))setPrices(p=>{setPrevPrices(pp=>({...pp,[id]:p[id]}));return{...p,[id]:lc};});}try{const r2=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=M5&limit=50`);const d2=await r2.json();if(d2.candles?.length>=10)setM5C(p=>({...p,[id]:d2.candles}));}catch(e){}try{const r3=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=M15&limit=100`);const d3=await r3.json();if(d3.candles?.length>=20)setM15C(p=>({...p,[id]:d3.candles}));}catch(e){}try{const r4=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=H1&limit=48`);const d4=await r4.json();if(d4.candles?.length>=20)setH1C(p=>({...p,[id]:d4.candles}));}catch(e){}try{const r5=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=H4&limit=100`);const d5=await r5.json();if(d5.candles?.length>=20)setH4C(p=>({...p,[id]:d5.candles}));}catch(e){}try{const r6=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=D1&limit=30`);const d6=await r6.json();if(d6.candles?.length>=10)setD1C(p=>({...p,[id]:d6.candles}));}catch(e){}try{const r7=await fetch(`/api/broker-candles?symbol=${sym}&timeframe=W1&limit=12`);const d7=await r7.json();if(d7.candles?.length>=4)setWkC(p=>({...p,[id]:d7.candles}));}catch(e){}}catch(e){setPrices(p=>({...p,[id]:null}));}};
     const fp=async(id)=>{try{const r=await fetch(`/api/broker-price?symbol=${sm[id]}`);const d=await r.json();if(Number.isFinite(d.price))setPrices(p=>{setPrevPrices(pp=>({...pp,[id]:p[id]}));return{...p,[id]:d.price};});}catch(e){}};
     INSTRUMENTS.forEach(i=>fc(i.id));const pi=INSTRUMENTS.map(i=>setInterval(()=>fp(i.id),5000));const ci=INSTRUMENTS.map(i=>setInterval(()=>fc(i.id),60000));
@@ -413,7 +413,8 @@ export default function TradingBotLive(){
       const tp2=stored?.tp2||dec?.takeProfit2||null;
       const tp3=stored?.tp3||dec?.takeProfit3||null;
       const tp4=stored?.tp4||dec?.takeProfit4||null;
-      return{id:pos.id||pos.positionId,symbol:pos.symbol,openPrice:pos.openPrice,currentPrice:pos.currentPrice,stopLoss:pos.stopLoss,volume:pos.volume,direction:pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',tp1,tp2,tp3,tp4,breakeven:pos.openPrice,atr:null};}).filter(p=>p.id&&p.tp1);if(!managed.length)return;try{const r=await fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({positions:managed})});const d=await r.json();if(d.managed?.length>0){d.managed.forEach(m=>m.actions.forEach(a=>{if(a.type==='PARTIAL_CLOSE_TP1')addLog(`TP1 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='PARTIAL_CLOSE_TP2')addLog(`TP2 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='FULL_CLOSE_TP3')addLog(`TP3 COMPLETE ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='SL_TO_BREAKEVEN')addLog(`BE lock ${m.symbol}`,'info');if(['PARTIAL_CLOSE_TP1','PARTIAL_CLOSE_TP2','FULL_CLOSE_TP3'].includes(a.type)){setNotifs(p=>[...p.slice(-3),{id:Date.now(),symbol:m.symbol,type:a.type,price:a.price,pnl:a.pnl,time:new Date().toLocaleTimeString()}]);fetchReports();}}));setTimeout(fetchPos,1500);setTimeout(fetchHist,3000);}}catch(e){}},[openPositions,aiDecisions,addLog,fetchPos,fetchHist,fetchReports]);
+      return{id:pos.id||pos.positionId,symbol:pos.symbol,openPrice:pos.openPrice,currentPrice:pos.currentPrice,stopLoss:pos.stopLoss,volume:pos.volume,direction:pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',tp1,tp2,tp3,tp4,breakeven:pos.openPrice,atr:null};}).filter(p=>p.id&&p.tp1);if(!managed.length)return;try{const r=await fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({positions:managed})});const d=await r.json();if(d.managed?.length>0){d.managed.forEach(m=>m.actions.forEach(a=>{if(a.type==='PARTIAL_CLOSE_TP1')addLog(`TP1 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='PARTIAL_CLOSE_TP2')addLog(`TP2 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='FULL_CLOSE_TP3')addLog(`TP3 COMPLETE ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='SL_TO_BREAKEVEN')addLog(`BE lock ${m.symbol}`,'info');
+                if(a.type==='TP1_RETRACE_CLOSE')addLog(`🔄 ${m.symbol} retraced to TP1 — closed remaining position $${a.pnl?.toFixed(2)}`,'warn');if(['PARTIAL_CLOSE_TP1','PARTIAL_CLOSE_TP2','FULL_CLOSE_TP3'].includes(a.type)){setNotifs(p=>[...p.slice(-3),{id:Date.now(),symbol:m.symbol,type:a.type,price:a.price,pnl:a.pnl,time:new Date().toLocaleTimeString()}]);fetchReports();}}));setTimeout(fetchPos,1500);setTimeout(fetchHist,3000);}}catch(e){}},[openPositions,aiDecisions,addLog,fetchPos,fetchHist,fetchReports]);
   useEffect(()=>{if(!openPositions.length)return;const i=setInterval(manageTrades,30000);manageTrades();return()=>clearInterval(i);},[openPositions,manageTrades]);
 
   const runAIBrain=useCallback(async(inst)=>{
@@ -661,7 +662,22 @@ export default function TradingBotLive(){
   useEffect(()=>{
     const run=()=>{
       const s=getSessionInfo();
-      if(!s.isLondon&&!s.isNY&&!s.isOverlap)return;
+      // Per-instrument session gates
+      const utcH = new Date().getUTCHours() + new Date().getUTCMinutes()/60;
+      if (inst.id === 'XAUUSD' || inst.id === 'GBPUSD') {
+        // Gold + GBP: ONLY London (08-16) and NY (13-21). Dead after 21:00.
+        if (!s.isLondon && !s.isNY) {
+          addLog(`⏸ ${inst.label}: outside trading hours (Gold/GBP stop at 21:00 UTC)`, 'info');
+          return;
+        }
+      } else if (inst.id === 'BTCUSDT') {
+        // BTC: active 07:00-23:00 UTC. Stop in dead Asian hours (23:00-07:00).
+        const btcAllowed = utcH >= 7 && utcH < 23;
+        if (!btcAllowed) {
+          addLog(`⏸ BTC/USDT: dead hours (23:00-07:00 UTC — low volume)`, 'info');
+          return;
+        }
+      }
       INSTRUMENTS.forEach(inst=>{
         const c=brokerCandles[inst.id];
         if(c&&c.length>=50&&prices[inst.id])runAIBrain(inst);

@@ -385,7 +385,49 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       const tp3_distance    = filledTP3 ? Math.abs(filledTP3 - openPrice) : null;
       const tp4_distance    = filledTP4 ? Math.abs(filledTP4 - openPrice) : null;
 
-      // ── TP1: Close 50% + SL to breakeven ──
+      // ── RETRACE GUARD: if price retraces back to last hit TP level → close all remaining ──
+      // TP1 hit, not TP2 → retrace to TP1 = close
+      // TP2 hit, not TP3 → retrace to TP2 = close
+      // TP3 hit, not TP4 → retrace to TP3 = close
+      const retraceLevel = state.tp3Hit && !state.tp4Hit ? filledTP3
+                         : state.tp2Hit && !state.tp3Hit ? filledTP2
+                         : state.tp1Hit && !state.tp2Hit ? filledTP1
+                         : null;
+
+      if (retraceLevel && state.tp1Hit) {
+        const hasRetraced = direction === 'LONG'
+          ? currentPrice <= retraceLevel
+          : currentPrice >= retraceLevel;
+
+        if (hasRetraced) {
+          const pnl = parseFloat((profit_distance * volume * getMultiplier(symbol)).toFixed(2));
+          const closeRes = await fetch(`${BASE}/trade`, {
+            method: 'POST', headers,
+            body: JSON.stringify({ actionType: 'POSITION_CLOSE_ID', positionId: id, comment: 'QuantumBot:RETRACE_CLOSE' })
+          });
+          const closeData = await closeRes.json();
+          if (closeRes.ok && (closeData.orderId || closeData.positionId)) {
+            const tpHitLabel = state.tp3Hit ? 'TP3' : state.tp2Hit ? 'TP2' : 'TP1';
+            result.actions.push({ type: 'RETRACE_CLOSE', price: currentPrice, pnl, tpHitLabel });
+            state.tp4Hit = true; // mark fully done
+            await saveReport({ positionId: id, symbol, direction, openPrice, volume,
+              tp1, tp2, tp3, eventType: 'RETRACE_CLOSE', price: currentPrice, pnl });
+            if (redis) { try { await redis.del(stateKey); } catch(e) {} }
+            await sendTelegram(
+              '🔄 <b>RETRACE CLOSE — ' + symbol + '</b>\n' +
+              direction + ' @ entry $' + parseFloat(openPrice).toFixed(2) + '\n' +
+              tpHitLabel + ' was hit but price retraced back to ' + tpHitLabel + ' level\n' +
+              'Closed remaining @ $' + currentPrice.toFixed(2) + '\n' +
+              'P&L this close: <b>' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '</b>\n' +
+              '(All previous TP profits already secured)'
+            );
+          }
+          if (result.actions.length > 0) managed.push(result);
+          continue;
+        }
+      }
+
+      // ── TP1: Close 40% + SL profit lock ──
       if (!state.tp1Hit && profit_distance >= tp1_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.4) / 0.01) * 0.01); // 40% at TP1
         const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
