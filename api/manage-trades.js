@@ -62,12 +62,16 @@ Confidence: <b>${conf||'—'}%</b>
 
   const tgTP1 = (sym, dir, price, pnl, entry, tp2, tp3) => {
     const progress = tp2 ? Math.abs(price - entry) / Math.abs(tp3 - entry) * 100 : 0;
+    const tp1Dist = Math.abs(price - parseFloat(entry));
+    const lockLevel = dir === 'LONG'
+      ? parseFloat(entry) + tp1Dist * 0.30
+      : parseFloat(entry) - tp1Dist * 0.30;
     return `🎯 <b>TP1 HIT — ${sym}</b>
 ━━━━━━━━━━━━━━━━━━━━
 ${dir} @ entry $${parseFloat(entry).toFixed(2)}
 Closed 50% @ <b>$${parseFloat(price).toFixed(2)}</b>
 Secured: <b>+$${parseFloat(pnl).toFixed(2)}</b>
-🛡️ Stop moved to <b>BREAKEVEN</b>
+🔒 SL locked at <b>$${lockLevel.toFixed(2)}</b> (+30% of TP1 — guaranteed profit)
 ━━━━━━━━━━━━━━━━━━━━
 Next target TP2: <b>$${parseFloat(tp2||0).toFixed(2)}</b>
 Progress to TP3: ${progress.toFixed(0)}%`;
@@ -344,19 +348,28 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
           // Send Telegram
           await sendTelegram(tgTP1(symbol, direction, currentPrice, pnl, openPrice, tp2, tp3));
 
-          // Move SL to breakeven
-          if (breakeven && stopLoss !== breakeven) {
-            const modRes = await fetch(`${BASE}/trade`, {
-              method: 'POST', headers,
-              body: JSON.stringify({ actionType: 'POSITION_MODIFY', positionId: id, stopLoss: parseFloat(breakeven.toFixed(5)), comment: 'QuantumBot:SL_to_BE' })
-            });
-            if (modRes.ok) {
-              result.actions.push({ type: 'SL_TO_BREAKEVEN', level: breakeven });
-              state.beSet = true;
-              await saveReport({ positionId: id, symbol, direction, openPrice, volume: 0,
-                tp1, tp2, tp3, eventType: 'SL_TO_BREAKEVEN', price: breakeven, pnl: 0 });
-              await sendTelegram(`🛡️ <b>BREAKEVEN SET</b>\n${symbol}\nSL moved to ${breakeven?.toFixed(2)}`);
-            }
+          // Move SL to entry + 30% of TP1 distance — locks profit, never goes back to 0
+          // Formula: if LONG entry=4800 TP1=4820 → lock SL at 4800 + (4820-4800)*0.30 = 4806
+          // If price reverses after TP1, we still keep at least 30% of TP1 profit on remaining position
+          const tp1Dist = Math.abs(tp1 - openPrice);
+          const lockPct  = 0.30; // lock 30% of TP1 distance as guaranteed minimum profit
+          const lockedSL = direction === 'LONG'
+            ? openPrice + tp1Dist * lockPct
+            : openPrice - tp1Dist * lockPct;
+          const dp = symbol.includes('JPY') ? 3 : symbol.includes('XAU') || symbol.includes('BTC') ? 2 : 5;
+
+          const modRes = await fetch(`${BASE}/trade`, {
+            method: 'POST', headers,
+            body: JSON.stringify({ actionType: 'POSITION_MODIFY', positionId: id, stopLoss: parseFloat(lockedSL.toFixed(dp)), comment: 'QuantumBot:SL_PROFIT_LOCK_TP1' })
+          });
+          if (modRes.ok) {
+            result.actions.push({ type: 'SL_PROFIT_LOCK_TP1', level: lockedSL });
+            state.beSet = true;
+            state.lockedSL = lockedSL;
+            await saveReport({ positionId: id, symbol, direction, openPrice, volume: 0,
+              tp1, tp2, tp3, eventType: 'SL_TO_BREAKEVEN', price: lockedSL, pnl: 0 });
+            const lockPips = (tp1Dist * lockPct).toFixed(2);
+            await sendTelegram('🔒 <b>PROFIT LOCKED</b>\n' + symbol + ' ' + direction + '\nSL locked at ' + lockedSL.toFixed(2) + '\n(+' + lockPips + ' pips guaranteed on remaining 50%)');
           }
         }
       }
@@ -381,14 +394,35 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
           const tp1pnl = result.actions.find(a=>a.type==='PARTIAL_CLOSE_TP1')?.pnl || 0;
           await sendTelegram(tgTP2(symbol, direction, currentPrice, pnl, openPrice, tp1pnl, tp3));
 
-          // Smart trail: 25% of TP1→TP2 distance
-          const trailDistance = pos.atr || Math.abs(tp2 - openPrice) * 0.25;
-          const trailSL = direction === 'LONG' ? currentPrice - trailDistance : currentPrice + trailDistance;
-          const modRes  = await fetch(`${BASE}/trade`, {
+          // Move SL to TP1 + 20% of TP1→TP2 distance
+          // This guarantees: even if price reverses from TP2, SL is ABOVE TP1 level
+          // Meaning the remaining 20% position is always in positive territory
+          // Formula: if LONG TP1=4820 TP2=4840 → SL at 4820 + (4840-4820)*0.20 = 4824
+          const tp1tp2Dist = tp2 ? Math.abs(tp2 - tp1) : 0;
+          const tp2LockBuffer = tp1tp2Dist * 0.20;
+          const dp2 = symbol.includes('JPY') ? 3 : symbol.includes('XAU') || symbol.includes('BTC') ? 2 : 5;
+
+          // Never go below the TP1 lock — always take the max (most profitable SL)
+          const rawTP2SL = direction === 'LONG'
+            ? (tp1 || openPrice) + tp2LockBuffer
+            : (tp1 || openPrice) - tp2LockBuffer;
+
+          // Safety: compare with existing SL and only move if more profitable
+          const currentSLValue = state.lockedSL || stopLoss || openPrice;
+          const tp2SL = direction === 'LONG'
+            ? Math.max(rawTP2SL, currentSLValue)
+            : Math.min(rawTP2SL, currentSLValue);
+
+          const modRes = await fetch(`${BASE}/trade`, {
             method: 'POST', headers,
-            body: JSON.stringify({ actionType: 'POSITION_MODIFY', positionId: id, stopLoss: parseFloat(trailSL.toFixed(5)), comment: 'QuantumBot:SMART_TRAIL' })
+            body: JSON.stringify({ actionType: 'POSITION_MODIFY', positionId: id, stopLoss: parseFloat(tp2SL.toFixed(dp2)), comment: 'QuantumBot:SL_ABOVE_TP1' })
           });
-          if (modRes.ok) result.actions.push({ type: 'SL_TRAIL_AT_TP2', level: trailSL });
+          if (modRes.ok) {
+            state.lockedSL = tp2SL;
+            result.actions.push({ type: 'SL_ABOVE_TP1', level: tp2SL });
+            const bufferPips = Math.abs(tp2SL - (tp1||openPrice)).toFixed(2);
+            await sendTelegram('🔒🔒 <b>SL ABOVE TP1</b>\n' + symbol + ' ' + direction + '\nSL at ' + tp2SL.toFixed(2) + '\n(' + bufferPips + ' pips above TP1 — 20% runner guaranteed profit)');
+          }
         }
       }
 
@@ -427,6 +461,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
         }
       }
 
+      // lockedSL is already in state object, will be persisted below
       if (redis && (state.tp1Hit || state.tp2Hit || state.tp3Hit)) {
         try { await redis.set(stateKey, JSON.stringify(state), { ex: 86400 }); } catch(e) {}
       }
