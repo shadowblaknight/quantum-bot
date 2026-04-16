@@ -236,14 +236,16 @@ module.exports = async (req, res) => {
       }
     }
 
-    // RR gate
-    if (dec.decision !== 'WAIT' && dec.stopLoss && dec.takeProfit1) {
-      const slD  = Math.abs((dec.entry||snap.price) - dec.stopLoss);
-      const tp1D = Math.abs(dec.takeProfit1 - (dec.entry||snap.price));
-      const minRR = instrument==='BTCUSDT' ? 0.8 : 1.0;
-      if (slD > 0 && tp1D/slD < minRR) {
+    // RR gate — use TP4 (best target) for R/R calculation
+    // TP1 is intentionally small (quick grab), full trade R/R is measured at TP4
+    if (dec.decision !== 'WAIT' && dec.stopLoss) {
+      const slD   = Math.abs((dec.entry||snap.price) - dec.stopLoss);
+      const bestTP = dec.takeProfit4 || dec.takeProfit3 || dec.takeProfit1;
+      const bestD  = bestTP ? Math.abs(bestTP - (dec.entry||snap.price)) : 0;
+      const minRR  = 1.5; // full trade must offer at least 1.5:1 at best TP
+      if (slD > 0 && bestD > 0 && bestD/slD < minRR) {
         dec.decision = 'WAIT';
-        dec.reason   = 'RR ' + (tp1D/slD).toFixed(2) + ':1 below ' + minRR + ':1 minimum';
+        dec.reason   = 'Full R/R ' + (bestD/slD).toFixed(2) + ':1 below ' + minRR + ':1 minimum';
         dec.volume   = null;
       }
     }
