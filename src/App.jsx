@@ -294,6 +294,8 @@ export default function TradingBotLive(){
   const [aiStatus,setAiStatus]=useState({});
   const [blacklist,setBlacklist]=useState([]);
   const [instStreaks,setInstStreaks]=useState({XAUUSD:{wins:0,losses:0},BTCUSDT:{wins:0,losses:0},GBPUSD:{wins:0,losses:0}});
+  // Store TP/SL levels at the moment each trade is placed — never overwritten by later AI decisions
+  const [openTradeData,setOpenTradeData]=useState({});
   const [crownLocks,setCrownLocks]=useState({});  // { XAUUSD:'ICT_FVG+TREND_H4', ... }
   const lastTradeRef=useRef({});
   const pendingRef=useRef({});
@@ -338,11 +340,20 @@ export default function TradingBotLive(){
   const recordResult=useCallback(async(position,dec,session)=>{if(!position||!dec)return;const pips=position.profit||0,won=pips>0;const payload={instrument:position.symbol?.replace('.s','').replace('.S','')||'UNKNOWN',direction:position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',won,pnl:pips,pips,rr:parseFloat((Math.abs(pips)/Math.max(1,Math.abs(pips))).toFixed(2)),strategy:dec.strategy||'UNKNOWN',session,confidence:dec.confidence||0};try{await fetch('/api/trades?learn=true',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});addLog(`${payload.instrument} ${won?'WIN':'LOSS'} ${pips>=0?'+':''}${pips.toFixed(2)}`,won?'success':'warn');setPrevDecisions(p=>{const ex=[...(p[payload.instrument]||[])];const last=ex[ex.length-1];if(last&&!last.outcome)ex[ex.length-1]={...last,outcome:won?'WIN':'LOSS',pnl:pips};return{...p,[payload.instrument]:ex};});
       // Update per-instrument streak
       setInstStreaks(prev=>{const inst=payload.instrument;const s=prev[inst]||{wins:0,losses:0};return{...prev,[inst]:{wins:won?s.wins+1:0,losses:won?0:s.losses+1}};});
+      // Clear stored TP data for this instrument when trade closes
+      setOpenTradeData(prev=>{const n={...prev};delete n[payload.instrument];return n;});
       fetchLearn();}catch(e){}},[addLog,fetchLearn]);
 
   useEffect(()=>{const prev=prevPosRef.current,cur=openPositions;prev.filter(p=>!cur.find(c=>(c.id||c.positionId)===(p.id||p.positionId))).forEach(cp=>{const raw=(cp.symbol||'').toUpperCase();const id=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;if(id&&aiDecisions[id])recordResult(cp,aiDecisions[id],getSessionInfo().session);});prevPosRef.current=cur;},[openPositions,aiDecisions,recordResult]);
 
-  const manageTrades=useCallback(async()=>{if(!openPositions.length)return;const managed=openPositions.map(pos=>{const raw=(pos.symbol||'').toUpperCase();const id=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;const dec=id?aiDecisions[id]:null;return{id:pos.id||pos.positionId,symbol:pos.symbol,openPrice:pos.openPrice,currentPrice:pos.currentPrice,stopLoss:pos.stopLoss,volume:pos.volume,direction:pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',tp1:dec?.takeProfit1??null,tp2:dec?.takeProfit2??null,tp3:dec?.takeProfit3??null,breakeven:pos.openPrice,atr:null};}).filter(p=>p.id&&p.tp1);if(!managed.length)return;try{const r=await fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({positions:managed})});const d=await r.json();if(d.managed?.length>0){d.managed.forEach(m=>m.actions.forEach(a=>{if(a.type==='PARTIAL_CLOSE_TP1')addLog(`TP1 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='PARTIAL_CLOSE_TP2')addLog(`TP2 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='FULL_CLOSE_TP3')addLog(`TP3 COMPLETE ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='SL_TO_BREAKEVEN')addLog(`BE lock ${m.symbol}`,'info');if(['PARTIAL_CLOSE_TP1','PARTIAL_CLOSE_TP2','FULL_CLOSE_TP3'].includes(a.type)){setNotifs(p=>[...p.slice(-3),{id:Date.now(),symbol:m.symbol,type:a.type,price:a.price,pnl:a.pnl,time:new Date().toLocaleTimeString()}]);fetchReports();}}));setTimeout(fetchPos,1500);setTimeout(fetchHist,3000);}}catch(e){}},[openPositions,aiDecisions,addLog,fetchPos,fetchHist,fetchReports]);
+  const manageTrades=useCallback(async()=>{if(!openPositions.length)return;const managed=openPositions.map(pos=>{const raw=(pos.symbol||'').toUpperCase();const id=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;
+      // Use stored trade data — correct TPs for THIS trade, not latest AI decision
+      const stored=id?openTradeData[id]:null;
+      const dec=id?aiDecisions[id]:null;
+      const tp1=stored?.tp1||dec?.takeProfit1||null;
+      const tp2=stored?.tp2||dec?.takeProfit2||null;
+      const tp3=stored?.tp3||dec?.takeProfit3||null;
+      return{id:pos.id||pos.positionId,symbol:pos.symbol,openPrice:pos.openPrice,currentPrice:pos.currentPrice,stopLoss:pos.stopLoss,volume:pos.volume,direction:pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',tp1,tp2,tp3,breakeven:pos.openPrice,atr:null};}).filter(p=>p.id&&p.tp1);if(!managed.length)return;try{const r=await fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({positions:managed})});const d=await r.json();if(d.managed?.length>0){d.managed.forEach(m=>m.actions.forEach(a=>{if(a.type==='PARTIAL_CLOSE_TP1')addLog(`TP1 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='PARTIAL_CLOSE_TP2')addLog(`TP2 ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='FULL_CLOSE_TP3')addLog(`TP3 COMPLETE ${m.symbol} +$${a.pnl?.toFixed(2)}`,'success');if(a.type==='SL_TO_BREAKEVEN')addLog(`BE lock ${m.symbol}`,'info');if(['PARTIAL_CLOSE_TP1','PARTIAL_CLOSE_TP2','FULL_CLOSE_TP3'].includes(a.type)){setNotifs(p=>[...p.slice(-3),{id:Date.now(),symbol:m.symbol,type:a.type,price:a.price,pnl:a.pnl,time:new Date().toLocaleTimeString()}]);fetchReports();}}));setTimeout(fetchPos,1500);setTimeout(fetchHist,3000);}}catch(e){}},[openPositions,aiDecisions,addLog,fetchPos,fetchHist,fetchReports]);
   useEffect(()=>{if(!openPositions.length)return;const i=setInterval(manageTrades,30000);manageTrades();return()=>clearInterval(i);},[openPositions,manageTrades]);
 
   const runAIBrain=useCallback(async(inst)=>{
@@ -509,7 +520,19 @@ export default function TradingBotLive(){
               symbol:inst.id, direction:dec.decision, price:prices[inst.id],
               sl:dec.stopLoss, tp1:dec.takeProfit1, tp2:dec.takeProfit2, tp3:dec.takeProfit3,
               volume:vol, confidence:dec.confidence, reason:dec.reason
-            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
+            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");
+              // Save TP/SL levels keyed by instrument — used for display until trade closes
+              setOpenTradeData(prev=>({...prev,[inst.id]:{
+                direction:dec.decision,
+                entry:prices[inst.id],
+                stopLoss:dec.stopLoss,
+                tp1:dec.takeProfit1,
+                tp2:dec.takeProfit2,
+                tp3:dec.takeProfit3,
+                volume:vol,
+                openedAt:Date.now(),
+              }}));
+              setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
   },[brokerCandles,prices,m5C,m15C,h1C,h4C,d1C,wkC,accountBalance,closedTrades,openPositions,news,calEvents,eventAlert,marketStatus,prevDecisions,addLog,fetchPos,fetchHist]);
 
   useEffect(()=>{
@@ -541,7 +564,40 @@ export default function TradingBotLive(){
   const nowTs=Date.now(),evTs=eventAlert?.date?new Date(eventAlert.date).getTime():0;
   const showBanner=!!eventAlert&&(!evTs||(evTs>nowTs&&evTs<nowTs+30*60*1000));
 
-  const getTPData=(pos)=>{const raw=(pos.symbol||'').toUpperCase();const id=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;const dec=id?aiDecisions[id]:null;if(!dec||!pos.openPrice)return null;const dir=pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT';const tp3=dec.takeProfit3,entry=pos.openPrice,curr=pos.currentPrice||pos.openPrice;const range=Math.abs((tp3||entry)-entry)||1;const progress=Math.min(100,Math.max(0,(Math.abs(curr-entry)/range)*100));return{dir,entry,curr,sl:dec.stopLoss||pos.stopLoss,tp1:dec.takeProfit1,tp2:dec.takeProfit2,tp3,progress,tp1Hit:dec.takeProfit1?(dir==='LONG'?curr>=dec.takeProfit1:curr<=dec.takeProfit1):false,tp2Hit:dec.takeProfit2?(dir==='LONG'?curr>=dec.takeProfit2:curr<=dec.takeProfit2):false,tp3Hit:tp3?(dir==='LONG'?curr>=tp3:curr<=tp3):false};};
+  const getTPData=(pos)=>{
+    const raw=(pos.symbol||'').toUpperCase();
+    const id=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;
+    // Use stored trade data (set at execution time) — never re-read from latest AI decision
+    const stored=id?openTradeData[id]:null;
+    const dec=stored||null;
+    if(!dec||!pos.openPrice)return null;
+    const dir=pos.type==='POSITION_TYPE_BUY'?'LONG':'SHORT';
+    // Validate TPs are in the correct direction before displaying
+    const entry=pos.openPrice;
+    const curr=pos.currentPrice||entry;
+    const tp1=dec.tp1||dec.takeProfit1;
+    const tp2=dec.tp2||dec.takeProfit2;
+    const tp3=dec.tp3||dec.takeProfit3;
+    // Sanity check: for LONG, TPs must be above entry. For SHORT, below entry.
+    const tp1Valid = tp1 && (dir==='LONG' ? tp1>entry : tp1<entry);
+    const tp2Valid = tp2 && (dir==='LONG' ? tp2>entry : tp2<entry);
+    const tp3Valid = tp3 && (dir==='LONG' ? tp3>entry : tp3<entry);
+    if(!tp3Valid && !tp1Valid) return null; // completely wrong direction — don't display
+    const safeTP1 = tp1Valid ? tp1 : null;
+    const safeTP2 = tp2Valid ? tp2 : null;
+    const safeTP3 = tp3Valid ? tp3 : null;
+    const range=Math.abs((safeTP3||safeTP1||entry)-entry)||1;
+    const progress=Math.min(100,Math.max(0,(Math.abs(curr-entry)/range)*100));
+    return{
+      dir,entry,curr,
+      sl:dec.stopLoss||pos.stopLoss,
+      tp1:safeTP1, tp2:safeTP2, tp3:safeTP3,
+      progress,
+      tp1Hit:safeTP1?(dir==='LONG'?curr>=safeTP1:curr<=safeTP1):false,
+      tp2Hit:safeTP2?(dir==='LONG'?curr>=safeTP2:curr<=safeTP2):false,
+      tp3Hit:safeTP3?(dir==='LONG'?curr>=safeTP3:curr<=safeTP3):false,
+    };
+  };
 
   const SC={LONDON:"#3b82f6",NEW_YORK:"#0ea56b",LONDON_NY_OVERLAP:"#c9882a",OVERLAP:"#c9882a"};
   const sc=(s)=>SC[s]||"#8892aa";
