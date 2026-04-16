@@ -592,7 +592,7 @@ export default function TradingBotLive(){
               sl:dec.stopLoss, tp1:dec.takeProfit1, tp2:dec.takeProfit2, tp3:dec.takeProfit3,
               volume:vol, confidence:dec.confidence, reason:dec.reason
             }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");
-              // Save TP/SL levels keyed by instrument — used for display until trade closes
+              // Store Claude's levels first (will be corrected after fill)
               setOpenTradeData(prev=>({...prev,[inst.id]:{
                 direction:dec.decision,
                 entry:prices[inst.id],
@@ -600,13 +600,62 @@ export default function TradingBotLive(){
                 tp1:dec.takeProfit1,
                 tp2:dec.takeProfit2,
                 tp3:dec.takeProfit3,
+                tp4:dec.takeProfit4||null,
                 volume:vol,
                 strategy:dec.strategy||'UNKNOWN',
                 confidence:dec.confidence||0,
-                tp4:dec.takeProfit4||null,
                 openedAt:Date.now(),
               }}));
-              setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
+              // After 3s fetch actual fill price and recalculate TPs from real entry
+              setTimeout(async()=>{
+                try{
+                  const pr=await fetch('/api/positions');
+                  if(!pr.ok)return;
+                  const pd=await pr.json();
+                  const positions=pd.positions||pd||[];
+                  const sym=inst.id==='BTCUSDT'?'BTCUSD':inst.id;
+                  const filled=positions.find(p=>{
+                    const s=(p.symbol||'').toUpperCase();
+                    return s.startsWith(sym.replace('USDT','USD').replace('USDT',''));
+                  });
+                  if(!filled||!filled.openPrice)return;
+                  const fillPrice=filled.openPrice;
+                  const dir=dec.decision;
+                  // Recalculate all TPs from actual fill price
+                  const TPPIPS={XAUUSD:[5,10,15,20],BTCUSDT:[100,200,300,400],GBPUSD:[0.0004,0.0008,0.0012,0.0016]};
+                  const pips=TPPIPS[inst.id]||TPPIPS.XAUUSD;
+                  const slPips=inst.id==='XAUUSD'?10:inst.id==='BTCUSDT'?200:0.0008;
+                  const sign=dir==='LONG'?1:-1;
+                  const correctedTp1=parseFloat((fillPrice+sign*pips[0]).toFixed(inst.id==='GBPUSD'?5:2));
+                  const correctedTp2=parseFloat((fillPrice+sign*pips[1]).toFixed(inst.id==='GBPUSD'?5:2));
+                  const correctedTp3=parseFloat((fillPrice+sign*pips[2]).toFixed(inst.id==='GBPUSD'?5:2));
+                  const correctedTp4=parseFloat((fillPrice+sign*pips[3]).toFixed(inst.id==='GBPUSD'?5:2));
+                  const correctedSL =parseFloat((fillPrice-sign*slPips).toFixed(inst.id==='GBPUSD'?5:2));
+                  addLog(`✅ ${inst.label} fill corrected: entry ${fillPrice} TP1=${correctedTp1} TP2=${correctedTp2}`,'info');
+                  setOpenTradeData(prev=>({...prev,[inst.id]:{
+                    ...prev[inst.id],
+                    entry:fillPrice,
+                    stopLoss:correctedSL,
+                    tp1:correctedTp1,
+                    tp2:correctedTp2,
+                    tp3:correctedTp3,
+                    tp4:correctedTp4,
+                    fillCorrected:true,
+                  }}));
+                  // Also update manage-trades with correct levels via position modify
+                  if(filled.id||filled.positionId){
+                    fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},
+                      body:JSON.stringify({correctTPs:{
+                        positionId:filled.id||filled.positionId,
+                        symbol:inst.id, direction:dir,
+                        tp1:correctedTp1, tp2:correctedTp2, tp3:correctedTp3, tp4:correctedTp4,
+                        sl:correctedSL,
+                      }})
+                    }).catch(()=>{});
+                  }
+                }catch(e){addLog(`TP correction error: ${e.message}`,'warn');}
+              },3000);
+              setTimeout(fetchPos,2000);setTimeout(fetchHist,5000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
   },[brokerCandles,prices,m5C,m15C,h1C,h4C,d1C,wkC,accountBalance,closedTrades,openPositions,news,calEvents,eventAlert,marketStatus,prevDecisions,addLog,fetchPos,fetchHist]);
 
   useEffect(()=>{

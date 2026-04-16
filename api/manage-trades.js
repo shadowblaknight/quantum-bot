@@ -241,6 +241,42 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
     return res.status(200).json({ ok: true });
   }
 
+  // ── Post-fill TP correction ──────────────────────────────────────────────
+  // Called 3s after trade opens to fix TPs based on actual fill price
+  if (body.correctTPs) {
+    const { positionId, symbol, direction, tp1, tp2, tp3, tp4, sl } = body.correctTPs;
+    try {
+      const dp = (symbol||'').includes('GBP') ? 5 : (symbol||'').includes('BTC') ? 2 : 2;
+      // Modify SL/TP on MT5 to match actual fill price
+      const modRes = await fetch(`${BASE}/trade`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          actionType: 'POSITION_MODIFY',
+          positionId,
+          stopLoss:   parseFloat(sl.toFixed(dp)),
+          takeProfit: parseFloat((tp4||tp3).toFixed(dp)),
+          comment:    'QuantumBot:FILL_CORRECTION',
+        })
+      });
+      const modData = await modRes.json();
+      console.log('Fill correction:', positionId, 'SL:', sl, 'TP:', tp4||tp3, 'ok:', modRes.ok);
+      // Store corrected levels in Redis for manage-trades to use
+      if (redis) {
+        const stateKey = `tp_state:${positionId}`;
+        const existing = await redis.get(stateKey).catch(()=>null);
+        const cur = existing ? (typeof existing==='string'?JSON.parse(existing):existing) : {};
+        await redis.set(stateKey, JSON.stringify({
+          ...cur,
+          tp1Fill: tp1, tp2Fill: tp2, tp3Fill: tp3, tp4Fill: tp4, slFill: sl,
+          fillCorrected: true,
+        }), { ex: 60*60*24 });
+      }
+      return res.status(200).json({ corrected: true, positionId, sl, tp4: tp4||tp3 });
+    } catch(e) {
+      return res.status(200).json({ corrected: false, error: e.message });
+    }
+  }
+
   const { positions } = body;
   if (!Array.isArray(positions) || positions.length === 0) {
     return res.status(200).json({ managed: [], message: 'No positions to manage' });
@@ -338,10 +374,16 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       }
 
       const profit_distance = direction === 'LONG' ? currentPrice - openPrice : openPrice - currentPrice;
-      const tp1_distance    = Math.abs(tp1 - openPrice);
-      const tp2_distance    = tp2 ? Math.abs(tp2 - openPrice) : null;
-      const tp3_distance    = tp3 ? Math.abs(tp3 - openPrice) : null;
-      const tp4_distance    = tp4 ? Math.abs(tp4 - openPrice) : null;
+      // Use fill-corrected levels if available (from Redis state)
+      const filledTP1 = state.tp1Fill || tp1;
+      const filledTP2 = state.tp2Fill || tp2;
+      const filledTP3 = state.tp3Fill || tp3;
+      const filledTP4 = state.tp4Fill || tp4;
+      const filledSL  = state.slFill  || stopLoss;
+      const tp1_distance    = Math.abs(filledTP1 - openPrice);
+      const tp2_distance    = filledTP2 ? Math.abs(filledTP2 - openPrice) : null;
+      const tp3_distance    = filledTP3 ? Math.abs(filledTP3 - openPrice) : null;
+      const tp4_distance    = filledTP4 ? Math.abs(filledTP4 - openPrice) : null;
 
       // ── TP1: Close 50% + SL to breakeven ──
       if (!state.tp1Hit && profit_distance >= tp1_distance * 0.95) {
