@@ -129,7 +129,8 @@ module.exports = async (req, res) => {
       try {
         const body = typeof req.body==='string' ? JSON.parse(req.body) : (req.body||{});
         const { instrument, direction, won, pnl, pips, rr, strategy, session,
-                tp1Hit, tp2Hit, tp3Hit, beMoved, confidence } = body;
+                tp1Hit, tp2Hit, tp3Hit, beMoved, confidence,
+                closeTime, openPrice, closePrice, volume } = body;
 
         if (!instrument || !direction || !strategy || won===undefined)
           return res.status(400).json({ error: 'Missing required fields' });
@@ -155,10 +156,13 @@ module.exports = async (req, res) => {
           consecutiveLosses: newConsec,
           postCrownLosses:   newPostCrownLosses,
           lastSeen:          now,
-          trades: [...(cur.trades||[]).slice(-9), {
-            won, pnl:pnl||0, pips:pips||0, rr:rr||0, direction,
+          trades: [...(cur.trades||[]).slice(-19), {
+            won, pnl:pnl||0, pips:pips||0, rr:rr||0, direction:direction||'UNKNOWN',
             session:session||'UNKNOWN', tp1Hit:!!tp1Hit, tp2Hit:!!tp2Hit,
-            tp3Hit:!!tp3Hit, beMoved:!!beMoved, confidence:confidence||0, date:now
+            tp3Hit:!!tp3Hit, beMoved:!!beMoved, confidence:confidence||0,
+            date:closeTime||now,
+            openPrice:openPrice||null, closePrice:closePrice||null,
+            volume:volume||0.1,
           }],
         };
 

@@ -315,7 +315,45 @@ export default function TradingBotLive(){
 
   const addLog=useCallback((msg,type="info")=>{const now=new Date(),time=`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}:${now.getSeconds().toString().padStart(2,"0")}`;setLog(p=>[...p.slice(-80),{time,msg,type}]);},[]);
   const fetchPos=useCallback(async()=>{try{const r=await fetch("/api/positions");if(r.ok){const d=await r.json();setOpenPositions(d.positions||[]);}}catch(e){}},[]);
-  const fetchHist=useCallback(async()=>{try{const r=await fetch("/api/history");if(r.ok){const d=await r.json();setClosedTrades(d.deals||[]);}}catch(e){}},[]);
+  const processedTradesRef=useRef(new Set()); // track which MT5 trades already synced to lab
+
+  const fetchHist=useCallback(async()=>{
+    try{
+      const r=await fetch("/api/history");
+      if(r.ok){
+        const d=await r.json();
+        const deals=d.deals||[];
+        setClosedTrades(deals);
+
+        // Sync new MT5 trades to strategy lab that weren't recorded via recordResult
+        for(const t of deals){
+          const tid=t.id||t.positionId||t.orderId||`${t.symbol}_${t.time}`;
+          if(processedTradesRef.current.has(tid))continue;
+          processedTradesRef.current.add(tid);
+
+          const sym=(t.symbol||'').toUpperCase();
+          const instId=sym.startsWith('BTCUSD')?'BTCUSDT':sym.startsWith('XAUUSD')?'XAUUSD':sym.startsWith('GBPUSD')?'GBPUSD':null;
+          if(!instId)continue;
+          const pnl=t.profit||0;
+          const won=pnl>0;
+          // Find matching stored trade data or use best available
+          const stored=openTradeData[instId];
+          const strategy=stored?.strategy||'UNKNOWN';
+          if(strategy==='UNKNOWN')continue; // skip if we have no strategy context
+
+          const payload={
+            instrument:instId, direction:t.type==='DEAL_TYPE_BUY'?'LONG':'SHORT',
+            won, pnl, pips:pnl,
+            rr:1, strategy, session:getSessionInfo().session,
+            confidence:stored?.confidence||0,
+            closeTime:t.time||new Date().toISOString(),
+            openPrice:t.price, closePrice:t.price, volume:t.volume||0.1,
+          };
+          fetch('/api/trades?learn=true',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(()=>{});
+        }
+      }
+    }catch(e){}
+  },[openTradeData]);
   const fetchLearn=useCallback(async()=>{try{const r=await fetch("/api/trades?learn=true");if(r.ok){const d=await r.json();setLearnedStats(d.lab||{});setBlacklist(d.blacklist||[]);setCrownLocks(d.crownLocks||{});}}catch(e){}},[]);
   const fetchReports=useCallback(async()=>{try{const r=await fetch("/api/manage-trades");if(r.ok){const d=await r.json();setTradeReports(d);}}catch(e){}},[]);
 
@@ -337,7 +375,28 @@ export default function TradingBotLive(){
   useEffect(()=>{fetchLearn();const i=setInterval(fetchLearn,300000);return()=>clearInterval(i);},[fetchLearn]);
   useEffect(()=>{fetchReports();const i=setInterval(fetchReports,30000);return()=>clearInterval(i);},[fetchReports]);
 
-  const recordResult=useCallback(async(position,dec,session)=>{if(!position||!dec)return;const pips=position.profit||0,won=pips>0;const payload={instrument:position.symbol?.replace('.s','').replace('.S','')||'UNKNOWN',direction:position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT',won,pnl:pips,pips,rr:parseFloat((Math.abs(pips)/Math.max(1,Math.abs(pips))).toFixed(2)),strategy:dec.strategy||'UNKNOWN',session,confidence:dec.confidence||0};try{await fetch('/api/trades?learn=true',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});addLog(`${payload.instrument} ${won?'WIN':'LOSS'} ${pips>=0?'+':''}${pips.toFixed(2)}`,won?'success':'warn');setPrevDecisions(p=>{const ex=[...(p[payload.instrument]||[])];const last=ex[ex.length-1];if(last&&!last.outcome)ex[ex.length-1]={...last,outcome:won?'WIN':'LOSS',pnl:pips};return{...p,[payload.instrument]:ex};});
+  const recordResult=useCallback(async(position,dec,session)=>{
+    if(!position)return;
+    const pips=position.profit||0,won=pips>0;
+    // Use openTradeData for strategy — correct for THIS trade, not latest AI decision
+    const raw=(position.symbol||'').toUpperCase();
+    const instId=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;
+    const stored=instId?openTradeData[instId]:null;
+    const strategy=(stored?.strategy)||(dec?.strategy)||'UNKNOWN';
+    const direction=position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT';
+    const atrPips=instId==='BTCUSDT'?200:instId==='XAUUSD'?12:10;
+    const slDist=position.stopLoss?Math.abs((position.currentPrice||position.openPrice||0)-position.stopLoss):atrPips;
+    const rr=slDist>0?parseFloat((Math.abs(pips)/slDist).toFixed(2)):1;
+    const payload={
+      instrument:instId||(position.symbol?.replace('.s','').replace('.S','')||'UNKNOWN'),
+      direction, won, pnl:pips, pips,
+      rr, strategy, session,
+      confidence:stored?.confidence||dec?.confidence||0,
+      closeTime:new Date().toISOString(),
+      openPrice:position.openPrice,
+      closePrice:position.currentPrice||position.openPrice,
+      volume:position.volume||0.1,
+    };try{await fetch('/api/trades?learn=true',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});addLog(`${payload.instrument} ${won?'WIN':'LOSS'} ${pips>=0?'+':''}${pips.toFixed(2)}`,won?'success':'warn');setPrevDecisions(p=>{const ex=[...(p[payload.instrument]||[])];const last=ex[ex.length-1];if(last&&!last.outcome)ex[ex.length-1]={...last,outcome:won?'WIN':'LOSS',pnl:pips};return{...p,[payload.instrument]:ex};});
       // Update per-instrument streak
       setInstStreaks(prev=>{const inst=payload.instrument;const s=prev[inst]||{wins:0,losses:0};return{...prev,[inst]:{wins:won?s.wins+1:0,losses:won?0:s.losses+1}};});
       // Clear stored TP data for this instrument when trade closes
@@ -541,6 +600,8 @@ export default function TradingBotLive(){
                 tp2:dec.takeProfit2,
                 tp3:dec.takeProfit3,
                 volume:vol,
+                strategy:dec.strategy||'UNKNOWN',
+                confidence:dec.confidence||0,
                 openedAt:Date.now(),
               }}));
               setTimeout(fetchPos,2000);setTimeout(fetchHist,3000);}else{addLog(`FAILED: ${d.error||"unknown"}`,"error");lastTradeRef.current[inst.id]=Date.now();}}).catch(e=>{pendingRef.current[inst.id]=false;addLog(`ERR: ${e.message}`,"error");});}}}catch(e){setAiStatus(p=>({...p,[inst.id]:'error'}));addLog(`Brain error: ${e.message}`,"error");}
@@ -1145,16 +1206,28 @@ export default function TradingBotLive(){
                           })}
                         </div>
 
-                        {/* Recent results bar */}
+                        {/* Recent trades — detailed */}
                         {data.total>0&&(()=>{
-                          const recentAll=ALL_INST.flatMap(inst=>(data.instruments?.[inst]?.trades||[])).sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,8);
+                          const recentAll=ALL_INST.flatMap(inst=>(data.instruments?.[inst]?.trades||[]).map(t=>({...t,inst}))).sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,10);
                           return recentAll.length>0&&(
-                            <div style={{marginTop:10,display:"flex",gap:3,alignItems:"center"}}>
-                              <span style={{fontSize:9,color:"var(--text3)",marginRight:4}}>Recent:</span>
-                              {recentAll.map((t,i)=>(
-                                <div key={i} title={`${t.won?"WIN":"LOSS"} ${t.pnl>=0?"+":""}$${t.pnl?.toFixed(2)||0} ${t.session||""}`}
-                                  style={{width:14,height:14,borderRadius:3,background:t.won?"#0ea56b":"#e8334a",cursor:"help",flexShrink:0}}/>
-                              ))}
+                            <div style={{marginTop:10}}>
+                              <div style={{fontSize:9,color:"var(--text3)",marginBottom:5,fontWeight:600,letterSpacing:".06em"}}>RECENT TRADES</div>
+                              <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                                {recentAll.map((t,i)=>{
+                                  const instColor=INST_COLORS[t.inst]||"#8892aa";
+                                  const dateStr=t.date?new Date(t.date).toLocaleString('en-GB',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):"—";
+                                  return(
+                                    <div key={i} style={{display:"flex",alignItems:"center",gap:6,background:"#f8f9fc",borderRadius:5,padding:"4px 8px",borderLeft:`3px solid ${t.won?"#0ea56b":"#e8334a"}`}}>
+                                      <div style={{width:6,height:6,borderRadius:"50%",background:t.won?"#0ea56b":"#e8334a",flexShrink:0}}/>
+                                      <span style={{fontSize:9,fontWeight:700,color:instColor,width:52,flexShrink:0}}>{INST_LABELS[t.inst]}</span>
+                                      <span style={{fontSize:9,color:t.won?"#0ea56b":"#e8334a",fontWeight:700,width:40,flexShrink:0}}>{t.won?"WIN":"LOSS"}</span>
+                                      <span style={{fontSize:9,fontWeight:700,color:t.pnl>=0?"#0ea56b":"#e8334a",width:52,flexShrink:0}}>{t.pnl>=0?"+":""}${(t.pnl||0).toFixed(2)}</span>
+                                      <span style={{fontSize:8,color:"var(--text3)",flex:1}}>{t.direction||"—"} · {t.session||"—"}</span>
+                                      <span style={{fontSize:8,color:"var(--text3)",flexShrink:0}}>{dateStr}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
                           );
                         })()}
