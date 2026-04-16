@@ -1223,6 +1223,14 @@ export default function TradingBotLive(){
               return(
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
 
+                {/* TEMP DEBUG — remove after fix */}
+                <div style={{background:"#1a2744",color:"#60a5fa",padding:"10px 14px",borderRadius:8,fontSize:11,fontFamily:"monospace"}}>
+                  <div>learnedStats keys: <b>{Object.keys(learnedStats).length}</b></div>
+                  <div>First key: <b>{Object.keys(learnedStats)[0]||"none"}</b></div>
+                  <div>fetchLearn interval: 5min</div>
+                  <button onClick={fetchLearn} style={{marginTop:6,padding:"4px 12px",background:"#3b6cf0",color:"white",border:"none",borderRadius:4,cursor:"pointer"}}>Force Reload Lab</button>
+                </div>
+
                 {/* Header stats */}
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
                   {[
