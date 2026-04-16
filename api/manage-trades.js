@@ -249,6 +249,20 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
   const BASE    = `https://mt-client-api-v1.london.agiliumtrade.ai/users/current/accounts/${ACCOUNT_ID}`;
   const headers = { 'auth-token': TOKEN, 'Content-Type': 'application/json' };
 
+  // Contract multiplier per instrument — verified against real PU Prime MT5 data
+  // BTC:  1 lot = 1 BTC,        price_move × lots × 1       = USD PnL
+  // XAU:  1 lot = 100 oz Gold,  price_move × lots × 100     = USD PnL
+  // GBP:  1 lot = 100k units,   price_move × lots × 100000  = USD PnL
+  const getMultiplier = (sym) => {
+    const s = (sym||'').toUpperCase();
+    if (s.includes('BTC'))  return 1;
+    if (s.includes('XAU'))  return 100;
+    if (s.includes('GBP'))  return 100000;
+    if (s.includes('EUR'))  return 100000;
+    if (s.includes('JPY'))  return 1000;
+    return 100; // default Gold-like
+  };
+
   // ── Save / update report in Redis ──
   const saveReport = async (report) => {
     if (!redis) return;
@@ -331,7 +345,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       // ── TP1: Close 50% + SL to breakeven ──
       if (!state.tp1Hit && profit_distance >= tp1_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.5) / 0.01) * 0.01);
-        const pnl = parseFloat((profit_distance * closeVolume * 100).toFixed(2));
+        const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
 
         const closeRes  = await fetch(`${BASE}/trade`, {
           method: 'POST', headers,
@@ -377,7 +391,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       // ── TP2: Close 30% + smart trail ──
       if (state.tp1Hit && !state.tp2Hit && tp2_distance && profit_distance >= tp2_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.5 * 0.6) / 0.01) * 0.01);
-        const pnl = parseFloat((profit_distance * closeVolume * 100).toFixed(2));
+        const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
 
         const closeRes  = await fetch(`${BASE}/trade`, {
           method: 'POST', headers,
@@ -429,7 +443,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       // ── TP3: Close remaining 20% ──
       if (state.tp2Hit && !state.tp3Hit && tp3_distance && profit_distance >= tp3_distance * 0.95) {
         const closeVolume = Math.max(0.01, Math.round((volume * 0.2) / 0.01) * 0.01);
-        const pnl = parseFloat((profit_distance * closeVolume * 100).toFixed(2));
+        const pnl = parseFloat((profit_distance * closeVolume * getMultiplier(symbol)).toFixed(2));
 
         const closeRes  = await fetch(`${BASE}/trade`, {
           method: 'POST', headers,
@@ -453,7 +467,7 @@ P&L: <b>$${parseFloat(pnl).toFixed(2)}</b>
       if (!state.tp3Hit && stopLoss && profit_distance < 0) {
         const slDist = Math.abs(stopLoss - openPrice);
         if (Math.abs(profit_distance) >= slDist * 0.95) {
-          const pnl = parseFloat((profit_distance * volume * 100).toFixed(2));
+          const pnl = parseFloat((profit_distance * volume * getMultiplier(symbol)).toFixed(2));
           await saveReport({ positionId: id, symbol, direction, openPrice, volume,
             tp1, tp2, tp3, eventType: 'SL_HIT', price: currentPrice, pnl });
           await sendTelegram(tgSLHit(symbol, direction, currentPrice, pnl, openPrice, state.tp1Hit));
