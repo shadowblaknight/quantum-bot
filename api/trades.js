@@ -2,7 +2,13 @@
 // api/trades.js — V8 Strategy Lab + Crown Lock System
 const { Redis } = require('@upstash/redis');
 
-const INSTRUMENTS = ['XAUUSD', 'BTCUSDT', 'GBPUSD'];
+const INSTRUMENTS     = ['XAUUSD', 'BTCUSDT', 'GBPUSD'];
+// All symbol variants stored in Redis (broker appends .s, crypto uses BTCUSD not BTCUSDT)
+const INST_NORMALIZE  = {
+  'BTCUSD':'BTCUSDT','BTCUSDT':'BTCUSDT',
+  'XAUUSD':'XAUUSD','XAUUSD.S':'XAUUSD','XAUUSD.s':'XAUUSD',
+  'GBPUSD':'GBPUSD','GBPUSD.S':'GBPUSD','GBPUSD.s':'GBPUSD',
+};
 const CROWN_THRESHOLD   = 5;   // wins needed for crown
 const DETHRONE_LOSSES   = 3;   // consec losses after crown = dethrone
 const BAN_LOSSES        = 3;   // consec losses = banned on instrument
@@ -71,9 +77,11 @@ module.exports = async (req, res) => {
           const parts = cleanKey.split(':');
           const inst  = parts[0];
           const strat = parts.slice(1).join(':') || 'LEGACY';
-          if (!INSTRUMENTS.includes(inst)) continue;
+          const normInst = INST_NORMALIZE[inst] || INST_NORMALIZE[(inst||'').toUpperCase()] || null;
+          if (!normInst) continue; // unknown instrument
           if (!strat || strat === 'broad') continue;
           if (!lab[strat]) lab[strat] = {};
+          const instKey = normInst; // canonical instrument key
 
           const total = (d.wins||0) + (d.losses||0);
           const wr    = total > 0 ? Math.round(((d.wins||0)/total)*100) : null;
@@ -88,7 +96,7 @@ module.exports = async (req, res) => {
           // Post-crown dethrone: if crowned, track losses since crown was earned
           const dethroned = hasCrown && (d.postCrownLosses||0) >= DETHRONE_LOSSES;
 
-          lab[strat][inst] = {
+          lab[strat][instKey] = {
             wins: d.wins||0, losses: d.losses||0, total, winRate: wr,
             avgPnl: d.totalPnl && total>0 ? parseFloat((d.totalPnl/total).toFixed(2)) : null,
             crown: hasCrown && !dethroned,
@@ -172,7 +180,9 @@ module.exports = async (req, res) => {
           return res.status(400).json({ error: 'Missing required fields' });
 
         const now = new Date().toISOString();
-        const key = `qbot:strat:${instrument}:${strategy}`;
+        // Normalize instrument name before writing
+        const normInstrument = INST_NORMALIZE[instrument] || INST_NORMALIZE[(instrument||'').toUpperCase()] || instrument;
+        const key = `qbot:strat:${normInstrument}:${strategy}`;
         const existing = await redis.get(key).catch(()=>null);
         const cur = existing ? (typeof existing==='string'?JSON.parse(existing):existing)
                              : { wins:0, losses:0, totalPnl:0, consecutiveLosses:0, postCrownLosses:0, trades:[] };
@@ -240,7 +250,7 @@ module.exports = async (req, res) => {
         if (!won && banned) {
           const others = INSTRUMENTS.filter(i=>i!==instrument);
           const checks = await Promise.all(others.map(async inst=>{
-            const r = await redis.get(`qbot:strat:${inst}:${strategy}`).catch(()=>null);
+            const r = await redis.get(`qbot:strat:${INST_NORMALIZE[inst]||inst}:${strategy}`).catch(()=>null);
             if (!r) return false;
             const d = typeof r==='string'?JSON.parse(r):r;
             return (d.consecutiveLosses||0) >= BAN_LOSSES;
