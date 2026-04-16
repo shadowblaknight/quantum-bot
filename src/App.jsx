@@ -999,43 +999,135 @@ export default function TradingBotLive(){
               </div>
             )}
 
-            {/* ══════ REPORTS ══════ */}
-            {page==="reports"&&(
-              <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
-                  {[["Total Trades",an.totalTrades||0,"var(--B)"],["Net P&L",`$${(an.totalPnl||0).toFixed(2)}`,pnlColor(an.totalPnl||0)],["Avg P&L",`$${(an.avgPnl||0).toFixed(2)}`,"var(--Au)"],["SL Hits",an.slHitCount||0,"var(--R)"]].map(([l,v,c])=>(
-                    <div key={l} className="card-sm" style={{background:"var(--card)"}}>
-                      <div style={{fontSize:10,fontWeight:600,color:"var(--text3)",marginBottom:6}}>{l}</div>
-                      <div style={{fontSize:24,fontWeight:800,color:c}}>{v}</div>
+            {/* ══════ REPORTS — sourced directly from MT5 history ══════ */}
+            {page==="reports"&&(()=>{
+              // All data comes from closedTrades (MT5 /api/history) — always correct P&L
+              const getInstColor=s=>{const u=(s||'').toUpperCase();return u.includes('XAU')?'#d4a843':u.includes('BTC')?'#fb923c':'#60a5fa';};
+              const getSession=t=>{const h=new Date(t||'').getUTCHours();if(h>=7&&h<13)return'LONDON';if(h>=13&&h<17)return'OVERLAP';if(h>=17&&h<22)return'NEW YORK';if(h>=22||h<2)return'SYDNEY';return'ASIA';};
+              const getExit=(t,storedReports)=>{
+                // Check Redis reports for TP hit data
+                const posId=t.positionId||t.id;
+                const rep=storedReports?.[posId];
+                if(rep?.tp3Hit)return{label:'TP3',color:'#0ea56b'};
+                if(rep?.tp2Hit)return{label:'TP2',color:'#3b6cf0'};
+                if(rep?.tp1Hit)return{label:'TP1',color:'#c9882a'};
+                if((t.profit||0)<0)return{label:'SL',color:'#e8334a'};
+                if((t.profit||0)===0)return{label:'BE',color:'#8892aa'};
+                return{label:'TP',color:'#0ea56b'};
+              };
+              const storedRep=tradeReports?.reportsById||{};
+              const trades=[...closedTrades].sort((a,b)=>new Date(b.time||b.closeTime||0)-new Date(a.time||a.closeTime||0));
+              const netPnl=trades.reduce((s,t)=>s+(t.profit||0),0);
+              const wins=trades.filter(t=>(t.profit||0)>0).length;
+              const losses=trades.filter(t=>(t.profit||0)<0).length;
+              const breakevens=trades.filter(t=>(t.profit||0)===0).length;
+              const avgPnl=trades.length?netPnl/trades.length:0;
+              const bestDay=(()=>{const byDay={};trades.forEach(t=>{const d=new Date(t.time||t.closeTime||'').toDateString();byDay[d]=(byDay[d]||0)+(t.profit||0);});return Math.max(0,...Object.values(byDay));})();
+              const worstDay=(()=>{const byDay={};trades.forEach(t=>{const d=new Date(t.time||t.closeTime||'').toDateString();byDay[d]=(byDay[d]||0)+(t.profit||0);});return Math.min(0,...Object.values(byDay));})();
+              const sessionStats=(()=>{const s={};trades.forEach(t=>{const sess=getSession(t.time||t.closeTime);if(!s[sess])s[sess]={trades:0,pnl:0,wins:0};s[sess].trades++;s[sess].pnl+=(t.profit||0);if((t.profit||0)>0)s[sess].wins++;});return s;})();
+              const instStats=(()=>{const s={};trades.forEach(t=>{const sym=(t.symbol||'').toUpperCase().replace('.S','');if(!s[sym])s[sym]={trades:0,pnl:0,wins:0};s[sym].trades++;s[sym].pnl+=(t.profit||0);if((t.profit||0)>0)s[sym].wins++;});return s;})();
+
+              return(
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+                {/* Header stats — all from MT5 */}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                  {[
+                    ["Total Trades", trades.length, "var(--B)"],
+                    ["Net P&L", `${netPnl>=0?"+":""}$${netPnl.toFixed(2)}`, pnlColor(netPnl)],
+                    ["Win Rate", trades.length?`${((wins/trades.length)*100).toFixed(1)}%`:"—", wins>losses?"#0ea56b":"#e8334a"],
+                    ["Avg / Trade", `${avgPnl>=0?"+":""}$${avgPnl.toFixed(2)}`, pnlColor(avgPnl)],
+                  ].map(([l,v,c])=>(
+                    <div key={l} className="card-sm">
+                      <div style={{fontSize:9,fontWeight:600,color:"var(--text3)",marginBottom:4}}>{l}</div>
+                      <div style={{fontSize:20,fontWeight:700,color:c}}>{v}</div>
                     </div>
                   ))}
                 </div>
-                <div className="card">
-                  <div className="stitle">TP Chain Performance</div>
-                  <TPChain tp1={an.tp1Pct||0} tp2={an.tp2Pct||0} tp3={an.tp3Pct||0} be={an.bePct||0}/>
+
+                {/* W/L/BE + Best/Worst day */}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                  {[
+                    ["Wins", wins, "#0ea56b"],
+                    ["Losses", losses, "#e8334a"],
+                    ["Best Day", `+$${bestDay.toFixed(2)}`, "#0ea56b"],
+                    ["Worst Day", `$${worstDay.toFixed(2)}`, "#e8334a"],
+                  ].map(([l,v,c])=>(
+                    <div key={l} className="card-sm">
+                      <div style={{fontSize:9,fontWeight:600,color:"var(--text3)",marginBottom:4}}>{l}</div>
+                      <div style={{fontSize:20,fontWeight:700,color:c}}>{v}</div>
+                    </div>
+                  ))}
                 </div>
+
+                {/* Per-instrument breakdown */}
                 <div className="card">
-                  <div className="stitle">Trade Reports</div>
-                  <div className="tbl-head tbl-row" style={{gridTemplateColumns:"100px 60px 80px 70px 90px"}}><span>Symbol</span><span>Dir</span><span>Result</span><span>Session</span><span>Exit</span></div>
-                  {(!tradeReports.reports||!tradeReports.reports.length)?<div style={{color:"var(--text3)",padding:"16px 0",textAlign:"center",fontSize:11}}>Reports appear after TP hits</div>
-                    :tradeReports.reports.map((r,i)=>(
-                      <div key={i} className="tbl-row" style={{gridTemplateColumns:"100px 60px 80px 70px 90px"}}>
-                        <span style={{fontWeight:600}}>{(r.symbol||'').replace('.s','')}</span>
-                        <span><span className={`badge badge-${(r.direction||'wait').toLowerCase()}`}>{r.direction}</span></span>
-                        <span style={{fontWeight:700,color:pnlColor(r.totalPnl||0)}}>{pnlStr(r.totalPnl||0)}</span>
-                        <span style={{fontSize:10,color:"var(--text3)"}}>{r.session}</span>
-                        <span style={{fontSize:10}}>
-                          {r.tp1Hit&&<span style={{color:"#c9882a",marginRight:4}}>TP1✓</span>}
-                          {r.tp2Hit&&<span style={{color:"#3b6cf0",marginRight:4}}>TP2✓</span>}
-                          {r.tp3Hit&&<span style={{color:"#0ea56b"}}>TP3✓</span>}
-                          {r.finalExit==='SL_HIT'&&<span style={{color:"#e8334a"}}>SL</span>}
-                        </span>
+                  <div className="stitle" style={{marginBottom:10}}>By Instrument</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {Object.entries(instStats).map(([sym,s])=>(
+                      <div key={sym} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"0.5px solid var(--border)"}}>
+                        <span style={{fontSize:11,fontWeight:700,color:getInstColor(sym),width:70,flexShrink:0}}>{sym.replace('.S','')}</span>
+                        <span style={{fontSize:11,color:"var(--text3)"}}>{s.trades} trades</span>
+                        <span style={{fontSize:11,color:"#0ea56b"}}>{s.wins}W</span>
+                        <span style={{fontSize:11,color:"#e8334a"}}>{s.trades-s.wins}L</span>
+                        <span style={{fontSize:11,fontWeight:700,color:pnlColor(s.pnl),marginLeft:"auto"}}>{s.pnl>=0?"+":""}${s.pnl.toFixed(2)}</span>
+                        <span style={{fontSize:10,color:s.trades>0?((s.wins/s.trades)>=0.5?"#0ea56b":"#e8334a"):"#8892aa"}}>{s.trades>0?`${((s.wins/s.trades)*100).toFixed(0)}%`:"—"}</span>
                       </div>
-                    ))
+                    ))}
+                  </div>
+                </div>
+
+                {/* Per-session breakdown */}
+                <div className="card">
+                  <div className="stitle" style={{marginBottom:10}}>By Session</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {Object.entries(sessionStats).sort((a,b)=>b[1].trades-a[1].trades).map(([sess,s])=>(
+                      <div key={sess} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"0.5px solid var(--border)"}}>
+                        <span style={{fontSize:11,fontWeight:700,width:80,flexShrink:0,color:sess==='LONDON'?'#3b82f6':sess==='OVERLAP'?'#c9882a':sess==='NEW YORK'?'#0ea56b':'#8892aa'}}>{sess}</span>
+                        <span style={{fontSize:11,color:"var(--text3)"}}>{s.trades} trades</span>
+                        <span style={{fontSize:11,color:"#0ea56b"}}>{s.wins}W</span>
+                        <span style={{fontSize:11,color:"#e8334a"}}>{s.trades-s.wins}L</span>
+                        <span style={{fontSize:11,fontWeight:700,color:pnlColor(s.pnl),marginLeft:"auto"}}>{s.pnl>=0?"+":""}${s.pnl.toFixed(2)}</span>
+                        <span style={{fontSize:10,color:s.trades>0?((s.wins/s.trades)>=0.5?"#0ea56b":"#e8334a"):"#8892aa"}}>{s.trades>0?`${((s.wins/s.trades)*100).toFixed(0)}%`:"—"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Full trade log — MT5 data, correct P&L */}
+                <div className="card">
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <div className="stitle">All Trades ({trades.length})</div>
+                    <div style={{fontSize:10,color:"var(--text3)"}}>Source: MT5 live history · P&L always correct</div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"90px 50px 75px 80px 50px 70px",gap:0}} className="tbl-head tbl-row">
+                    <span>Symbol</span><span>Dir</span><span>P&L</span><span>Time</span><span>Session</span><span>Exit</span>
+                  </div>
+                  {trades.length===0
+                    ?<div style={{color:"var(--text3)",padding:"16px 0",textAlign:"center",fontSize:11}}>No trades yet</div>
+                    :trades.map((t,i)=>{
+                      const pnl=t.profit||0;
+                      const side=t.type==='DEAL_TYPE_BUY'||t.type==='POSITION_TYPE_BUY'?'LONG':'SHORT';
+                      const sess=getSession(t.time||t.closeTime);
+                      const exit=getExit(t,storedRep);
+                      const dt=new Date(t.time||t.closeTime||'');
+                      const timeStr=isNaN(dt)?'—':`${dt.toLocaleDateString('en-GB',{day:'2-digit',month:'2-digit'})} ${dt.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}`;
+                      return(
+                        <div key={i} className="tbl-row" style={{gridTemplateColumns:"90px 50px 75px 80px 50px 70px",borderLeft:`3px solid ${pnl>0?'#0ea56b':pnl<0?'#e8334a':'#8892aa'}`,paddingLeft:6}}>
+                          <span style={{fontWeight:600,color:getInstColor(t.symbol)}}>{(t.symbol||'').replace('.s','').replace('.S','')}</span>
+                          <span><span className={`badge badge-${side.toLowerCase()}`} style={{fontSize:9}}>{side}</span></span>
+                          <span style={{fontWeight:700,color:pnlColor(pnl)}}>{pnl>=0?"+":""}${pnl.toFixed(2)}</span>
+                          <span style={{fontSize:9,color:"var(--text3)"}}>{timeStr}</span>
+                          <span style={{fontSize:9,color:"var(--text3)"}}>{sess}</span>
+                          <span style={{fontSize:9,fontWeight:700,color:exit.color}}>{exit.label}</span>
+                        </div>
+                      );
+                    })
                   }
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {/* ══════ STRATEGY LAB (replaces journal) ══════ */}
             {page==="journal"&&(()=>{
