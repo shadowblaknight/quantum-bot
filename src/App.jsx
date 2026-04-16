@@ -421,7 +421,7 @@ export default function TradingBotLive(){
     if(!candles||candles.length<50){addLog(`⚠ ${inst.label}: waiting for candles (${candles?.length||0}/50)`,"warn");return;}
     if(!prices[inst.id]){addLog(`⚠ ${inst.label}: price not loaded`,"warn");return;}
     if(!accountBalance){addLog(`⚠ ${inst.label}: balance not loaded`,"warn");return;}
-    const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<590000)return;
+    const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<290000)return;
     lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));addLog(`${crownLocks[inst.id]?'👑':'🧠'} ${inst.label} ${crownLocks[inst.id]?`CROWN: ${crownLocks[inst.id]}`:'V8: reading market…'}`,'info');
     // Filter blacklisted strategies from learnedStats before sending
     const filteredPatterns=Object.fromEntries(Object.entries(learnedStats).filter(([strat])=>!blacklist.includes(strat)));
@@ -618,7 +618,7 @@ export default function TradingBotLive(){
         if(c&&c.length>=50&&prices[inst.id])runAIBrain(inst);
       });
     };
-    const t=setTimeout(run,5000),i=setInterval(run,600000); // 10min analysis cycle
+    const t=setTimeout(run,5000),i=setInterval(run,300000); // 5min analysis cycle
     return()=>{clearTimeout(t);clearInterval(i)};
   },[runAIBrain,brokerCandles,prices]);
   useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;},[log]);
