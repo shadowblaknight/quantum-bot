@@ -361,7 +361,7 @@ export default function TradingBotLive(){
     if(!candles||candles.length<50){addLog(`⚠ ${inst.label}: waiting for candles (${candles?.length||0}/50)`,"warn");return;}
     if(!prices[inst.id]){addLog(`⚠ ${inst.label}: price not loaded`,"warn");return;}
     if(!accountBalance){addLog(`⚠ ${inst.label}: balance not loaded`,"warn");return;}
-    const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<300000)return;
+    const now=Date.now(),last=lastAIRef.current[inst.id]||0;if(now-last<590000)return;
     lastAIRef.current[inst.id]=now;setAiStatus(p=>({...p,[inst.id]:'thinking'}));addLog(`${crownLocks[inst.id]?'👑':'🧠'} ${inst.label} ${crownLocks[inst.id]?`CROWN: ${crownLocks[inst.id]}`:'V8: reading market…'}`,'info');
     // Filter blacklisted strategies from learnedStats before sending
     const filteredPatterns=Object.fromEntries(Object.entries(learnedStats).filter(([strat])=>!blacklist.includes(strat)));
@@ -491,9 +491,11 @@ export default function TradingBotLive(){
     try{const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketSnapshot:snap,instrument:inst.id,previousDecisions:prevDecisions[inst.id]||[],learnedPatterns:filteredPatterns,blacklistedStrategies:blacklist,crownedStrategy:crownLocks[inst.id]||null})});const dec=await r.json();if(dec.decision){setAiDecisions(p=>({...p,[inst.id]:dec}));setAiStatus(p=>({...p,[inst.id]:dec.decision}));addLog(`${inst.label} → ${dec.decision} ${dec.confidence||0}% — ${dec.reason||''}`,dec.decision==='WAIT'?'info':'signal');
           if(dec.decision==='WAIT'){addLog(`⏳ WAIT [${dec.confidence||0}%] — ${dec.reason?.slice(0,80)||'no reason'}`,'info');}if(dec.decision!=='WAIT'&&dec.confidence>=35){
           const n=Date.now();
-          // Block 2: 5 min cooldown between trades
-          if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<300000){
-            addLog(`⏸ ${inst.label}: cooldown active (${Math.round((300000-(n-lastTradeRef.current[inst.id]))/1000)}s left)`,"info");return;}
+          // Block 2: per-instrument cooldown (GBP=20min, BTC=10min, Gold=10min)
+          const cooldownMs = inst.id==='GBPUSD' ? 1200000 : 600000; // 20min GBP, 10min others
+          if(lastTradeRef.current[inst.id]&&(n-lastTradeRef.current[inst.id])<cooldownMs){
+            const secsLeft=Math.round((cooldownMs-(n-lastTradeRef.current[inst.id]))/1000);
+            addLog(`⏸ ${inst.label}: cooldown ${secsLeft}s left`,"info");return;}
           // Block 3: pending trade
           if(pendingRef.current[inst.id]){addLog(`⏸ ${inst.label}: execution already pending`,"warn");return;}
           // Block 4: upcoming event
@@ -513,7 +515,16 @@ export default function TradingBotLive(){
           // Block 10: balance unknown — LOG IT (was silent before!)
           if(!Number.isFinite(accountBalance)||accountBalance<=0){addLog(`⛔ Blocked: account balance unknown or zero`,"warn");return;}
           // Block 11: daily loss limit
-          if(getTodayPnl(closedTrades)<=-(accountBalance*0.05)){addLog(`⛔ Daily -5% limit hit — trading stopped for today`,"error");return;}const vol=dec.volume||0.08;pendingRef.current[inst.id]=true;addLog(`EXECUTE ${inst.label} ${dec.decision} ${vol}L`,"signal");
+          if(getTodayPnl(closedTrades)<=-(accountBalance*0.05)){addLog(`⛔ Daily -5% limit hit — trading stopped for today`,"error");return;}
+          // Per-instrument: max 3 consecutive losses today → pause that instrument
+          const todayInstTrades=closedTrades.filter(t=>{
+            const sym=(t.symbol||'').toUpperCase();
+            const matchesInst=(inst.id==='BTCUSDT'&&sym.includes('BTC'))||(inst.id==='XAUUSD'&&sym.includes('XAU'))||(inst.id==='GBPUSD'&&sym.includes('GBP'));
+            const today=new Date().toDateString();
+            return matchesInst&&new Date(t.time||t.closeTime||'').toDateString()===today;
+          });
+          const recentInstLosses=(()=>{let c=0;for(let i=todayInstTrades.length-1;i>=0;i--){if((todayInstTrades[i].profit||0)<0)c++;else break;}return c;})();
+          if(recentInstLosses>=3){addLog(`⛔ ${inst.label}: 3 consecutive losses today — paused until tomorrow`,"error");return;}const vol=dec.volume||0.08;pendingRef.current[inst.id]=true;addLog(`EXECUTE ${inst.label} ${dec.decision} ${vol}L`,"signal");
           // Telegram entry notification
           fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},
             body:JSON.stringify({telegramEntry:{
@@ -544,7 +555,7 @@ export default function TradingBotLive(){
         if(c&&c.length>=50&&prices[inst.id])runAIBrain(inst);
       });
     };
-    const t=setTimeout(run,4000),i=setInterval(run,300000);
+    const t=setTimeout(run,5000),i=setInterval(run,600000); // 10min analysis cycle
     return()=>{clearTimeout(t);clearInterval(i)};
   },[runAIBrain,brokerCandles,prices]);
   useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;},[log]);
