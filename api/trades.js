@@ -19,6 +19,34 @@ module.exports = async (req, res) => {
   const redis   = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
   const url     = req.url || '';
   const isLearn = url.includes('learn=true');
+  const isDebug = url.includes('debug=true');
+
+  // ── DEBUG: inspect Redis keys ──────────────────────────────────────────
+  if (isDebug && req.method === 'GET') {
+    try {
+      const allKeys   = await redis.keys('*').catch(()=>[]);
+      const stratKeys = allKeys.filter(k=>k.startsWith('qbot:strat:'));
+      const learnKeys = allKeys.filter(k=>k.startsWith('qbot:learn:'));
+      const otherKeys = allKeys.filter(k=>!k.startsWith('qbot:')&&!k.startsWith('tp_state:'));
+      let sample = null;
+      if (stratKeys.length > 0) {
+        const r = await redis.get(stratKeys[0]).catch(()=>null);
+        sample = { key: stratKeys[0], value: r };
+      } else if (learnKeys.length > 0) {
+        const r = await redis.get(learnKeys[0]).catch(()=>null);
+        sample = { key: learnKeys[0], value: r };
+      }
+      return res.status(200).json({
+        totalKeys: allKeys.length,
+        stratKeys: { count: stratKeys.length, keys: stratKeys.slice(0,20) },
+        learnKeys: { count: learnKeys.length, keys: learnKeys.slice(0,20) },
+        otherKeys: { count: otherKeys.length, keys: otherKeys.slice(0,10) },
+        sample,
+      });
+    } catch(e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
 
   if (isLearn) {
 
