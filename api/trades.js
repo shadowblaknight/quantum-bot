@@ -66,6 +66,7 @@ module.exports = async (req, res) => {
         ]);
         const keys = [...new Set([...newKeys, ...oldKeys])];
         const lab  = {};
+        const skipped = [], processed = [];
 
         for (const key of keys) {
           if (key.includes('blacklist:') || key.includes('crown:')) continue;
@@ -78,8 +79,8 @@ module.exports = async (req, res) => {
           const inst  = parts[0];
           const strat = parts.slice(1).join(':') || 'LEGACY';
           const normInst = INST_NORMALIZE[inst] || INST_NORMALIZE[(inst||'').toUpperCase()] || null;
-          if (!normInst) continue; // unknown instrument
-          if (!strat || strat === 'broad') continue;
+          if (!normInst) { skipped.push({key, reason:'unknown_inst', inst}); continue; }
+          if (!strat || strat === 'broad') { skipped.push({key, reason:'no_strat'}); continue; }
           if (!lab[strat]) lab[strat] = {};
           const instKey = normInst; // canonical instrument key
 
@@ -96,7 +97,7 @@ module.exports = async (req, res) => {
           // Post-crown dethrone: if crowned, track losses since crown was earned
           const dethroned = hasCrown && (d.postCrownLosses||0) >= DETHRONE_LOSSES;
 
-          lab[strat][instKey] = {
+          processed.push(key); lab[strat][instKey] = {
             wins: d.wins||0, losses: d.losses||0, total, winRate: wr,
             avgPnl: d.totalPnl && total>0 ? parseFloat((d.totalPnl/total).toFixed(2)) : null,
             crown: hasCrown && !dethroned,
@@ -156,8 +157,14 @@ module.exports = async (req, res) => {
         Object.entries(sessStat).forEach(([s,d])=>{ sessOut[s]={...d,winRate:d.trades>0?Math.round((d.wins/d.trades)*100):0,pnl:parseFloat(d.pnl.toFixed(2))}; });
         const tpFlow   = { tp1Pct:allT.length?Math.round(allT.filter(t=>t.tp1Hit).length/allT.length*100):0, tp2Pct:allT.filter(t=>t.tp1Hit).length?Math.round(allT.filter(t=>t.tp2Hit).length/allT.filter(t=>t.tp1Hit).length*100):0, tp3Pct:allT.filter(t=>t.tp2Hit).length?Math.round(allT.filter(t=>t.tp3Hit).length/allT.filter(t=>t.tp2Hit).length*100):0 };
 
+        // ── debug ──
+        console.log('Lab build:', processed.length, 'processed,', skipped.length, 'skipped');
+        console.log('Skipped sample:', JSON.stringify(skipped.slice(0,5)));
+        console.log('Summary keys:', Object.keys(summary).slice(0,5));
+
         return res.status(200).json({
           lab: summary,
+          _debug: { processed: processed.length, skipped: skipped.slice(0,10), summaryCount: Object.keys(summary).length },
           crownLocks,   // { XAUUSD: "ICT_FVG+TREND_H4", BTCUSDT: null, GBPUSD: null }
           blacklist,
           totalStrategiesTried: Object.keys(summary).length,
