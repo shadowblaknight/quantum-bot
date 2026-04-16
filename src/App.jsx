@@ -338,8 +338,8 @@ export default function TradingBotLive(){
           const won=pnl>0;
           // Find matching stored trade data or use best available
           const stored=openTradeData[instId];
-          const strategy=stored?.strategy||'UNKNOWN';
-          if(strategy==='UNKNOWN')continue; // skip if we have no strategy context
+          // Always record — use best available strategy name
+          const strategy=stored?.strategy||aiDecisions?.[instId]?.strategy||'EXPLORING';
 
           const payload={
             instrument:instId, direction:t.type==='DEAL_TYPE_BUY'?'LONG':'SHORT',
@@ -382,7 +382,8 @@ export default function TradingBotLive(){
     const raw=(position.symbol||'').toUpperCase();
     const instId=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;
     const stored=instId?openTradeData[instId]:null;
-    const strategy=(stored?.strategy)||(dec?.strategy)||'UNKNOWN';
+    // Use stored trade data first, then current AI decision, then best available
+    const strategy=(stored?.strategy)||(dec?.strategy)||(aiDecisions[instId]?.strategy)||'EXPLORING';
     const direction=position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT';
     const atrPips=instId==='BTCUSDT'?200:instId==='XAUUSD'?12:10;
     const slDist=position.stopLoss?Math.abs((position.currentPrice||position.openPrice||0)-position.stopLoss):atrPips;
@@ -592,7 +593,7 @@ export default function TradingBotLive(){
               symbol:inst.id, direction:dec.decision, price:prices[inst.id],
               sl:dec.stopLoss, tp1:dec.takeProfit1, tp2:dec.takeProfit2, tp3:dec.takeProfit3,
               volume:vol, confidence:dec.confidence, reason:dec.reason
-            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");
+            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol,comment:`QB:${(dec.strategy||'EXPLORING').slice(0,20)}`})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");
               // Store Claude's levels first (will be corrected after fill)
               setOpenTradeData(prev=>({...prev,[inst.id]:{
                 direction:dec.decision,

@@ -25,7 +25,12 @@ module.exports = async (req, res) => {
     // ── GET: full strategy lab ──────────────────────────────────────────
     if (req.method === 'GET') {
       try {
-        const keys = await redis.keys('qbot:strat:*');
+        // Read both new format (qbot:strat:*) and old format (qbot:learn:*)
+        const [newKeys, oldKeys] = await Promise.all([
+          redis.keys('qbot:strat:*').catch(()=>[]),
+          redis.keys('qbot:learn:*').catch(()=>[]),
+        ]);
+        const keys = [...new Set([...newKeys, ...oldKeys])];
         const lab  = {};
 
         for (const key of keys) {
@@ -33,10 +38,13 @@ module.exports = async (req, res) => {
           const raw = await redis.get(key);
           if (!raw) continue;
           const d     = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          const parts = key.replace('qbot:strat:', '').split(':');
+          // Handle both key formats
+          const cleanKey = key.replace('qbot:strat:', '').replace('qbot:learn:', '');
+          const parts = cleanKey.split(':');
           const inst  = parts[0];
-          const strat = parts.slice(1).join(':');
+          const strat = parts.slice(1).join(':') || 'LEGACY';
           if (!INSTRUMENTS.includes(inst)) continue;
+          if (!strat || strat === 'broad') continue;
           if (!lab[strat]) lab[strat] = {};
 
           const total = (d.wins||0) + (d.losses||0);
