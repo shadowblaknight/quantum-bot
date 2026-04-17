@@ -88,8 +88,13 @@ module.exports = async (req, res) => {
           if (!raw) continue;
 
           let d;
-          try { d = typeof raw === 'string' ? JSON.parse(raw) : raw; }
-          catch(e) { console.log('Parse error for key:', key, e.message); continue; }
+          try {
+            d = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (!d || typeof d !== 'object') continue; // skip non-object values
+          } catch(e) { 
+            console.log('Parse error for key:', key, 'raw:', String(raw).slice(0,50));
+            continue; 
+          }
 
           // Parse key — handle both qbot:strat: and qbot:learn: formats
           const cleanKey = key.replace('qbot:strat:','').replace('qbot:learn:','');
@@ -187,7 +192,10 @@ module.exports = async (req, res) => {
     // ── POST: record a strategy result ──────────────────────────────────
     if (req.method === 'POST') {
       try {
-        const body = typeof req.body==='string' ? JSON.parse(req.body) : (req.body||{});
+        let body = {};
+        try {
+          body = typeof req.body==='string' ? JSON.parse(req.body) : (req.body||{});
+        } catch(e) { return res.status(400).json({ error: 'Invalid JSON body' }); }
         const { instrument, direction, won, pnl, pips, rr, strategy, session,
                 tp1Hit, tp2Hit, tp3Hit, beMoved, confidence, closeTime, openPrice, closePrice, volume } = body;
 

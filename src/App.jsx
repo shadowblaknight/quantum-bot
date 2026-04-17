@@ -688,23 +688,14 @@ export default function TradingBotLive(){
   useEffect(()=>{
     const run=()=>{
       const s=getSessionInfo();
-      // Per-instrument session gates
       const utcH = new Date().getUTCHours() + new Date().getUTCMinutes()/60;
-      if (inst.id === 'XAUUSD' || inst.id === 'GBPUSD') {
-        // Gold + GBP: ONLY London (08-16) and NY (13-21). Dead after 21:00.
-        if (!s.isLondon && !s.isNY) {
-          addLog(`⏸ ${inst.label}: outside trading hours (Gold/GBP stop at 21:00 UTC)`, 'info');
-          return;
-        }
-      } else if (inst.id === 'BTCUSDT') {
-        // BTC: active 07:00-23:00 UTC. Stop in dead Asian hours (23:00-07:00).
-        const btcAllowed = utcH >= 7 && utcH < 23;
-        if (!btcAllowed) {
-          addLog(`⏸ BTC/USDT: dead hours (23:00-07:00 UTC — low volume)`, 'info');
-          return;
-        }
-      }
       INSTRUMENTS.forEach(inst=>{
+        // Per-instrument session gates
+        if (inst.id === 'XAUUSD' || inst.id === 'GBPUSD') {
+          if (!s.isLondon && !s.isNY) return; // Gold/GBP: London+NY only
+        } else if (inst.id === 'BTCUSDT') {
+          if (utcH < 7 || utcH >= 23) return; // BTC: stop dead hours
+        }
         const c=brokerCandles[inst.id];
         if(c&&c.length>=50&&prices[inst.id])runAIBrain(inst);
       });
