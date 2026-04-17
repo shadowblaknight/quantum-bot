@@ -65,12 +65,22 @@ module.exports = async (req, res) => {
         const dataKeys = [...new Set([...newKeys, ...oldKeys])]
           .filter(k => !k.includes('blacklist:') && !k.includes('crown:'));
 
-        // Fetch ALL values in ONE network call (not 128 sequential calls)
-        const values = dataKeys.length > 0
-          ? await redis.mget(...dataKeys).catch(()=>[])
-          : [];
+        // Fetch values in batches of 50 (safer than spreading 128 args)
+        let values = [];
+        const BATCH = 50;
+        for (let b = 0; b < dataKeys.length; b += BATCH) {
+          const batch = dataKeys.slice(b, b + BATCH);
+          const batchVals = batch.length > 0
+            ? await redis.mget(...batch).catch(()=>new Array(batch.length).fill(null))
+            : [];
+          values = values.concat(batchVals);
+        }
 
         const lab = {};
+
+        // Log summary of what we got
+        console.log(`mget: ${dataKeys.length} keys requested, ${values.filter(v=>v!=null).length} non-null values returned`);
+        if (dataKeys.length > 0) console.log('Sample key:', dataKeys[0], 'Sample value type:', typeof values[0]);
 
         for (let i = 0; i < dataKeys.length; i++) {
           const key = dataKeys[i];
@@ -79,7 +89,7 @@ module.exports = async (req, res) => {
 
           let d;
           try { d = typeof raw === 'string' ? JSON.parse(raw) : raw; }
-          catch(e) { continue; }
+          catch(e) { console.log('Parse error for key:', key, e.message); continue; }
 
           // Parse key — handle both qbot:strat: and qbot:learn: formats
           const cleanKey = key.replace('qbot:strat:','').replace('qbot:learn:','');
@@ -89,8 +99,8 @@ module.exports = async (req, res) => {
 
           // Normalize instrument
           const inst = NORM[rawInst] || NORM[rawInst.toUpperCase()] || null;
-          if (!inst) continue;
-          if (!strat || strat === 'broad') continue;
+          if (!inst) { if(i<3) console.log(`SKIP unknown inst: ${rawInst} from key: ${key}`); continue; }
+          if (!strat || strat === 'broad') { if(i<3) console.log(`SKIP no strat from key: ${key}`); continue; }
 
           if (!lab[strat]) lab[strat] = {};
 
@@ -160,6 +170,7 @@ module.exports = async (req, res) => {
         Object.entries(sessStat).forEach(([s,d])=>{ sessOut[s]={...d,winRate:d.trades>0?Math.round((d.wins/d.trades)*100):0,pnl:parseFloat(d.pnl.toFixed(2))}; });
         const tpFlow = { tp1Pct:allT.length?Math.round(allT.filter(t=>t.tp1Hit).length/allT.length*100):0, tp2Pct:allT.filter(t=>t.tp1Hit).length?Math.round(allT.filter(t=>t.tp2Hit).length/allT.filter(t=>t.tp1Hit).length*100):0, tp3Pct:allT.filter(t=>t.tp2Hit).length?Math.round(allT.filter(t=>t.tp3Hit).length/allT.filter(t=>t.tp2Hit).length*100):0 };
 
+        console.log(`Lab built: ${Object.keys(lab).length} strategies, summary: ${Object.keys(summary).length}`);
         return res.status(200).json({
           lab: summary,
           crownLocks,
