@@ -37,38 +37,64 @@ module.exports = async (req, res) => {
   // ── CLEANUP: wipe ALL strategy data, keep only trades from Apr 17+ ──────
   if (isCleanup && req.method === 'GET') {
     try {
-      const cutoff = new Date('2026-04-16T00:00:00.000Z').getTime();
-
-      // Delete all strategy/learn/crown/blacklist/tp keys
+      // SMART cleanup: only delete GARBAGE keys, keep real V8 strategy data
+      // Garbage = old qbot:learn:* keys, or strat keys with EXPLORING/UNKNOWN names
       const [stratKeys, learnKeys, tpKeys] = await Promise.all([
         redis.keys('qbot:strat:*').catch(()=>[]),
         redis.keys('qbot:learn:*').catch(()=>[]),
         redis.keys('tp_state:*').catch(()=>[]),
       ]);
-      const allToDelete = [...stratKeys, ...learnKeys, ...tpKeys];
-      for (let i = 0; i < allToDelete.length; i += 50) {
-        const batch = allToDelete.slice(i, i+50);
-        await Promise.all(batch.map(k => redis.del(k).catch(()=>null)));
+
+      const toDelete = [];
+
+      // Always delete all old qbot:learn:* keys (V1-V7 format)
+      toDelete.push(...learnKeys);
+
+      // Delete tp_state keys (stale position data)
+      toDelete.push(...tpKeys);
+
+      // For strat keys: only delete if strategy name is garbage
+      const GARBAGE = ['EXPLORING','UNKNOWN','LEGACY','broad'];
+      const stratDataKeys = stratKeys.filter(k =>
+        !k.includes('crown:') && !k.includes('blacklist:')
+      );
+      // Fetch strat keys in batches to check their names
+      for (const key of stratDataKeys) {
+        const cleanKey = key.replace('qbot:strat:','');
+        const parts = cleanKey.split(':');
+        const strat = parts.slice(1).join(':');
+        // Delete if strategy name is garbage or old format (contains LONG/SHORT/MEDIUM/UP/DOWN/NONE)
+        const isGarbage = GARBAGE.includes(strat) ||
+          strat.includes('LONG:') || strat.includes('SHORT:') ||
+          strat.includes(':UNKNOWN') || strat.includes(':NONE:') ||
+          strat.includes('AI_DECISION') || strat === '';
+        if (isGarbage) toDelete.push(key);
       }
 
-      // Also delete any crowns set to EXPLORING or garbage values
-      let exploringCrownsDeleted = 0;
+      // Delete EXPLORING/UNKNOWN crowns
       for (const inst of ['XAUUSD','BTCUSDT','GBPUSD']) {
         const ck  = `qbot:strat:crown:${inst}`;
         const val = await redis.get(ck).catch(()=>null);
         const parsed = safeJsonParse(val);
-        if (parsed === 'EXPLORING' || parsed === 'UNKNOWN' || !parsed) {
-          await redis.del(ck).catch(()=>null);
-          exploringCrownsDeleted++;
+        if (parsed === 'EXPLORING' || parsed === 'UNKNOWN' || parsed === null) {
+          toDelete.push(ck);
         }
       }
 
+      // Execute deletions
+      for (let i = 0; i < toDelete.length; i += 50) {
+        const batch = toDelete.slice(i, i+50);
+        await Promise.all(batch.map(k => redis.del(k).catch(()=>null)));
+      }
+
+      // Count kept real strategies
+      const keptKeys = stratDataKeys.filter(k => !toDelete.includes(k));
+
       return res.status(200).json({
-        deleted: allToDelete.length,
-        stratDeleted: stratKeys.length,
-        learnDeleted: learnKeys.length,
-        tpDeleted: tpKeys.length,
-        message: 'Reset complete — fresh start from Apr 16'
+        deleted: toDelete.length,
+        kept: keptKeys.length,
+        keptKeys: keptKeys.slice(0,10),
+        message: `Smart cleanup: deleted ${toDelete.length} garbage keys, kept ${keptKeys.length} real V8 strategies`
       });
     } catch(e) {
       return res.status(500).json({ error: e.message });
