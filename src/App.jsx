@@ -338,8 +338,8 @@ export default function TradingBotLive(){
           const won=pnl>0;
           // Find matching stored trade data or use best available
           const stored=openTradeData[instId];
-          // Always record — use best available strategy name
-          const strategy=stored?.strategy||aiDecisions?.[instId]?.strategy||'EXPLORING';
+          const strategy=stored?.strategy||aiDecisions?.[instId]?.strategy||null;
+          if(!strategy||strategy==='EXPLORING'||strategy==='UNKNOWN')continue; // skip garbage
 
           const payload={
             instrument:instId, direction:t.type==='DEAL_TYPE_BUY'?'LONG':'SHORT',
@@ -383,7 +383,8 @@ export default function TradingBotLive(){
     const instId=raw.startsWith('BTCUSD')?'BTCUSDT':raw.startsWith('XAUUSD')?'XAUUSD':raw.startsWith('GBPUSD')?'GBPUSD':null;
     const stored=instId?openTradeData[instId]:null;
     // Use stored trade data first, then current AI decision, then best available
-    const strategy=(stored?.strategy)||(dec?.strategy)||(aiDecisions[instId]?.strategy)||'EXPLORING';
+    const strategy=(stored?.strategy)||(dec?.strategy)||(aiDecisions[instId]?.strategy)||null;
+    if(!strategy||strategy==='EXPLORING'||strategy==='UNKNOWN')return; // don't record garbage strategy names
     const direction=position.type==='POSITION_TYPE_BUY'?'LONG':'SHORT';
     const atrPips=instId==='BTCUSDT'?200:instId==='XAUUSD'?12:10;
     const slDist=position.stopLoss?Math.abs((position.currentPrice||position.openPrice||0)-position.stopLoss):atrPips;
@@ -578,22 +579,23 @@ export default function TradingBotLive(){
           if(!Number.isFinite(accountBalance)||accountBalance<=0){addLog(`⛔ Blocked: account balance unknown or zero`,"warn");return;}
           // Block 11: daily loss limit
           if(getTodayPnl(closedTrades)<=-(accountBalance*0.05)){addLog(`⛔ Daily -5% limit hit — trading stopped for today`,"error");return;}
-          // Per-instrument: max 3 consecutive losses today → pause that instrument
+          // Per-instrument: max 3 consecutive losses since 08:00 UTC today → pause
+          const todayUTC8=new Date();todayUTC8.setUTCHours(8,0,0,0); // trading day starts 08:00 UTC
           const todayInstTrades=closedTrades.filter(t=>{
             const sym=(t.symbol||'').toUpperCase();
             const matchesInst=(inst.id==='BTCUSDT'&&sym.includes('BTC'))||(inst.id==='XAUUSD'&&sym.includes('XAU'))||(inst.id==='GBPUSD'&&sym.includes('GBP'));
-            const today=new Date().toDateString();
-            return matchesInst&&new Date(t.time||t.closeTime||'').toDateString()===today;
+            const closeTime=new Date(t.time||t.closeTime||'');
+            return matchesInst&&closeTime>=todayUTC8;
           });
           const recentInstLosses=(()=>{let c=0;for(let i=todayInstTrades.length-1;i>=0;i--){if((todayInstTrades[i].profit||0)<0)c++;else break;}return c;})();
-          if(recentInstLosses>=3){addLog(`⛔ ${inst.label}: 3 consecutive losses today — paused until tomorrow`,"error");return;}const vol=dec.volume||0.08;pendingRef.current[inst.id]=true;addLog(`EXECUTE ${inst.label} ${dec.decision} ${vol}L`,"signal");
+          if(recentInstLosses>=3){addLog(`⛔ ${inst.label}: 3 consecutive losses since 08:00 UTC — paused today`,"error");return;}const vol=dec.volume||0.08;pendingRef.current[inst.id]=true;addLog(`EXECUTE ${inst.label} ${dec.decision} ${vol}L`,"signal");
           // Telegram entry notification
           fetch('/api/manage-trades',{method:'POST',headers:{'Content-Type':'application/json'},
             body:JSON.stringify({telegramEntry:{
               symbol:inst.id, direction:dec.decision, price:prices[inst.id],
               sl:dec.stopLoss, tp1:dec.takeProfit1, tp2:dec.takeProfit2, tp3:dec.takeProfit3,
               volume:vol, confidence:dec.confidence, reason:dec.reason
-            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol,comment:`QB:${(dec.strategy||'EXPLORING').slice(0,20)}`})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");
+            }})}).catch(()=>{});setPrevDecisions(p=>({...p,[inst.id]:[...(p[inst.id]||[]).slice(-4),{decision:dec.decision,price:prices[inst.id],reason:dec.reason,strategy:dec.strategy||'unknown',what_im_testing:dec.what_im_testing||'',time:new Date().toISOString(),outcome:null,pnl:null}]}));fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instrument:inst.id,direction:dec.decision,entry:prices[inst.id],stopLoss:dec.stopLoss,takeProfit:dec.takeProfit3,volume:vol,comment:`QB:${(dec.strategy||'V8').slice(0,20)}`})}).then(r=>r.json()).then(d=>{pendingRef.current[inst.id]=false;if(d.success){lastTradeRef.current[inst.id]=Date.now();addLog(`LIVE ${inst.label} ${dec.decision} ${vol}L`,"success");
               // Store Claude's levels first (will be corrected after fill)
               setOpenTradeData(prev=>({...prev,[inst.id]:{
                 direction:dec.decision,

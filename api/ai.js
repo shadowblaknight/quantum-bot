@@ -84,9 +84,9 @@ module.exports = async (req, res) => {
         ).join('\n') : '';
 
     const instChar = {
-      XAUUSD:  'Gold: $5-150/session. 1pip=$1/0.01lot. Round $10 levels matter. USD+geopolitics sensitive. Best: London 07-10 UTC and NY 13-16 UTC.',
-      BTCUSDT: 'BTC: $200-3000/day. 24/7. Round $1000 levels matter. Trend-following dominates. Best: NY session and high-volume hours.',
-      GBPUSD:  'GBP/USD: 50-150pips/day. 1pip=$10/lot. BOE/Fed sensitive. Best: London open 07-10 UTC and NY open 13-16 UTC.',
+      XAUUSD:  'Gold: $5-150/session. 1pip=$1/0.01lot. Round $10 levels matter. USD+geopolitics sensitive. Trading is ALLOWED any time between 08:00-21:00 UTC — DO NOT wait for kill zones, trade when you see a setup.',
+      BTCUSDT: 'BTC: $200-3000/day. 24/7 market. Round $1000 levels matter. Trend-following dominates. NO kill zone restriction — BTC trades any hour 07:00-23:00 UTC. Best hours: NY session and London overlap.',
+      GBPUSD:  'GBP/USD: 50-150pips/day. 1pip=$10/lot. BOE/Fed sensitive. Trading is ALLOWED any time between 08:00-21:00 UTC — DO NOT wait for kill zones, trade when you see a setup.',
     };
 
     const slTpGuide = 'SL/TP FOR ' + instrument + ': SL=' + slPips + 'p  TP1=' + tp1Pips + 'p(close ' + (R.tp1Pct||50) + '%)  TP2=' + tp2Pips + 'p(close ' + (R.tp2Pct||30) + '%)  TP3=' + tp3Pips + 'p(close ' + (R.tp3Pct||20) + '%)' + (tp4Pips ? '  TP4=' + tp4Pips + 'p(close ' + (R.tp4Pct||10) + '%)' : '') + '  Vol=' + fullVol + 'L';
@@ -101,7 +101,7 @@ module.exports = async (req, res) => {
 
     const jsonSchema = '{\n  "decision": "LONG or SHORT or WAIT",\n  "confidence": 0-100,\n  "entry": price or null,\n  "stopLoss": price or null,\n  "takeProfit1": price or null,\n  "takeProfit2": price or null,\n  "takeProfit3": price or null,\n  "takeProfit4": price or null (Gold TP4=20p, close last 10%),\n  "volume": lots,\n  "strategy": "TACTIC1+TACTIC2 from the label list",\n  "reason": "what you see and why",\n  "risk": "LOW or MEDIUM or HIGH",\n  "slPips": number,\n  "rrRatio": number\n}';
 
-    const crownMode = !!crownedStrategy;
+    const crownMode = !!crownedStrategy && crownedStrategy !== 'EXPLORING' && crownedStrategy !== 'UNKNOWN';
 
     // ── CROWN MODE system prompt ──
     const crownPrompt = 'You are executing the CROWNED STRATEGY for ' + instrument + '.\n' +
@@ -109,7 +109,7 @@ module.exports = async (req, res) => {
       (instChar[instrument]||'') + '\n\n' +
       'CROWNED STRATEGY: ' + crownedStrategy + '\n\n' +
       'Parse each tactic and apply its logic:\n' +
-      'ICT_KILLZONE=only trade 07-10 or 13-16 UTC\n' +
+      'ICT_KILLZONE=price is at a high-probability ICT level (session open, daily open, previous high/low)\n' +
       'ICT_SWEEP=price swept asian H/L or PDH/PDL then returned\n' +
       'ICT_FVG=smc_fvg zone exists and price inside or near it\n' +
       'ICT_PDH_PDL=price reacting to pdh/pdl levels\n' +
@@ -136,7 +136,7 @@ module.exports = async (req, res) => {
       '<50% present = WAIT\n\n' +
       'WAIT only if: setup absent, news in <15min, position already open, daily -5% hit.\n' +
       'Dethrone warning: 3 consecutive losses after crown = dethroned. Do NOT force weak entries.\n\n' +
-      slTpGuide + '\n' + sizingGuide + '\n' + learnedCtx + prevCtx + '\n\nRESPOND JSON ONLY:\n' + jsonSchema;
+      noKZRuleStr + slTpGuide + '\n' + sizingGuide + '\n' + learnedCtx + prevCtx + '\n\nRESPOND JSON ONLY:\n' + jsonSchema;
 
     // ── EXPLORE MODE system prompt ──
     const explorePrompt = 'You are a professional trader with 15 years experience trading ' + instrument + '.\n' +
@@ -158,13 +158,13 @@ module.exports = async (req, res) => {
       'PA_ENGULFING PA_REJECTION_WICK PA_INSIDE_BAR PA_DOUBLE_TOP_BOT\n' +
       'SMC_ORDER_BLOCK SMC_BOS_RETEST SMC_CHOCH\n' +
       'Join with +. Example: ICT_FVG+TREND_H4\n\n' +
-      slTpGuide + '\n' + sizingGuide + '\n' + learnedCtx + prevCtx + '\n\nRESPOND JSON ONLY:\n' + jsonSchema;
+      noKZRuleStr + slTpGuide + '\n' + sizingGuide + '\n' + learnedCtx + prevCtx + '\n\nRESPOND JSON ONLY:\n' + jsonSchema;
 
     const systemPrompt = crownMode ? crownPrompt : explorePrompt;
 
     const userPrompt = instrument + ' - what do you see?\n\n' +
       'PRICE: ' + snap.price + '  UTC: ' + snap.utc_hour + ':xx  SESSION: ' + snap.session + '\n' +
-      (snap.in_kill_zone ? 'IN KILL ZONE: ' + snap.kill_zone + '\n' : 'Outside kill zone\n') +
+      'Session: ' + snap.kill_zone + '\n' +
       (crownMode ? 'CROWN MODE: executing ' + crownedStrategy + '\n' : 'EXPLORE MODE: find best combination\n') +
       '\nCANDLES:\n' +
       'W:   ' + (snap.candles_weekly||'no data') + '\n' +
@@ -250,11 +250,11 @@ module.exports = async (req, res) => {
       }
     }
 
-    // ATR gate
-    if (dec.decision !== 'WAIT' && dec.stopLoss) {
+    // ATR gate — only block if SL is clearly too tight, not if missing
+    if (dec.decision !== 'WAIT' && dec.stopLoss && dec.stopLoss !== 0) {
       const slD    = Math.abs((dec.entry||snap.price) - dec.stopLoss);
-      const minATR = instrument==='XAUUSD'?0.6:instrument==='BTCUSDT'?0.4:0.5;
-      if (slD < atr * minATR) {
+      const minATR = instrument==='XAUUSD'?0.5:instrument==='BTCUSDT'?0.3:0.4;
+      if (slD > 0 && slD < atr * minATR) {
         dec.decision = 'WAIT';
         dec.reason   = 'SL ' + slD.toFixed(instrument==='BTCUSDT'?0:2) + ' below ' + minATR + 'xATR minimum - will be hunted';
         dec.volume   = null;

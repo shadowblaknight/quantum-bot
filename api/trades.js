@@ -51,6 +51,18 @@ module.exports = async (req, res) => {
         await Promise.all(batch.map(k => redis.del(k).catch(()=>null)));
       }
 
+      // Also delete any crowns set to EXPLORING or garbage values
+      let exploringCrownsDeleted = 0;
+      for (const inst of ['XAUUSD','BTCUSDT','GBPUSD']) {
+        const ck  = `qbot:strat:crown:${inst}`;
+        const val = await redis.get(ck).catch(()=>null);
+        const parsed = safeJsonParse(val);
+        if (parsed === 'EXPLORING' || parsed === 'UNKNOWN' || !parsed) {
+          await redis.del(ck).catch(()=>null);
+          exploringCrownsDeleted++;
+        }
+      }
+
       return res.status(200).json({
         deleted: allToDelete.length,
         stratDeleted: stratKeys.length,
