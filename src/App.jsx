@@ -284,7 +284,6 @@ export default function TradingBotLive(){
   const [sessionInfo,setSessionInfo]=useState(getSessionInfo());
   const [log,setLog]=useState([]);
   const [learnedStats,setLearnedStats]=useState({});
-  const [labDebug,setLabDebug]=useState({});
   const [tradeReports,setTradeReports]=useState({reports:[],analytics:{}});
   const [notifs,setNotifs]=useState([]);
   const [selected,setSelected]=useState("XAUUSD");
@@ -355,29 +354,7 @@ export default function TradingBotLive(){
       }
     }catch(e){}
   },[openTradeData]);
-  const fetchLearn=useCallback(async()=>{
-    try{
-      const r=await fetch("/api/trades?learn=true");
-      const text=await r.text();
-      console.log("fetchLearn raw response:", text.slice(0,500));
-      if(r.ok){
-        const d=JSON.parse(text);
-        console.log("fetchLearn lab keys:", Object.keys(d.lab||{}).length, "total:", d.totalStrategiesTried);
-        console.log("fetchLearn error:", d.error||"none");
-        setLearnedStats(d.lab||{});
-        setBlacklist(d.blacklist||[]);
-        setCrownLocks(d.crownLocks||{});
-        // Show raw response in debug panel
-        setLabDebug({keys:Object.keys(d.lab||{}).length, total:d.totalStrategiesTried, error:d.error, raw:text.slice(0,200)});
-      }else{
-        console.error("fetchLearn failed:", r.status, text.slice(0,200));
-        setLabDebug({keys:0, error:`HTTP ${r.status}: ${text.slice(0,100)}`});
-      }
-    }catch(e){
-      console.error("fetchLearn exception:", e.message);
-      setLabDebug({keys:0, error:e.message});
-    }
-  },[]);
+  const fetchLearn=useCallback(async()=>{try{const r=await fetch("/api/trades?learn=true");if(r.ok){const d=await r.json();setLearnedStats(d.lab||{});setBlacklist(d.blacklist||[]);setCrownLocks(d.crownLocks||{});}}catch(e){}},[]);
   const fetchReports=useCallback(async()=>{try{const r=await fetch("/api/manage-trades");if(r.ok){const d=await r.json();setTradeReports(d);}}catch(e){}},[]);
 
   useEffect(()=>{const f=async()=>{try{const r=await fetch("/api/account");if(!r.ok)return;const d=await r.json();const b=Number(d.balance??d.equity??d.accountBalance);if(Number.isFinite(b)&&b>0)setAccountBalance(b);}catch(e){}};f();const i=setInterval(f,30000);return()=>clearInterval(i);},[]);
@@ -1239,14 +1216,7 @@ export default function TradingBotLive(){
               return(
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
 
-                {/* TEMP DEBUG */}
-                <div style={{background:"#1a2744",color:"#60a5fa",padding:"10px 14px",borderRadius:8,fontSize:11,fontFamily:"monospace"}}>
-                  <div>learnedStats keys: <b>{Object.keys(learnedStats).length}</b></div>
-                  <div>API returned: <b>{labDebug.keys??'?'} strategies, total:{labDebug.total??'?'}</b></div>
-                  <div style={{color:"#e8334a"}}>Error: <b>{labDebug.error||"none"}</b></div>
-                  <div style={{color:"#8892aa",wordBreak:"break-all"}}>Raw: {labDebug.raw||"not fetched yet"}</div>
-                  <button onClick={fetchLearn} style={{marginTop:6,padding:"4px 12px",background:"#3b6cf0",color:"white",border:"none",borderRadius:4,cursor:"pointer"}}>Force Reload</button>
-                </div>
+
 
                 {/* Header stats */}
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>

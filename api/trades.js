@@ -31,7 +31,25 @@ module.exports = async (req, res) => {
   const redis   = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
   const url     = req.url || '';
   const isLearn = url.includes('learn=true');
-  const isDebug = url.includes('debug=true');
+  const isDebug   = url.includes('debug=true');
+  const isCleanup = url.includes('cleanup=true');
+
+  // ── CLEANUP: delete all old qbot:learn:* keys ─────────────────────────
+  if (isCleanup && req.method === 'GET') {
+    try {
+      const oldKeys = await redis.keys('qbot:learn:*').catch(()=>[]);
+      if (oldKeys.length > 0) {
+        // Delete in batches
+        for (let i = 0; i < oldKeys.length; i += 50) {
+          const batch = oldKeys.slice(i, i+50);
+          await Promise.all(batch.map(k => redis.del(k).catch(()=>null)));
+        }
+      }
+      return res.status(200).json({ deleted: oldKeys.length, message: `Cleaned up ${oldKeys.length} old V1-V7 keys` });
+    } catch(e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
 
   // ── DEBUG ──────────────────────────────────────────────────────────────
   if (isDebug && req.method === 'GET') {
@@ -61,15 +79,11 @@ module.exports = async (req, res) => {
     // ── GET: full strategy lab ──────────────────────────────────────────
     if (req.method === 'GET') {
       try {
-        // Get all keys in parallel
-        const [newKeys, oldKeys] = await Promise.all([
-          redis.keys('qbot:strat:*').catch(()=>[]),
-          redis.keys('qbot:learn:*').catch(()=>[]),
-        ]);
+        // Only read V8 strategy keys (qbot:strat:*) — ignore old V1-V7 qbot:learn:* keys
+        const newKeys = await redis.keys('qbot:strat:*').catch(()=>[]);
 
         // Filter out crown/blacklist keys
-        const dataKeys = [...new Set([...newKeys, ...oldKeys])]
-          .filter(k => !k.includes('blacklist:') && !k.includes('crown:'));
+        const dataKeys = newKeys.filter(k => !k.includes('blacklist:') && !k.includes('crown:'));
 
         // Fetch values in batches of 50 (safer than spreading 128 args)
         let values = [];
