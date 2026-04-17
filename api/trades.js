@@ -34,18 +34,30 @@ module.exports = async (req, res) => {
   const isDebug   = url.includes('debug=true');
   const isCleanup = url.includes('cleanup=true');
 
-  // ── CLEANUP: delete all old qbot:learn:* keys ─────────────────────────
+  // ── CLEANUP: wipe ALL strategy data, keep only trades from Apr 17+ ──────
   if (isCleanup && req.method === 'GET') {
     try {
-      const oldKeys = await redis.keys('qbot:learn:*').catch(()=>[]);
-      if (oldKeys.length > 0) {
-        // Delete in batches
-        for (let i = 0; i < oldKeys.length; i += 50) {
-          const batch = oldKeys.slice(i, i+50);
-          await Promise.all(batch.map(k => redis.del(k).catch(()=>null)));
-        }
+      const cutoff = new Date('2026-04-16T00:00:00.000Z').getTime();
+
+      // Delete all strategy/learn/crown/blacklist/tp keys
+      const [stratKeys, learnKeys, tpKeys] = await Promise.all([
+        redis.keys('qbot:strat:*').catch(()=>[]),
+        redis.keys('qbot:learn:*').catch(()=>[]),
+        redis.keys('tp_state:*').catch(()=>[]),
+      ]);
+      const allToDelete = [...stratKeys, ...learnKeys, ...tpKeys];
+      for (let i = 0; i < allToDelete.length; i += 50) {
+        const batch = allToDelete.slice(i, i+50);
+        await Promise.all(batch.map(k => redis.del(k).catch(()=>null)));
       }
-      return res.status(200).json({ deleted: oldKeys.length, message: `Cleaned up ${oldKeys.length} old V1-V7 keys` });
+
+      return res.status(200).json({
+        deleted: allToDelete.length,
+        stratDeleted: stratKeys.length,
+        learnDeleted: learnKeys.length,
+        tpDeleted: tpKeys.length,
+        message: 'Reset complete — fresh start from Apr 16'
+      });
     } catch(e) {
       return res.status(500).json({ error: e.message });
     }
