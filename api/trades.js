@@ -7,6 +7,12 @@ const CROWN_THRESHOLD = 5;
 const DETHRONE_LOSSES = 3;
 const BAN_LOSSES      = 3;
 
+const safeJsonParse = (value) => {
+  if (value == null) return null;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch(e) { return value; }
+};
+
 // Normalize any broker symbol variant to canonical instrument ID
 const NORM = {
   'BTCUSD':'BTCUSDT','BTCUSDT':'BTCUSDT',
@@ -133,14 +139,13 @@ module.exports = async (req, res) => {
         const crownVals = await redis.mget(
           ...INSTRUMENTS.map(inst=>`qbot:strat:crown:${inst}`)
         ).catch(()=>[]);
-        INSTRUMENTS.forEach((inst,i)=>{
-          if (crownVals[i]) crownLocks[inst] = typeof crownVals[i]==='string'
-            ? JSON.parse(crownVals[i]) : crownVals[i];
+        INSTRUMENTS.forEach((inst, i) => {
+          if (crownVals[i]) crownLocks[inst] = safeJsonParse(crownVals[i]);
         });
 
         // Load blacklist
         const blRaw     = await redis.get('qbot:strat:blacklist:global').catch(()=>null);
-        const blacklist = blRaw ? (typeof blRaw==='string'?JSON.parse(blRaw):blRaw) : [];
+        const blacklist = safeJsonParse(blRaw) || [];
 
         // Build summary
         const summary = {};
@@ -206,7 +211,7 @@ module.exports = async (req, res) => {
         const normInst    = NORM[instrument] || NORM[(instrument||'').toUpperCase()] || instrument;
         const key         = `qbot:strat:${normInst}:${strategy}`;
         const existing    = await redis.get(key).catch(()=>null);
-        const cur         = existing ? (typeof existing==='string'?JSON.parse(existing):existing)
+        const cur         = existing ? safeJsonParse(existing)
                                      : { wins:0, losses:0, totalPnl:0, consecutiveLosses:0, postCrownLosses:0, trades:[] };
 
         const newConsec         = won ? 0 : (cur.consecutiveLosses||0)+1;
@@ -248,7 +253,7 @@ module.exports = async (req, res) => {
         if (wasCrowned && newPostCrownLosses >= DETHRONE_LOSSES) {
           const ck    = `qbot:strat:crown:${normInst}`;
           const curCr = await redis.get(ck).catch(()=>null);
-          const locked = curCr ? (typeof curCr==='string'?JSON.parse(curCr):curCr) : null;
+          const locked = safeJsonParse(curCr);
           if (locked === strategy) { await redis.del(ck); dethroneOccurred = true; }
         }
 
@@ -261,7 +266,7 @@ module.exports = async (req, res) => {
           const checks   = otherRaw.map(r=>{ if(!r)return false; const d=typeof r==='string'?JSON.parse(r):r; return (d.consecutiveLosses||0)>=BAN_LOSSES; });
           if (checks.every(b=>b)) {
             const blRaw = await redis.get('qbot:strat:blacklist:global').catch(()=>null);
-            const bl    = blRaw ? (typeof blRaw==='string'?JSON.parse(blRaw):blRaw) : [];
+            const bl = safeJsonParse(blRaw) || [];
             if (!bl.includes(strategy)) {
               bl.push(strategy);
               await redis.set('qbot:strat:blacklist:global', JSON.stringify(bl), { ex: 60*60*24*180 });
