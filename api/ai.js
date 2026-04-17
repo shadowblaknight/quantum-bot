@@ -1,278 +1,345 @@
 /* eslint-disable */
-// api/ai.js — V8 Brain — Read First, Label After. Crown-aware dual mode.
+// api/ai.js -- V8.2.0 Brain
+// Session-gating is enforced here (backend is source of truth).
+// Instrument categories are detected dynamically -- no hardcoded symbol names.
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
   try {
     const body = req.body || {};
 
-    if (body.prompt && !body.marketSnapshot) {
+    // Manual prompt mode (Brain page)
+    if (body.prompt && !body.snap) {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY||'', 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, messages: [{ role: 'user', content: body.prompt }] }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          messages: [{ role: 'user', content: body.prompt }],
+        }),
       });
       const d = await r.json();
-      return res.status(200).json({ analysis: d.content?.map(b=>b.text||'').join('')||'' });
+      return res.status(200).json({ text: d.content?.map(b => b.text || '').join('') || '' });
     }
 
-    const { marketSnapshot: snap, instrument, previousDecisions, learnedPatterns, blacklistedStrategies, crownedStrategy } = body;
-    if (!snap || !instrument) return res.status(400).json({ error: 'Missing marketSnapshot' });
+    const { snap, instrument, riskMode, prevDecisions, lab, crownLocks, blacklist } = body;
+    if (!snap || !instrument) return res.status(400).json({ error: 'Missing snap or instrument' });
 
-    const balance  = Number(snap.account_balance) || 10000;
-    const lossStrk = Number(snap.inst_loss_streak ?? snap.loss_streak) || 0;
-    const winStrk  = Number(snap.inst_win_streak  ?? snap.win_streak)  || 0;
-    // Normalize ATR to pip units per instrument
-    // Gold: ATR already in pips (e.g. 12.5 = 12.5 pips)
-    // BTC:  ATR already in price units = pip units (e.g. 250 = $250)
-    // GBP:  ATR in price units (e.g. 0.001) → convert to pips (×10000 = 10 pips)
-    const rawAtr = parseFloat(snap.atr14) || (instrument==='XAUUSD'?12:instrument==='BTCUSDT'?250:0.001);
-    const atr    = instrument==='GBPUSD' ? Math.round(rawAtr * 10000) : rawAtr;
+    // ---------------------------------------------------------------------------
+    // Instrument category detection -- dynamic, no hardcoded symbol names
+    // ---------------------------------------------------------------------------
+    const sym = (instrument || '').toUpperCase().replace('.S', '').replace('.PRO', '').trim();
 
-    // Per-instrument risk profiles
+    const isGoldInstrument = sym.includes('XAU') || sym.includes('GOLD');
+    const isCryptoInstrument = sym.includes('BTC') || sym.includes('ETH') || sym.includes('CRYPTO') || sym.includes('COIN');
+    const isForexInstrument = !isGoldInstrument && !isCryptoInstrument;
+
+    // Category string for prompts and TP selection
+    const category = isGoldInstrument ? 'GOLD' : isCryptoInstrument ? 'CRYPTO' : 'FOREX';
+
+    // ---------------------------------------------------------------------------
+    // Session gate -- backend enforces this. Frontend is advisory only.
+    // ---------------------------------------------------------------------------
+    const now = new Date();
+    const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
+    const isWeekend = now.getUTCDay() === 0 || now.getUTCDay() === 6;
+
+    if (isWeekend && !isCryptoInstrument) {
+      return res.status(200).json({
+        decision: 'WAIT',
+        reason: 'Weekend -- forex and gold markets are closed.',
+        confidence: 0,
+        volume: null,
+      });
+    }
+
+    if (isCryptoInstrument && (utcH < 7 || utcH >= 23)) {
+      return res.status(200).json({
+        decision: 'WAIT',
+        reason: 'Outside crypto active hours (07:00-23:00 UTC).',
+        confidence: 0,
+        volume: null,
+      });
+    }
+
+    if (!isCryptoInstrument && (utcH < 8 || utcH >= 21)) {
+      return res.status(200).json({
+        decision: 'WAIT',
+        reason: 'Outside trading hours (08:00-21:00 UTC) for ' + category + '.',
+        confidence: 0,
+        volume: null,
+      });
+    }
+
+    // ---------------------------------------------------------------------------
+    // ATR fallback by category
+    // ---------------------------------------------------------------------------
+    const atrFallback = isGoldInstrument ? 12 : isCryptoInstrument ? 300 : 0.0008;
+    const atr = parseFloat(snap.atr14) || atrFallback;
+
+    const balance  = Number(snap.balance)   || 10000;
+    const lossStrk = Number(snap.lossStreak) || 0;
+    const winStrk  = Number(snap.winStreak)  || 0;
+
+    // ---------------------------------------------------------------------------
+    // Risk-based sizing
+    // ---------------------------------------------------------------------------
     const RISK = {
-      // Gold: avg move 6-12 pips. SL tight beyond structure. TP1 must be reachable at 1:1.
-      XAUUSD:  { riskPct:0.01, pipVal:100, minSL:8,  maxSL:20,  maxLot:0.50, slMult:0.8, tp1Mult:0.5, tp2Mult:1.0, tp3Mult:1.5, tp4Mult:2.0, tp1Pct:40, tp2Pct:30, tp3Pct:20, tp4Pct:10 },
-      // BTC: moves $200-600/session. SL needs room. TP1 at 1.2× gives quick partial.
-      BTCUSDT: { riskPct:0.005,pipVal:1,   minSL:150,maxSL:300, maxLot:0.30, slMult:0.8, tp1Mult:0.5, tp2Mult:1.0, tp3Mult:1.5, tp4Mult:2.0, tp1Pct:40, tp2Pct:30, tp3Pct:20, tp4Pct:10 },
-      // GBP: tight intraday moves 8-20 pips. TP1 at 1:1, TP2 at 1:1.8.
-      GBPUSD:  { riskPct:0.01, pipVal:10,  minSL:6,  maxSL:15,  maxLot:2.00, slMult:0.8, tp1Mult:0.5, tp2Mult:1.0, tp3Mult:1.5, tp4Mult:2.0, tp1Pct:40, tp2Pct:30, tp3Pct:20, tp4Pct:10 },
+      TEST:       { pct: 0.005, maxLot: 0.05 },
+      REGULAR:    { pct: 0.01,  maxLot: 0.20 },
+      AGGRESSIVE: { pct: 0.02,  maxLot: 0.50 },
     };
-    const R = RISK[instrument] || RISK.XAUUSD;
+    const risk = RISK[riskMode || 'TEST'] || RISK.TEST;
+    const baseVol = Math.max(0.01, Math.min(risk.maxLot,
+      parseFloat(((balance * risk.pct) / (atr * 100)).toFixed(2))));
+    const lossAdj = lossStrk >= 4 ? 0.25 : lossStrk >= 3 ? 0.5 : lossStrk >= 2 ? 0.75 : 1.0;
+    const winAdj  = winStrk  >= 5 ? 2.0  : winStrk  >= 3 ? 1.5 : winStrk  >= 2 ? 1.25 : 1.0;
+    const fullVol = Math.max(0.01, Math.min(risk.maxLot, parseFloat((baseVol * lossAdj * winAdj).toFixed(2))));
 
-    // ATR-based SL/TP
-    const slPips  = Math.max(R.minSL, Math.min(R.maxSL, Math.round(atr * R.slMult)));
-    const tp1Pips = Math.round(slPips * R.tp1Mult);
-    const tp2Pips = Math.round(slPips * R.tp2Mult);
-    const tp3Pips = Math.round(slPips * R.tp3Mult);
-    const tp4Pips = R.tp4Mult ? Math.round(slPips * R.tp4Mult) : null;
+    // ---------------------------------------------------------------------------
+    // TP/SL configuration by category -- not by hardcoded symbol
+    // ---------------------------------------------------------------------------
+    let tp;
+    if (isGoldInstrument) {
+      // Gold special mode: fixed pip distances
+      tp = { tp1: 5, tp2: 10, tp3: 15, tp4: 20, sl: 10, isGold: true };
+    } else if (isCryptoInstrument) {
+      // Crypto: ATR-based distances
+      tp = {
+        tp1: Math.round(atr * 0.5),
+        tp2: Math.round(atr * 1.0),
+        tp3: Math.round(atr * 1.5),
+        tp4: Math.round(atr * 2.0),
+        sl:  Math.round(atr * 0.8),
+        isGold: false,
+      };
+    } else {
+      // Forex: ATR-based pip distances (in price units)
+      tp = {
+        tp1: parseFloat((atr * 0.5).toFixed(5)),
+        tp2: parseFloat((atr * 1.0).toFixed(5)),
+        tp3: parseFloat((atr * 1.5).toFixed(5)),
+        tp4: parseFloat((atr * 2.0).toFixed(5)),
+        sl:  parseFloat((atr * 0.8).toFixed(5)),
+        isGold: false,
+      };
+    }
 
-    // Lot sizing
-    const riskDollar = balance * R.riskPct;
-    const rawBaseLot = riskDollar / (slPips * R.pipVal);
-    const baseLot    = Math.max(0.01, Math.min(R.maxLot, Math.round(rawBaseLot/0.01)*0.01));
+    // ---------------------------------------------------------------------------
+    // Learned context from strategy lab
+    // ---------------------------------------------------------------------------
+    const instLab = lab
+      ? Object.entries(lab)
+          .filter(([, d]) => d.instruments && d.instruments[instrument])
+          .map(([strat, d]) => ({ strat, ...d.instruments[instrument] }))
+      : [];
 
-    const winScale  = winStrk>=10?3.0:winStrk>=7?2.5:winStrk>=5?2.0:winStrk>=4?1.75:winStrk>=3?1.5:winStrk>=2?1.25:1.0;
-    const lossScale = lossStrk>=4?0.25:lossStrk>=3?0.5:lossStrk>=2?0.75:1.0;
-    const fullVol   = Math.max(0.01, Math.min(R.maxLot, Math.round((baseLot*winScale*lossScale)/0.01)*0.01));
+    const proven = instLab.filter(s => s.crown).sort((a, b) => (b.winRate || 0) - (a.winRate || 0)).slice(0, 3);
+    const banned = instLab.filter(s => s.banned).map(s => s.strat);
+    const blList = Array.isArray(blacklist) ? blacklist : [];
+    const crown  = crownLocks && crownLocks[instrument] ? crownLocks[instrument] : null;
 
-    // Learned context
-    const goodPatterns = learnedPatterns
-      ? Object.entries(learnedPatterns)
-          .filter(([k,d])=>d.instruments?.[instrument]?.winRate>=60&&d.instruments?.[instrument]?.total>=3&&!d.instruments?.[instrument]?.banned)
-          .sort((a,b)=>(b[1].instruments?.[instrument]?.winRate||0)-(a[1].instruments?.[instrument]?.winRate||0))
-          .slice(0,5) : [];
-    const badPatterns = learnedPatterns
-      ? Object.entries(learnedPatterns)
-          .filter(([k,d])=>d.instruments?.[instrument]?.banned||(blacklistedStrategies||[]).includes(k)) : [];
+    const provenLines = proven.length
+      ? 'Proven winners:\n' + proven.map(s => '  ' + s.strat + ': ' + s.winRate + '% WR, ' + s.total + ' trades').join('\n')
+      : 'No proven strategies yet -- explore freely.';
 
-    const learnedCtx = goodPatterns.length>0||badPatterns.length>0
-      ? '\nWHAT I LEARNED FOR ' + instrument + ':\n' +
-        (goodPatterns.length>0 ? 'Proven winners:\n' + goodPatterns.map(([k,d])=>'  WIN: '+k+' '+d.instruments[instrument].winRate+'% ('+d.instruments[instrument].total+' trades)').join('\n') + '\n' : '') +
-        (badPatterns.length>0  ? 'Banned (never use):\n' + badPatterns.map(([k])=>'  BAN: '+k).join('\n') + '\n' : '')
-      : '\nNo learned patterns yet for ' + instrument + '. Explore freely.\n';
+    const bannedLines = banned.length
+      ? 'Banned on ' + instrument + ':\n' + banned.map(s => '  ' + s).join('\n')
+      : '';
 
-    const prevCtx = previousDecisions?.length>0
-      ? '\nRECENT DECISIONS:\n' + previousDecisions.map((d,i)=>
-          '  '+(d.decision||'?')+' @ '+(d.price||'?')+' -> '+(d.outcome||'open')+
-          (d.pnl!=null?' $'+(d.pnl>0?'+':'')+d.pnl.toFixed(2):'')+
-          ' ['+(d.strategy||'?')+'] - '+(d.reason||'')
-        ).join('\n') : '';
+    const blLines = blList.length
+      ? 'Globally blacklisted:\n' + blList.map(s => '  ' + s).join('\n')
+      : '';
 
-    const instChar = {
-      XAUUSD:  'Gold: $5-150/session. 1pip=$1/0.01lot. Round $10 levels matter. USD+geopolitics sensitive. Trading is ALLOWED any time between 08:00-21:00 UTC — DO NOT wait for kill zones, trade when you see a setup.',
-      BTCUSDT: 'BTC: $200-3000/day. 24/7 market. Round $1000 levels matter. Trend-following dominates. NO kill zone restriction — BTC trades any hour 07:00-23:00 UTC. Best hours: NY session and London overlap.',
-      GBPUSD:  'GBP/USD: 50-150pips/day. 1pip=$10/lot. BOE/Fed sensitive. Trading is ALLOWED any time between 08:00-21:00 UTC — DO NOT wait for kill zones, trade when you see a setup.',
+    const crownLine = crown
+      ? 'CROWN STRATEGY ACTIVE: Prefer "' + crown + '" if market supports it.'
+      : 'No crown lock -- explore freely.';
+
+    const learnedCtx = [
+      'WHAT I KNOW FOR ' + instrument + ':',
+      provenLines,
+      bannedLines,
+      blLines,
+      crownLine,
+    ].filter(Boolean).join('\n');
+
+    const prevCtx = (prevDecisions && prevDecisions.length)
+      ? '\nRECENT DECISIONS:\n' + prevDecisions.slice(-3).map(d =>
+          '  ' + d.decision + ' @ ' + d.price + ' [' + (d.strategy || '?') + '] -> ' +
+          (d.outcome || 'open') +
+          (d.pnl != null ? ' $' + (d.pnl > 0 ? '+' : '') + d.pnl.toFixed(2) : '')
+        ).join('\n')
+      : '';
+
+    // Instrument description by category
+    const catDescriptions = {
+      GOLD:   'Gold: $5-150/session. Round $10 price levels act as magnets. Best: 08-10 UTC (London) and 13-16 UTC (NY overlap).',
+      CRYPTO: 'Crypto: High volatility, $200-3000/day moves common. 24/7 but best liquidity 09-22 UTC. Round thousand levels matter. Trend-following dominates.',
+      FOREX:  'Forex pair: 50-150 pips/day typical. Best: 08-10 UTC (London open) and 13-16 UTC (NY open). Follow USD strength/weakness.',
     };
+    const instDescription = catDescriptions[category] || 'Unknown instrument type. Analyze structure and use conservative sizing.';
 
-    const slTpGuide = 'SL/TP FOR ' + instrument + ': SL=' + slPips + 'p  TP1=' + tp1Pips + 'p(close ' + (R.tp1Pct||50) + '%)  TP2=' + tp2Pips + 'p(close ' + (R.tp2Pct||30) + '%)  TP3=' + tp3Pips + 'p(close ' + (R.tp3Pct||20) + '%)' + (tp4Pips ? '  TP4=' + tp4Pips + 'p(close ' + (R.tp4Pct||10) + '%)' : '') + '  Vol=' + fullVol + 'L';
+    const tpSection = isGoldInstrument
+      ? 'GOLD TP SYSTEM (FIXED PIPS):\nSL: ' + tp.sl + ' pips from entry\nTP1: +' + tp.tp1 + ' pips -> close 40%, SL to BE\nTP2: +' + tp.tp2 + ' pips -> close 30%, SL to TP1\nTP3: +' + tp.tp3 + ' pips -> close 20%, SL to TP2\nTP4: +' + tp.tp4 + ' pips -> close final 10%'
+      : 'TP SYSTEM (' + category + '):\nSL: ' + tp.sl + ' minimum\nTP1: +' + tp.tp1 + ' -> close 40%, SL to BE\nTP2: +' + tp.tp2 + ' -> close 30%, SL to TP1\nTP3: +' + tp.tp3 + ' -> close 20%, SL to TP2\nTP4: +' + tp.tp4 + ' -> close final 10%';
 
-    const sizingGuide = 'SIZING FOR ' + instrument + ' (live calculation):\n' +
-      'Risk/trade: $' + riskDollar.toFixed(2) + ' | Win streak ' + winStrk + ' x' + winScale + ' | Loss streak ' + lossStrk + ' x' + lossScale + '\n' +
-      'Confidence 35-49: 0.01 lots (micro - learning)\n' +
-      'Confidence 50-64: ' + Math.max(0.01,Math.round(fullVol*0.5/0.01)*0.01) + ' lots\n' +
-      'Confidence 65-79: ' + fullVol + ' lots\n' +
-      'Confidence 80-100: ' + Math.min(R.maxLot,Math.round(fullVol*1.25/0.01)*0.01) + ' lots\n' +
-      'Max: ' + R.maxLot + ' lots. NEVER null when confidence>=35 and LONG/SHORT.';
+    const sizingSmall  = Math.max(0.01, parseFloat((fullVol * 0.5).toFixed(2)));
+    const sizingLarge  = Math.min(risk.maxLot, parseFloat((fullVol * 1.5).toFixed(2)));
 
-    const jsonSchema = '{\n  "decision": "LONG or SHORT or WAIT",\n  "confidence": 0-100,\n  "entry": price or null,\n  "stopLoss": price or null,\n  "takeProfit1": price or null,\n  "takeProfit2": price or null,\n  "takeProfit3": price or null,\n  "takeProfit4": price or null (Gold TP4=20p, close last 10%),\n  "volume": lots,\n  "strategy": "TACTIC1+TACTIC2 from the label list",\n  "reason": "what you see and why",\n  "risk": "LOW or MEDIUM or HIGH",\n  "slPips": number,\n  "rrRatio": number\n}';
+    const sysPrompt = 'You are a professional trader executing for Quantum Bot V8.2.0.\n' +
+      'Instrument: ' + instrument + ' (category: ' + category + '). ' + instDescription + '\n\n' +
+      'YOUR JOB: Read the market. Make a call. Execute it.\n\n' +
+      'TRADE BIAS: You are biased TOWARD TRADING.\n' +
+      'WAIT only when:\n' +
+      '1. Pure consolidation noise -- no readable structure\n' +
+      '2. High-impact news in next 15 minutes\n' +
+      '3. Already have an open position on this instrument\n\n' +
+      '"Not perfect" is NOT a reason to wait.\n' +
+      'A trade at 40% confidence with tiny size is better than no trade.\n\n' +
+      'SIZING (' + (riskMode || 'TEST') + ' mode):\n' +
+      'confidence 35-49 -> 0.01 lots (learning trade)\n' +
+      'confidence 50-64 -> ' + sizingSmall + ' lots\n' +
+      'confidence 65-79 -> ' + fullVol + ' lots\n' +
+      'confidence 80+   -> ' + sizingLarge + ' lots\n\n' +
+      tpSection + '\n\n' +
+      'STRATEGY LABELS (label AFTER deciding, join with +):\n' +
+      'ICT: ICT_KILLZONE, ICT_SWEEP, ICT_FVG, ICT_PDH_PDL, ICT_ASIAN_RANGE\n' +
+      'TREND: TREND_H4, TREND_EMA_ALIGN, TREND_BREAKOUT, TREND_MA_BOUNCE\n' +
+      'MOMENTUM: MOM_SESSION, MOM_MACD, MOM_RSI_DIV\n' +
+      'MEAN_REV: MR_ROUND, MR_BB_SQUEEZE, MR_RANGE\n' +
+      'PRICE_ACTION: PA_ENGULFING, PA_REJECTION, PA_INSIDE_BAR\n' +
+      'SMC: SMC_OB, SMC_BOS, SMC_CHOCH\n' +
+      'Example: ICT_FVG+TREND_H4\n\n' +
+      learnedCtx + prevCtx + '\n\n' +
+      'RESPOND WITH VALID JSON ONLY. No markdown fences. No explanation outside the JSON object.\n' +
+      '{\n' +
+      '  "decision": "LONG" or "SHORT" or "WAIT",\n' +
+      '  "confidence": 0-100,\n' +
+      '  "entry": price or null,\n' +
+      '  "stopLoss": price or null,\n' +
+      '  "takeProfit1": price or null,\n' +
+      '  "takeProfit2": price or null,\n' +
+      '  "takeProfit3": price or null,\n' +
+      '  "takeProfit4": price or null,\n' +
+      '  "volume": lots (never null if confidence >= 35 and decision is LONG or SHORT),\n' +
+      '  "strategy": "TACTIC1+TACTIC2",\n' +
+      '  "reason": "2-3 sentences describing what you see and why",\n' +
+      '  "risk": "LOW" or "MEDIUM" or "HIGH"\n' +
+      '}';
 
-    const crownMode = !!crownedStrategy && crownedStrategy !== 'EXPLORING' && crownedStrategy !== 'UNKNOWN';
+    const utcTimeStr = now.getUTCHours() + ':' + String(now.getUTCMinutes()).padStart(2, '0');
+    const killZoneStr = snap.inKillZone ? ('IN KILL ZONE: ' + (snap.killZone || '')) : 'Outside kill zone';
 
-    // ── CROWN MODE system prompt ──
-    const crownPrompt = 'You are executing the CROWNED STRATEGY for ' + instrument + '.\n' +
-      'Crowned = proven through 5+ real wins. Your ONLY job: find this exact setup and execute it.\n\n' +
-      (instChar[instrument]||'') + '\n\n' +
-      'CROWNED STRATEGY: ' + crownedStrategy + '\n\n' +
-      'Parse each tactic and apply its logic:\n' +
-      'ICT_KILLZONE=price is at a high-probability ICT level (session open, daily open, previous high/low)\n' +
-      'ICT_SWEEP=price swept asian H/L or PDH/PDL then returned\n' +
-      'ICT_FVG=smc_fvg zone exists and price inside or near it\n' +
-      'ICT_PDH_PDL=price reacting to pdh/pdl levels\n' +
-      'ICT_ASIAN_RANGE=asian range broken, trade continuation\n' +
-      'TREND_H4=candles_h4 shows clear direction, trade with it\n' +
-      'TREND_EMA_ALIGN=ema_alignment is BULLISH_STACK or BEARISH_STACK\n' +
-      'TREND_BREAKOUT_RETEST=smc_bos confirmed, price retesting broken level\n' +
-      'TREND_MA_BOUNCE=price pulled back to ema21 or ema50, bouncing\n' +
-      'MOM_SESSION_OPEN=first move at London/NY open, enter first pullback\n' +
-      'MOM_MACD_CROSS=macd histogram flipped direction\n' +
-      'MOM_RSI_DIVERGENCE=rsi14 diverging from price action\n' +
-      'MR_ROUND_NUMBER=round_levels reaction\n' +
-      'MR_BB_SQUEEZE=bbands SQUEEZE detected, enter breakout\n' +
-      'MR_RANGE_TRADING=clear range on h1/h4, trade within it\n' +
-      'PA_ENGULFING=strong engulfing candle at key level\n' +
-      'PA_REJECTION_WICK=long rejection wick at structure\n' +
-      'PA_INSIDE_BAR=inside bar breakout on h1/h4\n' +
-      'PA_DOUBLE_TOP_BOT=double top/bottom reversal on h1/h4\n' +
-      'SMC_ORDER_BLOCK=smc_order_block zone, enter at it\n' +
-      'SMC_BOS_RETEST=smc_bos confirmed, retest entry\n' +
-      'SMC_CHOCH=change of character on m15/h1\n\n' +
-      '70%+ tactics present = TRADE full size\n' +
-      '50-70% present = TRADE half size\n' +
-      '<50% present = WAIT\n\n' +
-      'WAIT only if: setup absent, news in <15min, position already open, daily -5% hit.\n' +
-      'Dethrone warning: 3 consecutive losses after crown = dethroned. Do NOT force weak entries.\n\n' +
-      noKZRuleStr + slTpGuide + '\n' + sizingGuide + '\n' + learnedCtx + prevCtx + '\n\nRESPOND JSON ONLY:\n' + jsonSchema;
+    const userPrompt = instrument + ' -- what do you see?\n\n' +
+      'PRICE: ' + snap.price + ' | UTC: ' + utcTimeStr + ' | SESSION: ' + (snap.session || 'UNKNOWN') + '\n' +
+      killZoneStr + '\n\n' +
+      'CANDLES:\n' +
+      'W:   ' + (snap.weekly || 'no data') + '\n' +
+      'D1:  ' + (snap.d1    || 'no data') + '\n' +
+      'H4:  ' + (snap.h4    || 'no data') + '\n' +
+      'H1:  ' + (snap.h1    || 'no data') + '\n' +
+      'M15: ' + (snap.m15   || 'no data') + '\n' +
+      'M5:  ' + (snap.m5    || 'no data') + '\n' +
+      'M1:  ' + (snap.m1    || 'no data') + '\n\n' +
+      'KEY LEVELS:\n' +
+      'Asian H/L: ' + (snap.asianHigh || 'n/a') + ' / ' + (snap.asianLow || 'n/a') + '\n' +
+      'PDH/PDL:   ' + (snap.pdh || 'n/a') + ' / ' + (snap.pdl || 'n/a') + '\n' +
+      'Sweep:     ' + (snap.sweep || 'none') + ' -> ' + (snap.sweepDir || 'NONE') + '\n' +
+      'Round:     ' + (snap.roundLevels || 'n/a') + '\n\n' +
+      'INDICATORS:\n' +
+      'RSI: ' + (snap.rsi || 'n/a') + ' | EMA: 21=' + (snap.ema21 || 'n/a') + ' 50=' + (snap.ema50 || 'n/a') + ' 200=' + (snap.ema200 || 'n/a') + ' stack=' + (snap.emaStack || 'n/a') + '\n' +
+      'MACD: ' + (snap.macd || 'n/a') + ' | BB: ' + (snap.bb || 'n/a') + '\n' +
+      'ATR: ' + snap.atr14 + ' -> ' + (snap.atrGuide || '') + '\n\n' +
+      'STRUCTURE:\n' +
+      'BOS: ' + (snap.bos || 'none') + ' | FVG: ' + (snap.fvg || 'none') + ' | OB: ' + (snap.ob || 'none') + '\n' +
+      'Fib: ' + (snap.fibNearest || 'n/a') + ' | Weekly bias: ' + (snap.weeklyBias || 'n/a') + '\n\n' +
+      'ACCOUNT:\n' +
+      'Balance: $' + balance.toFixed(2) + ' | P&L today: $' + (snap.todayPnl || '0.00') + '\n' +
+      'Loss streak: ' + lossStrk + ' | Win streak: ' + winStrk + '\n' +
+      'Open positions: ' + (snap.openCount || 0) + '\n\n' +
+      'NEWS: ' + ((snap.news && snap.news.length) ? snap.news.slice(0, 2).map(n => n.title || '').join(' | ') : 'none') + '\n\n' +
+      'Make your call. JSON only.';
 
-    // ── EXPLORE MODE system prompt ──
-    const explorePrompt = 'You are a professional trader with 15 years experience trading ' + instrument + '.\n' +
-      'Look at the market. Make a decision. Execute it.\n\n' +
-      (instChar[instrument]||'') + '\n\n' +
-      'YOU ARE BIASED TOWARD TRADING.\n' +
-      'WAIT only when: dead Asian hours (00:00-06:30 UTC) with no catalyst, position already open, daily -5% hit, high-impact news in <15min, or pure noise.\n' +
-      'Everything else = find a trade. A 40% confidence trade at 0.01 lots is better than WAIT.\n\n' +
-      'TOOLS AVAILABLE:\n' +
-      '7 timeframes (W1 to M1), ATR, RSI, EMA 21/50/200, MACD, Bollinger,\n' +
-      'Asian range, PDH/PDL, liquidity sweep, FVG, Order Blocks, BOS,\n' +
-      'Fibonacci, equilibrium zone, session timing, news.\n' +
-      'One clear signal = small size. Two signals = normal. Three+ = full size.\n\n' +
-      'STRATEGY LABELS (use AFTER deciding):\n' +
-      'ICT_KILLZONE ICT_SWEEP ICT_FVG ICT_PDH_PDL ICT_ASIAN_RANGE\n' +
-      'TREND_H4 TREND_EMA_ALIGN TREND_BREAKOUT_RETEST TREND_MA_BOUNCE\n' +
-      'MOM_SESSION_OPEN MOM_MACD_CROSS MOM_RSI_DIVERGENCE\n' +
-      'MR_ROUND_NUMBER MR_BB_SQUEEZE MR_RANGE_TRADING\n' +
-      'PA_ENGULFING PA_REJECTION_WICK PA_INSIDE_BAR PA_DOUBLE_TOP_BOT\n' +
-      'SMC_ORDER_BLOCK SMC_BOS_RETEST SMC_CHOCH\n' +
-      'Join with +. Example: ICT_FVG+TREND_H4\n\n' +
-      noKZRuleStr + slTpGuide + '\n' + sizingGuide + '\n' + learnedCtx + prevCtx + '\n\nRESPOND JSON ONLY:\n' + jsonSchema;
-
-    const systemPrompt = crownMode ? crownPrompt : explorePrompt;
-
-    const userPrompt = instrument + ' - what do you see?\n\n' +
-      'PRICE: ' + snap.price + '  UTC: ' + snap.utc_hour + ':xx  SESSION: ' + snap.session + '\n' +
-      'Session: ' + snap.kill_zone + '\n' +
-      (crownMode ? 'CROWN MODE: executing ' + crownedStrategy + '\n' : 'EXPLORE MODE: find best combination\n') +
-      '\nCANDLES:\n' +
-      'W:   ' + (snap.candles_weekly||'no data') + '\n' +
-      'D1:  ' + (snap.candles_d1||'no data') + '\n' +
-      'H4:  ' + (snap.candles_h4||'no data') + '\n' +
-      'H1:  ' + (snap.candles_h1||'no data') + '\n' +
-      'M15: ' + (snap.candles_m15||'no data') + '\n' +
-      'M5:  ' + (snap.candles_m5||'no data') + '\n' +
-      'M1:  ' + (snap.candles_m1||'no data') + '\n' +
-      '\nKEY LEVELS:\n' +
-      'Asian H/L: ' + (snap.asian_high||'-') + ' / ' + (snap.asian_low||'-') + '  range ' + (snap.asian_range_pips||'-') + 'p\n' +
-      'PDH/PDL: ' + (snap.pdh||'-') + ' / ' + (snap.pdl||'-') + '\n' +
-      'Sweep: ' + (snap.liquidity_sweep||'none') + '  dir: ' + (snap.sweep_direction||'NONE') + '\n' +
-      'Round levels: ' + (snap.round_levels||'-') + '\n' +
-      '\nINDICATORS:\n' +
-      'RSI: ' + (snap.rsi14||'-') + '\n' +
-      'EMA stack: 21=' + (snap.ema21||'-') + ' 50=' + (snap.ema50||'-') + ' 200=' + (snap.ema200||'-') + ' -> ' + (snap.ema_alignment||'-') + '\n' +
-      'MACD: ' + (snap.macd||'-') + '\n' +
-      'BB: ' + (snap.bbands||'-') + '\n' +
-      'ATR: ' + (snap.atr14||'-') + '\n' +
-      '\nSTRUCTURE:\n' +
-      'BOS: ' + (snap.smc_bos||'none') + '\n' +
-      'FVG: ' + (snap.smc_fvg||'none') + '\n' +
-      'OB: ' + (snap.smc_order_block||'none') + '\n' +
-      'Fib: ' + (snap.fib_nearest||'-') + '\n' +
-      'Equilibrium: ' + (snap.equilibrium_zone||'-') + '  Weekly bias: ' + (snap.weekly_bias||'-') + '\n' +
-      '\nACCOUNT:\n' +
-      'Balance: $' + balance.toFixed(2) + '  Today P&L: $' + (snap.today_pnl||0) + '\n' +
-      'Loss streak: ' + lossStrk + '  Win streak: ' + winStrk + '  Win rate: ' + (snap.overall_win_rate||0) + '%\n' +
-      'Longs: ' + (snap.today_long_results||'none') + '\n' +
-      'Shorts: ' + (snap.today_short_results||'none') + '\n' +
-      'Open: ' + (snap.open_positions?.length||0) + '\n' +
-      '\nNEWS: ' + (snap.news?.map(n=>n.title).join(' | ')||'none') + '\n' +
-      'EVENTS: ' + (snap.calendar_events?.length>0?snap.calendar_events.map(e=>e.name).join(', '):'none') + '\n' +
-      '\nJSON only.';
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type':'application/json', 'x-api-key':process.env.ANTHROPIC_API_KEY||'', 'anthropic-version':'2023-06-01' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+        'anthropic-version': '2023-06-01',
+      },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 600,
-        system: systemPrompt,
-        messages: [{ role:'user', content:userPrompt }],
+        system: sysPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
       }),
     });
 
-    const data = await response.json();
-    const raw  = data.content?.map(b=>b.text||'').join('')||'';
+    const data = await resp.json();
+    const raw  = (data.content || []).map(b => b.text || '').join('');
 
     let dec;
-    try { dec = JSON.parse(raw.replace(/```json|```/g,'').trim()); }
-    catch(e) { return res.status(200).json({ decision:'WAIT', reason:'Parse error: '+e.message, raw:raw.slice(0,200) }); }
+    try {
+      // Strip any markdown fences Claude might add despite instructions
+      const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+      dec = JSON.parse(cleaned);
+    } catch (e) {
+      return res.status(200).json({
+        decision: 'WAIT',
+        reason: 'Response parse error: ' + e.message,
+        confidence: 0,
+        volume: null,
+        raw: raw.slice(0, 200),
+      });
+    }
 
-    if (!['LONG','SHORT','WAIT'].includes(dec.decision)) dec.decision = 'WAIT';
+    if (!['LONG', 'SHORT', 'WAIT'].includes(dec.decision)) dec.decision = 'WAIT';
 
     // Enforce volume by confidence
     if (dec.decision !== 'WAIT') {
-      const conf = dec.confidence||0;
-      if (conf < 35) {
+      const c = dec.confidence || 0;
+      if (c < 35) {
         dec.decision = 'WAIT';
-        dec.reason   = 'Confidence ' + conf + '% below 35% minimum';
-        dec.volume   = null;
+        dec.reason = 'Confidence ' + c + '% is below the 35% minimum threshold.';
+        dec.volume = null;
       } else {
-        dec.volume =
-          conf>=80 ? Math.min(R.maxLot, Math.round(fullVol*1.25/0.01)*0.01) :
-          conf>=65 ? fullVol :
-          conf>=50 ? Math.max(0.01, Math.round(fullVol*0.5/0.01)*0.01) : 0.01;
+        dec.volume = c >= 80 ? sizingLarge
+                   : c >= 65 ? fullVol
+                   : c >= 50 ? sizingSmall
+                   : 0.01;
       }
     }
 
-    // RR gate — use TP4 (best target) for R/R calculation
-    // TP1 is intentionally small (quick grab), full trade R/R is measured at TP4
-    if (dec.decision !== 'WAIT' && dec.stopLoss) {
-      const slD   = Math.abs((dec.entry||snap.price) - dec.stopLoss);
-      const bestTP = dec.takeProfit4 || dec.takeProfit3 || dec.takeProfit1;
-      const bestD  = bestTP ? Math.abs(bestTP - (dec.entry||snap.price)) : 0;
-      const minRR  = 1.5; // full trade must offer at least 1.5:1 at best TP
-      if (slD > 0 && bestD > 0 && bestD/slD < minRR) {
-        dec.decision = 'WAIT';
-        dec.reason   = 'Full R/R ' + (bestD/slD).toFixed(2) + ':1 below ' + minRR + ':1 minimum';
-        dec.volume   = null;
-      }
-    }
-
-    // ATR gate — only block if SL is clearly too tight, not if missing
-    if (dec.decision !== 'WAIT' && dec.stopLoss && dec.stopLoss !== 0) {
-      const slD    = Math.abs((dec.entry||snap.price) - dec.stopLoss);
-      const minATR = instrument==='XAUUSD'?0.5:instrument==='BTCUSDT'?0.3:0.4;
-      if (slD > 0 && slD < atr * minATR) {
-        dec.decision = 'WAIT';
-        dec.reason   = 'SL ' + slD.toFixed(instrument==='BTCUSDT'?0:2) + ' below ' + minATR + 'xATR minimum - will be hunted';
-        dec.volume   = null;
-      }
+    // Blacklist gate
+    if (dec.decision !== 'WAIT' && dec.strategy && blList.includes(dec.strategy)) {
+      dec.decision = 'WAIT';
+      dec.reason   = 'Strategy "' + dec.strategy + '" is globally blacklisted.';
+      dec.volume   = null;
     }
 
     console.log(JSON.stringify({
-      instrument, mode: crownMode?'CROWN':'EXPLORE',
-      decision:dec.decision, confidence:dec.confidence,
-      volume:dec.volume, strategy:dec.strategy,
-      slPips:dec.slPips, rrRatio:dec.rrRatio,
-      reason:(dec.reason||'').slice(0,100),
+      instrument,
+      category,
+      decision:   dec.decision,
+      confidence: dec.confidence,
+      strategy:   dec.strategy,
+      volume:     dec.volume,
     }));
 
     return res.status(200).json(dec);
 
-  } catch(e) {
-    console.error('Brain error:', e);
+  } catch (e) {
+    console.error('AI error:', e.message);
     return res.status(500).json({ error: e.message });
   }
 };
