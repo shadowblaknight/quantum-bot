@@ -166,44 +166,44 @@ const CSS = `
 `;
 
 // ---------------------------------------------------------------------------
-// Admin credential storage helpers (localStorage)
-// Saves account ID, token, last-used instruments, sessions, riskMode for admin.
+// Admin hardcoded credentials
+// Password is checked client-side (UI only). Real security is in the backend.
 // ---------------------------------------------------------------------------
-const ADMIN_STORAGE_KEY = "qb_admin_profile";
+const ADMIN_ACCOUNT_ID = "760fa78c-931e-4b3f-a4b4-9c308b06e169";
+const ADMIN_TOKEN      = process.env.REACT_APP_META_TOKEN || "";
 
-const loadAdminProfile = () => {
+// Admin last-used instrument/session/risk preferences (localStorage only)
+const ADMIN_PREFS_KEY = "qb_admin_prefs";
+
+const loadAdminPrefs = () => {
   try {
-    const raw = localStorage.getItem(ADMIN_STORAGE_KEY);
+    const raw = localStorage.getItem(ADMIN_PREFS_KEY);
     return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 };
 
-const saveAdminProfile = (profile) => {
-  try {
-    localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(profile));
-  } catch (e) {}
+const saveAdminPrefs = (prefs) => {
+  try { localStorage.setItem(ADMIN_PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
 };
 
 // ---------------------------------------------------------------------------
 // SetupScreen
 // ---------------------------------------------------------------------------
 function SetupScreen({ onConnected }) {
-  const [step, setStep] = useState(1); // 1=auth, 2=broker, 3=config
+  const [step, setStep] = useState(1); // 1=auth, 2=broker(user only), 3=config
   const [adminPw, setAdminPw] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
+  // User-only broker fields
   const [accountId, setAccountId] = useState("");
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
-  const [autoConnecting, setAutoConnecting] = useState(false);
-  // brokerSymbols: raw symbols returned by the broker -- NOT hardcoded
   const [brokerSymbols, setBrokerSymbols] = useState([]);
   const [selected, setSelected] = useState([]);
   const [sessions, setSessions] = useState(["LONDON", "NEW YORK"]);
   const [riskMode, setRiskMode] = useState("TEST");
   const [error, setError] = useState("");
 
+  // Shared broker connect logic
   const connectBrokerWith = async (aid, tok) => {
     const r = await fetch(API("account"), {
       method: "POST",
@@ -211,48 +211,37 @@ function SetupScreen({ onConnected }) {
       body: JSON.stringify({ accountId: aid.trim(), token: tok.trim() }),
     });
     const d = await r.json();
-    if (!r.ok || d.error) throw new Error(d.error || "Connection failed. Check credentials.");
+    if (!r.ok || d.error) throw new Error(d.error || "Connection failed.");
     const symbols = Array.isArray(d.symbols) ? d.symbols : [];
-    if (symbols.length === 0) throw new Error("Broker connected but returned no tradeable symbols.");
+    if (symbols.length === 0) throw new Error("No tradeable symbols returned by broker.");
     return symbols;
   };
 
+  // Admin login: password check then auto-connect with hardcoded credentials
   const tryAdmin = async () => {
-    if (adminPw !== ADMIN_PW) {
-      setError("Incorrect password");
-      return;
-    }
+    if (adminPw !== ADMIN_PW) { setError("Incorrect password"); return; }
     setIsAdmin(true);
     setError("");
-
-    // Check for saved admin profile -- if found, skip broker step entirely
-    const saved = loadAdminProfile();
-    if (saved && saved.accountId && saved.token) {
-      setAutoConnecting(true);
-      try {
-        const symbols = await connectBrokerWith(saved.accountId, saved.token);
-        setAccountId(saved.accountId);
-        setToken(saved.token);
-        setBrokerSymbols(symbols);
-        // Restore last-used preferences
-        if (Array.isArray(saved.instruments) && saved.instruments.length > 0) {
-          // Only restore instruments that still exist on the broker
-          const valid = saved.instruments.filter((s) => symbols.includes(s));
-          setSelected(valid.length > 0 ? valid : []);
-        }
-        if (Array.isArray(saved.sessions) && saved.sessions.length > 0) setSessions(saved.sessions);
-        if (saved.riskMode) setRiskMode(saved.riskMode);
-        setStep(3);
-      } catch (e) {
-        // Saved credentials no longer work -- fall through to broker step
-        setError("Saved credentials failed (" + e.message + "). Please re-enter.");
-        setStep(2);
-      } finally {
-        setAutoConnecting(false);
+    setConnecting(true);
+    try {
+      const symbols = await connectBrokerWith(ADMIN_ACCOUNT_ID, ADMIN_TOKEN);
+      setBrokerSymbols(symbols);
+      // Restore last-used preferences if available
+      const prefs = loadAdminPrefs();
+      if (prefs) {
+        const validInst = Array.isArray(prefs.instruments)
+          ? prefs.instruments.filter((s) => symbols.includes(s))
+          : [];
+        if (validInst.length > 0) setSelected(validInst);
+        if (Array.isArray(prefs.sessions) && prefs.sessions.length > 0) setSessions(prefs.sessions);
+        if (prefs.riskMode) setRiskMode(prefs.riskMode);
       }
-    } else {
-      // No saved profile -- go to broker step as normal
-      setStep(2);
+      setStep(3);
+    } catch (e) {
+      setError("Auto-connect failed: " + e.message);
+      setIsAdmin(false);
+    } finally {
+      setConnecting(false);
     }
   };
 
@@ -261,6 +250,7 @@ function SetupScreen({ onConnected }) {
     setStep(2);
   };
 
+  // User broker connect
   const connectBroker = async () => {
     if (!accountId.trim() || !token.trim()) {
       setError("Account ID and token are required");
@@ -271,16 +261,6 @@ function SetupScreen({ onConnected }) {
     try {
       const symbols = await connectBrokerWith(accountId, token);
       setBrokerSymbols(symbols);
-      // Save credentials for admin so next login is instant
-      if (isAdmin) {
-        saveAdminProfile({
-          accountId: accountId.trim(),
-          token: token.trim(),
-          instruments: selected,
-          sessions,
-          riskMode,
-        });
-      }
       setStep(3);
     } catch (e) {
       setError(e.message || "Network error");
@@ -300,15 +280,14 @@ function SetupScreen({ onConnected }) {
       setError("Select at least one instrument to trade.");
       return;
     }
-    // Update saved profile with latest instrument/session/risk choices
+    // Save last-used instrument/session/risk preferences for admin
     if (isAdmin) {
-      saveAdminProfile({ accountId, token, instruments: selected, sessions, riskMode });
+      saveAdminPrefs({ instruments: selected, sessions, riskMode });
     }
     onConnected({
-      // isAdmin is UI state only -- backend enforces real permissions via token
       isAdmin,
-      accountId: accountId.trim(),
-      token: token.trim(),
+      accountId: isAdmin ? ADMIN_ACCOUNT_ID : accountId.trim(),
+      token:     isAdmin ? ADMIN_TOKEN      : token.trim(),
       instruments: selected,
       sessions,
       riskMode,
@@ -347,50 +326,34 @@ function SetupScreen({ onConnected }) {
         {/* Step 1: Auth */}
         {step === 1 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {/* Show whether a saved admin profile exists */}
-            {loadAdminProfile() && (
-              <div
-                style={{
-                  background: "rgba(59,130,246,0.08)",
-                  border: "1px solid rgba(59,130,246,0.25)",
-                  borderRadius: 8,
-                  padding: "8px 12px",
-                  fontSize: 12,
-                  color: "var(--blue)",
-                  textAlign: "center",
-                }}
-              >
-                Saved profile found -- enter admin password to connect instantly.
-              </div>
-            )}
             <div style={{ fontSize: 13, color: "var(--text2)", textAlign: "center" }}>
-              Admin password unlocks Strategy Lab and full risk modes.
+              Enter admin password for instant access.
               <br />
               Leave blank to continue as a regular user.
             </div>
             <input
               className="input"
               type="password"
-              placeholder="Admin password (optional)"
+              placeholder="Admin password"
               value={adminPw}
               onChange={(e) => setAdminPw(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && tryAdmin()}
-              disabled={autoConnecting}
+              disabled={connecting}
             />
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 className="btn btn-primary"
                 style={{ flex: 1 }}
                 onClick={tryAdmin}
-                disabled={autoConnecting}
+                disabled={connecting}
               >
-                {autoConnecting ? "Connecting..." : "Login as Admin"}
+                {connecting ? "Connecting..." : "Login as Admin"}
               </button>
               <button
                 className="btn btn-ghost"
                 style={{ flex: 1 }}
                 onClick={continueAsUser}
-                disabled={autoConnecting}
+                disabled={connecting}
               >
                 Continue as User
               </button>
@@ -2257,20 +2220,19 @@ function TradingApp({ config }) {
 
             {isAdmin && (
               <div className="card">
-                <div className="card-title">SAVED PROFILE</div>
+                <div className="card-title">SAVED PREFERENCES</div>
                 <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 10 }}>
-                  Your account ID, token, instruments, sessions and risk mode are saved locally.
-                  Next admin login will connect automatically without asking for credentials.
+                  Your selected instruments, sessions and risk mode are saved locally and restored on next login.
                 </div>
                 <button
                   className="btn btn-sm"
                   style={{ background: "rgba(239,68,68,0.1)", color: "var(--red)" }}
                   onClick={() => {
-                    try { localStorage.removeItem(ADMIN_STORAGE_KEY); } catch (e) {}
-                    alert("Saved profile cleared. Next login will ask for credentials again.");
+                    try { localStorage.removeItem(ADMIN_PREFS_KEY); } catch (e) {}
+                    alert("Preferences cleared. Defaults will be used on next login.");
                   }}
                 >
-                  Forget saved credentials
+                  Clear saved preferences
                 </button>
               </div>
             )}
