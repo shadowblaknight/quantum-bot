@@ -1,24 +1,24 @@
 /* eslint-disable */
-// api/trades.js -- V8.2.0 Strategy Lab
-// Redis namespace: v820:strat:*, v820:crown:*, v820:blacklist
+// api/trades.js -- Quantum Bot V9 Strategy Lab
+// Redis namespace: v9:strat:*, v9:crown:*, v9:blacklist
+// PERSISTENT FOREVER -- no TTL. Old namespaces (v820, v8, v7, v5, qbot) are ignored.
 
 const { Redis } = require('@upstash/redis');
 
-const CROWN_WIN  = 5;
-const BAN_LOSSES = 3;
-const DETHRONE   = 3;
+const CROWN_WIN  = 5;   // wins on one instrument to earn crown
+const BAN_LOSSES = 3;   // consecutive losses to ban on instrument
+const DETHRONE   = 3;   // post-crown losses to dethrone
+const BLACKLIST_PEERS = 2; // banned on this many other instruments to globally blacklist
 
-// Normalize broker symbol to a canonical key (strips suffixes, uppercases)
 const normSym = (s) => {
   if (!s) return '';
-  return s.toUpperCase().replace('.S', '').replace('.PRO', '').replace('.s', '').trim();
+  return s.toUpperCase().replace('.S', '').replace('.PRO', '').trim();
 };
 
-// Safe JSON parse -- returns null instead of throwing
 const safe = (v) => {
   if (v == null) return null;
   if (typeof v !== 'string') return v;
-  try { return JSON.parse(v); } catch (e) { return v; }
+  try { return JSON.parse(v); } catch (_) { return v; }
 };
 
 module.exports = async (req, res) => {
@@ -32,119 +32,181 @@ module.exports = async (req, res) => {
   }
 
   const redis = new Redis({
-    url: process.env.KV_REST_API_URL,
+    url:   process.env.KV_REST_API_URL,
     token: process.env.KV_REST_API_TOKEN,
   });
 
-  // GET -- return full strategy lab
+  // ====================================================================
+  // GET -- return full strategy lab (V9 namespace only)
+  // ====================================================================
   if (req.method === 'GET') {
     try {
-      // 1. Fetch all strategy data keys (not crown or blacklist keys)
-      const allKeys = await redis.keys('v820:strat:*').catch(() => []);
+      const allKeys  = await redis.keys('v9:strat:*').catch(() => []);
       const dataKeys = allKeys.filter(k => !k.includes(':crown:') && !k.includes(':bl:'));
 
-      // 2. Fetch all values in batches of 50
-      let values = [];
+      // Batch fetch values
+      let allValues = [];
       for (let b = 0; b < dataKeys.length; b += 50) {
         const batch = dataKeys.slice(b, b + 50);
         if (!batch.length) continue;
         const bv = await redis.mget(...batch).catch(() => new Array(batch.length).fill(null));
-        values = values.concat(Array.isArray(bv) ? bv : new Array(batch.length).fill(null));
+        allValues = allValues.concat(Array.isArray(bv) ? bv : new Array(batch.length).fill(null));
       }
 
-      // 3. Build lab map -- { [strategy]: { [instrument]: { wins, losses, ... } } }
-      // Instruments are discovered dynamically from Redis keys, never hardcoded.
+      // Build lab map: { [strategy]: { [instrument]: { stats } } }
       const lab = {};
-
       for (let i = 0; i < dataKeys.length; i++) {
-        const raw = values[i];
+        const raw = allValues[i];
         if (!raw) continue;
+        const d = safe(raw);
+        if (!d || typeof d !== 'object') continue;
 
-        let d;
-        try {
-          d = safe(raw);
-          if (!d || typeof d !== 'object') continue;
-        } catch (e) { continue; }
-
-        // Key format: v820:strat:{INSTRUMENT}:{STRATEGY}
-        const parts = dataKeys[i].replace('v820:strat:', '').split(':');
-        const rawInst = parts[0];
-        const strat   = parts.slice(1).join(':');
-
-        if (!rawInst || !strat || strat === 'EXPLORING' || strat === 'UNKNOWN') continue;
-
+        // Key format: v9:strat:{INSTRUMENT}:{STRATEGY}
+        const keyBody = dataKeys[i].replace('v9:strat:', '');
+        const colon   = keyBody.indexOf(':');
+        if (colon === -1) continue;
+        const rawInst = keyBody.slice(0, colon);
+        const strat   = keyBody.slice(colon + 1);
+        if (!rawInst || !strat || strat === 'EXPLORING' || strat === 'UNKNOWN' || strat.length < 3) continue;
         const inst = normSym(rawInst);
         if (!inst) continue;
-
         if (!lab[strat]) lab[strat] = {};
 
-        const total  = (d.wins || 0) + (d.losses || 0);
-        const wr     = total > 0 ? Math.round(((d.wins || 0) / total) * 100) : null;
-        const recent = (d.trades || []).slice(-BAN_LOSSES).map(t => t.won);
-        const banned = recent.length >= BAN_LOSSES && recent.every(r => r === false);
+        const total    = (d.wins || 0) + (d.losses || 0);
+        const wr       = total > 0 ? Math.round(((d.wins || 0) / total) * 100) : null;
+        const recent   = (d.trades || []).slice(-BAN_LOSSES).map(t => t.won);
+        const banned   = recent.length >= BAN_LOSSES && recent.every(r => r === false);
         const crowned  = (d.wins || 0) >= CROWN_WIN && !banned;
         const dethroned = crowned && (d.postCrownLosses || 0) >= DETHRONE;
 
+        // Failure analysis
+        const losingTrades  = (d.trades || []).filter(t => !t.won);
+        const winningTrades = (d.trades || []).filter(t => t.won);
+        const lossSessions  = {};
+        const winSessions   = {};
+        losingTrades.forEach(t => {
+          const s = t.session || 'UNKNOWN';
+          lossSessions[s] = (lossSessions[s] || 0) + 1;
+        });
+        winningTrades.forEach(t => {
+          const s = t.session || 'UNKNOWN';
+          winSessions[s] = (winSessions[s] || 0) + 1;
+        });
+
+        // Average win / loss size
+        const avgWin  = winningTrades.length ? winningTrades.reduce((s,t)=>s+(t.pnl||0),0)/winningTrades.length : 0;
+        const avgLoss = losingTrades.length  ? losingTrades.reduce((s,t)=>s+(t.pnl||0),0)/losingTrades.length  : 0;
+
+        // TP hit distribution
+        const tpDist = {
+          tp1Only: 0, tp2Reached: 0, tp3Reached: 0, tp4Reached: 0, slHit: 0,
+        };
+        (d.trades || []).forEach(t => {
+          if (t.tp4Hit) tpDist.tp4Reached++;
+          else if (t.tp3Hit) tpDist.tp3Reached++;
+          else if (t.tp2Hit) tpDist.tp2Reached++;
+          else if (t.tp1Hit) tpDist.tp1Only++;
+          else if (!t.won)   tpDist.slHit++;
+        });
+
         lab[strat][inst] = {
-          wins:               d.wins    || 0,
-          losses:             d.losses  || 0,
+          wins:              d.wins              || 0,
+          losses:            d.losses            || 0,
           total,
-          winRate:            wr,
-          avgPnl:             (d.totalPnl != null && total > 0) ? parseFloat((d.totalPnl / total).toFixed(2)) : null,
-          crown:              crowned && !dethroned,
+          winRate:           wr,
+          totalPnl:          d.totalPnl != null ? parseFloat(d.totalPnl.toFixed(2)) : 0,
+          avgPnl:            (d.totalPnl != null && total > 0) ? parseFloat((d.totalPnl / total).toFixed(2)) : null,
+          avgWin:            parseFloat(avgWin.toFixed(2)),
+          avgLoss:           parseFloat(avgLoss.toFixed(2)),
+          crown:             crowned && !dethroned,
           banned,
-          consecutiveLosses:  d.consecutiveLosses  || 0,
-          postCrownLosses:    d.postCrownLosses     || 0,
-          lastSeen:           d.lastSeen || null,
-          trades:             (d.trades || []).slice(-10),
+          consecutiveLosses: d.consecutiveLosses || 0,
+          postCrownLosses:   d.postCrownLosses   || 0,
+          lastSeen:          d.lastSeen          || null,
+          firstSeen:         d.firstSeen         || null,
+          tpDistribution:    tpDist,
+          lossSessions,
+          winSessions,
+          trades:            (d.trades || []).slice(-15),
         };
       }
 
-      // 4. Crown locks -- discovered from Redis, not from a hardcoded instrument list
-      const crownKeys = allKeys.filter(k => k.startsWith('v820:crown:'));
+      // Crown locks
+      const crownKeys = allKeys.filter(k => k.startsWith('v9:crown:'));
       const crownVals = crownKeys.length
         ? await redis.mget(...crownKeys).catch(() => new Array(crownKeys.length).fill(null))
         : [];
-
       const crownLocks = {};
       crownKeys.forEach((key, i) => {
-        const inst = key.replace('v820:crown:', '');
+        const inst = key.replace('v9:crown:', '');
         const val  = safe(crownVals[i]);
-        if (val && val !== 'EXPLORING' && val !== 'UNKNOWN') {
+        if (val && typeof val === 'string' && val !== 'EXPLORING' && val !== 'UNKNOWN') {
           crownLocks[inst] = val;
         }
       });
 
-      // 5. Blacklist
-      const blacklist = safe(await redis.get('v820:blacklist').catch(() => null)) || [];
+      // Global blacklist
+      const blacklist = safe(await redis.get('v9:blacklist').catch(() => null)) || [];
 
-      // 6. Build summary per strategy
+      // Build per-strategy summary with failure analysis
       const summary = {};
       for (const [strat, instData] of Object.entries(lab)) {
-        const instKeys = Object.keys(instData);
-        const tw = instKeys.reduce((s, k) => s + (instData[k].wins   || 0), 0);
-        const tl = instKeys.reduce((s, k) => s + (instData[k].losses || 0), 0);
+        const ks = Object.keys(instData);
+        const tw = ks.reduce((s, k) => s + (instData[k].wins   || 0), 0);
+        const tl = ks.reduce((s, k) => s + (instData[k].losses || 0), 0);
         const tt = tw + tl;
+
+        // Aggregate failure reasons across instruments
+        const aggLossSessions = {};
+        const aggTpDist = { tp1Only: 0, tp2Reached: 0, tp3Reached: 0, tp4Reached: 0, slHit: 0 };
+        ks.forEach(k => {
+          const d = instData[k];
+          Object.entries(d.lossSessions || {}).forEach(([s, c]) => {
+            aggLossSessions[s] = (aggLossSessions[s] || 0) + c;
+          });
+          Object.entries(d.tpDistribution || {}).forEach(([k2, v]) => {
+            aggTpDist[k2] = (aggTpDist[k2] || 0) + v;
+          });
+        });
+
+        // Identify worst session
+        const worstSession = Object.entries(aggLossSessions).sort((a, b) => b[1] - a[1])[0];
+
+        // Failure narrative
+        let failureNote = null;
+        if (tl > 0) {
+          const slPct = tt > 0 ? Math.round((aggTpDist.slHit / tt) * 100) : 0;
+          const tp1OnlyPct = tt > 0 ? Math.round((aggTpDist.tp1Only / tt) * 100) : 0;
+          const reachedTp4Pct = tt > 0 ? Math.round((aggTpDist.tp4Reached / tt) * 100) : 0;
+          const parts = [];
+          if (slPct >= 30) parts.push(`hits SL ${slPct}% of trades`);
+          if (tp1OnlyPct >= 40) parts.push(`stalls at TP1 ${tp1OnlyPct}% of the time`);
+          if (worstSession && worstSession[1] >= 3) parts.push(`weakest in ${worstSession[0]} session (${worstSession[1]} losses)`);
+          if (reachedTp4Pct < 10 && tt >= 10) parts.push('rarely reaches TP4');
+          failureNote = parts.length ? parts.join('; ') : null;
+        }
 
         summary[strat] = {
           instruments:    instData,
           totalWins:      tw,
           totalLosses:    tl,
           total:          tt,
+          totalPnl:       parseFloat(ks.reduce((s, k) => s + (instData[k].totalPnl || 0), 0).toFixed(2)),
           overallWinRate: tt > 0 ? Math.round((tw / tt) * 100) : null,
-          crowns:         instKeys.filter(k => instData[k].crown).length,
-          bannedOn:       instKeys.filter(k => instData[k].banned),
-          isBlacklisted:  (blacklist || []).includes(strat),
+          crowns:         ks.filter(k => instData[k].crown).length,
+          bannedOn:       ks.filter(k => instData[k].banned),
+          isBlacklisted:  Array.isArray(blacklist) && blacklist.includes(strat),
           isLocked:       Object.values(crownLocks).includes(strat),
+          aggLossSessions,
+          aggTpDistribution: aggTpDist,
+          failureNote,
         };
       }
 
-      // 7. Analytics
+      // Analytics
       const allT = Object.values(lab).flatMap(s => Object.values(s).flatMap(d => d.trades || []));
       const now  = new Date();
-
-      const isTdy = (t) => new Date(t).toDateString() === now.toDateString();
-
+      const isTdy = (dateStr) => new Date(dateStr).toDateString() === now.toDateString();
       const cmp = (arr) => {
         const w = arr.filter(t => t.won).length;
         return {
@@ -156,17 +218,16 @@ module.exports = async (req, res) => {
         };
       };
 
-      const sessMap = {};
+      const sessAcc = {};
       allT.forEach(t => {
         const s = t.session || 'UNKNOWN';
-        if (!sessMap[s]) sessMap[s] = { trades: 0, wins: 0, pnl: 0 };
-        sessMap[s].trades++;
-        if (t.won) sessMap[s].wins++;
-        sessMap[s].pnl += (t.pnl || 0);
+        if (!sessAcc[s]) sessAcc[s] = { trades: 0, wins: 0, pnl: 0 };
+        sessAcc[s].trades++;
+        if (t.won) sessAcc[s].wins++;
+        sessAcc[s].pnl += t.pnl || 0;
       });
-
       const sessions = {};
-      Object.entries(sessMap).forEach(([s, d]) => {
+      Object.entries(sessAcc).forEach(([s, d]) => {
         sessions[s] = {
           ...d,
           winRate: d.trades ? Math.round((d.wins / d.trades) * 100) : 0,
@@ -175,15 +236,17 @@ module.exports = async (req, res) => {
       });
 
       return res.status(200).json({
-        lab:                summary,
+        lab:             summary,
         crownLocks,
-        blacklist,
-        totalStrategies:    Object.keys(summary).length,
+        blacklist:       Array.isArray(blacklist) ? blacklist : [],
+        totalStrategies: Object.keys(summary).length,
         analytics: {
           all:      cmp(allT),
-          today:    cmp(allT.filter(t => isTdy(t.date))),
+          today:    cmp(allT.filter(t => t.date && isTdy(t.date))),
           sessions,
         },
+        version: 'v9',
+        persistent: true,
       });
 
     } catch (e) {
@@ -192,15 +255,14 @@ module.exports = async (req, res) => {
     }
   }
 
-  // POST -- record a trade result
+  // ====================================================================
+  // POST -- record a closed trade result (V9 namespace only, no TTL)
+  // ====================================================================
   if (req.method === 'POST') {
     try {
       let body = {};
-      try {
-        body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-      } catch (e) {
-        return res.status(400).json({ error: 'Invalid JSON body' });
-      }
+      try { body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {}); }
+      catch (_) { return res.status(400).json({ error: 'Invalid JSON body' }); }
 
       const {
         instrument, direction, won, pnl,
@@ -212,34 +274,36 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields: instrument, direction, won' });
       }
 
-      // Skip garbage strategy names
       const strat = (strategy || '').trim();
       if (!strat || strat === 'EXPLORING' || strat === 'UNKNOWN' || strat.length < 3) {
-        return res.status(200).json({ skipped: true, reason: 'No valid strategy name' });
+        return res.status(200).json({ skipped: true, reason: 'No valid strategy label' });
       }
 
       const inst = normSym(instrument);
-      const now  = new Date().toISOString();
-      const key  = 'v820:strat:' + inst + ':' + strat;
+      if (!inst) return res.status(400).json({ error: 'Invalid instrument' });
+
+      const now = new Date().toISOString();
+      const key = 'v9:strat:' + inst + ':' + strat;
 
       const existing = safe(await redis.get(key).catch(() => null));
       const cur = (existing && typeof existing === 'object')
         ? existing
-        : { wins: 0, losses: 0, totalPnl: 0, consecutiveLosses: 0, postCrownLosses: 0, trades: [] };
+        : { wins: 0, losses: 0, totalPnl: 0, consecutiveLosses: 0, postCrownLosses: 0, trades: [], firstSeen: now };
 
       const newConsec    = won ? 0 : (cur.consecutiveLosses || 0) + 1;
       const wasCrowned   = (cur.wins || 0) >= CROWN_WIN;
       const newPostCrown = wasCrowned ? (won ? 0 : (cur.postCrownLosses || 0) + 1) : 0;
 
       const updated = {
-        wins:               won ? (cur.wins   || 0) + 1 : (cur.wins   || 0),
-        losses:             won ? (cur.losses  || 0)     : (cur.losses || 0) + 1,
-        totalPnl:           parseFloat(((cur.totalPnl || 0) + (pnl || 0)).toFixed(2)),
-        consecutiveLosses:  newConsec,
-        postCrownLosses:    newPostCrown,
-        lastSeen:           now,
+        wins:              won ? (cur.wins   || 0) + 1 : (cur.wins   || 0),
+        losses:            won ? (cur.losses  || 0)     : (cur.losses || 0) + 1,
+        totalPnl:          parseFloat(((cur.totalPnl || 0) + (pnl || 0)).toFixed(2)),
+        consecutiveLosses: newConsec,
+        postCrownLosses:   newPostCrown,
+        lastSeen:          now,
+        firstSeen:         cur.firstSeen || now,
         trades: [
-          ...(cur.trades || []).slice(-24),
+          ...(cur.trades || []).slice(-99),
           {
             won,
             pnl:        pnl        || 0,
@@ -258,54 +322,52 @@ module.exports = async (req, res) => {
         ],
       };
 
-      await redis.set(key, JSON.stringify(updated), { ex: 60 * 60 * 24 * 90 });
+      // PERSISTENT: NO TTL. Data lives forever.
+      await redis.set(key, JSON.stringify(updated));
 
       // Crown check
       let justCrowned = false;
       if (!wasCrowned && updated.wins >= CROWN_WIN) {
-        const ck  = 'v820:crown:' + inst;
-        const cur = safe(await redis.get(ck).catch(() => null));
-        if (!cur || cur === 'EXPLORING' || cur === 'UNKNOWN') {
-          await redis.set(ck, JSON.stringify(strat), { ex: 60 * 60 * 24 * 365 });
+        const ck      = 'v9:crown:' + inst;
+        const ex = safe(await redis.get(ck).catch(() => null));
+        if (!ex || ex === 'EXPLORING' || ex === 'UNKNOWN') {
+          await redis.set(ck, JSON.stringify(strat)); // no TTL
           justCrowned = true;
+          console.log('V9 CROWN:', strat, 'on', inst);
         }
       }
 
       // Dethrone check
       let dethroned = false;
       if (wasCrowned && newPostCrown >= DETHRONE) {
-        const ck     = 'v820:crown:' + inst;
+        const ck     = 'v9:crown:' + inst;
         const locked = safe(await redis.get(ck).catch(() => null));
         if (locked === strat) {
           await redis.del(ck);
           dethroned = true;
+          console.log('V9 DETHRONED:', strat, 'on', inst);
         }
       }
 
-      // Blacklist check -- instrument peers discovered from Redis, not a hardcoded list
+      // Blacklist check
       let blacklisted = false;
       if (!won && newConsec >= BAN_LOSSES) {
-        // Find all other instruments that have data for this strategy
-        const peerPattern = 'v820:strat:*:' + strat;
-        const peerKeys = await redis.keys(peerPattern).catch(() => []);
-        const otherKeys = peerKeys.filter(k => {
-          const kInst = normSym(k.replace('v820:strat:', '').split(':')[0]);
-          return kInst !== inst;
-        });
-
-        if (otherKeys.length > 0) {
+        const peerKeys  = await redis.keys('v9:strat:*:' + strat).catch(() => []);
+        const otherKeys = peerKeys.filter(k => normSym(k.replace('v9:strat:', '').split(':')[0]) !== inst);
+        if (otherKeys.length >= BLACKLIST_PEERS) {
           const peerVals = await redis.mget(...otherKeys).catch(() => []);
-          const allPeersBanned = peerVals.every(r => {
+          const allBanned = peerVals.every(r => {
             const d = safe(r);
             return d && typeof d === 'object' && (d.consecutiveLosses || 0) >= BAN_LOSSES;
           });
-
-          if (allPeersBanned && otherKeys.length >= 2) {
-            const bl = safe(await redis.get('v820:blacklist').catch(() => null)) || [];
+          if (allBanned) {
+            const blRaw = safe(await redis.get('v9:blacklist').catch(() => null));
+            const bl    = Array.isArray(blRaw) ? blRaw : [];
             if (!bl.includes(strat)) {
               bl.push(strat);
-              await redis.set('v820:blacklist', JSON.stringify(bl), { ex: 60 * 60 * 24 * 180 });
+              await redis.set('v9:blacklist', JSON.stringify(bl)); // no TTL
               blacklisted = true;
+              console.log('V9 BLACKLISTED:', strat);
             }
           }
         }
@@ -322,6 +384,8 @@ module.exports = async (req, res) => {
           losses:  updated.losses,
           total,
           winRate: total ? Math.round((updated.wins / total) * 100) : null,
+          consecutiveLosses: newConsec,
+          totalPnl: updated.totalPnl,
         },
         justCrowned,
         dethroned,
