@@ -166,6 +166,27 @@ const CSS = `
 `;
 
 // ---------------------------------------------------------------------------
+// Admin credential storage helpers (localStorage)
+// Saves account ID, token, last-used instruments, sessions, riskMode for admin.
+// ---------------------------------------------------------------------------
+const ADMIN_STORAGE_KEY = "qb_admin_profile";
+
+const loadAdminProfile = () => {
+  try {
+    const raw = localStorage.getItem(ADMIN_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+};
+
+const saveAdminProfile = (profile) => {
+  try {
+    localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(profile));
+  } catch (e) {}
+};
+
+// ---------------------------------------------------------------------------
 // SetupScreen
 // ---------------------------------------------------------------------------
 function SetupScreen({ onConnected }) {
@@ -175,6 +196,7 @@ function SetupScreen({ onConnected }) {
   const [accountId, setAccountId] = useState("");
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [autoConnecting, setAutoConnecting] = useState(false);
   // brokerSymbols: raw symbols returned by the broker -- NOT hardcoded
   const [brokerSymbols, setBrokerSymbols] = useState([]);
   const [selected, setSelected] = useState([]);
@@ -182,12 +204,55 @@ function SetupScreen({ onConnected }) {
   const [riskMode, setRiskMode] = useState("TEST");
   const [error, setError] = useState("");
 
-  const tryAdmin = () => {
-    if (adminPw === ADMIN_PW) {
-      setIsAdmin(true);
-      setStep(2);
-    } else {
+  const connectBrokerWith = async (aid, tok) => {
+    const r = await fetch(API("account"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountId: aid.trim(), token: tok.trim() }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || "Connection failed. Check credentials.");
+    const symbols = Array.isArray(d.symbols) ? d.symbols : [];
+    if (symbols.length === 0) throw new Error("Broker connected but returned no tradeable symbols.");
+    return symbols;
+  };
+
+  const tryAdmin = async () => {
+    if (adminPw !== ADMIN_PW) {
       setError("Incorrect password");
+      return;
+    }
+    setIsAdmin(true);
+    setError("");
+
+    // Check for saved admin profile -- if found, skip broker step entirely
+    const saved = loadAdminProfile();
+    if (saved && saved.accountId && saved.token) {
+      setAutoConnecting(true);
+      try {
+        const symbols = await connectBrokerWith(saved.accountId, saved.token);
+        setAccountId(saved.accountId);
+        setToken(saved.token);
+        setBrokerSymbols(symbols);
+        // Restore last-used preferences
+        if (Array.isArray(saved.instruments) && saved.instruments.length > 0) {
+          // Only restore instruments that still exist on the broker
+          const valid = saved.instruments.filter((s) => symbols.includes(s));
+          setSelected(valid.length > 0 ? valid : []);
+        }
+        if (Array.isArray(saved.sessions) && saved.sessions.length > 0) setSessions(saved.sessions);
+        if (saved.riskMode) setRiskMode(saved.riskMode);
+        setStep(3);
+      } catch (e) {
+        // Saved credentials no longer work -- fall through to broker step
+        setError("Saved credentials failed (" + e.message + "). Please re-enter.");
+        setStep(2);
+      } finally {
+        setAutoConnecting(false);
+      }
+    } else {
+      // No saved profile -- go to broker step as normal
+      setStep(2);
     }
   };
 
@@ -204,26 +269,18 @@ function SetupScreen({ onConnected }) {
     setConnecting(true);
     setError("");
     try {
-      // POST to /api/account to validate and return broker metadata
-      // Backend must NOT return trading data here -- only connection status + symbol list
-      const r = await fetch(API("account"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId: accountId.trim(), token: token.trim() }),
-      });
-      const d = await r.json();
-      if (!r.ok || d.error) {
-        setError(d.error || "Connection failed. Check credentials.");
-        return;
-      }
-      // Backend returns { connected: true, symbols: [...rawBrokerSymbols] }
-      // Symbols come entirely from the broker -- no defaults injected here
-      const symbols = Array.isArray(d.symbols) ? d.symbols : [];
-      if (symbols.length === 0) {
-        setError("Broker connected but returned no tradeable symbols.");
-        return;
-      }
+      const symbols = await connectBrokerWith(accountId, token);
       setBrokerSymbols(symbols);
+      // Save credentials for admin so next login is instant
+      if (isAdmin) {
+        saveAdminProfile({
+          accountId: accountId.trim(),
+          token: token.trim(),
+          instruments: selected,
+          sessions,
+          riskMode,
+        });
+      }
       setStep(3);
     } catch (e) {
       setError(e.message || "Network error");
@@ -242,6 +299,10 @@ function SetupScreen({ onConnected }) {
     if (selected.length === 0) {
       setError("Select at least one instrument to trade.");
       return;
+    }
+    // Update saved profile with latest instrument/session/risk choices
+    if (isAdmin) {
+      saveAdminProfile({ accountId, token, instruments: selected, sessions, riskMode });
     }
     onConnected({
       // isAdmin is UI state only -- backend enforces real permissions via token
@@ -286,6 +347,22 @@ function SetupScreen({ onConnected }) {
         {/* Step 1: Auth */}
         {step === 1 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {/* Show whether a saved admin profile exists */}
+            {loadAdminProfile() && (
+              <div
+                style={{
+                  background: "rgba(59,130,246,0.08)",
+                  border: "1px solid rgba(59,130,246,0.25)",
+                  borderRadius: 8,
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  color: "var(--blue)",
+                  textAlign: "center",
+                }}
+              >
+                Saved profile found -- enter admin password to connect instantly.
+              </div>
+            )}
             <div style={{ fontSize: 13, color: "var(--text2)", textAlign: "center" }}>
               Admin password unlocks Strategy Lab and full risk modes.
               <br />
@@ -298,12 +375,23 @@ function SetupScreen({ onConnected }) {
               value={adminPw}
               onChange={(e) => setAdminPw(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && tryAdmin()}
+              disabled={autoConnecting}
             />
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn btn-primary" style={{ flex: 1 }} onClick={tryAdmin}>
-                Login as Admin
+              <button
+                className="btn btn-primary"
+                style={{ flex: 1 }}
+                onClick={tryAdmin}
+                disabled={autoConnecting}
+              >
+                {autoConnecting ? "Connecting..." : "Login as Admin"}
               </button>
-              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={continueAsUser}>
+              <button
+                className="btn btn-ghost"
+                style={{ flex: 1 }}
+                onClick={continueAsUser}
+                disabled={autoConnecting}
+              >
                 Continue as User
               </button>
             </div>
@@ -2146,9 +2234,7 @@ function TradingApp({ config }) {
             {isAdmin && Object.keys(crownLocks).length > 0 && (
               <div className="card">
                 <div className="card-title">CROWN LOCKS</div>
-                <div
-                  style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
-                >
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {Object.entries(crownLocks).map(([inst, strat]) => (
                     <div
                       key={inst}
@@ -2160,16 +2246,32 @@ function TradingApp({ config }) {
                         border: "1px solid rgba(245,158,11,0.2)",
                       }}
                     >
-                      <span style={{ color: "var(--gold)", marginRight: 4 }}>
-                        Crown
-                      </span>
+                      <span style={{ color: "var(--gold)", marginRight: 4 }}>Crown</span>
                       <span style={{ color: "var(--text2)" }}>{inst}:</span>
-                      <span style={{ color: "var(--text)", marginLeft: 4 }}>
-                        {strat}
-                      </span>
+                      <span style={{ color: "var(--text)", marginLeft: 4 }}>{strat}</span>
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {isAdmin && (
+              <div className="card">
+                <div className="card-title">SAVED PROFILE</div>
+                <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 10 }}>
+                  Your account ID, token, instruments, sessions and risk mode are saved locally.
+                  Next admin login will connect automatically without asking for credentials.
+                </div>
+                <button
+                  className="btn btn-sm"
+                  style={{ background: "rgba(239,68,68,0.1)", color: "var(--red)" }}
+                  onClick={() => {
+                    try { localStorage.removeItem(ADMIN_STORAGE_KEY); } catch (e) {}
+                    alert("Saved profile cleared. Next login will ask for credentials again.");
+                  }}
+                >
+                  Forget saved credentials
+                </button>
               </div>
             )}
           </div>
