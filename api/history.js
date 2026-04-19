@@ -1,5 +1,9 @@
 /* eslint-disable */
-// api/history.js - Closed deals from PU Prime via MetaAPI
+// api/history.js -- Closed deals from PU Prime via MetaAPI.
+// CRITICAL FIX: DEAL_ENTRY_OUT deals have INVERTED types vs the original position.
+// When you SELL to open, and later close, MetaAPI records the closing deal as DEAL_TYPE_BUY.
+// We invert on DEAL_ENTRY_OUT so the displayed direction matches the original position side.
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -28,16 +32,13 @@ module.exports = async (req, res) => {
       ACCOUNT_ID +
       '/history-deals/time/' + encodeURIComponent(fromStr) + '/' + encodeURIComponent(toStr);
 
-    const r = await fetch(url, {
-      method: 'GET',
-      headers: { 'auth-token': TOKEN }
-    });
+    const r = await fetch(url, { method: 'GET', headers: { 'auth-token': TOKEN } });
 
     if (!r.ok) {
       const text = await r.text();
       return res.status(r.status).json({
         deals: [],
-        error: (text || 'Failed to fetch history').slice(0, 500)
+        error: (text || 'Failed to fetch history').slice(0, 500),
       });
     }
 
@@ -45,41 +46,56 @@ module.exports = async (req, res) => {
     const raw = Array.isArray(data) ? data : ((data && data.deals) || []);
 
     const deals = raw
-      .filter(function(d) {
+      .filter(function (d) {
         return d.type === 'DEAL_TYPE_BUY' || d.type === 'DEAL_TYPE_SELL';
       })
-      .filter(function(d) {
+      .filter(function (d) {
         return d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT';
       })
-      .map(function(d) {
+      .map(function (d) {
+        // Fix: closing deals report the OPPOSITE type of the original position.
+        // A SELL position closes with a DEAL_TYPE_BUY.
+        // A BUY  position closes with a DEAL_TYPE_SELL.
+        // So for DEAL_ENTRY_OUT we invert to show the original side.
+        var rawType = d.type;
+        var positionSide;
+        if (d.entryType === 'DEAL_ENTRY_OUT') {
+          positionSide = rawType === 'DEAL_TYPE_BUY' ? 'SELL' : 'BUY';
+        } else {
+          // DEAL_ENTRY_INOUT (hedged close or partial): rare, treat as same side
+          positionSide = rawType === 'DEAL_TYPE_BUY' ? 'BUY' : 'SELL';
+        }
+
         return {
           id:         d.id || d.dealId || null,
           symbol:     d.symbol || '',
-          type:       d.type === 'DEAL_TYPE_BUY' ? 'BUY' : 'SELL',
+          type:       positionSide,                 // display side (matches MT5 position)
+          rawDealType: rawType,                     // kept for debugging if needed
+          entryType:  d.entryType || null,
           volume:     Number(d.volume || 0),
           openPrice:  null,
           closePrice: Number(d.price || 0),
+          price:      Number(d.price || 0),         // alias for old UI code
           profit:     Number(d.profit || 0),
           commission: Number(d.commission || 0),
           swap:       Number(d.swap || 0),
           time:       d.time || d.brokerTime || null,
-          comment:    d.comment || ''
+          comment:    d.comment || '',
         };
       })
-      .sort(function(a, b) {
+      .sort(function (a, b) {
         return new Date(b.time) - new Date(a.time);
       });
 
     return res.status(200).json({
       deals: deals,
       count: deals.length,
-      source: 'puprime'
+      source: 'puprime',
     });
-
-  } catch(e) {
+  } catch (e) {
     return res.status(500).json({
       deals: [],
-      error: e && e.message ? e.message : 'Unknown server error'
+      error: e && e.message ? e.message : 'Unknown server error',
     });
   }
 };
