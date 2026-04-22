@@ -157,6 +157,19 @@ module.exports = async (req, res) => {
       ));
       const [m1d, m5d, m15d, h1d, h4d, d1d, wkd] = candles.map(r => r.candles || []);
 
+      // V9.3: Hard gate -- if ALL timeframes came back empty, the broker-candles
+      // endpoint is broken or the symbol resolution is wrong. Calling the AI with
+      // "no data" strings just wastes tokens and makes it say WAIT. Skip and log.
+      const totalCandles = m1d.length + m5d.length + m15d.length + h1d.length + h4d.length + d1d.length + wkd.length;
+      if (totalCandles === 0) {
+        console.error('[CRON] ' + sym + ' ALL candle timeframes empty -- broker-candles endpoint broken or symbol unknown to broker');
+        summary.errors.push({ sym, where: 'candles', error: 'all timeframes empty -- check /api/broker-candles for this symbol' });
+        continue;
+      }
+      if (m1d.length < 15) {
+        console.warn('[CRON] ' + sym + ' M1 has only ' + m1d.length + ' candles, ATR will be inaccurate');
+      }
+
       // ATR14 from M1
       let atr = 0;
       if (m1d.length >= 15) {
@@ -234,18 +247,56 @@ module.exports = async (req, res) => {
         else { const aP = Math.max(atr * 0.5, 0.0005); pips = [aP, aP*2, aP*3, aP*4]; }
         const fdp = fill > 100 ? 2 : 5;
         const slDist = cat === 'GOLD' ? 10 : Math.max(atr * 0.8, pips[0]);
-        const corr = {
-          positionId: ex.positionId, instrument: sym, direction: dec.decision, fillPrice: fill,
-          tp1: parseFloat((fill + sign * pips[0]).toFixed(fdp)),
-          tp2: parseFloat((fill + sign * pips[1]).toFixed(fdp)),
-          tp3: parseFloat((fill + sign * pips[2]).toFixed(fdp)),
-          tp4: parseFloat((fill + sign * pips[3]).toFixed(fdp)),
-          sl:  parseFloat((fill - sign * slDist).toFixed(fdp)),
-        };
-        await fetch(SELF_BASE + '/api/manage-trades', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ correctTPs: corr }),
-        }).catch(() => {});
+
+        // V9.3: Fetch current market price to verify the new SL won't be already
+        // breached (broker rejects modify with "validation failed" if SL is on
+        // wrong side of current price, which is what caused your TP correction failures).
+        let livePrice = null;
+        try {
+          const pr = await fetch(SELF_BASE + '/api/broker-price?symbol=' + encodeURIComponent(sym));
+          if (pr.ok) { const pd = await pr.json(); livePrice = pd.price; }
+        } catch (_) {}
+
+        const proposedSL = parseFloat((fill - sign * slDist).toFixed(fdp));
+
+        // If price already moved past where the new SL would be, skip the correction
+        // to avoid broker rejection. Broker SL/TP from execute.js stays in place.
+        let slSafe = true;
+        if (livePrice) {
+          if (dec.decision === 'LONG' && livePrice <= proposedSL) slSafe = false;
+          if (dec.decision === 'SHORT' && livePrice >= proposedSL) slSafe = false;
+        }
+
+        if (!slSafe) {
+          console.warn('[CRON] ' + sym + ' skipping TP correction -- live price ' + livePrice + ' already past proposed SL ' + proposedSL);
+          // Still store the ladder in Redis so manage-trades can track TPs,
+          // but don't try to modify broker SL.
+          const corr = {
+            positionId: ex.positionId, instrument: sym, direction: dec.decision, fillPrice: fill,
+            tp1: parseFloat((fill + sign * pips[0]).toFixed(fdp)),
+            tp2: parseFloat((fill + sign * pips[1]).toFixed(fdp)),
+            tp3: parseFloat((fill + sign * pips[2]).toFixed(fdp)),
+            tp4: parseFloat((fill + sign * pips[3]).toFixed(fdp)),
+            sl: null,  // skip SL modify
+          };
+          await fetch(SELF_BASE + '/api/manage-trades', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ correctTPs: corr }),
+          }).catch(() => {});
+        } else {
+          const corr = {
+            positionId: ex.positionId, instrument: sym, direction: dec.decision, fillPrice: fill,
+            tp1: parseFloat((fill + sign * pips[0]).toFixed(fdp)),
+            tp2: parseFloat((fill + sign * pips[1]).toFixed(fdp)),
+            tp3: parseFloat((fill + sign * pips[2]).toFixed(fdp)),
+            tp4: parseFloat((fill + sign * pips[3]).toFixed(fdp)),
+            sl:  proposedSL,
+          };
+          await fetch(SELF_BASE + '/api/manage-trades', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ correctTPs: corr }),
+          }).catch(() => {});
+        }
       }
     } catch (e) {
       console.error('[CRON] ' + sym + ' error: ' + e.message);

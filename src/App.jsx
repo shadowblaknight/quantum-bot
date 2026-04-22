@@ -803,19 +803,25 @@ export default function App() {
                 else if (cat==="CRYPTO") { const aP=Math.max(atr*0.5,50); pips=[aP,aP*2,aP*3,aP*4]; }
                 else { const aP=Math.max(atr*0.5,0.0005); pips=[aP,aP*2,aP*3,aP*4]; }
                 const fdp=fill>100?2:5; const slDist=cat==="GOLD"?10:Math.max(atr*0.8,pips[0]);
+                // V9.3: Check live price so we don't send a modify that the broker will reject
+                // ("validation failed" = SL on wrong side of current price).
+                const livePrice = prices[sym] || fill;
+                const proposedSL = parseFloat((fill-sign*slDist).toFixed(fdp));
+                let slToSend = proposedSL;
+                if (dec.decision === "LONG" && livePrice <= proposedSL) slToSend = null;
+                if (dec.decision === "SHORT" && livePrice >= proposedSL) slToSend = null;
                 const corr = { positionId: filled.id||filled.positionId, instrument: sym, direction: dec.decision, fillPrice: fill,
                   tp1: parseFloat((fill+sign*pips[0]).toFixed(fdp)), tp2: parseFloat((fill+sign*pips[1]).toFixed(fdp)),
                   tp3: parseFloat((fill+sign*pips[2]).toFixed(fdp)), tp4: parseFloat((fill+sign*pips[3]).toFixed(fdp)),
-                  sl: parseFloat((fill-sign*slDist).toFixed(fdp)) };
+                  sl: slToSend };
                 // V9.2: Store the corrected TP ladder in tpLadders, keyed by positionId.
-                // This is what the visualizer reads (NOT aiDecisions anymore).
                 const posId = filled.id || filled.positionId;
                 setTpLadders((p) => ({
                   ...p,
-                  [posId]: { tp1: corr.tp1, tp2: corr.tp2, tp3: corr.tp3, tp4: corr.tp4, sl: corr.sl, fillPrice: fill },
+                  [posId]: { tp1: corr.tp1, tp2: corr.tp2, tp3: corr.tp3, tp4: corr.tp4, sl: corr.sl || proposedSL, fillPrice: fill },
                 }));
                 await fetch(API("manage-trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ correctTPs: corr }) }).catch(() => {});
-                addLog(`TPs corrected from fill @ ${fill}`, "info");
+                addLog(slToSend ? `TPs corrected from fill @ ${fill}` : `TPs updated from fill @ ${fill} (SL modify skipped -- price already past proposed SL)`, "info");
               } catch (_) {}
             }, 3000);
             setTimeout(fetchPositions, 2000); setTimeout(fetchHistory, 5000);

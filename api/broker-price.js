@@ -1,10 +1,19 @@
 /* eslint-disable */
-// api/broker-price.js -- V9 dynamic symbol resolution
-// Tries the symbol as-typed first, then .s, .pro, then bare. Caches working suffix in Redis.
+// api/broker-price.js -- V9.3 dynamic symbol resolution + multi-region fallback
+// Tries London -> New York -> Singapore MetaAPI regions.
+// Caches both the working symbol AND the working region in Redis, so subsequent
+// calls skip the probing step and go straight to the right endpoint.
 
 const { Redis } = require('@upstash/redis');
 
 const safe = (v) => { if (v == null) return null; if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch (_) { return v; } };
+
+// MetaAPI trading region endpoints (same base as execute.js, different service path)
+const REGIONS = [
+  'https://mt-client-api-v1.london.agiliumtrade.ai',
+  'https://mt-client-api-v1.new-york.agiliumtrade.ai',
+  'https://mt-client-api-v1.singapore.agiliumtrade.ai',
+];
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -23,60 +32,66 @@ module.exports = async (req, res) => {
   const baseSym = rawSymbol.toUpperCase().replace('.S', '').replace('.PRO', '').trim();
   const candidates = [];
 
-  // Redis cache: which suffix worked last time for this symbol
   let redis = null;
+  let cachedRegion = null;
   try {
     if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
       redis = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
       const cached = safe(await redis.get('v9:sym:' + baseSym).catch(() => null));
       if (cached && typeof cached === 'string') candidates.push(cached);
+      // NOTE: broker-candles and broker-price use different services, so they may
+      // have different working regions. We use v9:region_price for this endpoint.
+      cachedRegion = safe(await redis.get('v9:region_price').catch(() => null));
     }
   } catch (_) {}
 
-  // Prefer exact user input first
   if (rawSymbol !== baseSym && !candidates.includes(rawSymbol)) candidates.unshift(rawSymbol);
-  // Fallbacks
   for (const s of [baseSym + '.s', baseSym + '.pro', baseSym + '.S', baseSym + '.PRO', baseSym]) {
     if (!candidates.includes(s)) candidates.push(s);
   }
 
+  const regionOrder = cachedRegion && REGIONS.includes(cachedRegion)
+    ? [cachedRegion, ...REGIONS.filter(r => r !== cachedRegion)]
+    : REGIONS;
+
   let lastErr = null;
-  for (const trySym of candidates) {
-    try {
-      const r = await fetch(
-        'https://mt-client-api-v1.london.agiliumtrade.ai/users/current/accounts/' + ACCOUNT_ID + '/symbols/' + encodeURIComponent(trySym) + '/current-price',
-        { headers: { 'auth-token': TOKEN } }
-      );
-      if (!r.ok) {
-        const text = await r.text().catch(() => '');
-        lastErr = (text || 'HTTP ' + r.status).slice(0, 200);
-        // Only retry on symbol-not-found errors
-        if (!/symbol|not.?found|invalid|unknown/i.test(lastErr)) break;
-        continue;
-      }
-      const data = await r.json();
-      const bid = Number(data.bid);
-      const ask = Number(data.ask);
-      if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
-        lastErr = 'Invalid price data';
-        continue;
-      }
+  let lastStatus = null;
+  for (const region of regionOrder) {
+    for (const trySym of candidates) {
+      try {
+        const r = await fetch(
+          region + '/users/current/accounts/' + ACCOUNT_ID + '/symbols/' + encodeURIComponent(trySym) + '/current-price',
+          { headers: { 'auth-token': TOKEN } }
+        );
+        lastStatus = r.status;
+        if (!r.ok) {
+          const text = await r.text().catch(() => '');
+          lastErr = (text || 'HTTP ' + r.status).slice(0, 200);
+          // 404 = wrong region or unknown symbol. Try next symbol; if all fail, outer loop tries next region.
+          if (r.status === 404) { break; } // break symbol loop -> next region
+          continue;
+        }
+        const data = await r.json();
+        const bid = Number(data.bid);
+        const ask = Number(data.ask);
+        if (!Number.isFinite(bid) || !Number.isFinite(ask)) { lastErr = 'Invalid price data'; continue; }
 
-      // Decimals: detect from price magnitude
-      const sample = (bid + ask) / 2;
-      let decimals;
-      if (sample > 1000) decimals = 2;
-      else if (sample > 10) decimals = 3;
-      else decimals = 5;
+        const sample = (bid + ask) / 2;
+        let decimals;
+        if (sample > 1000) decimals = 2;
+        else if (sample > 10) decimals = 3;
+        else decimals = 5;
+        const mid = parseFloat(((bid + ask) / 2).toFixed(decimals));
 
-      const mid = parseFloat(((bid + ask) / 2).toFixed(decimals));
-
-      // Cache the working symbol
-      if (redis) { try { await redis.set('v9:sym:' + baseSym, JSON.stringify(trySym)); } catch (_) {} }
-
-      return res.status(200).json({ price: mid, bid, ask, symbol: trySym, source: 'puprime', tried: candidates.indexOf(trySym) + 1 });
-    } catch (e) { lastErr = e.message; }
+        if (redis) {
+          try { await redis.set('v9:sym:' + baseSym, JSON.stringify(trySym)); } catch (_) {}
+          try { await redis.set('v9:region_price', JSON.stringify(region)); } catch (_) {}
+        }
+        return res.status(200).json({ price: mid, bid, ask, symbol: trySym, region, source: 'puprime' });
+      } catch (e) { lastErr = e.message; }
+    }
   }
 
-  return res.status(404).json({ error: lastErr || 'Symbol not found on broker', price: null, tried: candidates });
+  console.warn('[BROKER-PRICE] all regions + symbols failed for ' + rawSymbol + ': ' + lastErr);
+  return res.status(404).json({ error: lastErr || 'Symbol not found in any region', price: null, tried: candidates, regions: regionOrder, lastStatus });
 };

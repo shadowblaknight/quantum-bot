@@ -101,12 +101,26 @@ module.exports = async (req, res) => {
       AGGRESSIVE: { pct: 0.02,  maxLot: 0.50 },
     };
     const risk = RISK[riskMode || 'TEST'] || RISK.TEST;
-    const baseVol = Math.max(0.01, Math.min(risk.maxLot, parseFloat(((balance * risk.pct) / (atr * 100)).toFixed(2))));
+
+    // V9.3: Category-aware volume scaling.
+    // The old formula `(balance*pct) / (atr*100)` was designed for forex-pip math.
+    // It under-sized crypto (BTC atr ~300 -> volume 0.006 = 0.01 clamped)
+    // and gold (atr ~12 -> decent but not aggressive enough).
+    // Fix: use a base volume scaled to category realities, then clamp to maxLot.
+    //   CRYPTO  : base = maxLot * 0.4  (e.g. AGGRESSIVE -> 0.20 lots BTC)
+    //   GOLD    : base = maxLot * 0.6  (e.g. AGGRESSIVE -> 0.30 lots gold)
+    //   FOREX   : base = maxLot * 0.8  (e.g. AGGRESSIVE -> 0.40 lots forex)
+    //   Then loss/win streak adjusts the base.
+    const categoryBaseMult = isCrypto ? 0.4 : isGold ? 0.6 : 0.8;
+    const rawBase = risk.maxLot * categoryBaseMult;
+    const baseVol = Math.max(0.01, Math.min(risk.maxLot, parseFloat(rawBase.toFixed(2))));
     const lossAdj = lossStrk >= 4 ? 0.25 : lossStrk >= 3 ? 0.5 : lossStrk >= 2 ? 0.75 : 1.0;
     const winAdj  = winStrk  >= 5 ? 2.0  : winStrk  >= 3 ? 1.5 : winStrk  >= 2 ? 1.25 : 1.0;
     const fullVol = Math.max(0.01, Math.min(risk.maxLot, parseFloat((baseVol * lossAdj * winAdj).toFixed(2))));
     const sizingSmall = Math.max(0.01, parseFloat((fullVol * 0.5).toFixed(2)));
     const sizingLarge = Math.min(risk.maxLot, parseFloat((fullVol * 1.5).toFixed(2)));
+
+    console.log('[AI-SIZE] ' + sym + ' ' + (riskMode || 'TEST') + ' cat=' + category + ' base=' + baseVol + ' full=' + fullVol + ' small=' + sizingSmall + ' large=' + sizingLarge);
 
     // TP/SL targets (distances in price units) -- same as V9, no forced floors
     let tp;
