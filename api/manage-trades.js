@@ -85,7 +85,7 @@ module.exports = async (req, res) => {
   // ========================================================================
   if (action === 'telegram-test') {
     console.log('[TG-TEST] invoked');
-    const r = await tg('<b>Quantum Bot V9.3 -- Telegram test</b>\nIf you see this, Telegram is working.');
+    const r = await tg('✅ <b>Quantum Bot V9.4</b>\n\n<pre>Telegram connection test successful.\nNotifications are active.</pre>');
     return res.status(200).json({
       ok: r.ok, result: r,
       envCheck: {
@@ -180,7 +180,39 @@ module.exports = async (req, res) => {
     }
 
     const finalTP = tp4 || tp3 || tp2 || tp1;
-    const modResult = await modifyPosition(positionId, sl, finalTP, 'QB:FILL_CORRECT');
+
+    // V9.4: Check if broker already has acceptable SL/TP. If so, skip modify entirely
+    // (this fixes the false "TP correction FAILED" notifications when execute.js
+    // already set fine values and our recalculated values are basically identical).
+    let needsModify = true;
+    let brokerSL = null, brokerTP = null;
+    try {
+      const pr = await fetch(BASE + '/positions', { headers: HEADERS });
+      if (pr.ok) {
+        const posList = await pr.json().catch(() => []);
+        const pos = Array.isArray(posList) ? posList.find(p => String(p.id) === String(positionId)) : null;
+        if (pos) {
+          brokerSL = pos.stopLoss || null;
+          brokerTP = pos.takeProfit || null;
+          // Tolerance: within 0.5% = already correct
+          const within = (a, b) => {
+            if (!a || !b) return false;
+            return Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-6) < 0.005;
+          };
+          const slOK = sl == null || within(brokerSL, sl);
+          const tpOK = finalTP == null || within(brokerTP, finalTP);
+          if (slOK && tpOK) {
+            needsModify = false;
+            console.log('[CORRECT] positionId=' + positionId + ' broker already has acceptable SL/TP, skipping modify');
+          }
+        }
+      }
+    } catch (_) {}
+
+    let modResult = { ok: true, skipped: !needsModify };
+    if (needsModify) {
+      modResult = await modifyPosition(positionId, sl, finalTP, 'QB:FILL_CORRECT');
+    }
 
     const stateKey = 'v9:tp:' + positionId;
     const existing = safe(await redis.get(stateKey).catch(() => null)) || {};
@@ -191,17 +223,43 @@ module.exports = async (req, res) => {
       modifyError: modResult.ok ? null : (modResult.resp || modResult.error || 'unknown'),
     }), { ex: 86400 * 7 });
 
-    const tgMsg = modResult.ok
-      ? '<b>TPs corrected -- ' + (instrument || positionId) + '</b>\n' +
-        'Direction: ' + direction + '\nFill: ' + fillPrice.toFixed(priceDp(fillPrice)) + '\n' +
-        'SL: ' + (sl || 0).toFixed(priceDp(sl || 0)) + '\n' +
-        'TP1: ' + (tp1 || 0).toFixed(priceDp(tp1 || 0)) + ' | TP2: ' + (tp2 || 0).toFixed(priceDp(tp2 || 0)) + '\n' +
-        'TP3: ' + (tp3 || 0).toFixed(priceDp(tp3 || 0)) + ' | TP4: ' + (tp4 || 0).toFixed(priceDp(tp4 || 0))
-      : '<b>TP correction FAILED -- ' + (instrument || positionId) + '</b>\n' +
-        'Error: ' + (modResult.resp && modResult.resp.message ? modResult.resp.message : (modResult.error || 'unknown')) + '\n' +
-        'Broker still has original SL/TP.';
-    await tg(tgMsg);
-    return res.status(200).json({ corrected: modResult.ok, positionId, modifyResult: modResult });
+    // V9.4: Clean structured Telegram notification with ALL TPs shown
+    if (modResult.ok) {
+      const dp = priceDp(fillPrice);
+      const dir = direction || '?';
+      const icon = dir === 'LONG' ? '🟢' : '🔴';
+      const arrow = dir === 'LONG' ? '↑' : '↓';
+      const pad = (v, w = 10) => String(v).padStart(w);
+      const fmt = (v) => v != null ? Number(v).toFixed(dp) : '—';
+      const lines = [
+        icon + ' <b>' + dir + ' · ' + (instrument || positionId) + '</b>',
+        '',
+        '<pre>',
+        'Fill:  ' + pad(fmt(fillPrice)),
+        '──────────────────',
+        'SL:    ' + pad(fmt(sl)) + '  ' + arrow,
+        'TP1:   ' + pad(fmt(tp1)),
+        tp2 ? 'TP2:   ' + pad(fmt(tp2)) : null,
+        tp3 ? 'TP3:   ' + pad(fmt(tp3)) : null,
+        tp4 ? 'TP4:   ' + pad(fmt(tp4)) : null,
+        '</pre>',
+        modResult.skipped ? '<i>Levels already set by broker</i>' : '<i>Levels confirmed on broker</i>',
+      ].filter(Boolean);
+      await tg(lines.join('\n'));
+    } else {
+      // Real failure: show what went wrong
+      const errMsg = modResult.resp && modResult.resp.message ? modResult.resp.message : (modResult.error || 'unknown');
+      await tg(
+        '⚠️ <b>TP setup issue · ' + (instrument || positionId) + '</b>\n\n' +
+        '<pre>' +
+        'Error: ' + errMsg + '\n' +
+        (brokerSL ? 'Broker SL: ' + brokerSL.toFixed(priceDp(brokerSL)) + '\n' : '') +
+        (brokerTP ? 'Broker TP: ' + brokerTP.toFixed(priceDp(brokerTP)) + '\n' : '') +
+        '</pre>\n' +
+        '<i>Trade is still active with original broker SL/TP</i>'
+      );
+    }
+    return res.status(200).json({ corrected: modResult.ok, skipped: modResult.skipped, positionId, modifyResult: modResult });
   }
 
   // ========================================================================
@@ -260,7 +318,7 @@ module.exports = async (req, res) => {
         return r.ok;
       };
 
-      // Post-TP1 pre-TP2 retrace guard
+      // ---- POST-TP1 PRE-TP2 RETRACE GUARD ----
       if (state.tp1Hit && !state.tp2Hit && !state.tp1RetraceClose) {
         const retracing = profit <= d1 * 0.25 && profit > 0;
         if (retracing) {
@@ -271,12 +329,21 @@ module.exports = async (req, res) => {
             await modifySL(tightSL);
             result.actions.push({ type: 'TP1_RETRACE_PROTECT', volume: vol, price: currentPrice, pnl });
             await saveState(state);
-            await tg('<b>TP1 retrace protect -- ' + symbol + '</b>\nClosed next 30% @ ' + currentPrice.toFixed(dp) + '\nP&L: ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '\nSL tightened above entry');
+            await tg(
+              '⚠️ <b>Retrace protect · ' + symbol + '</b>\n\n' +
+              '<pre>' +
+              'Price retraced toward entry after TP1.\n' +
+              '──────────────────\n' +
+              'Closed:  30% @ ' + currentPrice.toFixed(dp) + '\n' +
+              'P&L:     ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2) + '\n' +
+              'SL:      tightened above entry' +
+              '</pre>'
+            );
           }
         }
       }
 
-      // TP2/TP3 retrace guard
+      // ---- TP2/TP3 retrace guard ----
       const retraceLevel = state.tp3Hit && !state.tp4Hit ? fTP3 : state.tp2Hit && !state.tp3Hit ? fTP2 : state.tp1Hit && !state.tp2Hit ? fTP1 : null;
       if (retraceLevel && state.tp1Hit) {
         const retraced = direction === 'LONG' ? currentPrice <= retraceLevel : currentPrice >= retraceLevel;
@@ -288,14 +355,22 @@ module.exports = async (req, res) => {
             result.actions.push({ type: 'RETRACE_CLOSE', price: currentPrice, pnl });
             state.tp4Hit = true;
             await redis.del(stateKey).catch(() => {});
-            await tg('<b>Retrace protected -- ' + symbol + '</b>\n' + lbl + ' was hit, price retraced.\nClosed remainder @ ' + currentPrice.toFixed(dp) + '\nP&L: ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2));
+            await tg(
+              '🛡️ <b>Retrace protected · ' + symbol + '</b>\n\n' +
+              '<pre>' +
+              lbl + ' was hit, price retraced to protection.\n' +
+              '──────────────────\n' +
+              'Closed:   remainder @ ' + currentPrice.toFixed(dp) + '\n' +
+              'P&L:      ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2) +
+              '</pre>'
+            );
           }
           if (result.actions.length) managed.push(result);
           continue;
         }
       }
 
-      // TP1
+      // ---- TP1 ----
       if (!state.tp1Hit && profit >= d1 * 0.95) {
         const { ok, vol, pnl } = await closePartial(0.4, 'QB:TP1');
         if (ok) {
@@ -304,7 +379,17 @@ module.exports = async (req, res) => {
           await modifySL(beLevel);
           result.actions.push({ type: 'TP1', volume: vol, price: currentPrice, pnl });
           await saveState(state);
-          await tg('<b>TP1 hit -- ' + symbol + '</b>\n' + direction + ' | 40% closed @ ' + currentPrice.toFixed(dp) + '\nP&L: +$' + pnl.toFixed(2) + '\nSL -> BE+ ' + beLevel.toFixed(priceDp(beLevel)) + '\n60% running');
+          await tg(
+            '🎯 <b>TP1 · ' + symbol + '</b>\n\n' +
+            '<pre>' +
+            direction + '\n' +
+            '──────────────────\n' +
+            'Closed:   40% @ ' + currentPrice.toFixed(dp) + '\n' +
+            'P&L:      +$' + pnl.toFixed(2) + '\n' +
+            'SL:       BE+ ' + beLevel.toFixed(priceDp(beLevel)) + '\n' +
+            'Running:  60%' +
+            '</pre>'
+          );
         }
       }
       else if (state.tp1Hit && !state.tp2Hit && d2 && profit >= d2 * 0.95) {
@@ -314,7 +399,17 @@ module.exports = async (req, res) => {
           if (fTP1) await modifySL(fTP1);
           result.actions.push({ type: 'TP2', volume: vol, price: currentPrice, pnl });
           await saveState(state);
-          await tg('<b>TP2 hit -- ' + symbol + '</b>\n' + direction + ' | 30% closed @ ' + currentPrice.toFixed(dp) + '\nP&L: +$' + pnl.toFixed(2) + '\nSL -> TP1 ' + (fTP1||0).toFixed(priceDp(fTP1||0)) + '\n30% running');
+          await tg(
+            '🎯 <b>TP2 · ' + symbol + '</b>\n\n' +
+            '<pre>' +
+            direction + '\n' +
+            '──────────────────\n' +
+            'Closed:   30% @ ' + currentPrice.toFixed(dp) + '\n' +
+            'P&L:      +$' + pnl.toFixed(2) + '\n' +
+            'SL:       TP1 ' + (fTP1||0).toFixed(priceDp(fTP1||0)) + '\n' +
+            'Running:  30%' +
+            '</pre>'
+          );
         }
       }
       else if (state.tp2Hit && !state.tp3Hit && d3 && profit >= d3 * 0.95) {
@@ -324,7 +419,17 @@ module.exports = async (req, res) => {
           if (fTP2) await modifySL(fTP2);
           result.actions.push({ type: 'TP3', volume: vol, price: currentPrice, pnl });
           await saveState(state);
-          await tg('<b>TP3 hit -- ' + symbol + '</b>\n' + direction + ' | 20% closed @ ' + currentPrice.toFixed(dp) + '\nP&L: +$' + pnl.toFixed(2) + '\nSL -> TP2 ' + (fTP2||0).toFixed(priceDp(fTP2||0)) + '\n10% runner');
+          await tg(
+            '🎯 <b>TP3 · ' + symbol + '</b>\n\n' +
+            '<pre>' +
+            direction + '\n' +
+            '──────────────────\n' +
+            'Closed:   20% @ ' + currentPrice.toFixed(dp) + '\n' +
+            'P&L:      +$' + pnl.toFixed(2) + '\n' +
+            'SL:       TP2 ' + (fTP2||0).toFixed(priceDp(fTP2||0)) + '\n' +
+            'Running:  10%' +
+            '</pre>'
+          );
         }
       }
       else if (state.tp3Hit && !state.tp4Hit && d4 && profit >= d4 * 0.95) {
@@ -334,7 +439,15 @@ module.exports = async (req, res) => {
           state.tp4Hit = true;
           result.actions.push({ type: 'TP4_FINAL', price: currentPrice, pnl });
           await redis.del(stateKey).catch(() => {});
-          await tg('<b>TP4 COMPLETE -- ' + symbol + '</b>\nAll targets hit.\nFinal 10% @ ' + currentPrice.toFixed(dp) + '\nP&L: +$' + pnl.toFixed(2));
+          await tg(
+            '🏆 <b>TP4 COMPLETE · ' + symbol + '</b>\n\n' +
+            '<pre>' +
+            'All targets achieved.\n' +
+            '──────────────────\n' +
+            'Final:   10% @ ' + currentPrice.toFixed(dp) + '\n' +
+            'P&L:     +$' + pnl.toFixed(2) +
+            '</pre>'
+          );
         }
       }
 

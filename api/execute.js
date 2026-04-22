@@ -177,13 +177,16 @@ module.exports = async (req, res) => {
   if (!success) {
     console.error('[EXECUTE] FAILED ' + direction + ' ' + instrument + ' err=' + lastErr + ' status=' + lastStatus + ' tried=', candidates);
     await tg(
-      '<b>Trade FAILED -- ' + instrument + '</b>\n' +
-      'Direction: ' + direction + '\n' +
-      'Volume: ' + safeVol + 'L\n' +
-      'Entry: ' + entryPrice + '\n' +
-      'SL: ' + sl + (tp ? '\nTP: ' + tp : '') + '\n' +
-      'Reason: ' + (lastErr || 'unknown') + '\n' +
-      'Status: ' + lastStatus
+      '❌ <b>Trade FAILED · ' + instrument + '</b>\n\n' +
+      '<pre>' +
+      'Direction:  ' + direction + '\n' +
+      'Volume:     ' + safeVol + 'L\n' +
+      'Entry:      ' + entryPrice + '\n' +
+      'SL:         ' + sl + (tp ? '\nTP:         ' + tp : '') + '\n' +
+      '──────────────────\n' +
+      'Reason:     ' + (lastErr || 'unknown').slice(0, 80) + '\n' +
+      'Status:     ' + lastStatus +
+      '</pre>'
     );
     return res.status(200).json({
       success:    false,
@@ -225,18 +228,19 @@ module.exports = async (req, res) => {
     } catch (e) { console.warn('[EXECUTE] VERIFY error ' + e.message); }
   }
 
-  // ---- Telegram: notify on open (direct from execute, not fragile 3s chain) ----
+  // ---- Telegram: brief notification on open. Full TP ladder shown after
+  // post-fill correction (see /api/manage-trades correctTPs). ----
   const dp = priceDp(entryPrice);
-  const slMark = verified.slSet ? 'OK' : 'NOT CONFIRMED';
-  const tpMark = tp ? (verified.tpSet ? 'OK' : 'NOT CONFIRMED') : '-';
+  const icon = direction === 'LONG' ? '🟢' : '🔴';
+  const strategy = (comment || '').replace('QB:', '') || 'V9';
   const tgResult = await tg(
-    '<b>' + direction + ' opened -- ' + (trySym || instrument) + '</b>\n' +
-    'Volume: ' + safeVol + 'L\n' +
-    'Entry (req): ' + entryPrice.toFixed(dp) +
-      (verified.fillPrice ? '\nFill (broker): ' + verified.fillPrice.toFixed(dp) : '') + '\n' +
-    'SL: ' + sl.toFixed(dp) + ' [' + slMark + ']' +
-      (tp ? '\nTP: ' + tp.toFixed(dp) + ' [' + tpMark + ']' : '') + '\n' +
-    'Strategy: ' + ((comment || '').replace('QB:', '') || 'V9')
+    icon + ' <b>' + direction + ' · ' + (trySym || instrument) + ' · ' + safeVol + 'L</b>\n\n' +
+    '<pre>' +
+    'Entry:  ' + entryPrice.toFixed(dp) +
+      (verified.fillPrice ? '\nFill:   ' + verified.fillPrice.toFixed(dp) : '') + '\n' +
+    'Strat:  ' + strategy.slice(0, 24) +
+    '</pre>\n' +
+    '<i>Placing TP ladder...</i>'
   );
   if (!tgResult.ok) {
     console.error('[EXECUTE] Telegram open notification FAILED: ' + JSON.stringify(tgResult));

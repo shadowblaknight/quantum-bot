@@ -602,7 +602,14 @@ export default function App() {
   const [nowStr,         setNowStr]         = useState("");
   const [newsEvents,     setNewsEvents]     = useState([]);
   const [tgStatus,       setTgStatus]       = useState(null);
-  const [tpLadders,      setTpLadders]      = useState({}); // { [positionId]: { tp1, tp2, tp3, tp4, sl, fillPrice } } -- our corrected TP ladder, stored locally for the visualizer
+  const [tpLadders,      setTpLadders]      = useState({});
+  // V9.4: Strategy Lab filters
+  const [labSort,        setLabSort]        = useState("winRate"); // winRate | trades | pnl | expectancy
+  const [labFilter,      setLabFilter]      = useState("all");      // all | winners | losers | tested | crown | blacklist
+  const [labMinTrades,   setLabMinTrades]   = useState(0);          // min trades threshold
+  const [labSearch,      setLabSearch]      = useState("");         // search text
+  const [labInstFilter,  setLabInstFilter]  = useState("all");      // all | <instrument>
+  const [labExpanded,    setLabExpanded]    = useState({});         // { [strat]: true/false }
 
   const lastAIRef    = useRef({});
   const lastTradeRef = useRef({});
@@ -1446,131 +1453,260 @@ export default function App() {
             );
           })()}
 
-          {/* ========== STRATEGY LAB ========== */}
+          {/* ========== STRATEGY LAB (V9.4 -- clean filterable) ========== */}
           {page === "lab" && (() => {
-            const labData = learnedStats||{};
-            const sorted  = Object.entries(labData).sort((a,b) => (b[1].total||0)-(a[1].total||0));
-            const labInst = [...new Set(sorted.flatMap(([,d]) => Object.keys(d.instruments||{})))].sort();
-            const totals  = sorted.reduce((acc,[,d]) => { acc.t+=d.total||0; acc.w+=d.totalWins||0; acc.l+=d.totalLosses||0; acc.pnl+=d.totalPnl||0; return acc; }, {t:0,w:0,l:0,pnl:0});
+            const labData = learnedStats || {};
+            const allEntries = Object.entries(labData);
+            const labInst = [...new Set(allEntries.flatMap(([, d]) => Object.keys(d.instruments || {})))].sort();
+
+            // Compute derived metrics for ranking
+            const enriched = allEntries.map(([strat, d]) => {
+              const total = d.total || 0;
+              const wins  = d.totalWins || 0;
+              const losses = d.totalLosses || 0;
+              const wr = total > 0 ? (wins / total) * 100 : null;
+              const pnl = d.totalPnl || 0;
+              const expectancy = total > 0 ? pnl / total : 0;
+              const bl = (blacklist || []).includes(strat);
+              const crowns = d.crowns || 0;
+              return { strat, d, total, wins, losses, wr, pnl, expectancy, bl, crowns };
+            });
+
+            // Apply filters
+            let filtered = enriched.filter((e) => {
+              if (labSearch && !e.strat.toLowerCase().includes(labSearch.toLowerCase())) return false;
+              if (labMinTrades > 0 && e.total < labMinTrades) return false;
+              if (labInstFilter !== "all") {
+                if (!e.d.instruments || !e.d.instruments[labInstFilter]) return false;
+              }
+              if (labFilter === "winners"    && (e.wr == null || e.wr < 55)) return false;
+              if (labFilter === "losers"     && (e.wr == null || e.wr >= 45)) return false;
+              if (labFilter === "tested"     && e.total < 10) return false;
+              if (labFilter === "crown"      && e.crowns < 1) return false;
+              if (labFilter === "blacklist"  && !e.bl) return false;
+              return true;
+            });
+
+            // Apply sort
+            filtered.sort((a, b) => {
+              if (labSort === "winRate")    return (b.wr || 0) - (a.wr || 0);
+              if (labSort === "trades")     return b.total - a.total;
+              if (labSort === "pnl")        return b.pnl - a.pnl;
+              if (labSort === "expectancy") return b.expectancy - a.expectancy;
+              return 0;
+            });
+
+            const totals = enriched.reduce((acc, e) => {
+              acc.t += e.total; acc.w += e.wins; acc.l += e.losses; acc.pnl += e.pnl;
+              return acc;
+            }, { t: 0, w: 0, l: 0, pnl: 0 });
+            const topCount = filtered.length;
+
             return (
               <div className="s14">
+                {/* ---- Summary row ---- */}
                 <div className="g4c">
                   {[
-                    ["Strategies",   sorted.length, "var(--blue)"],
-                    ["Total Trades", totals.t, "var(--text)"],
-                    ["Win Rate",     totals.t ? `${Math.round(totals.w/totals.t*100)}%` : "--", totals.t&&totals.w/totals.t>=0.55?"var(--green)":totals.t&&totals.w/totals.t>=0.45?"var(--gold)":"var(--red)"],
-                    ["Net P&L",      pnlStr(totals.pnl), pnlColor(totals.pnl)],
-                  ].map(([lbl,val,clr]) => (
-                    <div key={lbl} className="panel"><div className="pt">{lbl}</div><div style={{ fontSize:24,fontWeight:700,color:clr,letterSpacing:"-0.5px" }}>{val}</div></div>
+                    ["Strategies Total",  enriched.length, "var(--blue)"],
+                    ["Showing",           topCount, "var(--text)"],
+                    ["Overall Win Rate",  totals.t ? `${Math.round(totals.w / totals.t * 100)}%` : "--", totals.t && totals.w / totals.t >= 0.55 ? "var(--green)" : totals.t && totals.w / totals.t >= 0.45 ? "var(--gold)" : "var(--red)"],
+                    ["Net P&L",           pnlStr(totals.pnl), pnlColor(totals.pnl)],
+                  ].map(([lbl, val, clr]) => (
+                    <div key={lbl} className="panel">
+                      <div className="pt">{lbl}</div>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: clr, letterSpacing: "-0.5px" }}>{val}</div>
+                    </div>
                   ))}
                 </div>
-                {sorted.length === 0 ? (
+
+                {/* ---- Filter bar ---- */}
+                <div className="panel" style={{ padding: 14 }}>
+                  <div className="r g8" style={{ flexWrap: "wrap", alignItems: "center" }}>
+                    <input
+                      className="inp"
+                      placeholder="Search strategy name..."
+                      value={labSearch}
+                      onChange={(e) => setLabSearch(e.target.value)}
+                      style={{ flex: "1 1 200px", minWidth: 0 }}
+                    />
+                    <select className="inp" value={labFilter} onChange={(e) => setLabFilter(e.target.value)} style={{ flex: "0 0 auto" }}>
+                      <option value="all">All strategies</option>
+                      <option value="winners">Winners (≥55% WR)</option>
+                      <option value="losers">Losers (&lt;45% WR)</option>
+                      <option value="tested">Well-tested (≥10 trades)</option>
+                      <option value="crown">Crowned</option>
+                      <option value="blacklist">Blacklisted</option>
+                    </select>
+                    <select className="inp" value={labSort} onChange={(e) => setLabSort(e.target.value)} style={{ flex: "0 0 auto" }}>
+                      <option value="winRate">Sort: Win Rate</option>
+                      <option value="trades">Sort: # Trades</option>
+                      <option value="pnl">Sort: Total P&L</option>
+                      <option value="expectancy">Sort: Expectancy</option>
+                    </select>
+                    <select className="inp" value={labInstFilter} onChange={(e) => setLabInstFilter(e.target.value)} style={{ flex: "0 0 auto" }}>
+                      <option value="all">All instruments</option>
+                      {labInst.map((i) => <option key={i} value={i}>{i}</option>)}
+                    </select>
+                    <div className="r g4" style={{ alignItems: "center", flex: "0 0 auto" }}>
+                      <span className="xs mut">Min trades:</span>
+                      <input
+                        className="inp"
+                        type="number" min="0" max="999"
+                        value={labMinTrades}
+                        onChange={(e) => setLabMinTrades(parseInt(e.target.value) || 0)}
+                        style={{ width: 60, padding: "6px 8px" }}
+                      />
+                    </div>
+                    {(labSearch || labFilter !== "all" || labMinTrades > 0 || labInstFilter !== "all") && (
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => { setLabSearch(""); setLabFilter("all"); setLabMinTrades(0); setLabInstFilter("all"); }}
+                      >Clear</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* ---- Strategy list ---- */}
+                {filtered.length === 0 ? (
                   <div className="panel empty">
                     <div className="empty-ico">&#9651;</div>
-                    <div className="empty-title">Strategy Lab is Empty</div>
-                    <p className="xs mut mt6">Trade results will populate this automatically. Data persists forever (no TTL).</p>
+                    <div className="empty-title">
+                      {enriched.length === 0 ? "Strategy Lab is Empty" : "No strategies match filters"}
+                    </div>
+                    <p className="xs mut mt6">
+                      {enriched.length === 0
+                        ? "Trade results populate this automatically. Data persists forever."
+                        : "Adjust filters above to see more results."}
+                    </p>
                   </div>
                 ) : (
-                  sorted.map(([strat, data]) => {
-                    const bl = (blacklist||[]).includes(strat); const cr = data.crowns||0; const wr = data.overallWinRate;
-                    const leftColor = bl?"var(--purple)":cr>=3?"var(--gold)":cr>=2?"var(--blue)":cr>=1?"var(--green)":"var(--border2)";
-                    const wc = wr!=null ? (wr>=65?"var(--green)":wr>=50?"var(--gold)":"var(--red)") : "var(--text3)";
-                    const tpd = data.aggTpDistribution || {};
-                    const totalTp = (tpd.tp1Only||0)+(tpd.tp2Reached||0)+(tpd.tp3Reached||0)+(tpd.tp4Reached||0)+(tpd.slHit||0);
-                    return (
-                      <div key={strat} className="lc" style={{ borderLeftColor:leftColor, opacity:bl?0.7:1 }}>
-                        <div className="lc-head">
-                          <div style={{ flex:1,minWidth:0 }}>
-                            <div className="r g8 mb8" style={{ flexWrap:"wrap" }}>
-                              {cr>=1 && <span style={{ color:"var(--gold)",fontSize:13,fontWeight:700 }}>{"\u2605".repeat(Math.min(cr,3))}</span>}
-                              <span className="w7" style={{ fontSize:13.5,wordBreak:"break-word" }}>{strat}</span>
-                              {bl && <span className="bdg bdg-purple">Blacklisted</span>}
-                              {data.isLocked && <span className="bdg bdg-gold">Locked</span>}
-                              {(data.bannedOn||[]).length>0 && <span className="bdg bdg-red">Ban: {(data.bannedOn||[]).join(", ")}</span>}
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {filtered.map(({ strat, d, total, wins, losses, wr, pnl, expectancy, bl, crowns }, idx) => {
+                      const expanded = !!labExpanded[strat];
+                      const wc = wr != null ? (wr >= 65 ? "var(--green)" : wr >= 50 ? "var(--gold)" : "var(--red)") : "var(--text3)";
+                      const leftColor = bl ? "var(--purple)" : crowns >= 3 ? "var(--gold)" : crowns >= 2 ? "var(--blue)" : crowns >= 1 ? "var(--green)" : "var(--border2)";
+                      const tpd = d.aggTpDistribution || {};
+                      const totalTp = (tpd.tp1Only || 0) + (tpd.tp2Reached || 0) + (tpd.tp3Reached || 0) + (tpd.tp4Reached || 0) + (tpd.slHit || 0);
+                      return (
+                        <div
+                          key={strat}
+                          className="lc"
+                          style={{ borderLeftColor: leftColor, opacity: bl ? 0.65 : 1, padding: "12px 14px", cursor: "pointer" }}
+                          onClick={() => setLabExpanded((p) => ({ ...p, [strat]: !p[strat] }))}
+                        >
+                          {/* Compact row */}
+                          <div className="r" style={{ alignItems: "center", gap: 12 }}>
+                            <div style={{ minWidth: 32, textAlign: "center" }}>
+                              <div style={{ fontSize: 18, fontWeight: 700, color: "var(--mut)" }}>#{idx + 1}</div>
                             </div>
-                            <div className="r g10 sm sub" style={{ flexWrap: "wrap" }}>
-                              <span>{data.total||0} trades</span>
-                              <span style={{ color:"var(--green)" }}>{data.totalWins||0}W</span>
-                              <span style={{ color:"var(--red)" }}>{data.totalLosses||0}L</span>
-                              {wr!=null && <span className="w7" style={{ color:wc }}>{wr}% WR</span>}
-                              {data.totalPnl!=null && <span className="w7 tn" style={{ color:pnlColor(data.totalPnl) }}>{pnlStr(data.totalPnl)}</span>}
-                            </div>
-                          </div>
-                          {wr!=null && (
-                            <div style={{ width:50,height:50,borderRadius:"50%",flexShrink:0,border:`3px solid ${wc}`,display:"flex",alignItems:"center",justifyContent:"center" }}>
-                              <span style={{ fontSize:12,fontWeight:800,color:wc }}>{wr}%</span>
-                            </div>
-                          )}
-                        </div>
 
-                        <div className="lc-body">
-                          {totalTp > 0 && (
-                            <div style={{ marginBottom:12 }}>
-                              <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>TP Distribution</div>
-                              <div className="tpd-bar">
-                                {[
-                                  ["tp4Reached", "#15803d", "TP4"],
-                                  ["tp3Reached", "#22c55e", "TP3"],
-                                  ["tp2Reached", "#84cc16", "TP2"],
-                                  ["tp1Only", "#b45309", "TP1 only"],
-                                  ["slHit", "#b91c1c", "SL"],
-                                ].map(([k, c, l]) => {
-                                  const v = tpd[k] || 0;
-                                  if (v === 0) return null;
-                                  const pct = (v / totalTp) * 100;
-                                  return <div key={k} className="tpd-seg" style={{ width: `${pct}%`, background: c }} title={`${l}: ${v} (${pct.toFixed(0)}%)`} />;
-                                })}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div className="r g6" style={{ flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
+                                {crowns >= 1 && <span style={{ color: "var(--gold)", fontSize: 12 }}>{"★".repeat(Math.min(crowns, 3))}</span>}
+                                <span className="w7" style={{ fontSize: 14, wordBreak: "break-word" }}>{strat}</span>
+                                {bl && <span className="bdg bdg-purple" style={{ fontSize: 9 }}>BLACKLIST</span>}
+                                {d.isLocked && <span className="bdg bdg-gold" style={{ fontSize: 9 }}>LOCKED</span>}
                               </div>
-                              <div className="r g10 mt6 xs sub" style={{ flexWrap: "wrap" }}>
-                                {tpd.tp4Reached > 0 && <span><span style={{color:"#15803d"}}>&#9632;</span> TP4 {tpd.tp4Reached}</span>}
-                                {tpd.tp3Reached > 0 && <span><span style={{color:"#22c55e"}}>&#9632;</span> TP3 {tpd.tp3Reached}</span>}
-                                {tpd.tp2Reached > 0 && <span><span style={{color:"#84cc16"}}>&#9632;</span> TP2 {tpd.tp2Reached}</span>}
-                                {tpd.tp1Only > 0 && <span><span style={{color:"#b45309"}}>&#9632;</span> TP1 only {tpd.tp1Only}</span>}
-                                {tpd.slHit > 0 && <span><span style={{color:"#b91c1c"}}>&#9632;</span> SL {tpd.slHit}</span>}
+                              <div className="r g10 xs sub" style={{ flexWrap: "wrap" }}>
+                                <span>{total} trades</span>
+                                <span style={{ color: "var(--green)" }}>{wins}W</span>
+                                <span style={{ color: "var(--red)" }}>{losses}L</span>
+                                <span className="w7 tn" style={{ color: pnlColor(pnl) }}>{pnlStr(pnl)}</span>
+                                <span className="xs mut">E: ${expectancy.toFixed(2)}</span>
                               </div>
                             </div>
-                          )}
-                          {data.failureNote && <div className="fail-note">Why it fails: {data.failureNote}</div>}
-                          {labInst.length > 0 && (
-                            <div className="mt12">
-                              <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Per-Instrument Breakdown</div>
-                              <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.min(labInst.length,5)}, 1fr)`, gap:8 }}>
-                                {labInst.map((inst) => {
-                                  const d = (data.instruments||{})[inst];
-                                  const ic = d&&d.crown?"var(--green)":d&&d.banned?"var(--red)":"var(--border2)";
-                                  return (
-                                    <div key={inst} className="lic" style={{ borderColor:ic, opacity:d?1:0.4 }}>
-                                      <div className="r g6 mb6" style={{ justifyContent:"space-between" }}>
-                                        <span className="xs w7 sub">{inst}</span>
-                                        {d&&d.crown  && <span className="bdg bdg-gold" style={{ fontSize:8 }}>Crown</span>}
-                                        {d&&d.banned && <span className="bdg bdg-red"  style={{ fontSize:8 }}>Ban</span>}
-                                      </div>
-                                      {d ? (
-                                        <>
-                                          <div className="r g6 xs">
-                                            <span style={{ color:"var(--green)" }}>{d.wins}W</span>
-                                            <span style={{ color:"var(--red)" }}>{d.losses}L</span>
+
+                            <div style={{
+                              width: 54, height: 54, borderRadius: "50%", flexShrink: 0,
+                              border: `3px solid ${wc}`, display: "flex", alignItems: "center", justifyContent: "center",
+                            }}>
+                              <span style={{ fontSize: 13, fontWeight: 800, color: wc }}>{wr != null ? `${Math.round(wr)}%` : "--"}</span>
+                            </div>
+
+                            <div style={{ color: "var(--mut)", fontSize: 16, flexShrink: 0 }}>{expanded ? "▾" : "▸"}</div>
+                          </div>
+
+                          {/* Expanded: TP distribution + per-instrument */}
+                          {expanded && (
+                            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
+                              {totalTp > 0 && (
+                                <div style={{ marginBottom: 14 }}>
+                                  <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Outcome Distribution</div>
+                                  <div className="tpd-bar">
+                                    {[
+                                      ["tp4Reached", "#15803d", "TP4"],
+                                      ["tp3Reached", "#22c55e", "TP3"],
+                                      ["tp2Reached", "#84cc16", "TP2"],
+                                      ["tp1Only",    "#b45309", "TP1"],
+                                      ["slHit",      "#b91c1c", "SL"],
+                                    ].map(([k, c, l]) => {
+                                      const v = tpd[k] || 0;
+                                      if (v === 0) return null;
+                                      const pct = (v / totalTp) * 100;
+                                      return <div key={k} className="tpd-seg" style={{ width: `${pct}%`, background: c }} title={`${l}: ${v} (${pct.toFixed(0)}%)`} />;
+                                    })}
+                                  </div>
+                                  <div className="r g12 mt8 xs sub" style={{ flexWrap: "wrap" }}>
+                                    {tpd.tp4Reached > 0 && <span><span style={{ color: "#15803d" }}>■</span> TP4 {tpd.tp4Reached} ({Math.round(tpd.tp4Reached / totalTp * 100)}%)</span>}
+                                    {tpd.tp3Reached > 0 && <span><span style={{ color: "#22c55e" }}>■</span> TP3 {tpd.tp3Reached} ({Math.round(tpd.tp3Reached / totalTp * 100)}%)</span>}
+                                    {tpd.tp2Reached > 0 && <span><span style={{ color: "#84cc16" }}>■</span> TP2 {tpd.tp2Reached} ({Math.round(tpd.tp2Reached / totalTp * 100)}%)</span>}
+                                    {tpd.tp1Only    > 0 && <span><span style={{ color: "#b45309" }}>■</span> TP1 only {tpd.tp1Only} ({Math.round(tpd.tp1Only / totalTp * 100)}%)</span>}
+                                    {tpd.slHit      > 0 && <span><span style={{ color: "#b91c1c" }}>■</span> SL {tpd.slHit} ({Math.round(tpd.slHit / totalTp * 100)}%)</span>}
+                                  </div>
+                                </div>
+                              )}
+
+                              {d.failureNote && (
+                                <div className="fail-note" style={{ marginBottom: 12 }}>
+                                  <b>Why it fails:</b> {d.failureNote}
+                                </div>
+                              )}
+
+                              {labInst.length > 0 && (
+                                <div>
+                                  <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Per-Instrument Performance</div>
+                                  <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(130px, 1fr))`, gap: 8 }}>
+                                    {labInst.map((inst) => {
+                                      const di = (d.instruments || {})[inst];
+                                      const ic = di && di.crown ? "var(--green)" : di && di.banned ? "var(--red)" : "var(--border2)";
+                                      return (
+                                        <div key={inst} className="lic" style={{ borderColor: ic, opacity: di ? 1 : 0.35, padding: 8 }}>
+                                          <div className="r g4" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                                            <span className="xs w7 sub">{inst}</span>
+                                            <div className="r g4">
+                                              {di && di.crown  && <span className="bdg bdg-gold" style={{ fontSize: 8, padding: "1px 5px" }}>★</span>}
+                                              {di && di.banned && <span className="bdg bdg-red"  style={{ fontSize: 8, padding: "1px 5px" }}>BAN</span>}
+                                            </div>
                                           </div>
-                                          {d.winRate!=null && (
+                                          {di ? (
                                             <>
-                                              <div className="wrb mt6"><div className="wrf" style={{ width:`${d.winRate}%`,background:d.winRate>=65?"var(--green)":d.winRate>=50?"var(--gold)":"var(--red)" }} /></div>
-                                              <div className="mt4 xs mut">{d.winRate}% &middot; {d.avgPnl!=null ? `${d.avgPnl>=0?"+":""}$${d.avgPnl}` : ""}</div>
+                                              <div className="r g6 xs" style={{ marginBottom: 4 }}>
+                                                <span style={{ color: "var(--green)" }}>{di.wins}W</span>
+                                                <span style={{ color: "var(--red)" }}>{di.losses}L</span>
+                                                <span className="mut">{di.total}T</span>
+                                              </div>
+                                              {di.winRate != null && (
+                                                <>
+                                                  <div className="wrb"><div className="wrf" style={{ width: `${di.winRate}%`, background: di.winRate >= 65 ? "var(--green)" : di.winRate >= 50 ? "var(--gold)" : "var(--red)" }} /></div>
+                                                  <div className="mt4 xs mut">{di.winRate}% · {di.avgPnl != null ? `${di.avgPnl >= 0 ? "+" : ""}$${di.avgPnl}` : ""}</div>
+                                                </>
+                                              )}
                                             </>
+                                          ) : (
+                                            <div className="xs mut">Not tested</div>
                                           )}
-                                        </>
-                                      ) : (
-                                        <div className="xs mut">Not tested</div>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
-                      </div>
-                    );
-                  })
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             );
