@@ -355,30 +355,57 @@ const CSS = `
 const NAV = [
   { id: "live",     icon: "\u25CF", label: "Live Trade"   },
   { id: "trades",   icon: "\u25B6", label: "Active Trades" },
+  { id: "news",     icon: "\u26A0", label: "News"         },
   { id: "reports",  icon: "\u2630", label: "Reports"      },
   { id: "lab",      icon: "\u25C6", label: "Strategy Lab" },
   { id: "settings", icon: "\u2699", label: "Settings"     },
 ];
 
+// Map news country code -> instruments in user's watchlist affected by this currency
+const newsAffects = (country, userInstruments) => {
+  const c = (country || '').toUpperCase();
+  return (userInstruments || []).filter((sym) => {
+    const u = sym.toUpperCase();
+    if (c === 'USD') {
+      if (u.includes('XAU') || u.includes('GOLD')) return true;
+      if (u.includes('BTC') || u.includes('ETH')) return true;
+      if (u.includes('US30') || u.includes('NAS') || u.includes('SPX')) return true;
+      return u.includes('USD');
+    }
+    return u.includes(c);
+  });
+};
+
 // ============================================================
 // TRADE VISUALIZER COMPONENT
 // ============================================================
-function TradeVisualizer({ pos, dec, fmtPrice }) {
+function TradeVisualizer({ pos, dec, tpState, fmtPrice }) {
+  // BROKER-CONFIRMED VALUES ONLY (V9.2 fix: no AI fallback)
+  // - SL comes from broker position (pos.stopLoss)
+  // - TPs come from: broker takeProfit (single) + Redis-stored ladder (tpState)
+  // - AI dec is used ONLY for the strategy label display, never for price levels
   const dir = pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT";
   const entry  = pos.openPrice;
   const cur    = pos.currentPrice;
-  const sl     = pos.stopLoss || dec?.stopLoss;
-  const tp1    = dec?.takeProfit1;
-  const tp2    = dec?.takeProfit2;
-  const tp3    = dec?.takeProfit3;
-  const tp4    = dec?.takeProfit4;
+  const sl     = pos.stopLoss;                 // broker only
+  const tp1    = tpState?.tp1;                 // Redis-stored ladder
+  const tp2    = tpState?.tp2;
+  const tp3    = tpState?.tp3;
+  const tp4    = tpState?.tp4;
 
+  // Not yet protected: broker doesn't have SL, or Redis ladder not written yet
   if (!entry || !cur || !sl || !tp1) {
     return (
       <div className="trade-viz">
         <div className="tv-head">
-          <span className="tv-title">{normSym(pos.symbol)} {dir}</span>
-          <span className="tv-meta sub">Awaiting TP correction...</span>
+          <div className="r g10">
+            <span className="tv-title">{normSym(pos.symbol)}</span>
+            <span className={`bdg bdg-${dir.toLowerCase()}`}>{dir}</span>
+            <span className="sub xs">{pos.volume}L</span>
+          </div>
+          <span className="tv-meta sub" style={{ color: "var(--red)" }}>
+            {!sl ? "BROKER HAS NO SL -- UNPROTECTED" : "Awaiting TP ladder..."}
+          </span>
         </div>
       </div>
     );
@@ -573,6 +600,9 @@ export default function App() {
   const [sessionInfo,    setSessionInfo]    = useState(getSessionInfo());
   const [newSymInput,    setNewSymInput]    = useState("");
   const [nowStr,         setNowStr]         = useState("");
+  const [newsEvents,     setNewsEvents]     = useState([]);
+  const [tgStatus,       setTgStatus]       = useState(null);
+  const [tpLadders,      setTpLadders]      = useState({}); // { [positionId]: { tp1, tp2, tp3, tp4, sl, fillPrice } } -- our corrected TP ladder, stored locally for the visualizer
 
   const lastAIRef    = useRef({});
   const lastTradeRef = useRef({});
@@ -611,6 +641,23 @@ export default function App() {
     try { const r = await fetch(API("trades")); if (r.ok) { const d = await r.json(); setLearnedStats(d.lab || {}); setCrownLocks(d.crownLocks || {}); setBlacklist(d.blacklist || []); } } catch (_) {}
   }, []);
 
+  const fetchNews = useCallback(async () => {
+    try { const r = await fetch(API("news?impact=medium&window=week")); if (r.ok) { const d = await r.json(); setNewsEvents(Array.isArray(d.events) ? d.events : []); } } catch (_) {}
+  }, []);
+
+  const testTelegram = useCallback(async () => {
+    setTgStatus({ loading: true });
+    try {
+      const r = await fetch(API("telegram-test"));
+      const d = await r.json();
+      setTgStatus(d);
+      addLog(d.ok ? "Telegram test sent successfully" : `Telegram test failed: ${d.error || 'unknown'}`, d.ok ? "success" : "error");
+    } catch (e) {
+      setTgStatus({ ok: false, error: e.message });
+      addLog(`Telegram test error: ${e.message}`, "error");
+    }
+  }, [addLog]);
+
   const recordResult = useCallback(async (pos, fallbackDec, session) => {
     const comment  = pos.comment || pos.tradeComment || "";
     const strategy = (comment.startsWith("QB:") ? comment.slice(3).trim() : null) || fallbackDec?.strategy || null;
@@ -630,6 +677,39 @@ export default function App() {
     const cur  = openPositions;
     prev.filter((p) => !cur.find((c) => (c.id || c.positionId) === (p.id || p.positionId))).forEach((closed) => { const sym = normSym(closed.symbol); recordResult(closed, aiDecisions[sym] || null, sessionInfo.session); });
     prevPosRef.current = cur;
+
+    // V9.2: Backfill tpLadders for positions that exist on broker but have no local ladder
+    // (app reload, position opened outside session, etc). Use broker SL as tp1 reference so
+    // management can at least track retraces against real broker-stored values.
+    setTpLadders((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      // Backfill
+      cur.forEach((pos) => {
+        const posId = pos.id || pos.positionId;
+        if (!posId || next[posId]) return;
+        if (pos.stopLoss && pos.takeProfit && pos.openPrice) {
+          const sign = pos.type === "POSITION_TYPE_BUY" ? 1 : -1;
+          const tp1Dist = Math.abs(pos.takeProfit - pos.openPrice);
+          next[posId] = {
+            sl: pos.stopLoss,
+            tp1: pos.openPrice + sign * tp1Dist * 0.25,
+            tp2: pos.openPrice + sign * tp1Dist * 0.50,
+            tp3: pos.openPrice + sign * tp1Dist * 0.75,
+            tp4: pos.takeProfit,
+            fillPrice: pos.openPrice,
+            backfilled: true,
+          };
+          changed = true;
+        }
+      });
+      // Cleanup ladders for positions no longer open
+      const curIds = new Set(cur.map((p) => p.id || p.positionId).filter(Boolean));
+      Object.keys(next).forEach((posId) => {
+        if (!curIds.has(posId) && !curIds.has(Number(posId))) { delete next[posId]; changed = true; }
+      });
+      return changed ? next : prev;
+    });
   }, [openPositions, aiDecisions, sessionInfo.session, recordResult]);
 
   const runAIBrain = useCallback(async (sym) => {
@@ -681,8 +761,22 @@ export default function App() {
       if (dec.decision !== "WAIT" && dec.volume && dec.stopLoss && dec.takeProfit1) {
         if (Date.now() - (lastTradeRef.current[sym]||0) < 600000) { addLog(`${sym}: cooldown -- skipping`, "warn"); return; }
         if (openPositions.some((p) => normSym(p.symbol) === sym)) { addLog(`${sym}: position already open -- skipping`, "warn"); return; }
+
+        // Validate SL/TP direction (catch AI errors that would silently fail)
+        const curPrice = prices[sym];
+        if (curPrice) {
+          if (dec.decision === "LONG" && (dec.stopLoss >= curPrice || dec.takeProfit1 <= curPrice)) {
+            addLog(`${sym}: LONG but SL/TP wrong side -- SL ${dec.stopLoss} TP1 ${dec.takeProfit1} price ${curPrice}. Skipped.`, "error");
+            return;
+          }
+          if (dec.decision === "SHORT" && (dec.stopLoss <= curPrice || dec.takeProfit1 >= curPrice)) {
+            addLog(`${sym}: SHORT but SL/TP wrong side -- SL ${dec.stopLoss} TP1 ${dec.takeProfit1} price ${curPrice}. Skipped.`, "error");
+            return;
+          }
+        }
+
         pendingRef.current[sym] = true;
-        addLog(`Executing ${sym} ${dec.decision} ${dec.volume}L [${dec.strategy}]`, "signal");
+        addLog(`Executing ${sym} ${dec.decision} ${dec.volume}L SL=${fl(dec.stopLoss)} TP=${fl(dec.takeProfit4||dec.takeProfit1)} [${dec.strategy}]`, "signal");
         try {
           const strategy = dec.strategy || "V9";
           const ex = await fetch(API("execute"), { method: "POST", headers: { "Content-Type": "application/json" },
@@ -706,17 +800,23 @@ export default function App() {
                   tp1: parseFloat((fill+sign*pips[0]).toFixed(fdp)), tp2: parseFloat((fill+sign*pips[1]).toFixed(fdp)),
                   tp3: parseFloat((fill+sign*pips[2]).toFixed(fdp)), tp4: parseFloat((fill+sign*pips[3]).toFixed(fdp)),
                   sl: parseFloat((fill-sign*slDist).toFixed(fdp)) };
-                // Update the AI decision with the corrected TPs so the visualizer can use them
-                setAiDecisions((p) => ({
+                // V9.2: Store the corrected TP ladder in tpLadders, keyed by positionId.
+                // This is what the visualizer reads (NOT aiDecisions anymore).
+                const posId = filled.id || filled.positionId;
+                setTpLadders((p) => ({
                   ...p,
-                  [sym]: { ...(p[sym] || {}), takeProfit1: corr.tp1, takeProfit2: corr.tp2, takeProfit3: corr.tp3, takeProfit4: corr.tp4, stopLoss: corr.sl, fillPrice: fill },
+                  [posId]: { tp1: corr.tp1, tp2: corr.tp2, tp3: corr.tp3, tp4: corr.tp4, sl: corr.sl, fillPrice: fill },
                 }));
                 await fetch(API("manage-trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ correctTPs: corr }) }).catch(() => {});
                 addLog(`TPs corrected from fill @ ${fill}`, "info");
               } catch (_) {}
             }, 3000);
             setTimeout(fetchPositions, 2000); setTimeout(fetchHistory, 5000);
-          } else { addLog(`Execute failed ${sym}: ${ed.error||"unknown"}`, "error"); }
+          } else {
+            const errMsg = ed.error || "unknown";
+            const broker = ed.brokerResp ? ` [broker: ${JSON.stringify(ed.brokerResp).slice(0,120)}]` : "";
+            addLog(`Execute failed ${sym} ${dec.decision}: ${errMsg}${broker}`, "error");
+          }
         } finally { pendingRef.current[sym] = false; }
       }
     } catch (e) { setAiStatus((p) => ({ ...p, [sym]: "error" })); addLog(`Brain error ${sym}: ${e.message}`, "error"); }
@@ -724,10 +824,25 @@ export default function App() {
 
   const manageTrades = useCallback(async () => {
     if (!openPositions.length) return;
+    // V9.2: TP ladder comes from tpLadders (set at execute time, broker-truth aligned),
+    // NOT from aiDecisions (which is the AI plan, not the actual trade).
     const positions = openPositions.map((pos) => {
-      const sym = normSym(pos.symbol); const dec = aiDecisions[sym];
-      if (!dec || !dec.takeProfit1) return null;
-      return { id: pos.id||pos.positionId, symbol: pos.symbol, openPrice: pos.openPrice, currentPrice: pos.currentPrice, stopLoss: pos.stopLoss, volume: pos.volume, direction: pos.type==="POSITION_TYPE_BUY"?"LONG":"SHORT", tp1: dec.takeProfit1, tp2: dec.takeProfit2||null, tp3: dec.takeProfit3||null, tp4: dec.takeProfit4||null };
+      const posId = pos.id || pos.positionId;
+      const ladder = tpLadders[posId];
+      if (!ladder || !ladder.tp1) return null;
+      return {
+        id: posId,
+        symbol: pos.symbol,
+        openPrice: pos.openPrice,
+        currentPrice: pos.currentPrice,
+        stopLoss: pos.stopLoss,
+        volume: pos.volume,
+        direction: pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT",
+        tp1: ladder.tp1,
+        tp2: ladder.tp2 || null,
+        tp3: ladder.tp3 || null,
+        tp4: ladder.tp4 || null,
+      };
     }).filter(Boolean);
     if (!positions.length) return;
     try {
@@ -744,19 +859,20 @@ export default function App() {
         });
       });
     } catch (_) {}
-  }, [openPositions, aiDecisions, addLog]);
+  }, [openPositions, tpLadders, addLog]);
 
   useEffect(() => {
-    fetchAccount(); fetchPositions(); fetchHistory(); fetchLab();
+    fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
     instruments.forEach((sym) => fetchPrice(sym));
     const ii = [
       setInterval(fetchAccount, 30000), setInterval(fetchPositions, 5000),
       setInterval(fetchHistory, 30000), setInterval(fetchLab, 300000),
+      setInterval(fetchNews, 1800000),
       setInterval(() => setSessionInfo(getSessionInfo()), 60000),
     ];
     instruments.forEach((sym) => { ii.push(setInterval(() => fetchPrice(sym), 5000)); });
     return () => ii.forEach(clearInterval);
-  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchPrice, instruments]);
+  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, instruments]);
 
   useEffect(() => {
     if (!openPositions.length) return;
@@ -940,7 +1056,9 @@ export default function App() {
                   {enrichedPositions.length > 0 && enrichedPositions.map((pos, i) => {
                     const sym = normSym(pos.symbol);
                     const dec = aiDecisions[sym];
-                    return <TradeVisualizer key={pos.id || pos.positionId || i} pos={pos} dec={dec} fmtPrice={fl} />;
+                    const posId = pos.id || pos.positionId;
+                    const tpState = tpLadders[posId];
+                    return <TradeVisualizer key={posId || i} pos={pos} dec={dec} tpState={tpState} fmtPrice={fl} />;
                   })}
 
                   {/* Instrument cards */}
@@ -1104,11 +1222,134 @@ export default function App() {
                 enrichedPositions.map((pos, i) => {
                   const sym = normSym(pos.symbol);
                   const dec = aiDecisions[sym];
-                  return <TradeVisualizer key={pos.id || pos.positionId || i} pos={pos} dec={dec} fmtPrice={fl} />;
+                  const posId = pos.id || pos.positionId;
+                  const tpState = tpLadders[posId];
+                  return <TradeVisualizer key={posId || i} pos={pos} dec={dec} tpState={tpState} fmtPrice={fl} />;
                 })
               )}
             </div>
           )}
+
+          {/* ========== NEWS ========== */}
+          {page === "news" && (() => {
+            const now = Date.now();
+            const hi  = newsEvents.filter((e) => e.impact === "High");
+            const med = newsEvents.filter((e) => e.impact === "Medium");
+            const nextHi = hi.filter((e) => !e.isPast).slice(0, 1)[0];
+
+            // Events affecting user's instruments within next 2 hours
+            const affecting = hi.filter((e) => {
+              if (e.isPast) return false;
+              if (e.minutesFromNow > 120) return false;
+              return newsAffects(e.country, instruments).length > 0;
+            });
+
+            // Group by day
+            const byDay = {};
+            newsEvents.forEach((e) => {
+              const d = new Date(e.ts);
+              const key = d.toUTCString().slice(0, 16);
+              if (!byDay[key]) byDay[key] = [];
+              byDay[key].push(e);
+            });
+
+            return (
+              <div className="s14">
+                {/* Summary cards */}
+                <div className="g4c">
+                  <div className="panel">
+                    <div className="pt">High Impact Today</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: "var(--red)" }}>{hi.filter((e) => !e.isPast && e.minutesFromNow < 24 * 60).length}</div>
+                  </div>
+                  <div className="panel">
+                    <div className="pt">Medium Impact Today</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: "var(--gold)" }}>{med.filter((e) => !e.isPast && e.minutesFromNow < 24 * 60).length}</div>
+                  </div>
+                  <div className="panel">
+                    <div className="pt">Next High-Impact</div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", lineHeight: 1.3 }}>
+                      {nextHi ? `${nextHi.country} in ${nextHi.minutesFromNow} min` : "None upcoming"}
+                    </div>
+                    {nextHi && <div className="xs mut mt4">{nextHi.title}</div>}
+                  </div>
+                  <div className="panel">
+                    <div className="pt">Your Instruments Affected</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: affecting.length ? "var(--red)" : "var(--green)" }}>{affecting.length}</div>
+                    <div className="xs mut mt4">in next 2 hours</div>
+                  </div>
+                </div>
+
+                {/* AI blocking preview */}
+                {affecting.length > 0 && (
+                  <div className="panel" style={{ borderLeft: "4px solid var(--red)" }}>
+                    <div className="pt">AI Trade Blocks (next 2 hours)</div>
+                    <p className="xs sub mt4 mb12">The AI will refuse to trade these instruments within +/- 15 min of the listed events:</p>
+                    {affecting.map((e, i) => {
+                      const blocked = newsAffects(e.country, instruments);
+                      return (
+                        <div key={i} className="srow">
+                          <span className="bdg bdg-red" style={{ marginRight: 8 }}>HIGH</span>
+                          <span className="w7 sm" style={{ color: "var(--text)" }}>{e.country}</span>
+                          <span className="sm sub" style={{ flex: 1, marginLeft: 8 }}>{e.title}</span>
+                          <span className="xs mut tn">in {e.minutesFromNow} min</span>
+                          <span className="ml">
+                            {blocked.map((sym) => (
+                              <span key={sym} className="bdg bdg-purple" style={{ marginLeft: 4 }}>{sym}</span>
+                            ))}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Full calendar */}
+                <div className="panel">
+                  <div className="r g8 mb14" style={{ justifyContent: "space-between" }}>
+                    <div className="pt pt0">Economic Calendar (ForexFactory)</div>
+                    <button className="btn btn-g btn-sm" onClick={fetchNews}>Refresh</button>
+                  </div>
+                  {newsEvents.length === 0 ? (
+                    <div style={{ padding: "16px 0", textAlign: "center", color: "var(--text3)", fontSize: 12 }}>Loading events...</div>
+                  ) : (
+                    Object.entries(byDay).map(([day, evs]) => (
+                      <div key={day} style={{ marginBottom: 16 }}>
+                        <div className="sm w7 sub mb8" style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>{day}</div>
+                        {evs.map((e, i) => {
+                          const affected = newsAffects(e.country, instruments);
+                          const impactClr = e.impact === "High" ? "#b91c1c" : e.impact === "Medium" ? "#b45309" : "#94a3b8";
+                          const pastClr = e.isPast ? "var(--text3)" : "var(--text)";
+                          return (
+                            <div key={i} className="r g10" style={{ padding: "7px 0", borderBottom: "1px solid var(--border)", opacity: e.isPast ? 0.5 : 1 }}>
+                              <span className="tn sm tn" style={{ minWidth: 62, color: pastClr, fontWeight: 600 }}>{fmtTime(e.date)}</span>
+                              <span style={{ width: 8, height: 8, borderRadius: 2, background: impactClr, flexShrink: 0 }} />
+                              <span className="w7 sm" style={{ minWidth: 40, color: pastClr }}>{e.country}</span>
+                              <span className="sm" style={{ flex: 1, color: pastClr }}>{e.title}</span>
+                              {e.forecast && <span className="xs mut tn">F: {e.forecast}</span>}
+                              {e.previous && <span className="xs mut tn">P: {e.previous}</span>}
+                              {!e.isPast && affected.length > 0 && (
+                                <span>
+                                  {affected.map((sym) => (
+                                    <span key={sym} className="bdg bdg-purple" style={{ marginLeft: 4, fontSize: 8.5 }}>{sym}</span>
+                                  ))}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="panel" style={{ background: "#f8fafc" }}>
+                  <div className="xs sub">
+                    <b>How it works:</b> This calendar is fetched live from ForexFactory (faireconomy.media). The AI automatically blocks new trades on any instrument whose currency has a HIGH-impact event within +/- 15 minutes. Medium and low impact events are shown for reference but do not block trading.
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ========== REPORTS ========== */}
           {page === "reports" && (() => {
@@ -1411,6 +1652,26 @@ export default function App() {
                     <span className="kv-v">{v}</span>
                   </div>
                 ))}
+              </div>
+
+              <div className="panel">
+                <div className="pt">Diagnostics</div>
+                <p className="xs mut" style={{ marginBottom: 14 }}>Send a test message to verify Telegram is receiving notifications. If this fails, check TELEGRAM_TOKEN and TELEGRAM_CHAT_ID in Vercel.</p>
+                <div className="r g8">
+                  <button className="btn btn-p btn-sm" onClick={testTelegram} disabled={tgStatus?.loading}>
+                    {tgStatus?.loading ? "Sending..." : "Test Telegram"}
+                  </button>
+                  {tgStatus && !tgStatus.loading && (
+                    <span className="sm" style={{ color: tgStatus.ok ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
+                      {tgStatus.ok ? "OK -- check your Telegram" : `Failed: ${tgStatus.error || (tgStatus.tgResponse && tgStatus.tgResponse.description) || 'unknown'}`}
+                    </span>
+                  )}
+                </div>
+                {tgStatus && !tgStatus.loading && !tgStatus.ok && (
+                  <div className="xs mut mt8">
+                    Token: {tgStatus.tokenMask || "MISSING"} &middot; Chat: {tgStatus.chatMask || "MISSING"}
+                  </div>
+                )}
               </div>
 
               <div className="panel">
