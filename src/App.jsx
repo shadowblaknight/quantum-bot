@@ -610,7 +610,14 @@ export default function App() {
   const prevPosRef   = useRef([]);
   const logRef       = useRef(null);
 
-  useEffect(() => { savePrefs({ instruments, sessions, riskMode }); }, [instruments, sessions, riskMode]);
+  useEffect(() => {
+    savePrefs({ instruments, sessions, riskMode });
+    // V9.3: also persist to Redis so the server-side cron knows what to scan
+    fetch(API("trades?action=set-config"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "set-config", instruments, sessions, riskMode }),
+    }).catch(() => {});
+  }, [instruments, sessions, riskMode]);
 
   useEffect(() => {
     const tick = () => setNowStr(new Date().toUTCString().slice(17, 25));
@@ -642,16 +649,16 @@ export default function App() {
   }, []);
 
   const fetchNews = useCallback(async () => {
-    try { const r = await fetch(API("news?impact=medium&window=week")); if (r.ok) { const d = await r.json(); setNewsEvents(Array.isArray(d.events) ? d.events : []); } } catch (_) {}
+    try { const r = await fetch(API("manage-trades?action=news&impact=high&days=7")); if (r.ok) { const d = await r.json(); setNewsEvents(Array.isArray(d.events) ? d.events : []); } } catch (_) {}
   }, []);
 
   const testTelegram = useCallback(async () => {
     setTgStatus({ loading: true });
     try {
-      const r = await fetch(API("telegram-test"));
+      const r = await fetch(API("manage-trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "telegram-test" }) });
       const d = await r.json();
       setTgStatus(d);
-      addLog(d.ok ? "Telegram test sent successfully" : `Telegram test failed: ${d.error || 'unknown'}`, d.ok ? "success" : "error");
+      addLog(d.ok ? "Telegram test sent successfully" : `Telegram test failed: ${d.result?.reason || d.error || 'unknown'}`, d.ok ? "success" : "error");
     } catch (e) {
       setTgStatus({ ok: false, error: e.message });
       addLog(`Telegram test error: ${e.message}`, "error");

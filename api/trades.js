@@ -37,6 +37,39 @@ module.exports = async (req, res) => {
   });
 
   // ====================================================================
+  // V9.3: Config persistence (cron reads this to know what to scan)
+  // GET  ?action=get-config   -> { instruments: [...], riskMode, sessions }
+  // POST ?action=set-config   -> body: { instruments, riskMode, sessions }
+  // ====================================================================
+  let body = {};
+  if (req.method === 'POST') {
+    try { body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {}); } catch (_) {}
+  }
+  const action = body.action || (req.query && req.query.action) || null;
+
+  if (action === 'get-config') {
+    try {
+      const cfg = await redis.get('v9:config').catch(() => null);
+      const parsed = (typeof cfg === 'string') ? (() => { try { return JSON.parse(cfg); } catch (_) { return null; } })() : cfg;
+      return res.status(200).json(parsed || { instruments: [], riskMode: 'TEST', sessions: ['LONDON', 'NEW YORK'] });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  if (action === 'set-config') {
+    try {
+      const cfg = {
+        instruments: Array.isArray(body.instruments) ? body.instruments.filter(Boolean) : [],
+        riskMode:    body.riskMode || 'TEST',
+        sessions:    Array.isArray(body.sessions) ? body.sessions : ['LONDON', 'NEW YORK'],
+        updatedAt:   new Date().toISOString(),
+      };
+      await redis.set('v9:config', JSON.stringify(cfg));
+      console.log('[CONFIG] saved', JSON.stringify(cfg));
+      return res.status(200).json({ ok: true, config: cfg });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ====================================================================
   // GET -- return full strategy lab (V9 namespace only)
   // ====================================================================
   if (req.method === 'GET') {
