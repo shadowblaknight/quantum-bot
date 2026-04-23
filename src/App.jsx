@@ -1472,6 +1472,43 @@ export default function App() {
               return { strat, d, total, wins, losses, wr, pnl, expectancy, bl, crowns };
             });
 
+            // V9.4: Per-instrument overview (crowns / bans / top strat / coverage)
+            const instOverview = {};
+            for (const inst of labInst) {
+              const strats = allEntries.filter(([, d]) => d.instruments && d.instruments[inst]);
+              let crowned = 0, bannedC = 0, inconcC = 0, topPnl = -Infinity, topStrat = null, worstPnl = Infinity, worstStrat = null;
+              let sessionBest = {};
+              for (const [stratName, d] of strats) {
+                const di = d.instruments[inst];
+                if (di.crown) crowned++;
+                if (di.banned) bannedC++;
+                if (di.inconclusive) inconcC++;
+                if (di.totalPnl != null && di.totalPnl > topPnl)  { topPnl = di.totalPnl; topStrat = stratName; }
+                if (di.totalPnl != null && di.totalPnl < worstPnl){ worstPnl = di.totalPnl; worstStrat = stratName; }
+                if (di.sessionStats) {
+                  for (const [sess, ss] of Object.entries(di.sessionStats)) {
+                    if (!sessionBest[sess] || ss.expectancy > sessionBest[sess].expectancy) {
+                      sessionBest[sess] = { strat: stratName, expectancy: ss.expectancy, wr: ss.wr, total: ss.total };
+                    }
+                  }
+                }
+              }
+              instOverview[inst] = {
+                total: strats.length, crowned, banned: bannedC, inconclusive: inconcC,
+                topStrat, topPnl: topPnl === -Infinity ? 0 : topPnl,
+                worstStrat, worstPnl: worstPnl === Infinity ? 0 : worstPnl,
+                sessionBest,
+              };
+            }
+
+            // Find "best combination so far" (highest instruments-succeeded-with count)
+            let bestGlobal = null;
+            for (const { strat, d } of enriched) {
+              if (!d.instruments) continue;
+              const wonOn = Object.values(d.instruments).filter(x => x.crown).length;
+              if (!bestGlobal || wonOn > bestGlobal.wonOn) bestGlobal = { strat, wonOn };
+            }
+
             // Apply filters
             let filtered = enriched.filter((e) => {
               if (labSearch && !e.strat.toLowerCase().includes(labSearch.toLowerCase())) return false;
@@ -1479,11 +1516,11 @@ export default function App() {
               if (labInstFilter !== "all") {
                 if (!e.d.instruments || !e.d.instruments[labInstFilter]) return false;
               }
-              if (labFilter === "winners"    && (e.wr == null || e.wr < 55)) return false;
-              if (labFilter === "losers"     && (e.wr == null || e.wr >= 45)) return false;
-              if (labFilter === "tested"     && e.total < 10) return false;
-              if (labFilter === "crown"      && e.crowns < 1) return false;
-              if (labFilter === "blacklist"  && !e.bl) return false;
+              if (labFilter === "winners")    return !(e.wr == null || e.wr < 55);
+              if (labFilter === "losers")     return !(e.wr == null || e.wr >= 45);
+              if (labFilter === "tested")     return e.total >= 10;
+              if (labFilter === "crown")      return e.crowns >= 1;
+              if (labFilter === "blacklist")  return e.bl;
               return true;
             });
 
@@ -1504,6 +1541,56 @@ export default function App() {
 
             return (
               <div className="s14">
+                {/* ---- V9.4 Instrument Overview Top Bar ---- */}
+                {labInst.length > 0 && (
+                  <div className="panel" style={{ padding: 14, marginBottom: 4 }}>
+                    <div className="pt" style={{ marginBottom: 10 }}>Instrument Overview</div>
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(200px, 1fr))`, gap: 10 }}>
+                      {labInst.map((inst) => {
+                        const o = instOverview[inst];
+                        const bestSessE = Object.entries(o.sessionBest).sort((a, b) => b[1].expectancy - a[1].expectancy)[0];
+                        return (
+                          <div key={inst} style={{ padding: 10, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg2)" }}>
+                            <div className="r g6" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                              <span className="w7" style={{ fontSize: 14 }}>{inst}</span>
+                              <span className="xs mut">{o.total} combos</span>
+                            </div>
+                            <div className="r g8 xs" style={{ flexWrap: "wrap", marginBottom: 6 }}>
+                              <span style={{ color: "var(--gold)" }}>👑 {o.crowned}</span>
+                              <span style={{ color: "var(--red)" }}>🚫 {o.banned}</span>
+                              <span style={{ color: "var(--mut)" }}>⋯ {o.inconclusive}</span>
+                            </div>
+                            {o.topStrat && (
+                              <div className="xs" style={{ marginTop: 4 }}>
+                                <span className="mut">Best: </span>
+                                <span className="w7" style={{ color: "var(--green)" }}>{o.topStrat.slice(0, 18)}</span>
+                                <span className="mut"> {pnlStr(o.topPnl)}</span>
+                              </div>
+                            )}
+                            {o.worstStrat && o.worstPnl < 0 && (
+                              <div className="xs" style={{ marginTop: 2 }}>
+                                <span className="mut">Worst: </span>
+                                <span className="w7" style={{ color: "var(--red)" }}>{o.worstStrat.slice(0, 18)}</span>
+                                <span className="mut"> {pnlStr(o.worstPnl)}</span>
+                              </div>
+                            )}
+                            {bestSessE && (
+                              <div className="xs mut" style={{ marginTop: 4 }}>
+                                Best session: <span className="w7" style={{ color: "var(--blue)" }}>{bestSessE[0]}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {bestGlobal && bestGlobal.wonOn > 0 && (
+                      <div className="mt12 xs sub" style={{ textAlign: "center" }}>
+                        ⭐ <span className="w7">Best overall:</span> <span style={{ color: "var(--gold)" }}>{bestGlobal.strat}</span> — crowned on <span className="w7">{bestGlobal.wonOn}</span> instrument{bestGlobal.wonOn > 1 ? "s" : ""}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* ---- Summary row ---- */}
                 <div className="g4c">
                   {[

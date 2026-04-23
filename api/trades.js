@@ -5,10 +5,21 @@
 
 const { Redis } = require('@upstash/redis');
 
-const CROWN_WIN  = 5;   // wins on one instrument to earn crown
-const BAN_LOSSES = 3;   // consecutive losses to ban on instrument
-const DETHRONE   = 3;   // post-crown losses to dethrone
-const BLACKLIST_PEERS = 2; // banned on this many other instruments to globally blacklist
+// ====================================================================
+// V9.4: Strict crown rules (replacing V9's "5 wins = crown" which crowned noise)
+// ====================================================================
+const CROWN_MIN_TRADES       = 7;    // must have at least 7 trades to even be evaluated
+const CROWN_MIN_WR           = 65;   // ≥65% win rate required
+const CROWN_MIN_EXPECTANCY   = 3;    // average P&L per trade must be ≥ $3
+const CROWN_MAX_CONSEC_LOSS  = 2;    // no more than 2 consecutive losses in history
+const INCONCLUSIVE_THRESHOLD = 7;    // below this trade count, mark INCONCLUSIVE
+const BAN_LOSSES             = 3;    // consecutive losses to ban on instrument
+const DETHRONE               = 3;    // post-crown losses to dethrone
+const BLACKLIST_PEERS        = 2;    // banned on this many instruments to globally blacklist
+
+// V9.4: Best-session lock
+const SESSION_LOCK_MIN_TRADES_PER_SESSION = 7;  // min trades in a session before lock-judging
+const SESSION_LOCK_WR_EDGE_PCT            = 15; // best session must be >=15pp better than next
 
 const normSym = (s) => {
   if (!s) return '';
@@ -70,6 +81,77 @@ module.exports = async (req, res) => {
   }
 
   // ====================================================================
+  // V9.4: Wipe existing crowns and re-evaluate all stored stats with
+  // the strict crown rules. Run this once after deploying V9.4 to clean
+  // up crowns that were granted by the old lenient "5 wins = crown" rule.
+  // ====================================================================
+  if (action === 'rebuild-crowns') {
+    try {
+      const crownKeys = await redis.keys('v9:crown:*').catch(() => []);
+      for (const k of crownKeys) await redis.del(k).catch(() => {});
+
+      const stratKeys = await redis.keys('v9:strat:*').catch(() => []);
+      const dataKeys = stratKeys.filter(k => !k.includes(':crown:') && !k.includes(':bl:'));
+
+      const promoted = [];
+      for (const key of dataKeys) {
+        const d = safe(await redis.get(key).catch(() => null));
+        if (!d || typeof d !== 'object') continue;
+        const keyBody = key.replace('v9:strat:', '');
+        const colon = keyBody.indexOf(':');
+        if (colon === -1) continue;
+        const inst  = normSym(keyBody.slice(0, colon));
+        const strat = keyBody.slice(colon + 1);
+        if (!inst || !strat) continue;
+
+        const total = (d.wins || 0) + (d.losses || 0);
+        const wr    = total > 0 ? ((d.wins || 0) / total) * 100 : 0;
+        const exp   = total > 0 ? (d.totalPnl || 0) / total : 0;
+        let maxCL = 0, curS = 0;
+        for (const t of (d.trades || [])) {
+          if (t.won === false) { curS++; if (curS > maxCL) maxCL = curS; }
+          else curS = 0;
+        }
+        if (total >= CROWN_MIN_TRADES &&
+            wr >= CROWN_MIN_WR &&
+            exp >= CROWN_MIN_EXPECTANCY &&
+            maxCL <= CROWN_MAX_CONSEC_LOSS) {
+          const ck = 'v9:crown:' + inst;
+          const existingCrown = safe(await redis.get(ck).catch(() => null));
+          if (!existingCrown) {
+            await redis.set(ck, JSON.stringify(strat));
+            promoted.push({ instrument: inst, strategy: strat, wr: Math.round(wr), trades: total, expectancy: parseFloat(exp.toFixed(2)) });
+          }
+        }
+      }
+      console.log('[V9.4 REBUILD-CROWNS] wiped ' + crownKeys.length + ' old crowns, promoted ' + promoted.length + ' under strict rules');
+      return res.status(200).json({
+        ok: true,
+        wipedOldCrowns: crownKeys.length,
+        newCrowns: promoted,
+        rules: {
+          minTrades:     CROWN_MIN_TRADES,
+          minWinRate:    CROWN_MIN_WR + '%',
+          minExpectancy: '$' + CROWN_MIN_EXPECTANCY,
+          maxConsecLoss: CROWN_MAX_CONSEC_LOSS,
+        },
+      });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ====================================================================
+  // V9.4: Daily learnings log -- returns what the bot learned today.
+  // ====================================================================
+  if (action === 'daily-learnings') {
+    const day = (req.query && req.query.date) || new Date().toISOString().slice(0, 10);
+    try {
+      const items = await redis.lrange('v9:learnings:' + day, 0, 199).catch(() => []);
+      const parsed = (items || []).map(safe).filter(Boolean);
+      return res.status(200).json({ date: day, count: parsed.length, learnings: parsed });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ====================================================================
   // GET -- return full strategy lab (V9 namespace only)
   // ====================================================================
   if (req.method === 'GET') {
@@ -109,12 +191,30 @@ module.exports = async (req, res) => {
         const wr       = total > 0 ? Math.round(((d.wins || 0) / total) * 100) : null;
         const recent   = (d.trades || []).slice(-BAN_LOSSES).map(t => t.won);
         const banned   = recent.length >= BAN_LOSSES && recent.every(r => r === false);
-        const crowned  = (d.wins || 0) >= CROWN_WIN && !banned;
-        const dethroned = crowned && (d.postCrownLosses || 0) >= DETHRONE;
+
+        // V9.4: Strict crown rule
+        const trades   = d.trades || [];
+        const totalPnl = d.totalPnl || 0;
+        const expectancy = total > 0 ? totalPnl / total : 0;
+
+        // Max consecutive loss streak in history
+        let maxConsecLoss = 0, curStreak = 0;
+        for (const t of trades) {
+          if (t.won === false) { curStreak++; if (curStreak > maxConsecLoss) maxConsecLoss = curStreak; }
+          else curStreak = 0;
+        }
+
+        const meetsCrown = total >= CROWN_MIN_TRADES &&
+                           wr !== null && wr >= CROWN_MIN_WR &&
+                           expectancy >= CROWN_MIN_EXPECTANCY &&
+                           maxConsecLoss <= CROWN_MAX_CONSEC_LOSS;
+        const crowned    = meetsCrown && !banned;
+        const dethroned  = crowned && (d.postCrownLosses || 0) >= DETHRONE;
+        const inconclusive = total < INCONCLUSIVE_THRESHOLD;
 
         // Failure analysis
-        const losingTrades  = (d.trades || []).filter(t => !t.won);
-        const winningTrades = (d.trades || []).filter(t => t.won);
+        const losingTrades  = trades.filter(t => !t.won);
+        const winningTrades = trades.filter(t => t.won);
         const lossSessions  = {};
         const winSessions   = {};
         losingTrades.forEach(t => {
@@ -126,6 +226,35 @@ module.exports = async (req, res) => {
           winSessions[s] = (winSessions[s] || 0) + 1;
         });
 
+        // V9.4: Per-session performance + session lock
+        const sessionStats = {};
+        trades.forEach(t => {
+          const s = t.session || 'UNKNOWN';
+          if (!sessionStats[s]) sessionStats[s] = { wins: 0, losses: 0, pnl: 0, total: 0 };
+          sessionStats[s].total++;
+          sessionStats[s].pnl += (t.pnl || 0);
+          if (t.won) sessionStats[s].wins++; else sessionStats[s].losses++;
+        });
+        Object.keys(sessionStats).forEach(s => {
+          const ss = sessionStats[s];
+          ss.wr = ss.total > 0 ? Math.round(ss.wins / ss.total * 100) : null;
+          ss.expectancy = ss.total > 0 ? parseFloat((ss.pnl / ss.total).toFixed(2)) : 0;
+          ss.pnl = parseFloat(ss.pnl.toFixed(2));
+        });
+
+        // Session lock: find best session with enough trades and a clear edge
+        let sessionLock = null;
+        const rankedSess = Object.entries(sessionStats)
+          .filter(([, ss]) => ss.total >= SESSION_LOCK_MIN_TRADES_PER_SESSION && ss.wr !== null)
+          .sort((a, b) => b[1].wr - a[1].wr);
+        if (rankedSess.length >= 1) {
+          const [bestSess, bestStats] = rankedSess[0];
+          const nextWR = rankedSess[1] ? rankedSess[1][1].wr : 0;
+          if (bestStats.wr - nextWR >= SESSION_LOCK_WR_EDGE_PCT && bestStats.wr >= 55) {
+            sessionLock = bestSess;
+          }
+        }
+
         // Average win / loss size
         const avgWin  = winningTrades.length ? winningTrades.reduce((s,t)=>s+(t.pnl||0),0)/winningTrades.length : 0;
         const avgLoss = losingTrades.length  ? losingTrades.reduce((s,t)=>s+(t.pnl||0),0)/losingTrades.length  : 0;
@@ -134,7 +263,7 @@ module.exports = async (req, res) => {
         const tpDist = {
           tp1Only: 0, tp2Reached: 0, tp3Reached: 0, tp4Reached: 0, slHit: 0,
         };
-        (d.trades || []).forEach(t => {
+        trades.forEach(t => {
           if (t.tp4Hit) tpDist.tp4Reached++;
           else if (t.tp3Hit) tpDist.tp3Reached++;
           else if (t.tp2Hit) tpDist.tp2Reached++;
@@ -149,10 +278,13 @@ module.exports = async (req, res) => {
           winRate:           wr,
           totalPnl:          d.totalPnl != null ? parseFloat(d.totalPnl.toFixed(2)) : 0,
           avgPnl:            (d.totalPnl != null && total > 0) ? parseFloat((d.totalPnl / total).toFixed(2)) : null,
+          expectancy:        parseFloat(expectancy.toFixed(2)),
           avgWin:            parseFloat(avgWin.toFixed(2)),
           avgLoss:           parseFloat(avgLoss.toFixed(2)),
+          maxConsecLoss,
           crown:             crowned && !dethroned,
           banned,
+          inconclusive,
           consecutiveLosses: d.consecutiveLosses || 0,
           postCrownLosses:   d.postCrownLosses   || 0,
           lastSeen:          d.lastSeen          || null,
@@ -160,7 +292,9 @@ module.exports = async (req, res) => {
           tpDistribution:    tpDist,
           lossSessions,
           winSessions,
-          trades:            (d.trades || []).slice(-15),
+          sessionStats,
+          sessionLock,
+          trades:            trades.slice(-15),
         };
       }
 
@@ -324,7 +458,22 @@ module.exports = async (req, res) => {
         : { wins: 0, losses: 0, totalPnl: 0, consecutiveLosses: 0, postCrownLosses: 0, trades: [], firstSeen: now };
 
       const newConsec    = won ? 0 : (cur.consecutiveLosses || 0) + 1;
-      const wasCrowned   = (cur.wins || 0) >= CROWN_WIN;
+
+      // V9.4: Check crown using STRICT rules (not old "5 wins = crown")
+      const newTotal  = (updated.wins || cur.wins || 0) + (updated.losses || cur.losses || 0) + 0;
+      // Note: `updated` is defined below. Compute pre-update "was strictly crowned" from current state.
+      const preTotal  = (cur.wins || 0) + (cur.losses || 0);
+      const preWR     = preTotal > 0 ? ((cur.wins || 0) / preTotal) * 100 : 0;
+      const preExp    = preTotal > 0 ? (cur.totalPnl || 0) / preTotal : 0;
+      let   preMaxCL  = 0, preCurStreak = 0;
+      for (const t of (cur.trades || [])) {
+        if (t.won === false) { preCurStreak++; if (preCurStreak > preMaxCL) preMaxCL = preCurStreak; }
+        else preCurStreak = 0;
+      }
+      const wasCrowned = preTotal >= CROWN_MIN_TRADES &&
+                         preWR >= CROWN_MIN_WR &&
+                         preExp >= CROWN_MIN_EXPECTANCY &&
+                         preMaxCL <= CROWN_MAX_CONSEC_LOSS;
       const newPostCrown = wasCrowned ? (won ? 0 : (cur.postCrownLosses || 0) + 1) : 0;
 
       const updated = {
@@ -358,15 +507,35 @@ module.exports = async (req, res) => {
       // PERSISTENT: NO TTL. Data lives forever.
       await redis.set(key, JSON.stringify(updated));
 
-      // Crown check
+      // V9.4: Strict crown promotion check on the UPDATED stats
+      const postTotal = (updated.wins || 0) + (updated.losses || 0);
+      const postWR    = postTotal > 0 ? (updated.wins / postTotal) * 100 : 0;
+      const postExp   = postTotal > 0 ? (updated.totalPnl || 0) / postTotal : 0;
+      let   postMaxCL = 0, postCurStreak = 0;
+      for (const t of (updated.trades || [])) {
+        if (t.won === false) { postCurStreak++; if (postCurStreak > postMaxCL) postMaxCL = postCurStreak; }
+        else postCurStreak = 0;
+      }
+      const meetsCrown = postTotal >= CROWN_MIN_TRADES &&
+                         postWR    >= CROWN_MIN_WR &&
+                         postExp   >= CROWN_MIN_EXPECTANCY &&
+                         postMaxCL <= CROWN_MAX_CONSEC_LOSS;
+
       let justCrowned = false;
-      if (!wasCrowned && updated.wins >= CROWN_WIN) {
-        const ck      = 'v9:crown:' + inst;
+      if (!wasCrowned && meetsCrown) {
+        const ck = 'v9:crown:' + inst;
         const ex = safe(await redis.get(ck).catch(() => null));
         if (!ex || ex === 'EXPLORING' || ex === 'UNKNOWN') {
-          await redis.set(ck, JSON.stringify(strat)); // no TTL
+          await redis.set(ck, JSON.stringify(strat));
           justCrowned = true;
-          console.log('V9 CROWN:', strat, 'on', inst);
+          console.log('[V9.4 CROWN]', strat, 'on', inst, 'wr=' + postWR.toFixed(1) + '% trades=' + postTotal + ' exp=$' + postExp.toFixed(2));
+
+          // Daily learnings log (daily summary will read this)
+          const today = new Date().toISOString().slice(0, 10);
+          await redis.lpush('v9:learnings:' + today,
+            JSON.stringify({ type: 'CROWN', strategy: strat, instrument: inst, wr: Math.round(postWR), trades: postTotal, expectancy: parseFloat(postExp.toFixed(2)), ts: now })
+          ).catch(() => {});
+          await redis.expire('v9:learnings:' + today, 86400 * 30).catch(() => {});
         }
       }
 
@@ -379,7 +548,23 @@ module.exports = async (req, res) => {
           await redis.del(ck);
           dethroned = true;
           console.log('V9 DETHRONED:', strat, 'on', inst);
+          const today = new Date().toISOString().slice(0, 10);
+          await redis.lpush('v9:learnings:' + today,
+            JSON.stringify({ type: 'DETHRONE', strategy: strat, instrument: inst, ts: now })
+          ).catch(() => {});
+          await redis.expire('v9:learnings:' + today, 86400 * 30).catch(() => {});
         }
+      }
+
+      // Ban on this instrument (consec losses triggered)
+      let bannedNow = false;
+      if (!won && newConsec >= BAN_LOSSES) {
+        bannedNow = true;
+        const today = new Date().toISOString().slice(0, 10);
+        await redis.lpush('v9:learnings:' + today,
+          JSON.stringify({ type: 'BAN', strategy: strat, instrument: inst, consecLosses: newConsec, ts: now })
+        ).catch(() => {});
+        await redis.expire('v9:learnings:' + today, 86400 * 30).catch(() => {});
       }
 
       // Blacklist check
@@ -398,9 +583,14 @@ module.exports = async (req, res) => {
             const bl    = Array.isArray(blRaw) ? blRaw : [];
             if (!bl.includes(strat)) {
               bl.push(strat);
-              await redis.set('v9:blacklist', JSON.stringify(bl)); // no TTL
+              await redis.set('v9:blacklist', JSON.stringify(bl));
               blacklisted = true;
               console.log('V9 BLACKLISTED:', strat);
+              const today = new Date().toISOString().slice(0, 10);
+              await redis.lpush('v9:learnings:' + today,
+                JSON.stringify({ type: 'BLACKLIST', strategy: strat, ts: now })
+              ).catch(() => {});
+              await redis.expire('v9:learnings:' + today, 86400 * 30).catch(() => {});
             }
           }
         }

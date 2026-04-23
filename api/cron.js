@@ -361,8 +361,170 @@ module.exports = async (req, res) => {
     }
   }
 
+  // ====================================================================
+  // V9.4: Daily summary at 21:00 UTC (end of NY session), weekdays only.
+  // Fires ONCE per day via the v9:dailySummary:{YYYY-MM-DD} guard.
+  // ====================================================================
+  try {
+    const nowUTC = new Date();
+    const utcHour = nowUTC.getUTCHours();
+    const utcDay  = nowUTC.getUTCDay(); // 0=Sun 6=Sat
+    const isWeekday = utcDay >= 1 && utcDay <= 5;
+    if (utcHour === 21 && isWeekday) {
+      const today = nowUTC.toISOString().slice(0, 10);
+      const guardKey = 'v9:daily_summary_sent:' + today;
+      const alreadySent = await redis.get(guardKey).catch(() => null);
+      if (!alreadySent) {
+        await redis.set(guardKey, '1', { ex: 86400 * 3 }).catch(() => {});
+        await sendDailySummary(SELF_BASE, redis, today);
+      }
+    }
+  } catch (e) { console.error('[CRON][DAILY-SUMMARY] error: ' + e.message); }
+
   const elapsed = Date.now() - startedAt;
   console.log('[CRON] done in ' + elapsed + 'ms processed=' + summary.processed.length + ' traded=' + summary.traded.length + ' skipped=' + summary.skipped.length + ' errors=' + summary.errors.length);
 
   return res.status(200).json({ ok: true, elapsedMs: elapsed, summary });
 };
+
+// ====================================================================
+// Daily summary builder
+// ====================================================================
+async function sendDailySummary(selfBase, redis, today) {
+  try {
+    // Read today's closed trades from /api/history
+    const histR = await fetch(selfBase + '/api/history?limit=200').catch(() => null);
+    if (!histR || !histR.ok) return;
+    const histD = await histR.json().catch(() => ({}));
+    const trades = Array.isArray(histD.trades) ? histD.trades : [];
+
+    const todayTrades = trades.filter(t => {
+      const d = t.closeTime || t.date || t.ts;
+      if (!d) return false;
+      return String(d).startsWith(today);
+    });
+
+    if (todayTrades.length === 0) {
+      const TG_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
+      const TG_CHAT  = process.env.TELEGRAM_CHAT_ID || '';
+      if (TG_TOKEN && TG_CHAT) {
+        await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: TG_CHAT, parse_mode: 'HTML',
+            text: '📊 <b>Daily Summary · ' + today + '</b>\n\n<pre>No trades today.</pre>' })
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // Aggregate per instrument
+    const perInst = {};
+    const perSess = {};
+    const perStrat = {};
+    let totalPnl = 0, totalWins = 0, totalLosses = 0;
+
+    for (const t of todayTrades) {
+      const sym  = (t.symbol || 'UNKNOWN').toUpperCase().replace('.S', '').replace('.PRO', '');
+      const sess = t.session || 'UNKNOWN';
+      const strat = t.strategy || 'UNKNOWN';
+      const pnl  = t.profit != null ? t.profit : (t.pnl || 0);
+      const won  = pnl > 0;
+      totalPnl += pnl;
+      if (won) totalWins++; else totalLosses++;
+
+      if (!perInst[sym])  perInst[sym]  = { wins: 0, losses: 0, pnl: 0, bestStrat: {}, bestSess: {} };
+      perInst[sym].pnl += pnl;
+      if (won) perInst[sym].wins++; else perInst[sym].losses++;
+      perInst[sym].bestStrat[strat] = (perInst[sym].bestStrat[strat] || 0) + pnl;
+      perInst[sym].bestSess[sess]   = (perInst[sym].bestSess[sess]   || 0) + pnl;
+
+      if (!perSess[sess])  perSess[sess]  = { wins: 0, losses: 0, pnl: 0 };
+      perSess[sess].pnl += pnl;
+      if (won) perSess[sess].wins++; else perSess[sess].losses++;
+
+      if (!perStrat[strat]) perStrat[strat] = { wins: 0, losses: 0, pnl: 0 };
+      perStrat[strat].pnl += pnl;
+      if (won) perStrat[strat].wins++; else perStrat[strat].losses++;
+    }
+
+    // Get today's learnings (crowns, bans, dethrones, blacklists)
+    const learnings = (await redis.lrange('v9:learnings:' + today, 0, 99).catch(() => []))
+      .map(x => { try { return typeof x === 'string' ? JSON.parse(x) : x; } catch (_) { return null; } })
+      .filter(Boolean);
+
+    const crownsToday   = learnings.filter(l => l.type === 'CROWN');
+    const dethronesToday = learnings.filter(l => l.type === 'DETHRONE');
+    const bansToday     = learnings.filter(l => l.type === 'BAN');
+    const blacklistsToday = learnings.filter(l => l.type === 'BLACKLIST');
+
+    // Format message
+    const pad = (s, w) => String(s).padEnd(w);
+    const money = (n) => (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2);
+
+    let msg = '📊 <b>Daily Summary · ' + today + '</b>\n\n';
+    msg += '<pre>';
+    msg += 'Trades:   ' + todayTrades.length + '\n';
+    msg += 'Wins:     ' + totalWins + '\n';
+    msg += 'Losses:   ' + totalLosses + '\n';
+    msg += 'Win Rate: ' + (todayTrades.length ? Math.round(totalWins / todayTrades.length * 100) : 0) + '%\n';
+    msg += 'Net P&L:  ' + money(totalPnl) + '\n';
+    msg += '</pre>\n';
+
+    // Per-instrument
+    msg += '<b>By Instrument</b>\n<pre>';
+    const instRows = Object.entries(perInst).sort((a, b) => b[1].pnl - a[1].pnl);
+    for (const [sym, s] of instRows) {
+      const bestSess  = Object.entries(s.bestSess).sort((a, b) => b[1] - a[1])[0];
+      const bestStratE = Object.entries(s.bestStrat).sort((a, b) => b[1] - a[1])[0];
+      msg += pad(sym, 8) + s.wins + 'W/' + s.losses + 'L ' + money(s.pnl) + '\n';
+      if (bestSess)  msg += '   best sess: ' + bestSess[0] + ' ' + money(bestSess[1]) + '\n';
+      if (bestStratE) msg += '   best strat: ' + bestStratE[0].slice(0, 22) + '\n';
+    }
+    msg += '</pre>\n';
+
+    // Per-session
+    msg += '<b>By Session</b>\n<pre>';
+    const sessRows = Object.entries(perSess).sort((a, b) => b[1].pnl - a[1].pnl);
+    for (const [sess, s] of sessRows) {
+      msg += pad(sess, 10) + s.wins + 'W/' + s.losses + 'L ' + money(s.pnl) + '\n';
+    }
+    msg += '</pre>\n';
+
+    // Top/bottom strategies
+    const stratRows = Object.entries(perStrat).sort((a, b) => b[1].pnl - a[1].pnl);
+    const topStrats = stratRows.slice(0, 3);
+    const botStrats = stratRows.slice(-2).reverse();
+    if (topStrats.length) {
+      msg += '<b>Best Strategies</b>\n<pre>';
+      for (const [strat, s] of topStrats) msg += pad(strat.slice(0, 22), 24) + money(s.pnl) + '\n';
+      msg += '</pre>\n';
+    }
+    if (botStrats.length && botStrats[0][1].pnl < 0) {
+      msg += '<b>Worst Strategies</b>\n<pre>';
+      for (const [strat, s] of botStrats) msg += pad(strat.slice(0, 22), 24) + money(s.pnl) + '\n';
+      msg += '</pre>\n';
+    }
+
+    // What the bot learned today
+    if (crownsToday.length || dethronesToday.length || blacklistsToday.length) {
+      msg += '<b>Learnings Today</b>\n<pre>';
+      for (const c of crownsToday)      msg += '👑 CROWN     ' + c.strategy + ' on ' + c.instrument + ' (' + c.wr + '% WR)\n';
+      for (const d of dethronesToday)   msg += '⚠️  DETHRONED ' + d.strategy + ' on ' + d.instrument + '\n';
+      for (const b of blacklistsToday)  msg += '🚫 BLACKLIST ' + b.strategy + '\n';
+      msg += '</pre>\n';
+    } else {
+      msg += '<i>No crown/ban changes today -- still exploring.</i>\n';
+    }
+
+    // Send
+    const TG_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
+    const TG_CHAT  = process.env.TELEGRAM_CHAT_ID || '';
+    if (TG_TOKEN && TG_CHAT) {
+      await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TG_CHAT, parse_mode: 'HTML', text: msg })
+      }).catch(() => {});
+      console.log('[DAILY-SUMMARY] sent for ' + today);
+    }
+  } catch (e) { console.error('[DAILY-SUMMARY] build error: ' + e.message); }
+}

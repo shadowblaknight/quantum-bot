@@ -133,10 +133,8 @@ module.exports = async (req, res) => {
     }
 
     // -------------------------------------------------------------
-    // FIXED: Learned context lookup uses normalized sym
+    // V9.4 learned context
     // -------------------------------------------------------------
-    // Search lab for data under BOTH raw instrument and normalized sym (safety net for
-    // any legacy keys that may exist under either spelling).
     const instLab = lab
       ? Object.entries(lab).filter(([, d]) => {
           if (!d || !d.instruments) return false;
@@ -147,19 +145,55 @@ module.exports = async (req, res) => {
         })
       : [];
 
-    const proven  = instLab.filter(s => s.crown && !s.banned).sort((a,b) => (b.winRate||0)-(a.winRate||0)).slice(0,3);
-    const banned  = instLab.filter(s => s.banned).map(s => s.strat);
-    const blList  = Array.isArray(blacklist) ? blacklist : [];
-    // Crown lookup: try normalized sym first, then raw instrument
-    const crown   = (crownLocks && (crownLocks[sym] || crownLocks[instrument])) || null;
+    const proven       = instLab.filter(s => s.crown && !s.banned).sort((a,b) => (b.winRate||0)-(a.winRate||0)).slice(0,5);
+    const banned       = instLab.filter(s => s.banned).map(s => s.strat);
+    const inconclusive = instLab.filter(s => s.inconclusive && !s.banned).map(s => ({ strat: s.strat, total: s.total }));
+    const blList       = Array.isArray(blacklist) ? blacklist : [];
+    const crown        = (crownLocks && (crownLocks[sym] || crownLocks[instrument])) || null;
+
+    // V9.4: Figure out which session we're currently in (for session-lock compliance)
+    const hr  = now.getUTCHours() + now.getUTCMinutes() / 60;
+    const currentSession = (hr >= 13 && hr < 16) ? 'OVERLAP'
+                         : (hr >= 13 && hr < 21) ? 'NEW YORK'
+                         : (hr >=  8 && hr < 16) ? 'LONDON'
+                         : 'ASIAN';
+
+    // V9.4: Session-locked proven strategies (only play these if we're in the right session)
+    const sessionLockedInfo = proven
+      .filter(s => s.sessionLock)
+      .map(s => 'CROWN "' + s.strat + '" session-locked to ' + s.sessionLock + ' (current: ' + currentSession + (s.sessionLock === currentSession ? ' -- OK' : ' -- WAIT') + ')');
+
+    // V9.4: Exploration quota -- every 3rd decision should prefer an under-tested combo
+    // to ensure we cover the full 1000+ combination space instead of looping on favorites.
+    const callCount = (prevDecisions && prevDecisions.length) || 0;
+    const explorationRequired = (callCount % 3 === 2) && inconclusive.length > 0;
 
     const provenLines = proven.length
-      ? 'Proven on ' + sym + ':\n' + proven.map(s => '  WIN: ' + s.strat + ' -- ' + s.winRate + '% WR (' + s.total + ' trades)').join('\n')
-      : 'No proven strategies yet -- explore freely.';
+      ? 'Proven on ' + sym + ':\n' + proven.map(s => '  WIN: ' + s.strat + ' -- ' + s.winRate + '% WR (' + s.total + ' trades, exp $' + (s.expectancy || 0) + ')' + (s.sessionLock ? ' [SESSION-LOCK: ' + s.sessionLock + ']' : '')).join('\n')
+      : 'No crowned strategies yet on ' + sym + ' -- explore freely.';
     const bannedLines = banned.length ? 'Banned on ' + sym + ' (avoid):\n' + banned.map(s => '  ' + s).join('\n') : '';
     const blLines     = blList.length ? 'Globally blacklisted (never use):\n' + blList.map(s => '  ' + s).join('\n') : '';
     const crownLine   = crown ? 'CROWN LOCK: Use "' + crown + '" if setup supports it.' : 'No crown lock -- explore all combinations freely.';
-    const learnedCtx  = ['=== STRATEGY KNOWLEDGE FOR ' + sym + ' ===', provenLines, bannedLines || null, blLines || null, crownLine].filter(Boolean).join('\n');
+    const sessLines   = sessionLockedInfo.length ? 'SESSION LOCKS:\n  ' + sessionLockedInfo.join('\n  ') : '';
+
+    // Exploration directive
+    const exploreLine = explorationRequired
+      ? '\nEXPLORATION QUOTA (REQUIRED THIS DECISION):\n' +
+        'The bot has traded ' + callCount + ' cycles. Every 3rd decision must test a NEW or UNDER-TESTED strategy combo\n' +
+        'to ensure coverage of the strategy space. If the setup supports a trade, PREFER one of these under-tested combos:\n' +
+        inconclusive.slice(0, 5).map(i => '  ' + i.strat + ' (only ' + i.total + ' trades so far)').join('\n') + '\n' +
+        'Only fall back to proven strategies if NONE of these fit the current setup.\n'
+      : '';
+
+    const learnedCtx = [
+      '=== STRATEGY KNOWLEDGE FOR ' + sym + ' ===',
+      provenLines,
+      bannedLines || null,
+      blLines || null,
+      crownLine,
+      sessLines || null,
+      exploreLine || null,
+    ].filter(Boolean).join('\n');
 
     const prevCtx = (prevDecisions && prevDecisions.length)
       ? '\nRECENT DECISIONS:\n' + prevDecisions.slice(-3).map(d => '  ' + d.decision + ' @ ' + d.price + ' [' + (d.strategy || '?') + ']').join('\n')
