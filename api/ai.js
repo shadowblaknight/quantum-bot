@@ -7,6 +7,14 @@
 
 const FF_CALENDAR_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 
+// V9.5: Redis for reliable exploration counter and recent-strategy tracking
+const { Redis } = require('@upstash/redis');
+const getRedis = () => {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return null;
+  try { return new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN }); }
+  catch (_) { return null; }
+};
+
 let _ffCache = { data: null, ts: 0 };
 const FF_TTL_MS = 30 * 60 * 1000;
 
@@ -163,27 +171,53 @@ module.exports = async (req, res) => {
       .filter(s => s.sessionLock)
       .map(s => 'CROWN "' + s.strat + '" session-locked to ' + s.sessionLock + ' (current: ' + currentSession + (s.sessionLock === currentSession ? ' -- OK' : ' -- WAIT') + ')');
 
-    // V9.4: Exploration quota -- every 3rd decision should prefer an under-tested combo
-    // to ensure we cover the full 1000+ combination space instead of looping on favorites.
-    const callCount = (prevDecisions && prevDecisions.length) || 0;
-    const explorationRequired = (callCount % 3 === 2) && inconclusive.length > 0;
+    // V9.5: Reliable exploration counter via Redis (replaces unreliable prevDecisions.length)
+    // Track last-used strategies per instrument to prevent overtrading the same crown.
+    const redis = getRedis();
+    let aiCounter = 0;
+    let recentStrats = []; // last 3 strategies used for this instrument
+    if (redis) {
+      try { aiCounter = await redis.incr('v9:ai_count:' + sym); } catch (_) {}
+      try {
+        const rsRaw = await redis.get('v9:recent_strats:' + sym);
+        if (rsRaw) {
+          const parsed = typeof rsRaw === 'string' ? JSON.parse(rsRaw) : rsRaw;
+          if (Array.isArray(parsed)) recentStrats = parsed.slice(0, 3);
+        }
+      } catch (_) {}
+    }
+
+    // V9.5: 50/50 exploration when under-tested combos exist (was: 33% every 3rd)
+    // Omar is in filtering phase -- need maximum coverage of the 1000+ combo space.
+    const explorationRequired = (aiCounter % 2 === 0) && inconclusive.length > 0;
 
     const provenLines = proven.length
       ? 'Proven on ' + sym + ':\n' + proven.map(s => '  WIN: ' + s.strat + ' -- ' + s.winRate + '% WR (' + s.total + ' trades, exp $' + (s.expectancy || 0) + ')' + (s.sessionLock ? ' [SESSION-LOCK: ' + s.sessionLock + ']' : '')).join('\n')
       : 'No crowned strategies yet on ' + sym + ' -- explore freely.';
     const bannedLines = banned.length ? 'Banned on ' + sym + ' (avoid):\n' + banned.map(s => '  ' + s).join('\n') : '';
     const blLines     = blList.length ? 'Globally blacklisted (never use):\n' + blList.map(s => '  ' + s).join('\n') : '';
-    const crownLine   = crown ? 'CROWN LOCK: Use "' + crown + '" if setup supports it.' : 'No crown lock -- explore all combinations freely.';
+
+    // V9.5: Softer crown language -- crown is a preference for matching setups, NOT a default
+    const crownLine   = crown
+      ? 'CROWN PREFERENCE: "' + crown + '" has an edge on ' + sym + ', BUT do NOT default to it. Only play it when the current setup PRECISELY matches its conditions. Prefer exploring other combos otherwise.'
+      : 'No crown lock -- explore all combinations freely.';
     const sessLines   = sessionLockedInfo.length ? 'SESSION LOCKS:\n  ' + sessionLockedInfo.join('\n  ') : '';
 
-    // Exploration directive
-    const exploreLine = explorationRequired
-      ? '\nEXPLORATION QUOTA (REQUIRED THIS DECISION):\n' +
-        'The bot has traded ' + callCount + ' cycles. Every 3rd decision must test a NEW or UNDER-TESTED strategy combo\n' +
-        'to ensure coverage of the strategy space. If the setup supports a trade, PREFER one of these under-tested combos:\n' +
-        inconclusive.slice(0, 5).map(i => '  ' + i.strat + ' (only ' + i.total + ' trades so far)').join('\n') + '\n' +
-        'Only fall back to proven strategies if NONE of these fit the current setup.\n'
+    // V9.5: Anti-overtrading -- forbid immediate repetition of recent strategies
+    const recentLine  = recentStrats.length
+      ? '\nRECENTLY USED (do NOT repeat these in back-to-back decisions):\n' + recentStrats.map(s => '  - ' + s).join('\n') + '\nPick a DIFFERENT combo unless the current setup is unambiguously a perfect match for one of these.'
       : '';
+
+    // V9.5: Stronger exploration directive
+    const exploreLine = explorationRequired
+      ? '\n*** EXPLORATION REQUIRED THIS DECISION ***\n' +
+        'This is an exploration cycle (counter=' + aiCounter + '). You MUST test a new or under-tested combo if the setup allows ANY trade.\n' +
+        'Under-tested combos on ' + sym + ' (pick one of these when possible):\n' +
+        inconclusive.slice(0, 8).map(i => '  - ' + i.strat + ' (' + i.total + ' trades so far)').join('\n') + '\n' +
+        'Only fall back to a proven/crown strategy if the setup is INCOMPATIBLE with every option above. Default position: explore.\n'
+      : (inconclusive.length > 0
+         ? '\nNOTE: ' + inconclusive.length + ' under-tested combos still exist. Favor these over crowns when setup is ambiguous; overtrading crowns adds no new information.\n'
+         : '');
 
     const learnedCtx = [
       '=== STRATEGY KNOWLEDGE FOR ' + sym + ' ===',
@@ -192,6 +226,7 @@ module.exports = async (req, res) => {
       blLines || null,
       crownLine,
       sessLines || null,
+      recentLine || null,
       exploreLine || null,
     ].filter(Boolean).join('\n');
 
@@ -301,7 +336,15 @@ module.exports = async (req, res) => {
       if (blList.includes(s)) { dec.decision = 'WAIT'; dec.reason = 'Strategy "'+s+'" globally blacklisted.'; dec.volume = null; }
     }
 
-    console.log('[AI]', sym, category, dec.decision, (dec.confidence || 0) + '%', dec.strategy || '-', 'vol=' + dec.volume);
+    // V9.5: After a non-WAIT decision, update the recent-strats list so next call knows what NOT to repeat
+    if (redis && dec.decision !== 'WAIT' && dec.strategy) {
+      try {
+        const newList = [dec.strategy, ...recentStrats.filter(x => x !== dec.strategy)].slice(0, 3);
+        await redis.set('v9:recent_strats:' + sym, JSON.stringify(newList));
+      } catch (_) {}
+    }
+
+    console.log('[AI]', sym, category, dec.decision, (dec.confidence || 0) + '%', dec.strategy || '-', 'vol=' + dec.volume, 'aiCount=' + aiCounter, 'explore=' + explorationRequired);
     return res.status(200).json(dec);
 
   } catch (e) {
