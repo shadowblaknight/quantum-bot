@@ -121,6 +121,171 @@ module.exports = async (req, res) => {
   }
 
   // ========================================================================
+  // ?action=redis-audit
+  // Count all keys grouped by namespace so you can see what's polluting Redis.
+  // Uses ONE keys("*") call to stay cheap. No deletion.
+  // ========================================================================
+  if (action === 'redis-audit') {
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+      return res.status(500).json({ error: 'Missing Redis env vars' });
+    }
+    const r = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+    try {
+      const allKeys = await r.keys('*').catch(() => []);
+      const buckets = {};
+      for (const k of allKeys) {
+        const parts = k.split(':');
+        const bucket = parts.length >= 2 ? parts[0] + ':' + parts[1] : parts[0];
+        buckets[bucket] = (buckets[bucket] || 0) + 1;
+      }
+      const classified = { current_v9: 0, legacy: 0, legacy_buckets: {}, v9_buckets: {} };
+      for (const [bucket, count] of Object.entries(buckets)) {
+        if (bucket.startsWith('v9:')) {
+          classified.current_v9 += count;
+          classified.v9_buckets[bucket] = count;
+        } else {
+          classified.legacy += count;
+          classified.legacy_buckets[bucket] = count;
+        }
+      }
+      return res.status(200).json({
+        totalKeys: allKeys.length,
+        buckets,
+        classified,
+      });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ========================================================================
+  // ?action=redis-export
+  // Export ALL v9:* keys as JSON so you can migrate to a new Redis database
+  // without losing strategy lab history, crowns, blacklists, etc.
+  //
+  // Usage:
+  //   Invoke-RestMethod -Uri ".../api/manage-trades?action=redis-export" -Method POST |
+  //     ConvertTo-Json -Depth 20 | Out-File -Encoding utf8 redis-backup.json
+  //
+  // Only exports v9:* keys (current namespace). Skips legacy junk.
+  // Handles 3 Redis data types: string, list, set. If you have other types,
+  // the response will flag them.
+  // ========================================================================
+  if (action === 'redis-export') {
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+      return res.status(500).json({ error: 'Missing Redis env vars' });
+    }
+    const r = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+    try {
+      const keys = await r.keys('v9:*').catch(() => []);
+      const data = {};
+      const stats = { strings: 0, lists: 0, sets: 0, hashes: 0, unknown: 0, errors: [] };
+
+      for (const k of keys) {
+        try {
+          const type = await r.type(k).catch(() => 'unknown');
+          if (type === 'string') {
+            const v = await r.get(k);
+            data[k] = { type: 'string', value: v };
+            stats.strings++;
+          } else if (type === 'list') {
+            const v = await r.lrange(k, 0, -1);
+            data[k] = { type: 'list', value: v };
+            stats.lists++;
+          } else if (type === 'set') {
+            const v = await r.smembers(k);
+            data[k] = { type: 'set', value: v };
+            stats.sets++;
+          } else if (type === 'hash') {
+            const v = await r.hgetall(k);
+            data[k] = { type: 'hash', value: v };
+            stats.hashes++;
+          } else {
+            stats.unknown++;
+            stats.errors.push({ key: k, type });
+          }
+        } catch (e) {
+          stats.errors.push({ key: k, error: e.message });
+        }
+      }
+
+      return res.status(200).json({
+        ok:        true,
+        exportedAt: new Date().toISOString(),
+        keyCount:  keys.length,
+        stats,
+        data,
+        note:      'Save this entire JSON response. Use action=redis-import to restore into a new Upstash DB.',
+      });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ========================================================================
+  // ?action=redis-import
+  // Restore data from a previous redis-export into the CURRENT Redis.
+  // This is what you run AFTER switching Vercel env vars to the new Upstash DB.
+  //
+  // Usage:
+  //   $backup = Get-Content redis-backup.json | ConvertFrom-Json
+  //   $body = @{ action="redis-import"; confirm="YES_IMPORT"; data=$backup.data } | ConvertTo-Json -Depth 20
+  //   Invoke-RestMethod -Uri ".../api/manage-trades" -Method POST -Body $body -ContentType "application/json"
+  //
+  // REQUIRES body: { "action":"redis-import", "confirm":"YES_IMPORT", "data":{...} }
+  // ========================================================================
+  if (action === 'redis-import') {
+    if (body.confirm !== 'YES_IMPORT') {
+      return res.status(400).json({
+        error:  'Missing confirmation',
+        needed: 'POST body must include "confirm": "YES_IMPORT" and "data": {...}',
+      });
+    }
+    if (!body.data || typeof body.data !== 'object') {
+      return res.status(400).json({ error: 'Missing data object in POST body' });
+    }
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+      return res.status(500).json({ error: 'Missing Redis env vars' });
+    }
+    const r = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+    const stats = { strings: 0, lists: 0, sets: 0, hashes: 0, errors: [] };
+
+    try {
+      for (const [key, entry] of Object.entries(body.data)) {
+        try {
+          if (entry.type === 'string') {
+            await r.set(key, entry.value);
+            stats.strings++;
+          } else if (entry.type === 'list' && Array.isArray(entry.value)) {
+            // Delete existing key first, then push in order
+            await r.del(key).catch(() => {});
+            if (entry.value.length > 0) {
+              // rpush preserves order (lpush would reverse it)
+              await r.rpush(key, ...entry.value);
+            }
+            stats.lists++;
+          } else if (entry.type === 'set' && Array.isArray(entry.value)) {
+            await r.del(key).catch(() => {});
+            if (entry.value.length > 0) {
+              await r.sadd(key, ...entry.value);
+            }
+            stats.sets++;
+          } else if (entry.type === 'hash' && entry.value && typeof entry.value === 'object') {
+            await r.del(key).catch(() => {});
+            const flat = [];
+            for (const [f, v] of Object.entries(entry.value)) { flat.push(f, v); }
+            if (flat.length > 0) {
+              await r.hset(key, entry.value);
+            }
+            stats.hashes++;
+          } else {
+            stats.errors.push({ key, reason: 'unknown type ' + entry.type });
+          }
+        } catch (e) {
+          stats.errors.push({ key, error: e.message });
+        }
+      }
+      return res.status(200).json({ ok: true, imported: Object.keys(body.data).length, stats });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ========================================================================
   // ?action=news  or  ?action=calendar
   // Returns ForexFactory economic calendar events (high impact only by default).
   // Optional query params: ?impact=high|medium|all  &days=7
