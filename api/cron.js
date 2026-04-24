@@ -440,6 +440,7 @@ module.exports = async (req, res) => {
               openPrice: wasOpen.openPrice || null,
               closePrice: histEntry ? (histEntry.closePrice || null) : null,
               volume: histEntry ? (histEntry.volume || 0.01) : 0.01,
+              positionId: closedId,
             }),
           });
           if (recR.ok) {

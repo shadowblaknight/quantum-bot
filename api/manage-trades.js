@@ -286,6 +286,122 @@ module.exports = async (req, res) => {
   }
 
   // ========================================================================
+  // ?action=backfill-history
+  // One-shot recovery: scan recent /api/history closed trades and record
+  // each into the strategy lab. Use this after deploying V9.5 cron to
+  // recover trades that closed while only the cron was running (no browser).
+  //
+  // Optional body params:
+  //   "days":   how many days back to scan (default 2)
+  //   "dryRun": true => report what WOULD be recorded without writing
+  //
+  // Idempotent: skips trades that look already-recorded by checking the
+  // strategy's stored trade history for matching positionId/closeTime.
+  // ========================================================================
+  if (action === 'backfill-history') {
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+      return res.status(500).json({ error: 'Missing Redis env vars' });
+    }
+    const r = new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN });
+    const days = parseInt(body.days || 2, 10);
+    const dryRun = body.dryRun === true;
+
+    // Build self URL for fetching history
+    const selfBase = process.env.QB_PUBLIC_URL
+      ? process.env.QB_PUBLIC_URL.replace(/\/$/, '')
+      : (process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : '');
+    if (!selfBase) return res.status(500).json({ error: 'Missing QB_PUBLIC_URL' });
+
+    try {
+      const hR = await fetch(selfBase + '/api/history?limit=500');
+      if (!hR.ok) return res.status(502).json({ error: 'history fetch failed: ' + hR.status });
+      const hD = await hR.json();
+      const trades = Array.isArray(hD.trades) ? hD.trades : [];
+
+      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+      const recent = trades.filter(t => {
+        const closeT = t.closeTime || t.closeDate || t.date;
+        if (!closeT) return false;
+        const ts = new Date(closeT).getTime();
+        return !isNaN(ts) && ts >= cutoff;
+      });
+
+      const result = { scanned: trades.length, eligible: recent.length, recorded: 0, skipped: [], wouldRecord: [] };
+
+      for (const t of recent) {
+        // Extract strategy from comment (QB:STRATNAME format)
+        const comment = t.comment || t.tradeComment || '';
+        const strategy = comment.startsWith('QB:') ? comment.slice(3).trim() : null;
+        if (!strategy || strategy === 'EXPLORING' || strategy === 'UNKNOWN' || strategy.length < 3) {
+          result.skipped.push({ id: t.positionId || t.id, reason: 'no strategy label', comment });
+          continue;
+        }
+
+        const inst = (t.symbol || '').toUpperCase().replace('.S', '').replace('.PRO', '').trim();
+        if (!inst) { result.skipped.push({ id: t.positionId || t.id, reason: 'no symbol' }); continue; }
+
+        const pnl = t.profit != null ? t.profit : (t.pnl || 0);
+        const direction = t.type === 'POSITION_TYPE_BUY' || t.direction === 'LONG' ? 'LONG' : 'SHORT';
+        const closeTime = t.closeTime || t.closeDate || t.date || new Date().toISOString();
+        const positionId = t.positionId || t.id || null;
+
+        // Idempotency: check if this positionId already exists in the strategy's recorded trades
+        const stratKey = 'v9:strat:' + inst + ':' + strategy;
+        const existingRaw = safe(await r.get(stratKey).catch(() => null));
+        if (existingRaw && Array.isArray(existingRaw.trades)) {
+          const dup = existingRaw.trades.some(x => x.positionId && positionId && String(x.positionId) === String(positionId));
+          if (dup) { result.skipped.push({ id: positionId, reason: 'already recorded' }); continue; }
+        }
+
+        // Determine session from close time
+        const closeDt = new Date(closeTime);
+        const hr = closeDt.getUTCHours() + closeDt.getUTCMinutes() / 60;
+        const session = (hr >= 13 && hr < 16) ? 'OVERLAP'
+                      : (hr >= 13 && hr < 21) ? 'NEW YORK'
+                      : (hr >=  8 && hr < 16) ? 'LONDON'
+                      : 'ASIAN';
+
+        const payload = {
+          instrument: inst,
+          direction,
+          won: pnl > 0,
+          pnl,
+          strategy,
+          session,
+          confidence: 0,
+          closeTime,
+          openPrice:  t.openPrice  || null,
+          closePrice: t.closePrice || null,
+          volume:     t.volume     || 0.01,
+          positionId,
+        };
+
+        if (dryRun) {
+          result.wouldRecord.push({ id: positionId, strategy, inst, pnl, session });
+          continue;
+        }
+
+        try {
+          const recR = await fetch(selfBase + '/api/trades', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (recR.ok) {
+            result.recorded++;
+          } else {
+            result.skipped.push({ id: positionId, reason: 'POST failed ' + recR.status });
+          }
+        } catch (e) {
+          result.skipped.push({ id: positionId, reason: 'POST throw: ' + e.message });
+        }
+      }
+
+      console.log('[BACKFILL] scanned=' + result.scanned + ' eligible=' + result.eligible + ' recorded=' + result.recorded + ' skipped=' + result.skipped.length + (dryRun ? ' [DRY RUN]' : ''));
+      return res.status(200).json(result);
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+
+  // ========================================================================
   // ?action=news  or  ?action=calendar
   // Returns ForexFactory economic calendar events (high impact only by default).
   // Optional query params: ?impact=high|medium|all  &days=7

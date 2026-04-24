@@ -435,6 +435,7 @@ module.exports = async (req, res) => {
         instrument, direction, won, pnl,
         strategy, session, tp1Hit, tp2Hit, tp3Hit, tp4Hit,
         confidence, closeTime, openPrice, closePrice, volume,
+        positionId,
       } = body;
 
       if (!instrument || !direction || won === undefined) {
@@ -500,6 +501,7 @@ module.exports = async (req, res) => {
             openPrice:  openPrice  || null,
             closePrice: closePrice || null,
             volume:     volume     || 0.01,
+            positionId: positionId || null,
           },
         ],
       };

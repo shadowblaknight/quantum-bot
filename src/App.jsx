@@ -680,7 +680,7 @@ export default function App() {
     const pnl  = pos.profit || 0;
     try {
       await fetch(API("trades"), { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instrument: inst, direction: pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT", won: pnl > 0, pnl, strategy, session, confidence: fallbackDec?.confidence || 0, closeTime: new Date().toISOString(), openPrice: pos.openPrice || null, closePrice: pos.currentPrice || null, volume: pos.volume || 0.01 }) });
+        body: JSON.stringify({ instrument: inst, direction: pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT", won: pnl > 0, pnl, strategy, session, confidence: fallbackDec?.confidence || 0, closeTime: new Date().toISOString(), openPrice: pos.openPrice || null, closePrice: pos.currentPrice || null, volume: pos.volume || 0.01, positionId: pos.id || pos.positionId || null }) });
       fetchLab();
       addLog(`Recorded [${strategy}] ${inst} ${pnl > 0 ? "WIN" : "LOSS"} ${pnlStr(pnl)}`, pnl > 0 ? "success" : "warn");
     } catch (e) { addLog(`Record failed: ${e.message}`, "error"); }
