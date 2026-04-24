@@ -313,7 +313,6 @@ module.exports = async (req, res) => {
       const r = await fetch(SELF_BASE + '/api/positions');
       if (r.ok) { const d = await r.json(); openPositions = Array.isArray(d.positions) ? d.positions : openPositions; }
     } catch (_) {}
-
     // Build manage payload from broker truth + Redis-stored TP ladders
     const managePos = [];
     for (const pos of openPositions) {
@@ -360,6 +359,109 @@ module.exports = async (req, res) => {
       } catch (e) { summary.errors.push({ where: 'manage-trades', error: e.message }); }
     }
   }
+
+  // ====================================================================
+  // V9.5: Detect closed positions and record them in the strategy lab.
+  // Without this, cron-placed trades never update the lab when they close.
+  // Strategy: store {id -> minimal info} in v9:cron_last_pos. Each cycle,
+  // diff against current open positions. Closed = was-open last, gone now.
+  // Fetch closed-trade profit from /api/history.
+  // ====================================================================
+  try {
+    const lastSnapRaw = await redis.get('v9:cron_last_pos').catch(() => null);
+    const lastSnap = safe(lastSnapRaw);
+    const lastMap = (lastSnap && typeof lastSnap === 'object' && !Array.isArray(lastSnap)) ? lastSnap : {};
+
+    // Build current map { positionId -> { symbol, type, openPrice } }
+    const currentMap = {};
+    for (const p of openPositions) {
+      const pid = p.id || p.positionId;
+      if (!pid) continue;
+      currentMap[String(pid)] = {
+        symbol:    p.symbol,
+        type:      p.type,
+        openPrice: p.openPrice,
+        comment:   p.comment || p.tradeComment || '',
+      };
+    }
+
+    // Find positions that disappeared (closed)
+    const closedIds = Object.keys(lastMap).filter(id => !currentMap[id]);
+
+    if (closedIds.length > 0) {
+      console.log('[CRON][CLOSED] detected ' + closedIds.length + ' closed position(s): ' + closedIds.join(','));
+
+      // Fetch recent history once to find profits for closed positions
+      let history = [];
+      try {
+        const hR = await fetch(SELF_BASE + '/api/history?limit=100');
+        if (hR.ok) { const hD = await hR.json(); history = Array.isArray(hD.trades) ? hD.trades : []; }
+      } catch (e) { console.warn('[CRON][CLOSED] history fetch failed: ' + e.message); }
+
+      // Determine current session (for recording)
+      const nowForSess = new Date();
+      const hr = nowForSess.getUTCHours() + nowForSess.getUTCMinutes() / 60;
+      const session = (hr >= 13 && hr < 16) ? 'OVERLAP'
+                    : (hr >= 13 && hr < 21) ? 'NEW YORK'
+                    : (hr >=  8 && hr < 16) ? 'LONDON'
+                    : 'ASIAN';
+
+      for (const closedId of closedIds) {
+        const wasOpen = lastMap[closedId];
+        if (!wasOpen) continue;
+
+        // Extract strategy from MT5 comment (set by execute.js as "QB:STRATNAME")
+        const comment = wasOpen.comment || '';
+        const strategy = comment.startsWith('QB:') ? comment.slice(3).trim() : null;
+        if (!strategy || strategy === 'EXPLORING' || strategy === 'UNKNOWN' || strategy.length < 3) {
+          console.warn('[CRON][CLOSED] skipping ' + closedId + ' -- no strategy label (comment=' + comment + ')');
+          continue;
+        }
+
+        // Find profit from history
+        const histEntry = history.find(h => String(h.positionId || h.id) === String(closedId));
+        const pnl = histEntry ? (histEntry.profit != null ? histEntry.profit : (histEntry.pnl || 0)) : 0;
+
+        const inst = (wasOpen.symbol || '').toUpperCase().replace('.S', '').replace('.PRO', '').trim();
+        const direction = wasOpen.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT';
+
+        try {
+          const recR = await fetch(SELF_BASE + '/api/trades', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              instrument: inst,
+              direction,
+              won: pnl > 0,
+              pnl,
+              strategy,
+              session,
+              confidence: 0,
+              closeTime: new Date().toISOString(),
+              openPrice: wasOpen.openPrice || null,
+              closePrice: histEntry ? (histEntry.closePrice || null) : null,
+              volume: histEntry ? (histEntry.volume || 0.01) : 0.01,
+            }),
+          });
+          if (recR.ok) {
+            const recD = await recR.json().catch(() => ({}));
+            console.log('[CRON][CLOSED] recorded [' + strategy + '] ' + inst + ' ' + (pnl > 0 ? 'WIN' : 'LOSS') + ' $' + pnl.toFixed(2) +
+                        (recD.justCrowned ? ' [CROWNED!]' : '') +
+                        (recD.dethroned ? ' [DETHRONED]' : '') +
+                        (recD.blacklisted ? ' [BLACKLISTED]' : ''));
+          } else {
+            console.error('[CRON][CLOSED] record FAIL ' + recR.status);
+          }
+        } catch (e) { console.error('[CRON][CLOSED] record error: ' + e.message); }
+      }
+    }
+
+    // Update the snapshot if positions changed (avoid Redis write when nothing happened)
+    const lastIds = Object.keys(lastMap).sort().join(',');
+    const currIds = Object.keys(currentMap).sort().join(',');
+    if (lastIds !== currIds) {
+      await redis.set('v9:cron_last_pos', JSON.stringify(currentMap)).catch(() => {});
+    }
+  } catch (e) { console.error('[CRON][CLOSED] block error: ' + e.message); }
 
   // ====================================================================
   // V9.4: Daily summary at 21:00 UTC (end of NY session), weekdays only.
