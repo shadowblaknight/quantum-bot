@@ -894,6 +894,11 @@ export default function App() {
     return () => ii.forEach(clearInterval);
   }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, instruments]);
 
+  // V9.5: Fresh history fetch whenever user opens the Reports/History tab
+  useEffect(() => {
+    if (page === "reports") fetchHistory();
+  }, [page, fetchHistory]);
+
   useEffect(() => {
     if (!openPositions.length) return;
     manageTrades();
