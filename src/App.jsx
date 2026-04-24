@@ -646,7 +646,7 @@ export default function App() {
     try { const r = await fetch(API("positions")); if (r.ok) { const d = await r.json(); setOpenPositions(Array.isArray(d.positions) ? d.positions : []); } } catch (_) {}
   }, []);
   const fetchHistory = useCallback(async () => {
-    try { const r = await fetch(API("history")); if (r.ok) { const d = await r.json(); setClosedTrades(Array.isArray(d.deals) ? d.deals : []); } } catch (_) {}
+    try { const r = await fetch(API("history")); if (r.ok) { const d = await r.json(); setClosedTrades(Array.isArray(d.trades) ? d.trades : (Array.isArray(d.deals) ? d.deals : [])); } } catch (_) {}
   }, []);
   const fetchPrice = useCallback(async (sym) => {
     try { const r = await fetch(API(`broker-price?symbol=${encodeURIComponent(sym)}`)); if (r.ok) { const d = await r.json(); if (d.price != null) setPrices((p) => ({ ...p, [sym]: d.price })); } } catch (_) {}

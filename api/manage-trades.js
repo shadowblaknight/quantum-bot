@@ -320,7 +320,8 @@ module.exports = async (req, res) => {
 
       const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
       const recent = trades.filter(t => {
-        const closeT = t.closeTime || t.closeDate || t.date;
+        // MetaAPI returns 'time' as the close timestamp; fall back to other names
+        const closeT = t.time || t.closeTime || t.closeDate || t.date || t.closeBrokerTime || t.brokerTime;
         if (!closeT) return false;
         const ts = new Date(closeT).getTime();
         return !isNaN(ts) && ts >= cutoff;
@@ -342,7 +343,7 @@ module.exports = async (req, res) => {
 
         const pnl = t.profit != null ? t.profit : (t.pnl || 0);
         const direction = t.type === 'POSITION_TYPE_BUY' || t.direction === 'LONG' ? 'LONG' : 'SHORT';
-        const closeTime = t.closeTime || t.closeDate || t.date || new Date().toISOString();
+        const closeTime = t.time || t.closeTime || t.closeDate || t.date || new Date().toISOString();
         const positionId = t.positionId || t.id || null;
 
         // Idempotency: check if this positionId already exists in the strategy's recorded trades
