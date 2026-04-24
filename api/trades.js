@@ -461,8 +461,7 @@ module.exports = async (req, res) => {
       const newConsec    = won ? 0 : (cur.consecutiveLosses || 0) + 1;
 
       // V9.4: Check crown using STRICT rules (not old "5 wins = crown")
-      const newTotal  = (updated.wins || cur.wins || 0) + (updated.losses || cur.losses || 0) + 0;
-      // Note: `updated` is defined below. Compute pre-update "was strictly crowned" from current state.
+      // Compute pre-update stats to detect "was crowned before this trade"
       const preTotal  = (cur.wins || 0) + (cur.losses || 0);
       const preWR     = preTotal > 0 ? ((cur.wins || 0) / preTotal) * 100 : 0;
       const preExp    = preTotal > 0 ? (cur.totalPnl || 0) / preTotal : 0;
