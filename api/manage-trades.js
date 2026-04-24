@@ -313,10 +313,34 @@ module.exports = async (req, res) => {
     if (!selfBase) return res.status(500).json({ error: 'Missing QB_PUBLIC_URL' });
 
     try {
-      const hR = await fetch(selfBase + '/api/history?limit=500');
-      if (!hR.ok) return res.status(502).json({ error: 'history fetch failed: ' + hR.status });
+      const histUrl = selfBase + '/api/history?limit=500';
+      const hR = await fetch(histUrl);
+      if (!hR.ok) {
+        const errText = await hR.text().catch(() => '');
+        return res.status(502).json({ error: 'history fetch failed: ' + hR.status, url: histUrl, body: errText.slice(0, 500) });
+      }
       const hD = await hR.json();
-      const trades = Array.isArray(hD.trades) ? hD.trades : [];
+      const trades = Array.isArray(hD.trades) ? hD.trades
+                   : Array.isArray(hD.deals) ? hD.deals
+                   : Array.isArray(hD) ? hD
+                   : [];
+
+      // Diagnostic: if no trades, return what we got
+      if (trades.length === 0) {
+        return res.status(200).json({
+          scanned: 0, eligible: 0, recorded: 0, skipped: [], wouldRecord: [],
+          DIAG: {
+            url: histUrl,
+            keys_in_response: Object.keys(hD || {}),
+            count_field: hD.count,
+            source_field: hD.source,
+            trades_field_type: typeof hD.trades,
+            trades_field_isArray: Array.isArray(hD.trades),
+            trades_field_length: Array.isArray(hD.trades) ? hD.trades.length : null,
+            sample: JSON.stringify(hD).slice(0, 500),
+          },
+        });
+      }
 
       const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
       const recent = trades.filter(t => {
