@@ -204,28 +204,81 @@ module.exports = async (req, res) => {
   console.log('[EXECUTE] OK ' + trySym + ' ' + direction + ' ' + safeVol + 'L orderId=' + orderId + ' positionId=' + positionId);
 
   // ---- Verify broker actually attached SL/TP by fetching position back ----
+  // V9.6: If SL is missing after open, retry up to 2x. If still missing,
+  // emergency close to prevent unbounded risk.
   let verified = { slSet: false, tpSet: false, fillPrice: null };
   if (positionId) {
-    try {
-      await new Promise(r => setTimeout(r, 500));
-      const pr = await fetch(BASE + '/positions', { headers: HEADERS });
-      if (pr.ok) {
-        const posList = await pr.json().catch(() => []);
-        const pos = Array.isArray(posList) ? posList.find(p => String(p.id) === String(positionId)) : null;
-        if (pos) {
-          verified = {
-            slSet:     pos.stopLoss != null && pos.stopLoss > 0,
-            tpSet:     pos.takeProfit != null && pos.takeProfit > 0,
-            fillPrice: pos.openPrice || null,
-            brokerSL:  pos.stopLoss  || null,
-            brokerTP:  pos.takeProfit || null,
-          };
-          console.log('[EXECUTE] VERIFY positionId=' + positionId + ' slSet=' + verified.slSet + ' tpSet=' + verified.tpSet + ' fill=' + verified.fillPrice);
-        } else {
-          console.warn('[EXECUTE] VERIFY: position ' + positionId + ' not found yet');
+    let attempt = 0;
+    while (attempt < 3) {
+      attempt++;
+      try {
+        await new Promise(r => setTimeout(r, 500 * attempt));
+        const pr = await fetch(BASE + '/positions', { headers: HEADERS });
+        if (pr.ok) {
+          const posList = await pr.json().catch(() => []);
+          const pos = Array.isArray(posList) ? posList.find(p => String(p.id) === String(positionId)) : null;
+          if (pos) {
+            verified = {
+              slSet:     pos.stopLoss != null && pos.stopLoss > 0,
+              tpSet:     pos.takeProfit != null && pos.takeProfit > 0,
+              fillPrice: pos.openPrice || null,
+              brokerSL:  pos.stopLoss  || null,
+              brokerTP:  pos.takeProfit || null,
+            };
+            console.log('[EXECUTE] VERIFY attempt=' + attempt + ' positionId=' + positionId + ' slSet=' + verified.slSet + ' tpSet=' + verified.tpSet + ' fill=' + verified.fillPrice);
+
+            // V9.6: Critical -- if SL is missing, RETRY attaching it
+            if (!verified.slSet) {
+              console.warn('[EXECUTE] SL not attached on attempt ' + attempt + ', retrying modify');
+              const modifyBody = {
+                actionType: 'POSITION_MODIFY',
+                positionId,
+                stopLoss: parseFloat(sl.toFixed(priceDp(sl))),
+              };
+              if (tp) modifyBody.takeProfit = parseFloat(tp.toFixed(priceDp(tp)));
+              try {
+                const mr = await fetch(BASE + '/trade', { method: 'POST', headers: HEADERS, body: JSON.stringify(modifyBody) });
+                const md = await mr.json().catch(() => ({}));
+                console.log('[EXECUTE] SL retry resp=' + mr.status + ' ' + JSON.stringify(md).slice(0, 200));
+                if (mr.ok && !md.error) continue; // re-verify on next attempt
+              } catch (e) { console.error('[EXECUTE] SL retry throw ' + e.message); }
+            } else {
+              break; // SL is attached, we're done
+            }
+          } else {
+            console.warn('[EXECUTE] VERIFY: position ' + positionId + ' not found yet (attempt ' + attempt + ')');
+          }
         }
-      }
-    } catch (e) { console.warn('[EXECUTE] VERIFY error ' + e.message); }
+      } catch (e) { console.warn('[EXECUTE] VERIFY error ' + e.message); }
+    }
+
+    // V9.6: If SL STILL not attached after retries, emergency close to prevent unbounded risk
+    if (!verified.slSet) {
+      console.error('[EXECUTE] SL FAILED to attach after retries, emergency closing positionId=' + positionId);
+      try {
+        const cr = await fetch(BASE + '/trade', { method: 'POST', headers: HEADERS, body: JSON.stringify({ actionType: 'POSITION_CLOSE_ID', positionId, comment: 'QB:NO_SL_FAILSAFE' }) });
+        const cd = await cr.json().catch(() => ({}));
+        console.log('[EXECUTE] FAILSAFE close resp=' + cr.status + ' ' + JSON.stringify(cd).slice(0, 200));
+      } catch (e) { console.error('[EXECUTE] FAILSAFE close throw ' + e.message); }
+      await tg(
+        '🚨 <b>Trade closed FAILSAFE · ' + (trySym || instrument) + '</b>\n\n' +
+        '<pre>' +
+        'Broker rejected SL attachment.\n' +
+        'Position closed immediately to prevent unbounded loss.\n' +
+        '──────────────────\n' +
+        'Direction: ' + direction + '\n' +
+        'Volume:    ' + safeVol + 'L\n' +
+        'Entry:     ' + entryPrice +
+        '</pre>'
+      );
+      return res.status(200).json({
+        success:  false,
+        blocked:  true,
+        positionId,
+        reason:   'SL failed to attach -- position emergency closed',
+        verified,
+      });
+    }
   }
 
   // ---- Telegram: brief notification on open. Full TP ladder shown after

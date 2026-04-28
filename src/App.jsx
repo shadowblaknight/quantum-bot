@@ -48,7 +48,8 @@ const isTradeable = (sym, utcH, isWeekend) => {
   const cat = instCategory(sym);
   if (isWeekend) return false;
   if (cat === "CRYPTO") return utcH >= 7 && utcH < 23;
-  return utcH >= 8 && utcH < 21;
+  // V9.6: Cut late NY (18-21 UTC) — proven loser zone, low liquidity after London close.
+  return utcH >= 8 && utcH < 18;
 };
 const getSessionLabel = (timeStr) => {
   const h = new Date(timeStr || "").getUTCHours();
@@ -350,6 +351,62 @@ const CSS = `
     .content { padding:14px 14px 24px; }
     .topbar { padding:10px 14px; }
   }
+
+  /* ================ V9.7 -- CHARTS & DECODER ================ */
+
+  /* Strategy Decoder */
+  .strat-decoder { width:100%; }
+  .tac-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:14px; border:1px solid; font-size:11px; }
+  .tac-details { display:grid; gap:8px; }
+  .tac-card { padding:10px 12px; background:#f8fafc; border-left:3px solid; border-radius:6px; }
+
+  /* Donut */
+  .dnt-wrap { position:relative; display:inline-block; }
+  .dnt-empty { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:11px; border:2px dashed #cbd5e1; border-radius:50%; }
+  .dnt-center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
+  .dnt-label { font-size:22px; font-weight:800; letter-spacing:-0.5px; }
+  .dnt-sub { font-size:10px; color:#64748b; margin-top:2px; }
+
+  /* Bar chart */
+  .bch-wrap { display:flex; align-items:flex-end; gap:6px; padding:8px 4px 28px; position:relative; }
+  .bch-empty { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:11px; }
+  .bch-col { flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; min-width:0; height:100%; }
+  .bch-val { font-size:10px; font-weight:700; }
+  .bch-track { flex:1; width:100%; max-width:30px; display:flex; align-items:flex-end; background:rgba(226,232,240,0.5); border-radius:3px; overflow:hidden; }
+  .bch-fill { width:100%; border-radius:3px; transition:height 600ms ease; min-height:2px; }
+  .bch-lbl { font-size:9px; color:#64748b; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:100%; }
+
+  /* Progress ring */
+  .prg-wrap { position:relative; display:inline-block; }
+  .prg-center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
+  .prg-label { font-size:18px; font-weight:800; letter-spacing:-0.5px; }
+  .prg-sub { font-size:9px; color:#64748b; margin-top:1px; text-transform:uppercase; letter-spacing:0.5px; }
+
+  /* Pyramid */
+  .pyr-wrap { display:flex; flex-direction:column; gap:6px; padding:8px 0; }
+  .pyr-row { display:flex; flex-direction:column; align-items:center; gap:3px; }
+  .pyr-bar-shell { width:100%; display:flex; justify-content:center; }
+  .pyr-bar { padding:6px 12px; border-radius:6px; min-width:50px; text-align:center; transition:width 600ms ease; box-shadow:0 1px 2px rgba(0,0,0,0.08); }
+  .pyr-val { color:#fff; font-weight:800; font-size:13px; }
+  .pyr-label { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; }
+
+  /* Equity curve */
+  .eq-svg { display:block; width:100%; }
+  .eq-empty { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:11px; border:2px dashed #cbd5e1; border-radius:8px; }
+
+  /* Chart panel grid */
+  .chart-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px; }
+  .chart-card { background:linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .chart-title { font-size:11px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:10px; }
+
+  /* Sound toggle */
+  .snd-toggle { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:14px; border:1px solid var(--border2); background:#fff; font-size:11px; cursor:pointer; }
+  .snd-toggle.on { background:#dcfce7; border-color:#22c55e; color:#15803d; }
+  .snd-toggle.off { background:#fef2f2; border-color:#ef4444; color:#b91c1c; }
+
+  @media (max-width: 600px) {
+    .chart-grid { grid-template-columns:1fr 1fr; }
+  }
 `;
 
 const NAV = [
@@ -576,6 +633,317 @@ function Sparkline({ values, color = "#2563eb", height = 60 }) {
 }
 
 // ============================================================
+// V9.7 -- STRATEGY TACTIC DICTIONARY
+// Decodes every abbreviated strategy name into plain language.
+// ============================================================
+const TACTIC_DICT = {
+  TREND_H4:        { name: "H4 Trend Following",       icon: "📈", color: "#6366f1", desc: "Aligns with the dominant 4-hour trend.",                   when: "Strong directional move on H4 chart",        ex: "Price > H4 EMA200, pullback to H1 support, enter long on bullish candle close." },
+  TREND_BREAKOUT:  { name: "Trend Breakout",            icon: "💥", color: "#ef4444", desc: "Catches momentum breakouts of consolidation.",              when: "Tight range followed by high-volume break",  ex: "M15 range break with expanding volume, enter in break direction." },
+  MR_ROUND:        { name: "Mean Reversion @ Round #",  icon: "🎯", color: "#10b981", desc: "Fades spikes into psychological round numbers.",            when: "Price spikes to round levels (1.0800, 2050)",ex: "Gold spikes to 2050, RSI overbought, short for retrace." },
+  MR_RANGE:        { name: "Mean Reversion in Range",   icon: "↔️", color: "#84cc16", desc: "Fades extremes within an established range.",                when: "Clear range bounds on H1 / M15",             ex: "Price hits range top, RSI > 70, short to range middle." },
+  MEAN_REV:        { name: "Mean Reversion (Generic)",  icon: "🔄", color: "#10b981", desc: "Reverts price toward the mean after extension.",            when: "Strong move with weakening momentum",        ex: "M15 RSI < 25 after sell-off, look for bullish divergence." },
+  ICT_KILLZONE:    { name: "ICT Kill Zone",             icon: "⚡", color: "#f59e0b", desc: "Trades during ICT high-volume time windows.",               when: "London 07-10 UTC or NY 13-16 UTC",           ex: "London open: wait for liquidity sweep, enter on reversal." },
+  ICT_SWEEP:       { name: "ICT Liquidity Sweep",       icon: "🌊", color: "#06b6d4", desc: "Trades reversal after the bot hunts retail stops.",         when: "Price sweeps a recent high/low then reverses",ex: "Sweep of M15 low, structure shift, enter long on retest." },
+  MOM_SESSION:     { name: "Session Momentum",          icon: "🚀", color: "#ec4899", desc: "Rides the dominant session direction after open.",          when: "Clear session-open momentum after consolidation", ex: "London open breaks Asian range, follow the breakout." },
+  MOM_S:           { name: "Session Momentum",          icon: "🚀", color: "#ec4899", desc: "Rides the dominant session direction after open.",          when: "Clear session-open momentum after consolidation", ex: "London open breaks Asian range, follow the breakout." },
+  PA_REJECTION:    { name: "Price Action Rejection",    icon: "🛡️", color: "#8b5cf6", desc: "Trades pin bars or engulfing patterns at S/R.",             when: "Strong rejection wick at key level",         ex: "Bullish pin bar at H4 support, enter long with SL below wick." },
+  PA_REJ:          { name: "Price Action Rejection",    icon: "🛡️", color: "#8b5cf6", desc: "Trades pin bars or engulfing patterns at S/R.",             when: "Strong rejection wick at key level",         ex: "Bullish pin bar at H4 support, enter long with SL below wick." },
+  PA_RE:           { name: "Price Action Rejection",    icon: "🛡️", color: "#8b5cf6", desc: "Trades pin bars or engulfing patterns at S/R.",             when: "Strong rejection wick at key level",         ex: "Bullish pin bar at H4 support, enter long with SL below wick." },
+  TREND:           { name: "Trend Continuation",        icon: "📊", color: "#3b82f6", desc: "Generic trend-following signal.",                            when: "Higher highs / higher lows on multi-TF",     ex: "Pullback to 21 EMA in uptrend, enter long." },
+  MOM:             { name: "Momentum",                  icon: "⚡", color: "#f97316", desc: "Pure momentum signal (MACD, RSI, etc.).",                   when: "MACD histogram expanding in trend direction",ex: "MACD bullish cross + price above 50 EMA, enter long." },
+  MR:              { name: "Mean Reversion",            icon: "🔄", color: "#10b981", desc: "Mean reversion signal (generic).",                          when: "Price stretched far from mean",              ex: "Bollinger %B > 1.0, fade for retrace." },
+  PA:              { name: "Price Action",              icon: "🕯️", color: "#a855f7", desc: "Pure candlestick / structure signal.",                      when: "Significant candlestick pattern at key level",ex: "Engulfing candle at trendline retest." },
+  MR_RO:           { name: "Mean Reversion @ Round #",  icon: "🎯", color: "#10b981", desc: "Fades spikes into psychological round numbers.",            when: "Price spikes to round levels",               ex: "Gold spikes to 2050, RSI overbought, short for retrace." },
+  MR_RA:           { name: "Mean Reversion in Range",   icon: "↔️", color: "#84cc16", desc: "Fades extremes within an established range.",                when: "Clear range bounds on H1 / M15",             ex: "Price hits range top, RSI > 70, short to range middle." },
+  MOMEN:           { name: "Momentum",                  icon: "⚡", color: "#f97316", desc: "Momentum signal.",                                          when: "MACD / RSI showing strong directional bias", ex: "MACD bullish cross, follow the move." },
+  TREND_:          { name: "Trend",                     icon: "📊", color: "#3b82f6", desc: "Trend signal.",                                             when: "Aligned multi-TF trend",                     ex: "All TFs in same direction, follow." },
+};
+// Lookup with fallback for unknown abbrevs
+const decodeTactic = (raw) => {
+  if (!raw) return { name: raw, icon: "❓", color: "#94a3b8", desc: "Unknown tactic", when: "—", ex: "—" };
+  const key = raw.trim().toUpperCase();
+  if (TACTIC_DICT[key]) return TACTIC_DICT[key];
+  // Try prefix match (e.g. "TREND_H" matches "TREND_H4")
+  for (const k of Object.keys(TACTIC_DICT)) {
+    if (k.startsWith(key) || key.startsWith(k)) return TACTIC_DICT[k];
+  }
+  return { name: raw, icon: "❓", color: "#94a3b8", desc: "Unknown tactic — possibly truncated label", when: "—", ex: "—" };
+};
+const splitStrategy = (strat) => (strat || "").split("+").map(s => s.trim()).filter(Boolean);
+
+// ============================================================
+// V9.7 -- STRATEGY DECODER COMPONENT
+// Click any strategy name to expand into plain-language tactics.
+// ============================================================
+function StrategyDecoder({ strategy, compact }) {
+  const tactics = splitStrategy(strategy);
+  if (!tactics.length) return null;
+  return (
+    <div className="strat-decoder">
+      <div className="r g6" style={{ flexWrap: "wrap" }}>
+        {tactics.map((t, i) => {
+          const td = decodeTactic(t);
+          return (
+            <div key={i} className="tac-chip" style={{ borderColor: td.color, background: `${td.color}10` }}>
+              <span style={{ fontSize: 14 }}>{td.icon}</span>
+              <span style={{ color: td.color, fontWeight: 700, fontSize: 11 }}>{td.name}</span>
+            </div>
+          );
+        })}
+      </div>
+      {!compact && (
+        <div className="tac-details mt8">
+          {tactics.map((t, i) => {
+            const td = decodeTactic(t);
+            return (
+              <div key={i} className="tac-card" style={{ borderLeftColor: td.color }}>
+                <div className="r g6 mb4" style={{ alignItems: "center" }}>
+                  <span style={{ fontSize: 16 }}>{td.icon}</span>
+                  <span style={{ fontWeight: 700, color: td.color }}>{td.name}</span>
+                </div>
+                <div className="xs sub mb4">{td.desc}</div>
+                <div className="xs mut"><b>When:</b> {td.when}</div>
+                <div className="xs mut"><b>Example:</b> {td.ex}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// V9.7 -- CHART COMPONENTS (inline SVG, no deps)
+// ============================================================
+
+// Donut / Pie chart with center label
+function DonutChart({ data, size = 140, label, sublabel }) {
+  const total = data.reduce((s, d) => s + (d.value || 0), 0);
+  if (!total) return <div className="dnt-empty" style={{ width: size, height: size }}>No data</div>;
+  const r = size / 2 - 8;
+  const cx = size / 2, cy = size / 2;
+  const stroke = 18;
+  let cumPct = 0;
+  const circumference = 2 * Math.PI * r;
+  return (
+    <div className="dnt-wrap" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#e2e8f0" strokeWidth={stroke} />
+        {data.map((d, i) => {
+          if (!d.value) return null;
+          const pct = d.value / total;
+          const dashLen = pct * circumference;
+          const offset = -cumPct * circumference;
+          cumPct += pct;
+          return (
+            <circle
+              key={i}
+              cx={cx} cy={cy} r={r}
+              fill="none"
+              stroke={d.color}
+              strokeWidth={stroke}
+              strokeDasharray={`${dashLen} ${circumference - dashLen}`}
+              strokeDashoffset={offset}
+              transform={`rotate(-90 ${cx} ${cy})`}
+              style={{ transition: "stroke-dasharray 600ms ease" }}
+            />
+          );
+        })}
+      </svg>
+      <div className="dnt-center">
+        <div className="dnt-label">{label}</div>
+        {sublabel && <div className="dnt-sub">{sublabel}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Vertical bar chart with hover labels
+function BarChart({ data, height = 160, valueFormat }) {
+  if (!data || !data.length) return <div className="bch-empty" style={{ height }}>No data</div>;
+  const max = Math.max(...data.map(d => Math.abs(d.value || 0)), 1);
+  const fmt = valueFormat || ((v) => v.toFixed(0));
+  return (
+    <div className="bch-wrap" style={{ height }}>
+      {data.map((d, i) => {
+        const pct = (Math.abs(d.value) / max) * 100;
+        const color = d.color || (d.value >= 0 ? "#22c55e" : "#ef4444");
+        return (
+          <div key={i} className="bch-col">
+            <div className="bch-val" style={{ color }}>{fmt(d.value)}</div>
+            <div className="bch-track">
+              <div className="bch-fill" style={{ height: `${pct}%`, background: color }} />
+            </div>
+            <div className="bch-lbl" title={d.label}>{(d.label || "").slice(0, 10)}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Horizontal progress ring (used for crown progress, win rate)
+function ProgressRing({ value, max = 100, size = 90, color = "#2563eb", label, sublabel, thickness = 9 }) {
+  const r = size / 2 - thickness;
+  const cx = size / 2, cy = size / 2;
+  const circ = 2 * Math.PI * r;
+  const pct = Math.min(1, Math.max(0, (value || 0) / max));
+  const filled = pct * circ;
+  return (
+    <div className="prg-wrap" style={{ width: size, height: size }}>
+      <svg width={size} height={size}>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#e2e8f0" strokeWidth={thickness} />
+        <circle
+          cx={cx} cy={cy} r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth={thickness}
+          strokeDasharray={`${filled} ${circ}`}
+          strokeLinecap="round"
+          transform={`rotate(-90 ${cx} ${cy})`}
+          style={{ transition: "stroke-dasharray 600ms ease" }}
+        />
+      </svg>
+      <div className="prg-center">
+        <div className="prg-label" style={{ color }}>{label}</div>
+        {sublabel && <div className="prg-sub">{sublabel}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Pyramid/triangle chart - tiered breakdown (e.g., confidence levels)
+function PyramidChart({ tiers }) {
+  if (!tiers || !tiers.length) return null;
+  const max = Math.max(...tiers.map(t => t.value), 1);
+  return (
+    <div className="pyr-wrap">
+      {tiers.map((t, i) => {
+        const pct = (t.value / max) * 100;
+        return (
+          <div key={i} className="pyr-row">
+            <div className="pyr-bar-shell">
+              <div className="pyr-bar" style={{ width: `${pct}%`, background: t.color }}>
+                <span className="pyr-val">{t.value}</span>
+              </div>
+            </div>
+            <div className="pyr-label" style={{ color: t.color }}>{t.label}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Equity curve (cumulative P&L over time) -- bigger sparkline with gradient
+function EquityCurve({ values, height = 200 }) {
+  if (!values || values.length < 2) {
+    return <div className="eq-empty" style={{ height }}>Not enough data</div>;
+  }
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const range = (max - min) || 1;
+  const w = 600;
+  const h = height;
+  const last = values[values.length - 1];
+  const lineColor = last >= 0 ? "#22c55e" : "#ef4444";
+  const fillColor = last >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)";
+  const points = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - 10 - ((v - min) / range) * (h - 20);
+    return [x, y];
+  });
+  const linePath = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const fillPath = `${linePath} L${w},${h} L0,${h} Z`;
+  const zeroY = h - 10 - ((0 - min) / range) * (h - 20);
+  return (
+    <svg className="eq-svg" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height }}>
+      <defs>
+        <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={lineColor} stopOpacity="0.4" />
+          <stop offset="100%" stopColor={lineColor} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      {min < 0 && max > 0 && <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="#cbd5e1" strokeDasharray="3 4" strokeWidth="1" />}
+      <path d={fillPath} fill="url(#eqGrad)" />
+      <path d={linePath} fill="none" stroke={lineColor} strokeWidth="2.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// Daily P&L bar chart (positive/negative)
+function DailyPnLBars({ days, height = 140 }) {
+  if (!days || !days.length) return <div className="bch-empty" style={{ height }}>No data</div>;
+  const max = Math.max(...days.map(d => Math.abs(d.pnl)), 1);
+  return (
+    <div className="bch-wrap" style={{ height }}>
+      {days.map((d, i) => {
+        const pct = (Math.abs(d.pnl) / max) * 100;
+        const color = d.pnl >= 0 ? "#22c55e" : "#ef4444";
+        return (
+          <div key={i} className="bch-col">
+            <div className="bch-val" style={{ color, fontSize: 9 }}>{d.pnl >= 0 ? "+" : ""}{Math.abs(d.pnl) > 999 ? `${(d.pnl/1000).toFixed(1)}k` : d.pnl.toFixed(0)}</div>
+            <div className="bch-track">
+              <div className="bch-fill" style={{ height: `${pct}%`, background: color }} />
+            </div>
+            <div className="bch-lbl">{d.label}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ============================================================
+// V9.7 -- SOUND EFFECTS (Web Audio API, no assets)
+// ============================================================
+let _audioCtx = null;
+const getAudioCtx = () => {
+  if (typeof window === "undefined") return null;
+  if (!_audioCtx) {
+    try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (_) { return null; }
+  }
+  return _audioCtx;
+};
+const playTone = (freq, duration = 0.18, type = "sine", vol = 0.15) => {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + duration);
+  } catch (_) {}
+};
+const playSequence = (notes) => {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  let t = 0;
+  notes.forEach(([freq, dur, vol = 0.15, type = "sine"]) => {
+    setTimeout(() => playTone(freq, dur, type, vol), t * 1000);
+    t += dur * 0.8;
+  });
+};
+const SFX = {
+  open:    () => playSequence([[660, 0.1], [880, 0.15]]),                            // pleasant chime
+  tp1:     () => playSequence([[880, 0.1], [1320, 0.15]]),                           // ascending pair
+  tp2:     () => playSequence([[880, 0.1], [1100, 0.1], [1320, 0.18]]),              // ascending triplet
+  tp3:     () => playSequence([[1100, 0.1], [1320, 0.1], [1760, 0.18]]),             // higher triplet
+  tp4:     () => playSequence([[1320, 0.12], [1760, 0.12], [2640, 0.25, 0.18]]),     // victory fanfare
+  sl:      () => playSequence([[440, 0.15, 0.18], [220, 0.25, 0.18, "sawtooth"]]),   // descending sad
+  retrace: () => playTone(523, 0.25, "triangle", 0.12),                              // single warning ping
+  alert:   () => playSequence([[880, 0.08], [880, 0.08]]),                           // double ping
+};
+
+// ============================================================
 // MAIN APP
 // ============================================================
 export default function App() {
@@ -584,6 +952,7 @@ export default function App() {
   const [instruments, setInstruments] = useState(Array.isArray(prefs.instruments) ? prefs.instruments : []);
   const [sessions,    setSessions]    = useState(Array.isArray(prefs.sessions)    ? prefs.sessions    : ["LONDON", "NEW YORK"]);
   const [riskMode,    setRiskMode]    = useState(prefs.riskMode || "TEST");
+  const [soundEnabled, setSoundEnabled] = useState(prefs.soundEnabled !== false); // default ON
 
   const [page,           setPage]           = useState("live");
   const [prices,         setPrices]         = useState({});
@@ -618,13 +987,13 @@ export default function App() {
   const logRef       = useRef(null);
 
   useEffect(() => {
-    savePrefs({ instruments, sessions, riskMode });
+    savePrefs({ instruments, sessions, riskMode, soundEnabled });
     // V9.3: also persist to Redis so the server-side cron knows what to scan
     fetch(API("trades?action=set-config"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "set-config", instruments, sessions, riskMode }),
     }).catch(() => {});
-  }, [instruments, sessions, riskMode]);
+  }, [instruments, sessions, riskMode, soundEnabled]);
 
   useEffect(() => {
     const tick = () => setNowStr(new Date().toUTCString().slice(17, 25));
@@ -678,13 +1047,18 @@ export default function App() {
     if (!strategy || strategy === "EXPLORING" || strategy === "UNKNOWN" || strategy.length < 3) { addLog(`Not recorded: ${pos.symbol} -- no strategy label`, "warn"); return; }
     const inst = normSym(pos.symbol);
     const pnl  = pos.profit || 0;
+    // V9.7: Sound feedback on close
+    if (soundEnabled) {
+      if (pnl > 0) SFX.tp4();         // big win -> victory
+      else if (pnl < 0) SFX.sl();     // loss -> sad descend
+    }
     try {
       await fetch(API("trades"), { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ instrument: inst, direction: pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT", won: pnl > 0, pnl, strategy, session, confidence: fallbackDec?.confidence || 0, closeTime: new Date().toISOString(), openPrice: pos.openPrice || null, closePrice: pos.currentPrice || null, volume: pos.volume || 0.01, positionId: pos.id || pos.positionId || null }) });
       fetchLab();
       addLog(`Recorded [${strategy}] ${inst} ${pnl > 0 ? "WIN" : "LOSS"} ${pnlStr(pnl)}`, pnl > 0 ? "success" : "warn");
     } catch (e) { addLog(`Record failed: ${e.message}`, "error"); }
-  }, [addLog, fetchLab]);
+  }, [addLog, fetchLab, soundEnabled]);
 
   useEffect(() => {
     const prev = prevPosRef.current;
@@ -799,6 +1173,7 @@ export default function App() {
           if (ed.success) {
             lastTradeRef.current[sym] = Date.now();
             addLog(`Opened: ${ed.instrument||sym} ${dec.decision} ${dec.volume}L`, "success");
+            if (soundEnabled) SFX.open();
             setTimeout(async () => {
               try {
                 const pr = await fetch(API("positions")).then((r) => r.json());
@@ -870,16 +1245,19 @@ export default function App() {
       const d = await r.json();
       (d.managed||[]).forEach((m) => {
         (m.actions||[]).forEach((a) => {
-          if (a.type==="TP1") addLog(`TP1 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success");
-          if (a.type==="TP2") addLog(`TP2 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success");
-          if (a.type==="TP3") addLog(`TP3 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success");
-          if (a.type==="TP4_FINAL") addLog(`TP4 complete ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success");
-          if (a.type==="RETRACE_CLOSE") addLog(`Retrace close ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn");
-          if (a.type==="TP1_RETRACE_PROTECT") addLog(`TP1 retrace protect ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn");
+          if (a.type==="TP1") { addLog(`TP1 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp1(); }
+          if (a.type==="TP2") { addLog(`TP2 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp2(); }
+          if (a.type==="TP3") { addLog(`TP3 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp3(); }
+          if (a.type==="TP4_FINAL") { addLog(`TP4 complete ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp4(); }
+          if (a.type==="RETRACE_CLOSE") { addLog(`Retrace close ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn"); if (soundEnabled) SFX.retrace(); }
+          if (a.type==="TP1_RETRACE_PROTECT") { addLog(`TP1 retrace protect ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn"); if (soundEnabled) SFX.retrace(); }
+          if (a.type==="TP1_FAILSAFE_CLOSE" || a.type==="TP2_FAILSAFE_CLOSE" || a.type==="TP3_FAILSAFE_CLOSE" || a.type==="HEAL_FAILSAFE_CLOSE" || a.type==="RETRACE_FAILSAFE_CLOSE") {
+            addLog(`Failsafe close ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn"); if (soundEnabled) SFX.alert();
+          }
         });
       });
     } catch (_) {}
-  }, [openPositions, tpLadders, addLog]);
+  }, [openPositions, tpLadders, addLog, soundEnabled]);
 
   useEffect(() => {
     fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
@@ -1077,6 +1455,40 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* V9.7: Today's P&L visual breakdown */}
+                  {todayTrades.length > 0 && (() => {
+                    const todayWins = todayTrades.filter(t => (t.profit || 0) > 0);
+                    const todayLosses = todayTrades.filter(t => (t.profit || 0) < 0);
+                    const winsPnl = todayWins.reduce((s, t) => s + (t.profit || 0), 0);
+                    const lossesPnl = Math.abs(todayLosses.reduce((s, t) => s + (t.profit || 0), 0));
+                    const wrToday = todayTrades.length > 0 ? (todayWins.length / todayTrades.length) * 100 : 0;
+                    const wrClr = wrToday >= 55 ? "#22c55e" : wrToday >= 45 ? "#f59e0b" : "#ef4444";
+                    return (
+                      <div className="chart-grid">
+                        <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                          <div className="chart-title">Today Win Rate</div>
+                          <ProgressRing value={wrToday} size={120} color={wrClr} label={`${wrToday.toFixed(0)}%`} sublabel={`${todayWins.length}W ${todayLosses.length}L`} thickness={10} />
+                        </div>
+                        <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                          <div className="chart-title">Wins vs Losses</div>
+                          <DonutChart
+                            data={[
+                              { value: winsPnl,   color: "#22c55e", label: "Wins" },
+                              { value: lossesPnl, color: "#ef4444", label: "Losses" },
+                            ]}
+                            size={120}
+                            label={pnlStr(todayPnl)}
+                            sublabel="net P&L"
+                          />
+                        </div>
+                        <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
+                          <div className="chart-title">Today Equity Curve</div>
+                          <EquityCurve values={todayEquity} height={140} />
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Active trades visualizer (if any) */}
                   {enrichedPositions.length > 0 && enrichedPositions.map((pos, i) => {
                     const sym = normSym(pos.symbol);
@@ -1249,7 +1661,20 @@ export default function App() {
                   const dec = aiDecisions[sym];
                   const posId = pos.id || pos.positionId;
                   const tpState = tpLadders[posId];
-                  return <TradeVisualizer key={posId || i} pos={pos} dec={dec} tpState={tpState} fmtPrice={fl} />;
+                  // V9.7: Extract strategy from MT5 comment for decoder
+                  const cmt = pos.comment || pos.tradeComment || "";
+                  const strat = cmt.startsWith("QB:") ? cmt.slice(3).trim() : (dec?.strategy || "");
+                  return (
+                    <div key={posId || i}>
+                      <TradeVisualizer pos={pos} dec={dec} tpState={tpState} fmtPrice={fl} />
+                      {strat && (
+                        <div className="panel" style={{ padding: 14, marginTop: -8 }}>
+                          <div className="chart-title" style={{ marginBottom: 10 }}>Tactic Breakdown · {strat}</div>
+                          <StrategyDecoder strategy={strat} />
+                        </div>
+                      )}
+                    </div>
+                  );
                 })
               )}
             </div>
@@ -1397,6 +1822,75 @@ export default function App() {
                     <div key={lbl} className="panel"><div className="pt">{lbl}</div><div style={{ fontSize:24,fontWeight:700,color:clr,letterSpacing:"-0.5px" }}>{val}</div></div>
                   ))}
                 </div>
+
+                {/* V9.7: Visual reports dashboard */}
+                {trades.length > 0 && (() => {
+                  // Equity curve from oldest to newest
+                  const oldestFirst = [...trades].reverse();
+                  const equity = []; let cum = 0;
+                  oldestFirst.forEach(t => { cum += (t.profit || 0); equity.push(cum); });
+
+                  // Daily P&L grouping
+                  const dailyMap = {};
+                  oldestFirst.forEach(t => {
+                    const d = (t.time || t.closeTime || "").slice(0, 10);
+                    if (!d) return;
+                    if (!dailyMap[d]) dailyMap[d] = 0;
+                    dailyMap[d] += (t.profit || 0);
+                  });
+                  const dailyArr = Object.entries(dailyMap)
+                    .sort((a, b) => a[0].localeCompare(b[0]))
+                    .slice(-14) // last 14 days
+                    .map(([date, pnl]) => ({ label: date.slice(5), pnl }));
+
+                  // Win/Loss donut data
+                  const wins = trades.filter(t => (t.profit || 0) > 0);
+                  const losses = trades.filter(t => (t.profit || 0) < 0);
+                  const winsAmt = wins.reduce((s, t) => s + (t.profit || 0), 0);
+                  const lossesAmt = Math.abs(losses.reduce((s, t) => s + (t.profit || 0), 0));
+
+                  // Session breakdown for bar chart
+                  const sessBars = Object.entries(sessMap).map(([sess, s]) => ({
+                    label: sess, value: s.pnl, color: s.pnl >= 0 ? "#22c55e" : "#ef4444",
+                  })).filter(s => s.value !== 0);
+
+                  return (
+                    <>
+                      <div className="panel" style={{ padding: 16 }}>
+                        <div className="pt">Equity Curve · {trades.length} trades</div>
+                        <EquityCurve values={equity} height={220} />
+                      </div>
+
+                      <div className="chart-grid">
+                        <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                          <div className="chart-title">Win / Loss Split</div>
+                          <DonutChart
+                            data={[
+                              { value: winsAmt,   color: "#22c55e", label: "Wins" },
+                              { value: lossesAmt, color: "#ef4444", label: "Losses" },
+                            ]}
+                            size={140}
+                            label={pnlStr(netPnl)}
+                            sublabel={`${wins.length}W ${losses.length}L`}
+                          />
+                        </div>
+
+                        <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
+                          <div className="chart-title">Daily P&amp;L (last 14 days)</div>
+                          <DailyPnLBars days={dailyArr} height={150} />
+                        </div>
+
+                        {sessBars.length > 0 && (
+                          <div className="chart-card" style={{ minWidth: 0 }}>
+                            <div className="chart-title">By Session</div>
+                            <BarChart data={sessBars} height={150} valueFormat={(v) => v >= 0 ? `+$${v.toFixed(0)}` : `-$${Math.abs(v).toFixed(0)}`} />
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
+
                 <div className="g2">
                   <div className="panel">
                     <div className="pt">By Instrument</div>
@@ -1596,6 +2090,93 @@ export default function App() {
                   </div>
                 )}
 
+                {/* ---- V9.7 Visual Dashboard ---- */}
+                {enriched.length > 0 && (() => {
+                  // Win rate distribution buckets
+                  const wrBuckets = [
+                    { label: "Crowned 65%+",  value: enriched.filter(e => e.wr != null && e.wr >= 65).length, color: "#15803d" },
+                    { label: "Solid 50-65%",  value: enriched.filter(e => e.wr != null && e.wr >= 50 && e.wr < 65).length, color: "#22c55e" },
+                    { label: "Mid 35-50%",    value: enriched.filter(e => e.wr != null && e.wr >= 35 && e.wr < 50).length, color: "#f59e0b" },
+                    { label: "Weak < 35%",    value: enriched.filter(e => e.wr != null && e.wr < 35).length, color: "#ef4444" },
+                    { label: "Untested",      value: enriched.filter(e => e.wr == null || e.total < 3).length, color: "#94a3b8" },
+                  ].filter(b => b.value > 0);
+
+                  // Top 6 strategies by P&L
+                  const topPnl = [...enriched]
+                    .filter(e => e.total >= 3)
+                    .sort((a, b) => b.pnl - a.pnl)
+                    .slice(0, 6)
+                    .map(e => ({ label: e.strat.split("+")[0].slice(0,8), value: e.pnl, color: e.pnl >= 0 ? "#22c55e" : "#ef4444" }));
+
+                  // Bottom 6 (worst losers)
+                  const worstPnl = [...enriched]
+                    .filter(e => e.total >= 3 && e.pnl < 0)
+                    .sort((a, b) => a.pnl - b.pnl)
+                    .slice(0, 6)
+                    .map(e => ({ label: e.strat.split("+")[0].slice(0,8), value: e.pnl, color: "#ef4444" }));
+
+                  // Confidence pyramid -- count of trades by trade outcome tier
+                  const totalWins = enriched.reduce((s, e) => s + e.wins, 0);
+                  const totalLosses = enriched.reduce((s, e) => s + e.losses, 0);
+                  const totalCrowned = enriched.filter(e => e.crowns >= 1).length;
+                  const totalBlacklisted = enriched.filter(e => e.bl).length;
+                  const tiers = [
+                    { label: "Crowned 👑",   value: totalCrowned,    color: "#f59e0b" },
+                    { label: "Wins",         value: totalWins,       color: "#22c55e" },
+                    { label: "Losses",       value: totalLosses,     color: "#ef4444" },
+                    { label: "Blacklisted",  value: totalBlacklisted,color: "#7c3aed" },
+                  ].filter(t => t.value > 0);
+
+                  // Overall WR donut
+                  const overallWR = totals.t > 0 ? (totals.w / totals.t) * 100 : 0;
+                  const wrColor = overallWR >= 55 ? "#22c55e" : overallWR >= 45 ? "#f59e0b" : "#ef4444";
+
+                  return (
+                    <div className="chart-grid">
+                      <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                        <div className="chart-title">Overall Win Rate</div>
+                        <ProgressRing value={overallWR} size={140} color={wrColor} label={`${overallWR.toFixed(0)}%`} sublabel={`${totals.w}W / ${totals.l}L`} thickness={12} />
+                      </div>
+
+                      <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                        <div className="chart-title">Strategy Quality</div>
+                        <DonutChart
+                          data={wrBuckets}
+                          size={140}
+                          label={enriched.length}
+                          sublabel="strategies"
+                        />
+                        <div className="mt8" style={{ width: "100%", display: "flex", flexDirection: "column", gap: 3 }}>
+                          {wrBuckets.map((b, i) => (
+                            <div key={i} className="r g6 xs" style={{ alignItems: "center" }}>
+                              <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color, display: "inline-block" }} />
+                              <span style={{ flex: 1, color: "#475569", fontSize: 10 }}>{b.label}</span>
+                              <span className="w7" style={{ fontSize: 10 }}>{b.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
+                        <div className="chart-title">Top Strategies (Net P&amp;L)</div>
+                        <BarChart data={topPnl} height={180} valueFormat={(v) => v >= 0 ? `+$${v.toFixed(0)}` : `-$${Math.abs(v).toFixed(0)}`} />
+                      </div>
+
+                      <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                        <div className="chart-title">Lab Pyramid</div>
+                        <PyramidChart tiers={tiers} />
+                      </div>
+
+                      {worstPnl.length > 0 && (
+                        <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
+                          <div className="chart-title">Worst Losers</div>
+                          <BarChart data={worstPnl} height={140} valueFormat={(v) => `-$${Math.abs(v).toFixed(0)}`} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* ---- Summary row ---- */}
                 <div className="g4c">
                   {[
@@ -1721,6 +2302,12 @@ export default function App() {
                           {/* Expanded: TP distribution + per-instrument */}
                           {expanded && (
                             <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
+                              {/* V9.7: Strategy Decoder */}
+                              <div style={{ marginBottom: 14 }}>
+                                <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Strategy Decoder</div>
+                                <StrategyDecoder strategy={strat} />
+                              </div>
+
                               {totalTp > 0 && (
                                 <div style={{ marginBottom: 14 }}>
                                   <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Outcome Distribution</div>
@@ -1861,6 +2448,33 @@ export default function App() {
                 </div>
                 <div className="mt8 xs mut">
                   {riskMode==="TEST" ? "0.5% risk per trade, max 0.05L" : riskMode==="REGULAR" ? "1% risk per trade, max 0.20L" : "2% risk per trade, max 0.50L \u2014 use with caution"}
+                </div>
+              </div>
+
+              <div className="panel">
+                <div className="pt">Sound Effects</div>
+                <div className="r g8" style={{ alignItems: "center", flexWrap: "wrap" }}>
+                  <button
+                    className={`snd-toggle ${soundEnabled ? "on" : "off"}`}
+                    style={{ fontSize: 13, padding: "8px 16px" }}
+                    onClick={() => { setSoundEnabled((s) => !s); if (!soundEnabled) SFX.alert(); }}
+                  >
+                    {soundEnabled ? "🔊 Sound ON" : "🔇 Sound OFF"}
+                  </button>
+                  {soundEnabled && (
+                    <div className="r g6" style={{ flexWrap: "wrap" }}>
+                      <button className="btn btn-sm" onClick={() => SFX.open()}>Test Open</button>
+                      <button className="btn btn-sm" onClick={() => SFX.tp1()}>TP1</button>
+                      <button className="btn btn-sm" onClick={() => SFX.tp2()}>TP2</button>
+                      <button className="btn btn-sm" onClick={() => SFX.tp3()}>TP3</button>
+                      <button className="btn btn-sm" onClick={() => SFX.tp4()}>TP4</button>
+                      <button className="btn btn-sm" onClick={() => SFX.sl()}>SL</button>
+                      <button className="btn btn-sm" onClick={() => SFX.retrace()}>Retrace</button>
+                    </div>
+                  )}
+                </div>
+                <div className="mt8 xs mut">
+                  Plays distinct tones for trade open, TP hits, SL, and retrace protection. Click any test button above to preview.
                 </div>
               </div>
 

@@ -581,6 +581,19 @@ module.exports = async (req, res) => {
     if (!id || !currentPrice || !openPrice || !tp1) continue;
     const result = { id, symbol, actions: [] };
 
+    // V9.6: RACE-CONDITION LOCK
+    // Frontend manage-trades (every 30s) and cron manage-trades (every 60s) can both
+    // try to manage the same position simultaneously. Without a lock, both could fire
+    // closePartial(0.4) + modifySL in parallel — leading to double-close (80% closed
+    // instead of 40%) and broken SL coordination. The lock holds for 25s (long enough
+    // to cover any single tick's logic, short enough that a crashed tick won't deadlock).
+    const lockKey = 'v9:lock:mgmt:' + id;
+    const lockAcquired = await redis.set(lockKey, String(Date.now()), { nx: true, ex: 25 }).catch(() => null);
+    if (!lockAcquired) {
+      console.log('[LOCK] skip ' + id + ' -- another manage-trades cycle is in progress');
+      continue;
+    }
+
     try {
       const stateKey = 'v9:tp:' + id;
       const stateRaw = safe(await redis.get(stateKey).catch(() => null));
@@ -904,6 +917,10 @@ module.exports = async (req, res) => {
 
       if (result.actions.length) managed.push(result);
     } catch (e) { console.error('[MANAGE] error for ' + id + ': ' + e.message); }
+    finally {
+      // V9.6: Always release the lock, even on exception, so next tick can proceed
+      await redis.del(lockKey).catch(() => {});
+    }
   }
 
   return res.status(200).json({ managed });

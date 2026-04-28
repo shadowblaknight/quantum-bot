@@ -458,6 +458,17 @@ module.exports = async (req, res) => {
         ? existing
         : { wins: 0, losses: 0, totalPnl: 0, consecutiveLosses: 0, postCrownLosses: 0, trades: [], firstSeen: now };
 
+      // V9.6: IDEMPOTENCY -- skip if this positionId was already recorded.
+      // Both frontend (closed-pos detect every 5s) and cron (every 60s) can record
+      // the same trade. Without this check, every closed trade is counted twice.
+      if (positionId) {
+        const dup = (cur.trades || []).some(t => t.positionId && String(t.positionId) === String(positionId));
+        if (dup) {
+          console.log('[TRADES][SKIP] positionId=' + positionId + ' already recorded for ' + key);
+          return res.status(200).json({ skipped: true, reason: 'already recorded', positionId });
+        }
+      }
+
       const newConsec    = won ? 0 : (cur.consecutiveLosses || 0) + 1;
 
       // V9.4: Check crown using STRICT rules (not old "5 wins = crown")

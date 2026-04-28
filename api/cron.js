@@ -37,7 +37,10 @@ const isTradeable = (sym, utcH, isWeekend) => {
   if (isWeekend) return false;
   const cat = instCategory(sym);
   if (cat === 'CRYPTO') return utcH >= 7 && utcH < 23;
-  return utcH >= 8 && utcH < 21;
+  // V9.6: Cut late NY (18-21 UTC). After London close, liquidity drops and
+  // fakeouts dominate -- proven loser zone in our backfilled data.
+  // Tradeable hours: London open + London/NY overlap + early NY only.
+  return utcH >= 8 && utcH < 18;
 };
 
 const sumC = (arr, n = 5) => {
@@ -321,10 +324,20 @@ module.exports = async (req, res) => {
       const stateRaw = await redis.get('v9:tp:' + posId).catch(() => null);
       const state = safe(stateRaw);
       if (!state || !state.tp1) {
-        // Backfill from broker SL/TP if available
-        if (pos.stopLoss && pos.takeProfit && pos.openPrice) {
+        // V9.6: Backfill TP ladder. Prefer broker TP as TP4 reference.
+        // If broker has no TP (only SL), derive from SL distance (assume 1:2 R:R).
+        if (pos.openPrice && (pos.takeProfit || pos.stopLoss)) {
           const sign = pos.type === 'POSITION_TYPE_BUY' ? 1 : -1;
-          const tp1Dist = Math.abs(pos.takeProfit - pos.openPrice);
+          let tp4Ref;
+          if (pos.takeProfit) {
+            tp4Ref = pos.takeProfit;
+          } else {
+            // No broker TP -- estimate TP4 as 2x SL distance from entry
+            const slDist = Math.abs(pos.openPrice - pos.stopLoss);
+            tp4Ref = pos.openPrice + sign * slDist * 2;
+            console.log('[CRON] ' + posId + ' no broker TP, estimating TP4 at 2:1 R:R from SL');
+          }
+          const tp1Dist = Math.abs(tp4Ref - pos.openPrice);
           managePos.push({
             id: posId, symbol: pos.symbol, openPrice: pos.openPrice, currentPrice: pos.currentPrice,
             stopLoss: pos.stopLoss, volume: pos.volume,
@@ -332,8 +345,10 @@ module.exports = async (req, res) => {
             tp1: pos.openPrice + sign * tp1Dist * 0.25,
             tp2: pos.openPrice + sign * tp1Dist * 0.50,
             tp3: pos.openPrice + sign * tp1Dist * 0.75,
-            tp4: pos.takeProfit,
+            tp4: tp4Ref,
           });
+        } else {
+          console.warn('[CRON] ' + posId + ' cannot manage: no openPrice or no SL/TP');
         }
         continue;
       }
@@ -502,7 +517,10 @@ async function sendDailySummary(selfBase, redis, today) {
     const trades = Array.isArray(histD.trades) ? histD.trades : [];
 
     const todayTrades = trades.filter(t => {
-      const d = t.closeTime || t.date || t.ts;
+      // V9.6: history.js returns `t.time` as the close timestamp. Older code
+      // used `t.closeTime || t.date || t.ts` which always returned nothing,
+      // so the daily summary always reported "no trades today".
+      const d = t.time || t.closeTime || t.date || t.ts;
       if (!d) return false;
       return String(d).startsWith(today);
     });
