@@ -30,16 +30,37 @@ const tg = async (msg) => {
 };
 
 // ---- Broker modify ----
+// V9.7: When called to modify ONLY SL (takeProfit=null), we must preserve the existing
+// broker TP — many MT5 brokers interpret a missing takeProfit field as "remove TP",
+// which then causes the modify to be rejected as "no change" or strips the TP entirely.
+// So we fetch the current broker state and re-send the existing TP alongside the new SL.
 const modifyPosition = async (positionId, stopLoss, takeProfit, comment) => {
   const dp = (p) => (p > 100 ? 2 : 5);
   const modBody = { actionType: 'POSITION_MODIFY', positionId };
-  if (stopLoss   != null) modBody.stopLoss   = parseFloat(stopLoss.toFixed(dp(stopLoss)));
-  if (takeProfit != null) modBody.takeProfit = parseFloat(takeProfit.toFixed(dp(takeProfit)));
+
+  // If caller wants to change only SL, fetch existing TP and preserve it
+  let preservedTP = takeProfit;
+  if (stopLoss != null && takeProfit == null) {
+    try {
+      const pr = await fetch(BASE + '/positions', { headers: HEADERS });
+      if (pr.ok) {
+        const list = await pr.json().catch(() => []);
+        const pos = Array.isArray(list) ? list.find(p => String(p.id) === String(positionId)) : null;
+        if (pos && pos.takeProfit != null && pos.takeProfit > 0) {
+          preservedTP = pos.takeProfit;
+          console.log('[MODIFY] preserving existing TP=' + preservedTP + ' on positionId=' + positionId);
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (stopLoss     != null) modBody.stopLoss   = parseFloat(stopLoss.toFixed(dp(stopLoss)));
+  if (preservedTP  != null) modBody.takeProfit = parseFloat(preservedTP.toFixed(dp(preservedTP)));
   if (comment) modBody.comment = comment;
   try {
     const r = await fetch(BASE + '/trade', { method: 'POST', headers: HEADERS, body: JSON.stringify(modBody) });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { console.error('[MODIFY] FAIL positionId=' + positionId + ' status=' + r.status + ' ' + JSON.stringify(d).slice(0, 300)); return { ok: false, status: r.status, resp: d }; }
+    if (!r.ok || d.error) { console.error('[MODIFY] FAIL positionId=' + positionId + ' status=' + r.status + ' body=' + JSON.stringify(modBody) + ' resp=' + JSON.stringify(d).slice(0, 300)); return { ok: false, status: r.status, resp: d }; }
     console.log('[MODIFY] OK positionId=' + positionId + ' sl=' + modBody.stopLoss + ' tp=' + modBody.takeProfit);
     return { ok: true, resp: d };
   } catch (e) { console.error('[MODIFY] throw ' + e.message); return { ok: false, error: e.message }; }
@@ -656,21 +677,23 @@ module.exports = async (req, res) => {
         return { ok: false, reason: 'all retries failed', lastResp };
       };
 
-      // ---- V9.6: SELF-HEALING SL RECOVERY ----
+      // ---- V9.7: SELF-HEALING SL RECOVERY ----
       // If a previous tick fired TP1 but the SL move silently failed, the broker SL is still
-      // at the original loss level. Detect this and retry. If retry fails too, emergency close.
+      // at the original loss level. Detect this and retry the SL move on every cron tick
+      // until it succeeds. Only emergency-close if the runner has gone net negative
+      // (meaning the original SL would close at a worse level than current price would).
       if (state.tp1Hit && !state.tp4Hit && !state.slMovedConfirmed) {
         const desiredSL = direction === 'LONG' ? openPrice + d1 * 0.3 : openPrice - d1 * 0.3;
         const slBad = direction === 'LONG' ? (stopLoss == null || stopLoss < openPrice) : (stopLoss == null || stopLoss > openPrice);
         if (slBad) {
-          console.warn('[SELF_HEAL] ' + id + ' tp1Hit but SL not moved. broker SL=' + stopLoss + ' desired=' + desiredSL);
+          console.warn('[SELF_HEAL] ' + id + ' tp1Hit but SL not moved. broker SL=' + stopLoss + ' desired=' + desiredSL + ' profit=' + profit);
           const slr = await modifySL(desiredSL, 'TP1_HEAL');
           if (slr.ok) {
             state.slMovedConfirmed = true;
             await saveState(state);
             await tg('🔧 <b>SL recovered · ' + symbol + '</b>\n\n<pre>Previous SL move had failed.\nSL now at: ' + slr.sl.toFixed(dp) + '</pre>');
-          } else {
-            // SL still cannot be moved → close remainder immediately
+          } else if (profit < 0) {
+            // Runner has gone negative -- close immediately to save what's left of TP1 profit
             const pnl = parseFloat((profit * volume * mult).toFixed(2));
             const closed = await closeFull('QB:HEAL_FAILSAFE');
             if (closed) {
@@ -678,19 +701,19 @@ module.exports = async (req, res) => {
               await redis.del(stateKey).catch(() => {});
               result.actions.push({ type: 'HEAL_FAILSAFE_CLOSE', price: currentPrice, pnl });
               await tg(
-                '🚨 <b>FAILSAFE close · ' + symbol + '</b>\n\n' +
+                '🛡️ <b>Runner closed · ' + symbol + '</b>\n\n' +
                 '<pre>' +
-                'Could not protect SL after TP1.\n' +
+                'SL move kept failing AND runner went negative.\n' +
                 '──────────────────\n' +
                 'Closed:   remainder @ ' + currentPrice.toFixed(dp) + '\n' +
-                'P&L:      ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2) + '\n' +
-                'Reason:   ' + (slr.reason || 'broker rejected SL') +
+                'P&L:      ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2) +
                 '</pre>'
               );
               if (result.actions.length) managed.push(result);
               continue;
             }
           }
+          // else: profit still positive, leave runner alone with original SL, retry next tick
         } else {
           // SL is past entry already — mark confirmed so we stop checking
           state.slMovedConfirmed = true;
@@ -722,27 +745,22 @@ module.exports = async (req, res) => {
                 '</pre>'
               );
             } else {
-              // V9.6: Tightened SL failed → close remainder. Already losing momentum.
-              console.error('[RETRACE] SL tighten FAILED — closing remainder');
-              const remainderPnl = parseFloat((profit * (volume - vol) * mult).toFixed(2));
-              const closed = await closeFull('QB:RETRACE_FAILSAFE');
-              if (closed) {
-                state.tp4Hit = true;
-                await redis.del(stateKey).catch(() => {});
-                result.actions.push({ type: 'RETRACE_FAILSAFE_CLOSE', price: currentPrice, pnl: remainderPnl });
-                await tg(
-                  '🛡️ <b>Retrace · SL failed · ' + symbol + '</b>\n\n' +
-                  '<pre>' +
-                  'Could not tighten SL after retrace.\n' +
-                  'Emergency-closed remainder.\n' +
-                  '──────────────────\n' +
-                  'Retrace P&L: ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2) + '\n' +
-                  'Remainder:   ' + (remainderPnl >= 0 ? '+$' : '-$') + Math.abs(remainderPnl).toFixed(2) +
-                  '</pre>'
-                );
-              } else {
-                await saveState(state);
-              }
+              // V9.7: SL tighten failed. The 30% partial close already happened, so we've
+              // taken some profit. Save state and let self-heal retry. Don't emergency close
+              // the rest unless profit on what's left has turned negative.
+              console.warn('[RETRACE] SL tighten failed -- runner kept with original SL, self-heal will retry');
+              await saveState(state);
+              await tg(
+                '⚠️ <b>Retrace protect · ' + symbol + '</b>\n\n' +
+                '<pre>' +
+                'Price retraced toward entry after TP1.\n' +
+                '──────────────────\n' +
+                'Closed:  30% @ ' + currentPrice.toFixed(dp) + '\n' +
+                'P&L:     ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2) + '\n' +
+                'SL:      unchanged (tighten pending retry)' +
+                '</pre>\n' +
+                '<i>SL tighten retry will run next cycle.</i>'
+              );
             }
           }
         }
@@ -799,31 +817,25 @@ module.exports = async (req, res) => {
               '</pre>'
             );
           } else {
-            // V9.6: SL move FAILED → emergency close remainder to lock TP1 profit
-            console.error('[TP1] SL move FAILED after retries — closing remainder');
-            const remainderPnl = parseFloat((profit * (volume - vol) * mult).toFixed(2));
-            const closed = await closeFull('QB:TP1_FAILSAFE');
-            if (closed) {
-              state.tp4Hit = true;
-              await redis.del(stateKey).catch(() => {});
-              result.actions.push({ type: 'TP1_FAILSAFE_CLOSE', price: currentPrice, pnl: remainderPnl });
-              await tg(
-                '⚠️ <b>TP1 hit · SL failed · ' + symbol + '</b>\n\n' +
-                '<pre>' +
-                'TP1 hit but broker rejected SL move.\n' +
-                'Emergency-closed remainder to lock profit.\n' +
-                '──────────────────\n' +
-                'TP1 P&L:    +$' + pnl.toFixed(2) + '\n' +
-                'Remainder:  ' + (remainderPnl >= 0 ? '+$' : '-$') + Math.abs(remainderPnl).toFixed(2) + '\n' +
-                'Total:      ' + ((pnl + remainderPnl) >= 0 ? '+$' : '-$') + Math.abs(pnl + remainderPnl).toFixed(2) + '\n' +
-                'Reason:     ' + (slr.reason || 'broker rejected SL') +
-                '</pre>'
-              );
-            } else {
-              // Even close failed — save state, self-heal will try next tick
-              await saveState(state);
-              await tg('🚨 <b>CRITICAL · ' + symbol + '</b>\n\nTP1 hit, SL move failed, emergency close failed. Manual intervention may be required.');
-            }
+            // V9.7: SL move failed. DON'T emergency close -- the runner is still in profit,
+            // original SL is still attached as worst-case safety net, and self-healing block
+            // at the top of the next cron tick will retry the SL move.
+            // We only emergency close on TP1-fail if profit on the runner has already
+            // gone negative (meaning the original SL wouldn't lock TP1 net profit anyway).
+            console.warn('[TP1] SL move failed -- keeping runner with original SL, self-heal will retry');
+            await saveState(state);
+            await tg(
+              '🎯 <b>TP1 · ' + symbol + '</b>\n\n' +
+              '<pre>' +
+              direction + '\n' +
+              '──────────────────\n' +
+              'Closed:    40% @ ' + currentPrice.toFixed(dp) + '\n' +
+              'P&L:       +$' + pnl.toFixed(2) + '\n' +
+              'SL:        unchanged (move pending retry)\n' +
+              'Running:   60% · original SL still attached' +
+              '</pre>\n' +
+              '<i>SL move retry will run next cycle.</i>'
+            );
           }
         }
       }
@@ -848,17 +860,11 @@ module.exports = async (req, res) => {
               '</pre>'
             );
           } else {
-            // V9.6 failsafe: trail failed, close remainder
-            const remainderPnl = parseFloat((profit * (volume - vol) * mult).toFixed(2));
-            const closed = await closeFull('QB:TP2_FAILSAFE');
-            if (closed) {
-              state.tp4Hit = true;
-              await redis.del(stateKey).catch(() => {});
-              result.actions.push({ type: 'TP2_FAILSAFE_CLOSE', price: currentPrice, pnl: remainderPnl });
-              await tg('⚠️ <b>TP2 · SL trail failed · ' + symbol + '</b>\n\n<pre>Closed remainder. TP2 P&L: +$' + pnl.toFixed(2) + ' | Remainder: ' + (remainderPnl >= 0 ? '+$' : '-$') + Math.abs(remainderPnl).toFixed(2) + '</pre>');
-            } else {
-              await saveState(state);
-            }
+            // V9.7: Trail SL failed -- runner is way ahead in profit, just keep going.
+            // Original SL still attached as worst-case. Self-heal will retry next tick.
+            console.warn('[TP2] Trail SL failed -- keeping runner with prior SL');
+            await saveState(state);
+            await tg('🎯 <b>TP2 · ' + symbol + '</b>\n\n<pre>Closed: 30% @ ' + currentPrice.toFixed(dp) + '\nP&L:    +$' + pnl.toFixed(2) + '\nSL:     unchanged (trail pending retry)\nRunning: 30%</pre>');
           }
         }
       }
@@ -883,16 +889,9 @@ module.exports = async (req, res) => {
               '</pre>'
             );
           } else {
-            const remainderPnl = parseFloat((profit * (volume - vol) * mult).toFixed(2));
-            const closed = await closeFull('QB:TP3_FAILSAFE');
-            if (closed) {
-              state.tp4Hit = true;
-              await redis.del(stateKey).catch(() => {});
-              result.actions.push({ type: 'TP3_FAILSAFE_CLOSE', price: currentPrice, pnl: remainderPnl });
-              await tg('⚠️ <b>TP3 · SL trail failed · ' + symbol + '</b>\n\n<pre>Closed remainder. TP3 P&L: +$' + pnl.toFixed(2) + ' | Remainder: ' + (remainderPnl >= 0 ? '+$' : '-$') + Math.abs(remainderPnl).toFixed(2) + '</pre>');
-            } else {
-              await saveState(state);
-            }
+            console.warn('[TP3] Trail SL failed -- keeping runner with prior SL');
+            await saveState(state);
+            await tg('🎯 <b>TP3 · ' + symbol + '</b>\n\n<pre>Closed: 20% @ ' + currentPrice.toFixed(dp) + '\nP&L:    +$' + pnl.toFixed(2) + '\nSL:     unchanged (trail pending retry)\nRunning: 10%</pre>');
           }
         }
       }
