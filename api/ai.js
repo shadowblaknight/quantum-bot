@@ -1,354 +1,388 @@
 /* eslint-disable */
-// api/ai.js -- Quantum Bot V9.2 Brain
-// Changes vs V9:
-//   - Fixed symbol normalization for lab/crown lookup (use normalized sym, not raw instrument)
-//   - Stronger LONG/SHORT price structure instructions to reduce malformed output
-//   - Instruments stay fully open -- no hardcoded symbol list, no category floors
+// V10 — api/ai.js
+// AI decision engine. Full rewrite from V9. Key differences:
+//   * 9-timeframe context (1m/5m/15m/30m/1h/4h/1d/1w/1mn) -- not just 3
+//   * 3-layer memory injected in prompt header (short/mid/long)
+//   * Family-based decisions (TREND/REVERSION/STRUCTURE/BREAKOUT/RANGE/NEWS)
+//   * Bayesian Thompson sampling over family WR distributions
+//   * Regime-aware: family choice gated by current regime
+//   * Correlation cluster awareness
+//
+// Returns: { decision, family, rawTactic, confidence, volume, reason, regime, sampledWR, ... }
 
-const FF_CALENDAR_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const {
+  getRedis, applyCors, normSym, instCategory, safeParse,
+  FAMILY_META, tacticFamily,
+  betaMean, betaCI, betaSample,
+  atr,
+} = require('./_lib');
 
-// V9.5: Redis for reliable exploration counter and recent-strategy tracking
-const { Redis } = require('@upstash/redis');
-const getRedis = () => {
-  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return null;
-  try { return new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN }); }
-  catch (_) { return null; }
-};
+const { fetchMultiTF, fetchPositions } = require('./broker');
+const { getRegimeFor } = require('./regime');
+const { readMemory, buildPromptContext, appendDecision } = require('./memory');
+const { readFamilyForSymbol } = require('./trades');
+const { clusterFor } = require('./pair-intel');
 
-let _ffCache = { data: null, ts: 0 };
-const FF_TTL_MS = 30 * 60 * 1000;
+const FAMILIES = ['TREND', 'REVERSION', 'STRUCTURE', 'BREAKOUT', 'RANGE', 'NEWS'];
 
-const fetchFFCalendar = async () => {
-  const now = Date.now();
-  if (_ffCache.data && (now - _ffCache.ts) < FF_TTL_MS) return _ffCache.data;
+// V10: Read cached backtest stats for a symbol -- used to detect overfit families
+async function readBacktestStats(sym) {
+  const r = getRedis(); if (!r) return {};
+  const keys = [];
+  let cursor = 0;
   try {
-    const r = await fetch(FF_CALENDAR_URL);
-    if (!r.ok) return _ffCache.data || [];
-    const d = await r.json();
-    if (Array.isArray(d)) { _ffCache = { data: d, ts: now }; return d; }
+    do {
+      const result = await r.scan(cursor, { match: 'v10:backtest:' + sym + ':*', count: 100 }).catch(() => [0, []]);
+      cursor = parseInt(result[0], 10);
+      keys.push(...result[1]);
+    } while (cursor !== 0);
   } catch (_) {}
-  return _ffCache.data || [];
-};
-
-const instrumentCurrencies = (sym) => {
-  const u = (sym || '').toUpperCase();
-  if (u.includes('XAU') || u.includes('GOLD')) return ['USD'];
-  if (u.includes('BTC') || u.includes('ETH'))  return ['USD'];
-  if (u.includes('US30') || u.includes('NAS') || u.includes('SPX')) return ['USD'];
-  if (u.length >= 6) return [u.slice(0,3), u.slice(3,6)];
-  return ['USD'];
-};
-
-const newsBlockReason = async (instrument) => {
-  const cal = await fetchFFCalendar();
-  if (!cal.length) return null;
-  const ccys = instrumentCurrencies(instrument);
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  for (const ev of cal) {
-    if (!ev || ev.impact !== 'High') continue;
-    if (!ccys.includes(ev.country)) continue;
-    const evTs = new Date(ev.date).getTime();
-    if (isNaN(evTs)) continue;
-    const diff = evTs - now;
-    if (Math.abs(diff) <= windowMs) {
-      const mins = Math.round(diff / 60000);
-      return 'High-impact ' + ev.country + ' news: ' + ev.title + ' (' + (mins >= 0 ? 'in ' + mins + ' min' : Math.abs(mins) + ' min ago') + ')';
+  const out = {};
+  for (const k of keys) {
+    const raw = await r.get(k).catch(() => null);
+    const parsed = safeParse(raw);
+    if (parsed && parsed.family && parsed.stats) {
+      // Take most recent for each family
+      if (!out[parsed.family] || (out[parsed.family].ts || 0) < (parsed.ts || 0)) {
+        out[parsed.family] = parsed;
+      }
     }
   }
-  return null;
+  return out;
+}
+
+// Regime-family fitness — which families work in which regimes (from our research + literature)
+const FAMILY_REGIME_FIT = {
+  TREND:     { TRENDING: 1.0, RANGING: 0.2, VOLATILE: 0.6, QUIET: 0.4, MIXED: 0.5 },
+  REVERSION: { TRENDING: 0.3, RANGING: 1.0, VOLATILE: 0.5, QUIET: 0.7, MIXED: 0.6 },
+  STRUCTURE: { TRENDING: 0.8, RANGING: 0.7, VOLATILE: 0.6, QUIET: 0.5, MIXED: 0.7 },
+  BREAKOUT:  { TRENDING: 0.7, RANGING: 0.4, VOLATILE: 0.9, QUIET: 0.8, MIXED: 0.5 },
+  RANGE:     { TRENDING: 0.2, RANGING: 0.9, VOLATILE: 0.3, QUIET: 0.6, MIXED: 0.4 },
+  NEWS:      { TRENDING: 0.5, RANGING: 0.5, VOLATILE: 0.7, QUIET: 0.3, MIXED: 0.5 },
 };
 
-// Normalize a symbol (strip .s, .pro, uppercase) -- used for all lab/crown/blacklist lookups
-const normSym = (s) => {
-  if (!s) return '';
-  return s.toUpperCase().replace('.S', '').replace('.PRO', '').trim();
-};
+// Compress candles into a compact text representation for AI prompt
+function summarizeTF(tf, candles) {
+  if (!candles || candles.length < 5) return tf + ': insufficient data';
+  const c = candles.slice(-20); // last 20 for prompt
+  const last = c[c.length - 1];
+  const first = c[0];
+  const high = Math.max(...c.map(x => x.high));
+  const low = Math.min(...c.map(x => x.low));
+  const move = ((last.close - first.close) / first.close) * 100;
+  const range = ((high - low) / first.close) * 100;
+  const _atr = atr(candles, 14) || 0;
+  // Direction of last 5 candles
+  const recent5 = candles.slice(-5);
+  const upBars = recent5.filter(x => x.close > x.open).length;
+  const dir = upBars >= 4 ? 'STRONG_UP' : upBars === 3 ? 'UP' : upBars === 2 ? 'DOWN' : upBars <= 1 ? 'STRONG_DOWN' : 'MIXED';
 
-module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+  // V10: Tick-volume z-score (current candle vol vs last 20 avg).
+  // Strong divergence (|z| > 2) = institutional participation signal.
+  let volTag = '';
+  const volumes = candles.slice(-20).map(x => x.tickVolume || x.volume || 0).filter(v => v > 0);
+  if (volumes.length >= 10) {
+    const meanV = volumes.reduce((s, v) => s + v, 0) / volumes.length;
+    const varV = volumes.reduce((s, v) => s + (v - meanV) ** 2, 0) / volumes.length;
+    const stdV = Math.sqrt(varV);
+    const lastV = last.tickVolume || last.volume || 0;
+    if (lastV > 0 && stdV > 0) {
+      const z = (lastV - meanV) / stdV;
+      if (z >= 2.0)       volTag = ' vol=SPIKE+' + z.toFixed(1) + 'σ';
+      else if (z >= 1.0)  volTag = ' vol=high+' + z.toFixed(1) + 'σ';
+      else if (z <= -1.5) volTag = ' vol=THIN' + z.toFixed(1) + 'σ';
+      else                volTag = ' vol=normal';
+    }
+  }
 
-  try {
-    const body = req.body || {};
-    const { snap, instrument, riskMode, prevDecisions, lab, crownLocks, blacklist } = body;
-    if (!snap || !instrument) return res.status(400).json({ error: 'Missing snap or instrument' });
+  return tf + ': move=' + move.toFixed(2) + '% range=' + range.toFixed(2) + '% ATR=' + _atr.toFixed(5) + ' last5=' + dir + volTag + ' last_close=' + last.close;
+}
 
-    // Normalize once, use everywhere
-    const sym = normSym(instrument);
-    const isGold   = sym.includes('XAU') || sym.includes('GOLD');
-    const isCrypto = sym.includes('BTC') || sym.includes('ETH') || sym.includes('CRYPTO') || sym.includes('COIN');
-    const category = isGold ? 'GOLD' : isCrypto ? 'CRYPTO' : 'FOREX';
+// Build the AI prompt.
+function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtestStats, openPositions, correlationCluster, sessionLabel }) {
+  const memCtx = buildPromptContext(memory, sym);
 
-    // Session gates
-    const now = new Date();
-    const utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
-    const isWeekend = now.getUTCDay() === 0 || now.getUTCDay() === 6;
-    if (isWeekend) return res.status(200).json({ decision:'WAIT', reason:'Weekend -- markets closed.', confidence:0, volume:null });
-    if (isCrypto && (utcH < 7 || utcH >= 23)) return res.status(200).json({ decision:'WAIT', reason:'Outside crypto hours (07:00-23:00 UTC).', confidence:0, volume:null });
-    if (!isCrypto && (utcH < 8 || utcH >= 21)) return res.status(200).json({ decision:'WAIT', reason:'Outside trading hours (08:00-21:00 UTC).', confidence:0, volume:null });
+  const tfLines = [];
+  for (const tf of ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mn']) {
+    tfLines.push('  ' + summarizeTF(tf, multiTF.timeframes[tf] || []));
+  }
 
-    // News block (use raw instrument for currency detection)
-    const newsBlock = await newsBlockReason(instrument);
-    if (newsBlock) return res.status(200).json({ decision:'WAIT', reason:newsBlock, confidence:0, volume:null, newsBlocked:true });
-
-    // ATR & sizing
-    const atrFallback = isGold ? 12 : isCrypto ? 300 : 0.0008;
-    const atr      = parseFloat(snap.atr14) || atrFallback;
-    const balance  = Number(snap.balance)   || 10000;
-    const lossStrk = Number(snap.lossStreak) || 0;
-    const winStrk  = Number(snap.winStreak)  || 0;
-    const price    = Number(snap.price)      || 0;
-
-    const RISK = {
-      TEST:       { pct: 0.005, maxLot: 0.05 },
-      REGULAR:    { pct: 0.01,  maxLot: 0.20 },
-      AGGRESSIVE: { pct: 0.02,  maxLot: 0.50 },
-    };
-    const risk = RISK[riskMode || 'TEST'] || RISK.TEST;
-
-    // V9.3: Category-aware volume scaling.
-    // The old formula `(balance*pct) / (atr*100)` was designed for forex-pip math.
-    // It under-sized crypto (BTC atr ~300 -> volume 0.006 = 0.01 clamped)
-    // and gold (atr ~12 -> decent but not aggressive enough).
-    // Fix: use a base volume scaled to category realities, then clamp to maxLot.
-    //   CRYPTO  : base = maxLot * 0.4  (e.g. AGGRESSIVE -> 0.20 lots BTC)
-    //   GOLD    : base = maxLot * 0.6  (e.g. AGGRESSIVE -> 0.30 lots gold)
-    //   FOREX   : base = maxLot * 0.8  (e.g. AGGRESSIVE -> 0.40 lots forex)
-    //   Then loss/win streak adjusts the base.
-    const categoryBaseMult = isCrypto ? 0.4 : isGold ? 0.6 : 0.8;
-    const rawBase = risk.maxLot * categoryBaseMult;
-    const baseVol = Math.max(0.01, Math.min(risk.maxLot, parseFloat(rawBase.toFixed(2))));
-    const lossAdj = lossStrk >= 4 ? 0.25 : lossStrk >= 3 ? 0.5 : lossStrk >= 2 ? 0.75 : 1.0;
-    const winAdj  = winStrk  >= 5 ? 2.0  : winStrk  >= 3 ? 1.5 : winStrk  >= 2 ? 1.25 : 1.0;
-    const fullVol = Math.max(0.01, Math.min(risk.maxLot, parseFloat((baseVol * lossAdj * winAdj).toFixed(2))));
-    const sizingSmall = Math.max(0.01, parseFloat((fullVol * 0.5).toFixed(2)));
-    const sizingLarge = Math.min(risk.maxLot, parseFloat((fullVol * 1.5).toFixed(2)));
-
-    console.log('[AI-SIZE] ' + sym + ' ' + (riskMode || 'TEST') + ' cat=' + category + ' base=' + baseVol + ' full=' + fullVol + ' small=' + sizingSmall + ' large=' + sizingLarge);
-
-    // TP/SL targets (distances in price units) -- same as V9, no forced floors
-    let tp;
-    if (isGold) {
-      tp = { tp1: 5, tp2: 10, tp3: 15, tp4: 20, sl: 10, isGold: true };
-    } else if (isCrypto) {
-      tp = { tp1: Math.round(atr*0.5), tp2: Math.round(atr*1.0), tp3: Math.round(atr*1.5), tp4: Math.round(atr*2.0), sl: Math.round(atr*0.8), isGold: false };
+  // Family stats summary
+  const famLines = [];
+  for (const fam of FAMILIES) {
+    const s = familyStats[fam];
+    const bt = backtestStats[fam];
+    let line;
+    if (!s || s.total === 0) {
+      line = '  ' + fam + ': untested live (Beta(1,1) = 50% prior, very wide CI)';
     } else {
-      tp = { tp1: parseFloat((atr*0.5).toFixed(5)), tp2: parseFloat((atr*1.0).toFixed(5)), tp3: parseFloat((atr*1.5).toFixed(5)), tp4: parseFloat((atr*2.0).toFixed(5)), sl: parseFloat((atr*0.8).toFixed(5)), isGold: false };
+      const fit = (FAMILY_REGIME_FIT[fam] && FAMILY_REGIME_FIT[fam][regime.regime]) || 0.5;
+      line = '  ' + fam + ': ' + s.wins + 'W/' + s.losses + 'L · liveWR=' + s.winRate + '% · CI=[' + s.ci[0] + '-' + s.ci[1] + '%] · expectancy=$' + s.expectancy.toFixed(2) + ' · regime-fit=' + fit.toFixed(1);
     }
-
-    // -------------------------------------------------------------
-    // V9.4 learned context
-    // -------------------------------------------------------------
-    const instLab = lab
-      ? Object.entries(lab).filter(([, d]) => {
-          if (!d || !d.instruments) return false;
-          return d.instruments[sym] || d.instruments[instrument];
-        }).map(([strat, d]) => {
-          const instData = (d.instruments[sym] || d.instruments[instrument]);
-          return { strat, ...instData };
-        })
-      : [];
-
-    const proven       = instLab.filter(s => s.crown && !s.banned).sort((a,b) => (b.winRate||0)-(a.winRate||0)).slice(0,5);
-    const banned       = instLab.filter(s => s.banned).map(s => s.strat);
-    const inconclusive = instLab.filter(s => s.inconclusive && !s.banned).map(s => ({ strat: s.strat, total: s.total }));
-    const blList       = Array.isArray(blacklist) ? blacklist : [];
-    const crown        = (crownLocks && (crownLocks[sym] || crownLocks[instrument])) || null;
-
-    // V9.4: Figure out which session we're currently in (for session-lock compliance)
-    const hr  = now.getUTCHours() + now.getUTCMinutes() / 60;
-    const currentSession = (hr >= 13 && hr < 16) ? 'OVERLAP'
-                         : (hr >= 13 && hr < 21) ? 'NEW YORK'
-                         : (hr >=  8 && hr < 16) ? 'LONDON'
-                         : 'ASIAN';
-
-    // V9.4: Session-locked proven strategies (only play these if we're in the right session)
-    const sessionLockedInfo = proven
-      .filter(s => s.sessionLock)
-      .map(s => 'CROWN "' + s.strat + '" session-locked to ' + s.sessionLock + ' (current: ' + currentSession + (s.sessionLock === currentSession ? ' -- OK' : ' -- WAIT') + ')');
-
-    // V9.5: Reliable exploration counter via Redis (replaces unreliable prevDecisions.length)
-    // Track last-used strategies per instrument to prevent overtrading the same crown.
-    const redis = getRedis();
-    let aiCounter = 0;
-    let recentStrats = []; // last 3 strategies used for this instrument
-    if (redis) {
-      try { aiCounter = await redis.incr('v9:ai_count:' + sym); } catch (_) {}
-      try {
-        const rsRaw = await redis.get('v9:recent_strats:' + sym);
-        if (rsRaw) {
-          const parsed = typeof rsRaw === 'string' ? JSON.parse(rsRaw) : rsRaw;
-          if (Array.isArray(parsed)) recentStrats = parsed.slice(0, 3);
-        }
-      } catch (_) {}
-    }
-
-    // V9.5: 50/50 exploration when under-tested combos exist (was: 33% every 3rd)
-    // Omar is in filtering phase -- need maximum coverage of the 1000+ combo space.
-    const explorationRequired = (aiCounter % 2 === 0) && inconclusive.length > 0;
-
-    const provenLines = proven.length
-      ? 'Proven on ' + sym + ':\n' + proven.map(s => '  WIN: ' + s.strat + ' -- ' + s.winRate + '% WR (' + s.total + ' trades, exp $' + (s.expectancy || 0) + ')' + (s.sessionLock ? ' [SESSION-LOCK: ' + s.sessionLock + ']' : '')).join('\n')
-      : 'No crowned strategies yet on ' + sym + ' -- explore freely.';
-    const bannedLines = banned.length ? 'Banned on ' + sym + ' (avoid):\n' + banned.map(s => '  ' + s).join('\n') : '';
-    const blLines     = blList.length ? 'Globally blacklisted (never use):\n' + blList.map(s => '  ' + s).join('\n') : '';
-
-    // V9.5: Softer crown language -- crown is a preference for matching setups, NOT a default
-    const crownLine   = crown
-      ? 'CROWN PREFERENCE: "' + crown + '" has an edge on ' + sym + ', BUT do NOT default to it. Only play it when the current setup PRECISELY matches its conditions. Prefer exploring other combos otherwise.'
-      : 'No crown lock -- explore all combinations freely.';
-    const sessLines   = sessionLockedInfo.length ? 'SESSION LOCKS:\n  ' + sessionLockedInfo.join('\n  ') : '';
-
-    // V9.5: Anti-overtrading -- forbid immediate repetition of recent strategies
-    const recentLine  = recentStrats.length
-      ? '\nRECENTLY USED (do NOT repeat these in back-to-back decisions):\n' + recentStrats.map(s => '  - ' + s).join('\n') + '\nPick a DIFFERENT combo unless the current setup is unambiguously a perfect match for one of these.'
-      : '';
-
-    // V9.5: Stronger exploration directive
-    const exploreLine = explorationRequired
-      ? '\n*** EXPLORATION REQUIRED THIS DECISION ***\n' +
-        'This is an exploration cycle (counter=' + aiCounter + '). You MUST test a new or under-tested combo if the setup allows ANY trade.\n' +
-        'Under-tested combos on ' + sym + ' (pick one of these when possible):\n' +
-        inconclusive.slice(0, 8).map(i => '  - ' + i.strat + ' (' + i.total + ' trades so far)').join('\n') + '\n' +
-        'Only fall back to a proven/crown strategy if the setup is INCOMPATIBLE with every option above. Default position: explore.\n'
-      : (inconclusive.length > 0
-         ? '\nNOTE: ' + inconclusive.length + ' under-tested combos still exist. Favor these over crowns when setup is ambiguous; overtrading crowns adds no new information.\n'
-         : '');
-
-    const learnedCtx = [
-      '=== STRATEGY KNOWLEDGE FOR ' + sym + ' ===',
-      provenLines,
-      bannedLines || null,
-      blLines || null,
-      crownLine,
-      sessLines || null,
-      recentLine || null,
-      exploreLine || null,
-    ].filter(Boolean).join('\n');
-
-    const prevCtx = (prevDecisions && prevDecisions.length)
-      ? '\nRECENT DECISIONS:\n' + prevDecisions.slice(-3).map(d => '  ' + d.decision + ' @ ' + d.price + ' [' + (d.strategy || '?') + ']').join('\n')
-      : '';
-
-    const catDescriptions = {
-      GOLD:   'Gold: $5-150/session. Round $10 levels are magnets. Best: London 08-10, NY 13-16 UTC.',
-      CRYPTO: 'Crypto: $200-3000/day moves. Best 09-22 UTC. Round thousand levels matter.',
-      FOREX:  'Forex: 50-150 pips/day typical. Best London 08-10, NY 13-16 UTC.',
-    };
-
-    const tpSection = isGold
-      ? 'GOLD TP SYSTEM (fixed pips):\nSL distance: ' + tp.sl + ' pips\nTP1: +' + tp.tp1 + ' pips -> close 40%, SL to BE\nTP2: +' + tp.tp2 + ' pips -> close 30%, SL to TP1\nTP3: +' + tp.tp3 + ' pips -> close 20%, SL to TP2\nTP4: +' + tp.tp4 + ' pips -> close final 10%'
-      : 'TP SYSTEM (' + category + ', ATR-based, distances in price units):\nSL distance: ' + tp.sl + '\nTP1: +' + tp.tp1 + ' -> close 40%, SL to BE\nTP2: +' + tp.tp2 + ' -> close 30%, SL to TP1\nTP3: +' + tp.tp3 + ' -> close 20%, SL to TP2\nTP4: +' + tp.tp4 + ' -> close final 10%';
-
-    // -------------------------------------------------------------
-    // Strong LONG/SHORT structure instructions
-    // -------------------------------------------------------------
-    const sysPrompt =
-      'You are the trading brain of Quantum Bot V9.2.\n' +
-      'Instrument: ' + sym + ' (' + category + '). ' + (catDescriptions[category] || '') + '\n\n' +
-      'YOUR JOB: Read the market. Make a decisive call. Trade LONG or SHORT freely based on bias.\n\n' +
-      'WAIT only when:\n' +
-      '1. Pure noise, no readable structure\n' +
-      '2. Position already open on this instrument\n' +
-      '"Suboptimal" is not a reason to wait. SHORT as readily as LONG.\n\n' +
-      tpSection + '\n\n' +
-      'PRICE STRUCTURE RULES (CRITICAL -- wrong side = rejection by executor):\n' +
-      'Current price: ' + price + '\n' +
-      '  For LONG: entry=' + price + ', stopLoss MUST be BELOW entry, ALL takeProfits MUST be ABOVE entry.\n' +
-      '    Example LONG: stopLoss = ' + price + ' - ' + tp.sl + ', takeProfit1 = ' + price + ' + ' + tp.tp1 + '\n' +
-      '  For SHORT: entry=' + price + ', stopLoss MUST be ABOVE entry, ALL takeProfits MUST be BELOW entry.\n' +
-      '    Example SHORT: stopLoss = ' + price + ' + ' + tp.sl + ', takeProfit1 = ' + price + ' - ' + tp.tp1 + '\n' +
-      '  Verify before outputting JSON. A malformed SHORT will be rejected and logged.\n\n' +
-      'SIZING (' + (riskMode || 'TEST') + '):\n' +
-      '35-49%: 0.01 lots\n' +
-      '50-64%: ' + sizingSmall + ' lots\n' +
-      '65-79%: ' + fullVol + ' lots\n' +
-      '80%+:   ' + sizingLarge + ' lots\n\n' +
-      'STRATEGY LABELS (combine with +):\n' +
-      'ICT: ICT_KILLZONE, ICT_SWEEP, ICT_FVG, ICT_PDH_PDL, ICT_ASIAN_RANGE\n' +
-      'TREND: TREND_H4, TREND_EMA_ALIGN, TREND_BREAKOUT, TREND_MA_BOUNCE\n' +
-      'MOMENTUM: MOM_SESSION, MOM_MACD, MOM_RSI_DIV\n' +
-      'MEAN_REV: MR_ROUND, MR_BB_SQUEEZE, MR_RANGE\n' +
-      'PRICE_ACTION: PA_ENGULFING, PA_REJECTION, PA_INSIDE_BAR\n' +
-      'SMC: SMC_OB, SMC_BOS, SMC_CHOCH\n' +
-      'Example: ICT_FVG+TREND_H4+SMC_BOS\n\n' +
-      learnedCtx + prevCtx + '\n\n' +
-      'OUTPUT: valid JSON only, no markdown fences, no prose outside JSON.\n' +
-      '{"decision":"LONG|SHORT|WAIT","confidence":0-100,"entry":price,"stopLoss":price,"takeProfit1":price,"takeProfit2":price,"takeProfit3":price,"takeProfit4":price,"volume":lots,"strategy":"TACTIC1+TACTIC2","reason":"2-3 sentences","risk":"LOW|MEDIUM|HIGH"}';
-
-    const utcStr = String(now.getUTCHours()).padStart(2,'0') + ':' + String(now.getUTCMinutes()).padStart(2,'0');
-    const userPrompt =
-      sym + ' @ ' + price + ' -- analysis?\n\n' +
-      'UTC: ' + utcStr + ' | SESSION: ' + (snap.session || '') + '\n' +
-      (snap.inKillZone ? 'IN KILL ZONE: ' + (snap.killZone || '') : 'Outside kill zone') + '\n\n' +
-      'CANDLES:\nW: ' + (snap.weekly||'no data') + '\nD1: ' + (snap.d1||'no data') + '\nH4: ' + (snap.h4||'no data') + '\nH1: ' + (snap.h1||'no data') + '\nM15: ' + (snap.m15||'no data') + '\nM5: ' + (snap.m5||'no data') + '\nM1: ' + (snap.m1||'no data') + '\n\n' +
-      'ATR14(M1): ' + snap.atr14 + '\nSL distance target: ' + tp.sl + '\nTP1 distance target: ' + tp.tp1 + '\n\n' +
-      'ACCOUNT:\nBalance: $' + balance.toFixed(2) + ' | Today P&L: $' + (snap.todayPnl||'0.00') + '\nLoss streak: ' + lossStrk + ' | Win streak: ' + winStrk + '\nOpen on ' + sym + ': ' + (snap.openCount||0) + '\n\n' +
-      'Make the call. JSON only. Remember: for SHORT, stopLoss > entry and all TPs < entry.';
-
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY || '', 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 600, system: sysPrompt, messages: [{ role: 'user', content: userPrompt }] }),
-    });
-
-    const data = await resp.json();
-    const raw  = (data.content || []).map(b => b.text || '').join('');
-
-    let dec;
-    try { dec = JSON.parse(raw.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim()); }
-    catch (e) { return res.status(200).json({ decision:'WAIT', reason:'Parse error: '+e.message, confidence:0, volume:null, raw:raw.slice(0,200) }); }
-
-    if (!['LONG','SHORT','WAIT'].includes(dec.decision)) dec.decision = 'WAIT';
-
-    // ---- Structural sanity check on AI output ----
-    if (dec.decision !== 'WAIT' && price > 0 && dec.stopLoss && dec.takeProfit1) {
-      if (dec.decision === 'LONG') {
-        if (dec.stopLoss >= price) {
-          console.warn('[AI] LONG output bad: stopLoss ' + dec.stopLoss + ' >= price ' + price + ' -- downgrade to WAIT');
-          dec.decision = 'WAIT'; dec.reason = 'AI produced invalid LONG structure (SL >= entry)'; dec.volume = null;
-        } else if (dec.takeProfit1 <= price) {
-          console.warn('[AI] LONG output bad: TP1 ' + dec.takeProfit1 + ' <= price ' + price + ' -- downgrade to WAIT');
-          dec.decision = 'WAIT'; dec.reason = 'AI produced invalid LONG structure (TP1 <= entry)'; dec.volume = null;
-        }
-      } else if (dec.decision === 'SHORT') {
-        if (dec.stopLoss <= price) {
-          console.warn('[AI] SHORT output bad: stopLoss ' + dec.stopLoss + ' <= price ' + price + ' -- downgrade to WAIT');
-          dec.decision = 'WAIT'; dec.reason = 'AI produced invalid SHORT structure (SL <= entry)'; dec.volume = null;
-        } else if (dec.takeProfit1 >= price) {
-          console.warn('[AI] SHORT output bad: TP1 ' + dec.takeProfit1 + ' >= price ' + price + ' -- downgrade to WAIT');
-          dec.decision = 'WAIT'; dec.reason = 'AI produced invalid SHORT structure (TP1 >= entry)'; dec.volume = null;
+    // V10: Append backtest validation if available
+    if (bt && bt.stats) {
+      line += '\n      backtest(' + bt.start + '..' + bt.end + ', n=' + bt.stats.total + '): WR=' + bt.stats.winRate + '% PF=' + bt.stats.profitFactor + ' expectancy=' + bt.stats.expectancyR + 'R MaxDD=' + bt.stats.maxDrawdownR + 'R';
+      // Overfit detection: live WR diverges from backtest WR by more than 15 percentage points
+      if (s && s.total >= 10) {
+        const divergence = Math.abs(s.winRate - bt.stats.winRate);
+        if (divergence > 15) {
+          line += '\n      ⚠ OVERFIT WARNING: live WR ' + s.winRate + '% diverges from backtest ' + bt.stats.winRate + '% by ' + divergence.toFixed(0) + 'pp -- treat live edge with caution';
         }
       }
     }
+    famLines.push(line);
+  }
 
-    if (dec.decision !== 'WAIT') {
-      const c = dec.confidence || 0;
-      if (c < 35) { dec.decision = 'WAIT'; dec.reason = 'Confidence ' + c + '% below 35% min.'; dec.volume = null; }
-      else { dec.volume = c >= 80 ? sizingLarge : c >= 65 ? fullVol : c >= 50 ? sizingSmall : 0.01; }
+  // Open positions summary
+  const openLines = openPositions.length
+    ? openPositions.map(p => '  ' + p.symbol + ': ' + p.direction + ' ' + p.volume + 'L @ ' + p.openPrice + ' (P&L $' + (p.profit || 0).toFixed(2) + ')').join('\n')
+    : '  (none)';
+
+  const chaosLine = chaos && chaos.chaos
+    ? 'CHAOS DETECTED on ' + sym + ' (1m/1h ATR ratio ' + chaos.ratio + 'x). Strongly avoid new trades unless setup is overwhelming.'
+    : 'No chaos signal.';
+
+  const clusterLine = correlationCluster
+    ? 'Correlation cluster: ' + correlationCluster + '. Check open positions in this cluster before adding.'
+    : 'No correlation cluster.';
+
+  return `You are the decision layer of an algorithmic trading system. Make ONE decision now.
+
+=== CONTEXT ===
+Symbol: ${sym}  ·  Category: ${instCategory(sym)}  ·  Session: ${sessionLabel}  ·  UTC: ${new Date().toISOString()}
+
+${memCtx ? '=== YOUR MEMORY (continuous identity across calls) ===\n' + memCtx + '\n' : ''}
+=== MARKET REGIME ===
+Current regime: ${regime.regime} (score ${regime.score}/100)
+Indicators: ADX=${(regime.indicators.h1Adx14 || 0).toFixed(1)} · ATR=${(regime.indicators.h1Atr14 || 0).toFixed(5)} · BB-width=${((regime.indicators.h1BBwidth || 0) * 100).toFixed(2)}% · MA-diff=${(regime.indicators.maDiff || 0).toFixed(2)} · H4 trend dir=${regime.indicators.h4TrendDir}
+${chaosLine}
+${clusterLine}
+
+=== MULTI-TIMEFRAME VIEW ===
+${tfLines.join('\n')}
+
+=== FAMILY PERFORMANCE ON ${sym} (Bayesian) ===
+${famLines.join('\n')}
+
+=== CURRENT OPEN POSITIONS ===
+${openLines}
+
+=== INSTRUCTIONS ===
+1. Choose a FAMILY first: TREND, REVERSION, STRUCTURE, BREAKOUT, RANGE, or NEWS. Or WAIT if nothing fits.
+2. Family selection MUST consider regime fit. Do not pick TREND in a clearly RANGING regime.
+3. Provide a specific raw tactic name (e.g. "TREND_H4+MOM_SESSION", "ICT_KILLZONE+SWEEP") for label/learning.
+4. Confidence 0-100. <35 = WAIT (no trade). 35-49 = small. 50-64 = standard. 65-79 = full. 80+ = oversized.
+5. If chaos detected, threshold for entry is 80+ confidence ONLY.
+6. Volume tags on each TF line:
+   - vol=SPIKE+Xσ -> very strong institutional participation (X std devs above mean). Confirms breakouts/reversals.
+   - vol=high+Xσ -> above-average. Mild confirmation.
+   - vol=normal -> nothing notable.
+   - vol=THIN-Xσ -> below-average. Setup signals are LESS reliable; lower confidence.
+   Use these to validate or reject technical setups. Strong setup + thin volume = lower confidence.
+7. Reason should be concise -- which TFs you read, what regime you see, why this family fits NOW, what volume confirms.
+8. Output JSON ONLY:
+{
+  "decision": "BUY" | "SELL" | "WAIT",
+  "family": "TREND" | "REVERSION" | "STRUCTURE" | "BREAKOUT" | "RANGE" | "NEWS",
+  "rawTactic": "string -- specific label",
+  "confidence": 0-100,
+  "reason": "concise multi-TF + regime reasoning",
+  "tp1Pips": number,
+  "slPips": number,
+  "memo": "optional one-line note for next AI call to remember"
+}
+
+DO NOT include anything before or after the JSON.`;
+}
+
+// Volume sizing tiers (V9 compatible)
+function sizingFor(confidence, riskMode, category) {
+  const baseFx     = riskMode === 'AGGRESSIVE' ? 0.50 : riskMode === 'REGULAR' ? 0.20 : 0.05;
+  const baseGold   = riskMode === 'AGGRESSIVE' ? 0.20 : riskMode === 'REGULAR' ? 0.10 : 0.02;
+  const baseCrypto = riskMode === 'AGGRESSIVE' ? 0.10 : riskMode === 'REGULAR' ? 0.05 : 0.01;
+  const baseIndex  = riskMode === 'AGGRESSIVE' ? 1.00 : riskMode === 'REGULAR' ? 0.50 : 0.10;
+  const base = category === 'GOLD' || category === 'METAL' ? baseGold
+             : category === 'CRYPTO' ? baseCrypto
+             : category === 'INDEX'  ? baseIndex
+             : baseFx;
+  if (confidence >= 80) return base;             // full
+  if (confidence >= 65) return base * 0.7;
+  if (confidence >= 50) return base * 0.4;
+  if (confidence >= 35) return base * 0.2;
+  return 0;
+}
+
+function getSessionLabel() {
+  const h = new Date().getUTCHours();
+  if (h >= 13 && h < 16) return 'OVERLAP';
+  if (h >= 13 && h < 18) return 'NEW_YORK';
+  if (h >= 8  && h < 16) return 'LONDON';
+  return 'ASIAN';
+}
+
+// Call Anthropic API
+async function callClaude(prompt) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { error: 'ANTHROPIC_API_KEY not set' };
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      return { error: 'Anthropic ' + r.status + ': ' + txt.slice(0, 300) };
     }
-    if (dec.decision !== 'WAIT' && dec.strategy) {
-      const s = (dec.strategy || '').trim();
-      if (blList.includes(s)) { dec.decision = 'WAIT'; dec.reason = 'Strategy "'+s+'" globally blacklisted.'; dec.volume = null; }
-    }
-
-    // V9.5: After a non-WAIT decision, update the recent-strats list so next call knows what NOT to repeat
-    if (redis && dec.decision !== 'WAIT' && dec.strategy) {
-      try {
-        const newList = [dec.strategy, ...recentStrats.filter(x => x !== dec.strategy)].slice(0, 3);
-        await redis.set('v9:recent_strats:' + sym, JSON.stringify(newList));
-      } catch (_) {}
-    }
-
-    console.log('[AI]', sym, category, dec.decision, (dec.confidence || 0) + '%', dec.strategy || '-', 'vol=' + dec.volume, 'aiCount=' + aiCounter, 'explore=' + explorationRequired);
-    return res.status(200).json(dec);
-
+    const data = await r.json();
+    const text = (data.content || []).map(c => c.text || '').join('');
+    return { text, usage: data.usage };
   } catch (e) {
-    console.error('ai.js error:', e.message);
-    return res.status(500).json({ error: e.message });
+    return { error: e && e.message ? e.message : 'unknown' };
+  }
+}
+
+// Parse AI response (strip markdown fences if any)
+function parseDecision(rawText) {
+  if (!rawText) return null;
+  let cleaned = rawText.trim();
+  // strip ```json ... ``` fences
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+  // find first { and last }
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1) return null;
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1));
+  } catch (_) { return null; }
+}
+
+// Apply Bayesian sampling adjustment to AI confidence
+function adjustConfidenceWithBayes(aiConfidence, family, familyStats, regime) {
+  const stats = familyStats[family];
+  if (!stats || stats.total < 3) return aiConfidence; // not enough data
+  const sampledWR = betaSample(stats.wins, stats.losses) * 100;
+  const fit = (FAMILY_REGIME_FIT[family] && FAMILY_REGIME_FIT[family][regime.regime]) || 0.5;
+  const fitAdj = (fit - 0.5) * 30; // -15 to +15
+  // Blend: 60% AI confidence, 30% sampled WR, 10% regime fit
+  const blended = aiConfidence * 0.6 + sampledWR * 0.3 + (50 + fitAdj) * 0.1;
+  return Math.round(Math.max(0, Math.min(100, blended)));
+}
+
+// === HTTP handler ===
+module.exports = async (req, res) => {
+  if (applyCors(req, res)) return;
+  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+
+  const body = typeof req.body === 'string' ? safeParse(req.body) : (req.body || {});
+  if (!body || !body.symbol) return res.status(400).json({ error: 'symbol required in body' });
+
+  const sym = normSym(body.symbol);
+  const riskMode = body.riskMode || 'TEST';
+
+  try {
+    // 1. Fetch all the context in parallel
+    const [multiTF, regime, memory, familyStats, positionsResp, backtestStats] = await Promise.all([
+      fetchMultiTF(sym),
+      getRegimeFor(sym),
+      readMemory(),
+      readFamilyForSymbol(sym),
+      fetchPositions(),
+      readBacktestStats(sym),
+    ]);
+    const openPositions = positionsResp.positions || [];
+
+    // Skip if already open on this symbol
+    const alreadyOpen = openPositions.some(p => normSym(p.symbol) === sym);
+    if (alreadyOpen) {
+      return res.status(200).json({
+        decision: 'WAIT',
+        reason: 'Position already open on ' + sym,
+        skipReason: 'already-open',
+      });
+    }
+
+    // 2. Correlation cluster check
+    const myCluster = clusterFor(sym);
+    if (myCluster) {
+      const clusterMembers = openPositions.map(p => clusterFor(p.symbol)).filter(Boolean);
+      if (clusterMembers.includes(myCluster)) {
+        return res.status(200).json({
+          decision: 'WAIT',
+          reason: 'Correlation cluster ' + myCluster + ' already has an open position',
+          skipReason: 'correlation-cluster',
+        });
+      }
+    }
+
+    // 3. Build prompt + call Claude
+    const sessionLabel = getSessionLabel();
+    const prompt = buildPrompt({
+      sym, multiTF, regime, chaos: regime.chaos, memory, familyStats, backtestStats,
+      openPositions, correlationCluster: myCluster, sessionLabel,
+    });
+
+    const claudeResp = await callClaude(prompt);
+    if (claudeResp.error) {
+      return res.status(200).json({ decision: 'WAIT', reason: 'AI error: ' + claudeResp.error, error: claudeResp.error });
+    }
+    const decision = parseDecision(claudeResp.text);
+    if (!decision || !decision.decision) {
+      return res.status(200).json({ decision: 'WAIT', reason: 'AI did not return parseable decision', raw: (claudeResp.text || '').slice(0, 300) });
+    }
+
+    // 4. Validate + adjust confidence with Bayesian sampling
+    if (!FAMILIES.includes(decision.family)) decision.family = tacticFamily(decision.rawTactic || '');
+    const adjustedConf = adjustConfidenceWithBayes(decision.confidence || 0, decision.family, familyStats, regime);
+    decision.aiRawConfidence = decision.confidence;
+    decision.confidence = adjustedConf;
+
+    // Chaos veto
+    if (regime.chaos && regime.chaos.chaos && decision.confidence < 80) {
+      decision.decision = 'WAIT';
+      decision.reason = 'Chaos detected (ratio ' + regime.chaos.ratio + 'x); confidence ' + decision.confidence + ' < 80 chaos threshold';
+    }
+
+    // Below-min veto
+    if (decision.confidence < 35) {
+      decision.decision = 'WAIT';
+    }
+
+    // 5. Volume sizing
+    const cat = instCategory(sym);
+    const volume = decision.decision === 'WAIT' ? null : sizingFor(decision.confidence, riskMode, cat);
+    decision.volume = volume;
+    decision.regime = regime.regime;
+    decision.regimeScore = regime.score;
+    decision.symbol = sym;
+    decision.session = sessionLabel;
+
+    // 6. Append to memory
+    await appendDecision({
+      sym,
+      decision: decision.decision,
+      family: decision.family,
+      conf: decision.confidence,
+      regime: regime.regime,
+      reason: decision.reason,
+    }).catch(() => {});
+
+    return res.status(200).json(decision);
+  } catch (e) {
+    return res.status(500).json({ error: e && e.message ? e.message : 'Unknown', decision: 'WAIT' });
   }
 };
+
+module.exports.callClaude    = callClaude;
+module.exports.parseDecision = parseDecision;
+module.exports.buildPrompt   = buildPrompt;
+module.exports.FAMILIES      = FAMILIES;
+module.exports.FAMILY_REGIME_FIT = FAMILY_REGIME_FIT;

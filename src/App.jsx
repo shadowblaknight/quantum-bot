@@ -412,6 +412,9 @@ const CSS = `
 const NAV = [
   { id: "live",     icon: "\u25CF", label: "Live Trade"   },
   { id: "trades",   icon: "\u25B6", label: "Active Trades" },
+  { id: "intel",    icon: "\u25CE", label: "Pair Intel"    },
+  { id: "memory",   icon: "\u26C2", label: "Bot Memory"    },
+  { id: "backtest", icon: "\u29BF", label: "Backtest"      },
   { id: "news",     icon: "\u26A0", label: "News"         },
   { id: "reports",  icon: "\u2630", label: "Reports"      },
   { id: "lab",      icon: "\u25C6", label: "Strategy Lab" },
@@ -980,6 +983,19 @@ export default function App() {
   const [labInstFilter,  setLabInstFilter]  = useState("all");      // all | <instrument>
   const [labExpanded,    setLabExpanded]    = useState({});         // { [strat]: true/false }
 
+  // V10 state — family-based lab, pair intel, memory, regimes
+  const [familyUniverse, setFamilyUniverse] = useState({});         // { sym: { TREND: {...}, REVERSION: {...} } }
+  const [v9Archive,      setV9Archive]      = useState([]);          // archived V9 raw tactics
+  const [pairIntel,      setPairIntel]      = useState([]);          // [{ sym, score, recommendation, ...}]
+  const [botMemory,      setBotMemory]      = useState(null);        // { short, mid, long }
+  const [regimes,        setRegimes]        = useState({});          // { sym: { regime, score, chaos } }
+  const [labView,        setLabView]        = useState("family");    // "family" | "archive"
+  // V10 backtest state
+  const [backtestSymbol, setBacktestSymbol] = useState("");
+  const [backtestData,   setBacktestData]   = useState({});          // { sym: [{ family, stats, start, end, ts }] }
+  const [backtestRunning, setBacktestRunning] = useState(false);
+  const [historicalStatus, setHistoricalStatus] = useState([]);
+
   const lastAIRef    = useRef({});
   const lastTradeRef = useRef({});
   const pendingRef   = useRef({});
@@ -1009,20 +1025,124 @@ export default function App() {
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
 
   const fetchAccount = useCallback(async () => {
-    try { const r = await fetch(API("account")); if (r.ok) { const d = await r.json(); if (d.balance != null) setAccountBalance(d.balance); } } catch (_) {}
+    try { const r = await fetch(API("broker?action=account")); if (r.ok) { const d = await r.json(); if (d.balance != null) setAccountBalance(d.balance); } } catch (_) {}
   }, []);
   const fetchPositions = useCallback(async () => {
-    try { const r = await fetch(API("positions")); if (r.ok) { const d = await r.json(); setOpenPositions(Array.isArray(d.positions) ? d.positions : []); } } catch (_) {}
+    try { const r = await fetch(API("broker?action=positions")); if (r.ok) { const d = await r.json(); setOpenPositions(Array.isArray(d.positions) ? d.positions : []); } } catch (_) {}
   }, []);
   const fetchHistory = useCallback(async () => {
     try { const r = await fetch(API("history")); if (r.ok) { const d = await r.json(); setClosedTrades(Array.isArray(d.trades) ? d.trades : (Array.isArray(d.deals) ? d.deals : [])); } } catch (_) {}
   }, []);
   const fetchPrice = useCallback(async (sym) => {
-    try { const r = await fetch(API(`broker-price?symbol=${encodeURIComponent(sym)}`)); if (r.ok) { const d = await r.json(); if (d.price != null) setPrices((p) => ({ ...p, [sym]: d.price })); } } catch (_) {}
+    try { const r = await fetch(API(`broker?action=price&symbol=${encodeURIComponent(sym)}`)); if (r.ok) { const d = await r.json(); if (d.price != null) setPrices((p) => ({ ...p, [sym]: d.price })); } } catch (_) {}
   }, []);
   const fetchLab = useCallback(async () => {
-    try { const r = await fetch(API("trades")); if (r.ok) { const d = await r.json(); setLearnedStats(d.lab || {}); setCrownLocks(d.crownLocks || {}); setBlacklist(d.blacklist || []); } } catch (_) {}
+    // V10: Fetch family stats + V9 archive
+    try {
+      const r = await fetch(API("trades?action=lab"));
+      if (r.ok) {
+        const d = await r.json();
+        setFamilyUniverse(d.universe || {});
+        setV9Archive(d.archive || []);
+        // Backwards compat for old UI bits
+        setLearnedStats(d.lab || {});
+        setCrownLocks(d.crownLocks || {});
+        setBlacklist(d.blacklist || []);
+      }
+    } catch (_) {}
   }, []);
+
+  const fetchPairIntel = useCallback(async () => {
+    try {
+      const userInstr = (instruments || []).join(",");
+      const r = await fetch(API("pair-intel?action=universe&userInstruments=" + encodeURIComponent(userInstr)));
+      if (r.ok) { const d = await r.json(); setPairIntel(d.universe || []); }
+    } catch (_) {}
+  }, [instruments]);
+
+  const fetchMemory = useCallback(async () => {
+    try {
+      const r = await fetch(API("memory"));
+      if (r.ok) { const d = await r.json(); setBotMemory(d || null); }
+    } catch (_) {}
+  }, []);
+
+  const fetchRegimes = useCallback(async () => {
+    if (!instruments.length) return;
+    const out = {};
+    for (const sym of instruments) {
+      try {
+        const r = await fetch(API("regime?symbol=" + sym));
+        if (r.ok) out[sym] = await r.json();
+      } catch (_) {}
+    }
+    setRegimes(out);
+  }, [instruments]);
+
+  // V10: Backtest helpers
+  const fetchBacktestSummary = useCallback(async (sym) => {
+    if (!sym) return;
+    try {
+      const r = await fetch(API("backtest?action=summary&symbol=" + sym));
+      if (r.ok) {
+        const d = await r.json();
+        setBacktestData(prev => ({ ...prev, [sym]: Array.isArray(d) ? d : [] }));
+      }
+    } catch (_) {}
+  }, []);
+
+  const fetchHistoricalStatus = useCallback(async () => {
+    try {
+      const r = await fetch(API("historical-fetch?action=status"));
+      if (r.ok) {
+        const d = await r.json();
+        setHistoricalStatus(Array.isArray(d) ? d : []);
+      }
+    } catch (_) {}
+  }, []);
+
+  const runBacktest = useCallback(async (sym, family) => {
+    if (!sym) return;
+    setBacktestRunning(true);
+    try {
+      const end = new Date().toISOString().slice(0, 10);
+      const start = new Date(Date.now() - 90 * 86400 * 1000).toISOString().slice(0, 10);
+      const body = { symbol: sym, family: family || "ALL", start, end, tf: "1h" };
+      addLog(`Backtest: ${sym} ${family || "ALL"} ${start}..${end}`, "info");
+      const r = await fetch(API("backtest"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (d.error) {
+        addLog(`Backtest error: ${d.error}`, "error");
+      } else {
+        addLog(`Backtest complete for ${sym}`, "success");
+        await fetchBacktestSummary(sym);
+      }
+    } catch (e) { addLog(`Backtest failed: ${e.message}`, "error"); }
+    finally { setBacktestRunning(false); }
+  }, [addLog, fetchBacktestSummary]);
+
+  const downloadHistorical = useCallback(async (sym) => {
+    if (!sym) return;
+    setBacktestRunning(true);
+    try {
+      const end = new Date().toISOString().slice(0, 10);
+      const start = new Date(Date.now() - 90 * 86400 * 1000).toISOString().slice(0, 10);
+      addLog(`Downloading historical: ${sym} 1h ${start}..${end}`, "info");
+      const r = await fetch(API(`historical-fetch?symbol=${sym}&tf=1h&start=${start}&end=${end}`));
+      const d = await r.json();
+      if (d.error) {
+        addLog(`Historical fetch error: ${d.error}`, "error");
+      } else {
+        addLog(`Downloaded ${d.downloaded || 0} candles, cached to ${d.cached || 0} dates`, "success");
+        await fetchHistoricalStatus();
+      }
+    } catch (e) { addLog(`Download failed: ${e.message}`, "error"); }
+    finally { setBacktestRunning(false); }
+  }, [addLog, fetchHistoricalStatus]);
 
   const fetchNews = useCallback(async () => {
     try { const r = await fetch(API("manage-trades?action=news&impact=high&days=7")); if (r.ok) { const d = await r.json(); setNewsEvents(Array.isArray(d.events) ? d.events : []); } } catch (_) {}
@@ -1109,7 +1229,7 @@ export default function App() {
     addLog(`Brain: ${sym} -- reading market...`, "info");
     try {
       const tfs = ["M1","M5","M15","H1","H4","D1","W1"]; const limits = [60,24,24,24,20,14,8];
-      const results = await Promise.all(tfs.map((tf, i) => fetch(API(`broker-candles?symbol=${encodeURIComponent(sym)}&timeframe=${tf}&limit=${limits[i]}`)).then((r) => r.json()).catch(() => ({ candles: [] }))));
+      const results = await Promise.all(tfs.map((tf, i) => fetch(API(`broker?action=candles&symbol=${encodeURIComponent(sym)}&tf=${tf}&n=${limits[i]}`)).then((r) => r.json()).catch(() => ({ candles: [] }))));
       const [m1d, m5d, m15d, h1d, h4d, d1d, wkd] = results.map((r) => r.candles || []);
       const sumC = (arr, n = 5) => {
         if (!arr || !arr.length) return "no data";
@@ -1135,8 +1255,9 @@ export default function App() {
         killZone: s.utcH>=7&&s.utcH<10 ? "London 07-10" : s.utcH>=13&&s.utcH<16 ? "NY 13-16" : "",
         atrGuide: atr>0 ? `min SL ${(atr*0.8).toFixed(4)}` : "unknown",
       };
-      const prevDec = aiDecisions[sym] ? [aiDecisions[sym]] : [];
-      const r = await fetch(API("ai"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ snap, instrument: sym, riskMode, prevDecisions: prevDec, lab: learnedStats, crownLocks, blacklist }) });
+      // V10 AI fetches its own context (multi-TF, regime, memory, family stats)
+      // Frontend just sends symbol + riskMode for OBSERVATION ONLY — cron is the executor.
+      const r = await fetch(API("ai"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: sym, riskMode }) });
       if (!r.ok) { addLog(`AI error ${sym}: HTTP ${r.status}`, "error"); setAiStatus((p) => ({ ...p, [sym]: "error" })); return; }
       const dec = await r.json();
       const decWithMeta = { ...dec, symbol: sym, price: prices[sym], time: new Date().toISOString() };
@@ -1144,76 +1265,11 @@ export default function App() {
       setAiHistory((p) => ({ ...p, [sym]: [decWithMeta, ...((p[sym] || []).slice(0, 4))] }));
       setAiStatus((p) => ({ ...p, [sym]: (dec.decision||"wait").toLowerCase() }));
       if (dec.newsBlocked) addLog(`${sym}: blocked by news -- ${dec.reason}`, "warn");
-      else addLog(`${sym}: ${dec.decision||"WAIT"} ${dec.confidence||0}% [${dec.strategy||"?"}]`, dec.decision==="WAIT" ? "warn" : "signal");
+      else addLog(`${sym}: ${dec.decision||"WAIT"} ${dec.confidence||0}% [${dec.family||dec.rawTactic||"?"}]`, dec.decision==="WAIT" ? "warn" : "signal");
 
-      if (dec.decision !== "WAIT" && dec.volume && dec.stopLoss && dec.takeProfit1) {
-        if (Date.now() - (lastTradeRef.current[sym]||0) < 600000) { addLog(`${sym}: cooldown -- skipping`, "warn"); return; }
-        if (openPositions.some((p) => normSym(p.symbol) === sym)) { addLog(`${sym}: position already open -- skipping`, "warn"); return; }
-
-        // Validate SL/TP direction (catch AI errors that would silently fail)
-        const curPrice = prices[sym];
-        if (curPrice) {
-          if (dec.decision === "LONG" && (dec.stopLoss >= curPrice || dec.takeProfit1 <= curPrice)) {
-            addLog(`${sym}: LONG but SL/TP wrong side -- SL ${dec.stopLoss} TP1 ${dec.takeProfit1} price ${curPrice}. Skipped.`, "error");
-            return;
-          }
-          if (dec.decision === "SHORT" && (dec.stopLoss <= curPrice || dec.takeProfit1 >= curPrice)) {
-            addLog(`${sym}: SHORT but SL/TP wrong side -- SL ${dec.stopLoss} TP1 ${dec.takeProfit1} price ${curPrice}. Skipped.`, "error");
-            return;
-          }
-        }
-
-        pendingRef.current[sym] = true;
-        addLog(`Executing ${sym} ${dec.decision} ${dec.volume}L SL=${fl(dec.stopLoss)} TP=${fl(dec.takeProfit4||dec.takeProfit1)} [${dec.strategy}]`, "signal");
-        try {
-          const strategy = dec.strategy || "V9";
-          const ex = await fetch(API("execute"), { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ instrument: sym, direction: dec.decision, entry: prices[sym], stopLoss: dec.stopLoss, takeProfit: dec.takeProfit4||dec.takeProfit3||dec.takeProfit2||dec.takeProfit1, volume: dec.volume, comment: `QB:${strategy.slice(0,18)}` }) });
-          const ed = await ex.json();
-          if (ed.success) {
-            lastTradeRef.current[sym] = Date.now();
-            addLog(`Opened: ${ed.instrument||sym} ${dec.decision} ${dec.volume}L`, "success");
-            if (soundEnabled) SFX.open();
-            setTimeout(async () => {
-              try {
-                const pr = await fetch(API("positions")).then((r) => r.json());
-                const filled = (pr.positions||[]).find((p) => normSym(p.symbol) === sym);
-                if (!filled || !filled.openPrice) return;
-                const fill = filled.openPrice; const sign = dec.decision==="LONG" ? 1 : -1; const cat = instCategory(sym);
-                let pips;
-                if (cat==="GOLD") pips=[5,10,15,20];
-                else if (cat==="CRYPTO") { const aP=Math.max(atr*0.5,50); pips=[aP,aP*2,aP*3,aP*4]; }
-                else { const aP=Math.max(atr*0.5,0.0005); pips=[aP,aP*2,aP*3,aP*4]; }
-                const fdp=fill>100?2:5; const slDist=cat==="GOLD"?10:Math.max(atr*0.8,pips[0]);
-                // V9.3: Check live price so we don't send a modify that the broker will reject
-                // ("validation failed" = SL on wrong side of current price).
-                const livePrice = prices[sym] || fill;
-                const proposedSL = parseFloat((fill-sign*slDist).toFixed(fdp));
-                let slToSend = proposedSL;
-                if (dec.decision === "LONG" && livePrice <= proposedSL) slToSend = null;
-                if (dec.decision === "SHORT" && livePrice >= proposedSL) slToSend = null;
-                const corr = { positionId: filled.id||filled.positionId, instrument: sym, direction: dec.decision, fillPrice: fill,
-                  tp1: parseFloat((fill+sign*pips[0]).toFixed(fdp)), tp2: parseFloat((fill+sign*pips[1]).toFixed(fdp)),
-                  tp3: parseFloat((fill+sign*pips[2]).toFixed(fdp)), tp4: parseFloat((fill+sign*pips[3]).toFixed(fdp)),
-                  sl: slToSend };
-                // V9.2: Store the corrected TP ladder in tpLadders, keyed by positionId.
-                const posId = filled.id || filled.positionId;
-                setTpLadders((p) => ({
-                  ...p,
-                  [posId]: { tp1: corr.tp1, tp2: corr.tp2, tp3: corr.tp3, tp4: corr.tp4, sl: corr.sl || proposedSL, fillPrice: fill },
-                }));
-                await fetch(API("manage-trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ correctTPs: corr }) }).catch(() => {});
-                addLog(slToSend ? `TPs corrected from fill @ ${fill}` : `TPs updated from fill @ ${fill} (SL modify skipped -- price already past proposed SL)`, "info");
-              } catch (_) {}
-            }, 3000);
-            setTimeout(fetchPositions, 2000); setTimeout(fetchHistory, 5000);
-          } else {
-            const errMsg = ed.error || "unknown";
-            const broker = ed.brokerResp ? ` [broker: ${JSON.stringify(ed.brokerResp).slice(0,120)}]` : "";
-            addLog(`Execute failed ${sym} ${dec.decision}: ${errMsg}${broker}`, "error");
-          }
-        } finally { pendingRef.current[sym] = false; }
-      }
+      // V10: Frontend NO LONGER EXECUTES TRADES. The cron at /api/cron is the sole executor.
+      // This kills the dual-execution race that V9 had. Frontend is now observational —
+      // shows what the bot is doing, doesn't compete with it.
     } catch (e) { setAiStatus((p) => ({ ...p, [sym]: "error" })); addLog(`Brain error ${sym}: ${e.message}`, "error"); }
   }, [prices, openPositions, closedTrades, accountBalance, sessionInfo, riskMode, aiDecisions, learnedStats, crownLocks, blacklist, addLog, fetchPositions, fetchHistory]);
 
@@ -1261,29 +1317,39 @@ export default function App() {
 
   useEffect(() => {
     fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
+    fetchPairIntel(); fetchMemory(); fetchRegimes();
     instruments.forEach((sym) => fetchPrice(sym));
     const ii = [
       setInterval(fetchAccount, 30000), setInterval(fetchPositions, 5000),
       setInterval(fetchHistory, 30000), setInterval(fetchLab, 300000),
       setInterval(fetchNews, 1800000),
+      setInterval(fetchPairIntel, 600000),     // V10: refresh pair intel every 10min
+      setInterval(fetchMemory, 60000),         // V10: refresh memory every 1min
+      setInterval(fetchRegimes, 300000),       // V10: refresh regimes every 5min
       setInterval(() => setSessionInfo(getSessionInfo()), 60000),
     ];
     instruments.forEach((sym) => { ii.push(setInterval(() => fetchPrice(sym), 5000)); });
     return () => ii.forEach(clearInterval);
-  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, instruments]);
+  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, fetchPairIntel, fetchMemory, fetchRegimes, instruments]);
 
   // V9.5: Fresh history fetch whenever user opens the Reports/History tab
   useEffect(() => {
     if (page === "reports") fetchHistory();
-  }, [page, fetchHistory]);
+    if (page === "backtest") fetchHistoricalStatus();
+  }, [page, fetchHistory, fetchHistoricalStatus]);
 
-  useEffect(() => {
-    if (!openPositions.length) return;
-    manageTrades();
-    const i = setInterval(manageTrades, 30000);
-    return () => clearInterval(i);
-  }, [openPositions, manageTrades]);
+  // V10: Frontend NO LONGER manages trades. Cron does it every minute server-side.
+  // This kills the dual-execution race condition. Frontend is observational.
+  // (Original useEffect commented out below for reference.)
+  // useEffect(() => {
+  //   if (!openPositions.length) return;
+  //   manageTrades();
+  //   const i = setInterval(manageTrades, 30000);
+  //   return () => clearInterval(i);
+  // }, [openPositions, manageTrades]);
 
+  // V10: Observational AI poll. Cron at /api/cron is the executor (every 1 min).
+  // Frontend just polls at 10-min interval to refresh the UI display of recent decisions.
   useEffect(() => {
     const run = () => {
       if (!instruments.length) return;
@@ -1295,8 +1361,8 @@ export default function App() {
         runAIBrain(sym);
       });
     };
-    const t = setTimeout(run, 3000);
-    const i = setInterval(run, 300000);
+    const t = setTimeout(run, 5000);
+    const i = setInterval(run, 600000);  // 10 min — observational only
     return () => { clearTimeout(t); clearInterval(i); };
   }, [instruments, sessions, prices, runAIBrain]);
 
@@ -1356,7 +1422,7 @@ export default function App() {
             <div className="sb-logo">Q</div>
             <div>
               <div>Quantum Bot</div>
-              <div className="sb-sub">V9</div>
+              <div className="sb-sub">V10</div>
             </div>
           </div>
         </div>
@@ -1454,6 +1520,63 @@ export default function App() {
                       <Sparkline values={todayEquity} height={28} />
                     </div>
                   </div>
+
+                  {/* V10: Regime indicators per active instrument */}
+                  {Object.keys(regimes).length > 0 && (
+                    <div className="panel">
+                      <div className="pt">Market Regimes</div>
+                      <div className="g3">
+                        {instruments.map((sym) => {
+                          const reg = regimes[sym];
+                          if (!reg) return null;
+                          const regColor = reg.regime === "TRENDING" ? "#3b82f6"
+                                         : reg.regime === "RANGING"  ? "#10b981"
+                                         : reg.regime === "VOLATILE" ? "#ef4444"
+                                         : reg.regime === "QUIET"    ? "#94a3b8"
+                                         : "#f59e0b";
+                          const isChaos = reg.chaos && reg.chaos.chaos;
+                          return (
+                            <div key={sym} className="panel" style={{ borderLeft: `4px solid ${regColor}`, padding: 10 }}>
+                              <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
+                                <div className="w7">{sym}</div>
+                                <div style={{ fontSize: 10, padding: "2px 8px", background: regColor + "15", color: regColor, borderRadius: 8, fontWeight: 700 }}>{reg.regime}</div>
+                              </div>
+                              {isChaos && (
+                                <div className="xs mt4" style={{ color: "var(--red)", fontWeight: 700 }}>⚠ CHAOS · {reg.chaos.ratio}x ATR</div>
+                              )}
+                              {reg.indicators && (
+                                <div className="xs mut mt4">ADX {(reg.indicators.h1Adx14 || 0).toFixed(0)} · BB {((reg.indicators.h1BBwidth || 0) * 100).toFixed(2)}%</div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* V10: Pair Intel quick view (top recommendations) */}
+                  {pairIntel.length > 0 && (
+                    <div className="panel">
+                      <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                        <div className="pt" style={{ marginBottom: 0 }}>Pair Intelligence · Top Picks</div>
+                        <button className="btn btn-sm" onClick={() => setPage("intel")}>See All</button>
+                      </div>
+                      <div className="g4c">
+                        {pairIntel.filter(p => p.recommendation === "FAVORED").slice(0, 4).map((p) => (
+                          <div key={p.sym} className="panel" style={{ padding: 10, borderLeft: "3px solid #15803d" }}>
+                            <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
+                              <div className="w7">{p.sym}</div>
+                              <div style={{ fontWeight: 800, color: "#15803d" }}>{p.score}</div>
+                            </div>
+                            <div className="xs sub mt4">{p.regime} · {p.bestFamily || "untested"}</div>
+                            {!p.inUserSet && (
+                              <button className="btn btn-sm btn-p mt6" style={{ width: "100%", fontSize: 10 }} onClick={() => addInstrument(p.sym)}>+ Add</button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* V9.7: Today's P&L visual breakdown */}
                   {todayTrades.length > 0 && (() => {
@@ -1954,6 +2077,26 @@ export default function App() {
 
           {/* ========== STRATEGY LAB (V9.4 -- clean filterable) ========== */}
           {page === "lab" && (() => {
+            // V10: Compute family stats from familyUniverse for V10 Family view
+            const familySymbols = Object.keys(familyUniverse || {});
+            const familyAggregate = {};
+            const FAMILY_KEYS = ["TREND", "REVERSION", "STRUCTURE", "BREAKOUT", "RANGE", "NEWS"];
+            const FAMILY_COLOR = { TREND:"#3b82f6", REVERSION:"#10b981", STRUCTURE:"#f59e0b", BREAKOUT:"#ef4444", RANGE:"#84cc16", NEWS:"#a855f7" };
+            const FAMILY_ICON  = { TREND:"📈", REVERSION:"🔄", STRUCTURE:"⚡", BREAKOUT:"💥", RANGE:"↔️", NEWS:"📰" };
+            for (const fam of FAMILY_KEYS) familyAggregate[fam] = { wins: 0, losses: 0, totalPnl: 0, total: 0, perSym: {} };
+            for (const sym of familySymbols) {
+              const symFams = familyUniverse[sym] || {};
+              for (const fam of FAMILY_KEYS) {
+                const s = symFams[fam];
+                if (!s || s.total === 0) continue;
+                familyAggregate[fam].wins += s.wins;
+                familyAggregate[fam].losses += s.losses;
+                familyAggregate[fam].totalPnl += s.totalPnl || 0;
+                familyAggregate[fam].total += s.total;
+                familyAggregate[fam].perSym[sym] = s;
+              }
+            }
+
             const labData = learnedStats || {};
             const allEntries = Object.entries(labData);
             const labInst = [...new Set(allEntries.flatMap(([, d]) => Object.keys(d.instruments || {})))].sort();
@@ -1970,6 +2113,133 @@ export default function App() {
               const crowns = d.crowns || 0;
               return { strat, d, total, wins, losses, wr, pnl, expectancy, bl, crowns };
             });
+
+            return (
+              <div className="s14">
+                {/* V10: Tab switcher */}
+                <div className="r g6">
+                  <button className={`btn btn-sm${labView === "family" ? " btn-p" : ""}`} onClick={() => setLabView("family")}>📊 Family View (V10)</button>
+                  <button className={`btn btn-sm${labView === "archive" ? " btn-p" : ""}`} onClick={() => setLabView("archive")}>📦 Tactic Archive (V9)</button>
+                  <button className="btn btn-sm" style={{ marginLeft: "auto" }} onClick={async () => {
+                    if (!confirm("Migrate V9 raw tactic data into V10 family records? Idempotent — safe to run multiple times.")) return;
+                    const r = await fetch(API("trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "migrate-v9" }) });
+                    const d = await r.json();
+                    alert("Migration: " + (d.migrated || 0) + " migrated, " + (d.skipped || 0) + " skipped (already migrated). Total V9: " + (d.totalV9Records || 0));
+                    fetchLab();
+                  }}>↻ Migrate V9 → V10</button>
+                </div>
+
+                {labView === "family" && (
+                  <>
+                    {/* V10 Family Lab dashboard */}
+                    <div className="panel">
+                      <div className="pt">Tactic Families · Bayesian Beta-distributions</div>
+                      <div className="xs sub mb8">Each family's win rate is shown as a probability distribution. Wider band = less data = more uncertainty. Tighter band = high confidence.</div>
+                      <div className="g3">
+                        {FAMILY_KEYS.map((fam) => {
+                          const a = familyAggregate[fam];
+                          const total = a.total;
+                          const fmColor = FAMILY_COLOR[fam];
+                          const wins = a.wins, losses = a.losses;
+                          // Beta mean + 95% CI
+                          const aA = wins + 1, aB = losses + 1;
+                          const mean = aA / (aA + aB);
+                          const variance = (aA * aB) / ((aA + aB) * (aA + aB) * (aA + aB + 1));
+                          const std = Math.sqrt(variance);
+                          const lo = Math.max(0, mean - 1.96 * std) * 100;
+                          const hi = Math.min(1, mean + 1.96 * std) * 100;
+                          const meanPct = mean * 100;
+                          const expect = total > 0 ? a.totalPnl / total : 0;
+                          return (
+                            <div key={fam} className="panel" style={{ borderLeft: `4px solid ${fmColor}`, padding: 14 }}>
+                              <div className="r" style={{ alignItems: "center", gap: 8 }}>
+                                <span style={{ fontSize: 20 }}>{FAMILY_ICON[fam]}</span>
+                                <div style={{ fontWeight: 700, fontSize: 14, color: fmColor }}>{fam}</div>
+                                <div className="xs mut" style={{ marginLeft: "auto" }}>{total} trades</div>
+                              </div>
+                              <div style={{ marginTop: 10, fontSize: 26, fontWeight: 800, color: fmColor }}>
+                                {meanPct.toFixed(0)}<span style={{ fontSize: 14, fontWeight: 600 }}>%</span>
+                                <span className="xs mut" style={{ marginLeft: 6, fontWeight: 500 }}>WR</span>
+                              </div>
+                              {/* Visual CI band */}
+                              <div style={{ background: "#e2e8f0", height: 8, borderRadius: 4, position: "relative", marginTop: 8 }}>
+                                <div style={{ position: "absolute", left: lo + "%", width: (hi - lo) + "%", height: "100%", background: fmColor + "60", borderRadius: 4 }} />
+                                <div style={{ position: "absolute", left: meanPct + "%", width: 2, height: "100%", background: fmColor }} />
+                              </div>
+                              <div className="xs mut" style={{ marginTop: 4 }}>95% CI: {lo.toFixed(0)}% – {hi.toFixed(0)}%</div>
+                              <div className="r mt8 xs" style={{ justifyContent: "space-between" }}>
+                                <span><span style={{ color: "var(--green)", fontWeight: 700 }}>{wins}</span>W / <span style={{ color: "var(--red)", fontWeight: 700 }}>{losses}</span>L</span>
+                                <span style={{ color: a.totalPnl >= 0 ? "var(--green)" : "var(--red)", fontWeight: 700 }}>${a.totalPnl.toFixed(0)}</span>
+                              </div>
+                              <div className="xs mut">Avg/trade: ${expect.toFixed(2)}</div>
+                              {/* Per-symbol breakdown */}
+                              {Object.keys(a.perSym).length > 0 && (
+                                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                                  <div className="xs mut mb4">Per symbol:</div>
+                                  {Object.entries(a.perSym).map(([s, st]) => (
+                                    <div key={s} className="xs" style={{ display: "flex", justifyContent: "space-between" }}>
+                                      <span>{s}</span>
+                                      <span style={{ color: st.winRate >= 55 ? "var(--green)" : st.winRate >= 45 ? "var(--gold)" : "var(--red)" }}>{st.winRate}% ({st.total})</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {total === 0 && (
+                                <div className="xs mut mt8" style={{ fontStyle: "italic" }}>No trades yet on this family.</div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Per-symbol family matrix */}
+                    {familySymbols.length > 0 && (
+                      <div className="panel">
+                        <div className="pt">Per-Symbol Family Matrix</div>
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                                <th style={{ textAlign: "left", padding: 6 }}>Symbol</th>
+                                {FAMILY_KEYS.map(f => <th key={f} style={{ textAlign: "center", padding: 6, color: FAMILY_COLOR[f] }}>{FAMILY_ICON[f]} {f.slice(0, 4)}</th>)}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {familySymbols.map(sym => {
+                                const symFams = familyUniverse[sym] || {};
+                                return (
+                                  <tr key={sym} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                                    <td style={{ padding: 6, fontWeight: 700 }}>{sym}</td>
+                                    {FAMILY_KEYS.map(f => {
+                                      const s = symFams[f];
+                                      if (!s || s.total === 0) return <td key={f} style={{ textAlign: "center", padding: 6, color: "var(--text3)" }}>—</td>;
+                                      const wrColor = s.winRate >= 55 ? "var(--green)" : s.winRate >= 45 ? "var(--gold)" : "var(--red)";
+                                      return (
+                                        <td key={f} style={{ textAlign: "center", padding: 6 }}>
+                                          <div style={{ color: wrColor, fontWeight: 700 }}>{s.winRate}%</div>
+                                          <div className="xs mut">{s.total}t</div>
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                    {familySymbols.length === 0 && (
+                      <div className="panel empty">
+                        <div className="empty-title">No family data yet</div>
+                        <p className="xs mut mt6">Click "Migrate V9 → V10" above to import 3 weeks of testing data into the new family system.</p>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {labView === "archive" && (() => {
 
             // V9.4: Per-instrument overview (crowns / bans / top strat / coverage)
             const instOverview = {};
@@ -2039,7 +2309,7 @@ export default function App() {
             const topCount = filtered.length;
 
             return (
-              <div className="s14">
+              <>
                 {/* ---- V9.4 Instrument Overview Top Bar ---- */}
                 {labInst.length > 0 && (
                   <div className="panel" style={{ padding: 14, marginBottom: 4 }}>
@@ -2387,9 +2657,343 @@ export default function App() {
                     })}
                   </div>
                 )}
+              </>
+            );
+          })()}
               </div>
             );
           })()}
+
+          {/* ========== BACKTEST (V10) ========== */}
+          {page === "backtest" && (
+            <div className="s14">
+              <div className="panel">
+                <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 800 }}>Backtest Engine · Out-of-Sample Validation</div>
+                    <div className="xs sub mt4">Runs each family against historical candles. Compares vs live performance to detect overfit.</div>
+                  </div>
+                  <button className="btn btn-sm" onClick={fetchHistoricalStatus}>↻ Refresh Status</button>
+                </div>
+
+                {/* Step 1: Download historical */}
+                <div className="panel" style={{ padding: 12, marginTop: 10, background: "#f8fafc" }}>
+                  <div className="w7 mb6">Step 1: Download historical data</div>
+                  <div className="xs sub mb8">Requires <code>TWELVE_DATA_KEY</code> env var. Get free key at twelvedata.com (800 calls/day).</div>
+                  <div className="r g6" style={{ flexWrap: "wrap", marginBottom: 10 }}>
+                    {instruments.map((sym) => (
+                      <button
+                        key={sym}
+                        className="btn btn-sm"
+                        onClick={() => downloadHistorical(sym)}
+                        disabled={backtestRunning}
+                      >
+                        ⬇ {sym}
+                      </button>
+                    ))}
+                  </div>
+                  {historicalStatus.length > 0 && (
+                    <div className="mt8">
+                      <div className="xs w7 mb4">Cached data:</div>
+                      <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                            <th style={{ textAlign: "left", padding: 4 }}>Symbol</th>
+                            <th style={{ textAlign: "left", padding: 4 }}>TF</th>
+                            <th style={{ textAlign: "left", padding: 4 }}>Range</th>
+                            <th style={{ textAlign: "right", padding: 4 }}>Days</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {historicalStatus.map((h, i) => (
+                            <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                              <td className="w7" style={{ padding: 4 }}>{h.symbol}</td>
+                              <td style={{ padding: 4 }}>{h.tf}</td>
+                              <td style={{ padding: 4 }}>{h.firstDate} → {h.lastDate}</td>
+                              <td style={{ padding: 4, textAlign: "right" }}>{h.count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 2: Run backtest */}
+                <div className="panel" style={{ padding: 12, marginTop: 10, background: "#fffbeb" }}>
+                  <div className="w7 mb6">Step 2: Run backtest</div>
+                  <div className="xs sub mb8">Runs all 6 families against the cached historical data. Results stored for 30 days and used by AI to detect overfit families.</div>
+                  <div className="r g6" style={{ flexWrap: "wrap" }}>
+                    {instruments.map((sym) => (
+                      <button
+                        key={sym}
+                        className="btn btn-sm btn-p"
+                        onClick={() => runBacktest(sym, "ALL")}
+                        disabled={backtestRunning}
+                      >
+                        🧪 Run {sym} (all 6)
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Step 3: View results */}
+                <div className="panel" style={{ padding: 12, marginTop: 10 }}>
+                  <div className="w7 mb6">Step 3: View results</div>
+                  <div className="r g6 mb8">
+                    {instruments.map((sym) => (
+                      <button
+                        key={sym}
+                        className={`btn btn-sm${backtestSymbol === sym ? " btn-p" : ""}`}
+                        onClick={() => { setBacktestSymbol(sym); fetchBacktestSummary(sym); }}
+                      >
+                        {sym}
+                      </button>
+                    ))}
+                  </div>
+
+                  {backtestSymbol && backtestData[backtestSymbol] && backtestData[backtestSymbol].length > 0 ? (
+                    <div className="g3">
+                      {backtestData[backtestSymbol].map((bt, i) => {
+                        const fam = bt.family;
+                        const FAMILY_COLOR = { TREND:"#3b82f6", REVERSION:"#10b981", STRUCTURE:"#f59e0b", BREAKOUT:"#ef4444", RANGE:"#84cc16", NEWS:"#a855f7" };
+                        const fmColor = FAMILY_COLOR[fam] || "#94a3b8";
+                        const stats = bt.stats || {};
+                        const wrColor = stats.winRate >= 55 ? "#15803d" : stats.winRate >= 45 ? "#f59e0b" : "#dc2626";
+                        // Compare vs live family stats
+                        const liveStat = (familyUniverse[backtestSymbol] || {})[fam];
+                        const liveWR = liveStat ? liveStat.winRate : null;
+                        const divergence = liveWR != null && stats.winRate != null ? Math.abs(liveWR - stats.winRate) : null;
+                        return (
+                          <div key={i} className="panel" style={{ borderLeft: `4px solid ${fmColor}`, padding: 14 }}>
+                            <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
+                              <div className="w7" style={{ color: fmColor }}>{fam}</div>
+                              <div className="xs mut">{stats.total} trades</div>
+                            </div>
+                            <div style={{ marginTop: 8, fontSize: 22, fontWeight: 800, color: wrColor }}>
+                              {stats.winRate}<span style={{ fontSize: 12, fontWeight: 600 }}>%</span>
+                              <span className="xs mut" style={{ marginLeft: 6, fontWeight: 500 }}>backtest WR</span>
+                            </div>
+                            <div className="xs mt4">
+                              Profit Factor: <span className="w7" style={{ color: stats.profitFactor >= 1.5 ? "var(--green)" : stats.profitFactor >= 1.0 ? "var(--gold)" : "var(--red)" }}>{stats.profitFactor}</span>
+                            </div>
+                            <div className="xs mt2">Expectancy: {stats.expectancyR}R</div>
+                            <div className="xs mt2">Max Drawdown: {stats.maxDrawdownR}R</div>
+                            <div className="xs mt2 mut">Final equity: {stats.finalEquity}R</div>
+                            {liveWR != null && (
+                              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                                <div className="xs mut">Live: {liveWR}% WR (n={liveStat.total})</div>
+                                {divergence > 15 && (
+                                  <div className="xs w7" style={{ color: "var(--red)", marginTop: 2 }}>⚠ Overfit warning · diverges {divergence.toFixed(0)}pp</div>
+                                )}
+                                {divergence != null && divergence <= 15 && stats.total >= 10 && (
+                                  <div className="xs w7" style={{ color: "var(--green)", marginTop: 2 }}>✓ Live aligned with backtest</div>
+                                )}
+                              </div>
+                            )}
+                            <div className="xs mut mt4" style={{ fontSize: 9 }}>{bt.start} → {bt.end} · {bt.candleCount} candles</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="xs mut" style={{ padding: 20, textAlign: "center" }}>
+                      {backtestSymbol ? `No backtest results for ${backtestSymbol} yet. Run a backtest above.` : "Pick a symbol above to view results."}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ========== PAIR INTEL (V10) ========== */}
+          {page === "intel" && (
+            <div className="s14">
+              <div className="panel">
+                <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 800 }}>Pair Intelligence Engine</div>
+                    <div className="xs sub mt4">Bot-recommended pairs based on regime, family performance, session match, and chaos detection. Updated every 10 min.</div>
+                  </div>
+                  <button className="btn btn-sm" onClick={fetchPairIntel}>↻ Refresh</button>
+                </div>
+
+                {pairIntel.length === 0 ? (
+                  <div className="xs mut" style={{ padding: 20, textAlign: "center" }}>Loading pair intelligence... (first scan can take 30-60s)</div>
+                ) : (
+                  <div className="g3">
+                    {pairIntel.map((p) => {
+                      const isUserPair = p.inUserSet;
+                      const recColor = p.recommendation === "FAVORED" ? "#15803d"
+                                    : p.recommendation === "NEUTRAL"  ? "#3b82f6"
+                                    : p.recommendation === "CAUTION"  ? "#f59e0b"
+                                    : "#dc2626";
+                      const scoreColor = p.score >= 70 ? "#15803d" : p.score >= 50 ? "#3b82f6" : p.score >= 30 ? "#f59e0b" : "#dc2626";
+                      return (
+                        <div key={p.sym} className="panel" style={{ borderLeft: `4px solid ${recColor}`, padding: 14, position: "relative" }}>
+                          {isUserPair && (
+                            <div style={{ position: "absolute", top: 8, right: 8, fontSize: 9, padding: "2px 7px", background: "#dbeafe", color: "#1e40af", borderRadius: 9, fontWeight: 700 }}>ACTIVE</div>
+                          )}
+                          <div className="r" style={{ alignItems: "center", gap: 8, marginBottom: 4 }}>
+                            <div style={{ fontSize: 17, fontWeight: 800 }}>{p.sym}</div>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: scoreColor, marginLeft: "auto" }}>{p.score}</div>
+                          </div>
+                          <div className="xs w7" style={{ color: recColor, marginBottom: 6 }}>{p.recommendation}</div>
+                          <div className="r g6" style={{ flexWrap: "wrap", marginBottom: 8 }}>
+                            {(p.badges || []).map((b, i) => (
+                              <span key={i} style={{ fontSize: 9, padding: "2px 6px", background: b.color + "15", color: b.color, borderRadius: 8, fontWeight: 700 }}>{b.label}</span>
+                            ))}
+                            {p.cluster && <span style={{ fontSize: 9, padding: "2px 6px", background: "#f1f5f9", color: "#475569", borderRadius: 8, fontWeight: 600 }}>{p.cluster}</span>}
+                          </div>
+                          {p.bestFamily && p.totalTrades > 0 && (
+                            <div className="xs mut">Best family: <span className="w7" style={{ color: "var(--text2)" }}>{p.bestFamily}</span> ({p.bestWR}% WR, {p.totalTrades} trades)</div>
+                          )}
+                          {(p.reasons || []).slice(0, 3).map((rs, i) => (
+                            <div key={i} className="xs mut" style={{ marginTop: 2 }}>• {rs}</div>
+                          ))}
+                          {!isUserPair && p.score >= 60 && (
+                            <button
+                              className="btn btn-sm btn-p mt8"
+                              style={{ width: "100%" }}
+                              onClick={() => addInstrument(p.sym)}
+                            >+ Add to Active Pairs</button>
+                          )}
+                          {isUserPair && p.score < 30 && (
+                            <button
+                              className="btn btn-sm mt8"
+                              style={{ width: "100%", color: "var(--red)", borderColor: "var(--red)" }}
+                              onClick={() => removeInstrument(p.sym)}
+                            >− Remove (low score)</button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ========== BOT MEMORY (V10) ========== */}
+          {page === "memory" && (
+            <div className="s14">
+              <div className="panel">
+                <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 800 }}>Bot Memory · 3-Layer System</div>
+                    <div className="xs sub mt4">What the AI remembers across calls. Continuous identity, not reborn each time.</div>
+                  </div>
+                  <button className="btn btn-sm" onClick={fetchMemory}>↻ Refresh</button>
+                </div>
+
+                {!botMemory ? (
+                  <div className="xs mut" style={{ padding: 20, textAlign: "center" }}>Loading memory...</div>
+                ) : (
+                  <>
+                    {/* Short-term layer */}
+                    <div className="panel" style={{ borderLeft: "4px solid #ef4444", padding: 14, marginTop: 12 }}>
+                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 18 }}>⚡</span>
+                        <div style={{ fontWeight: 700 }}>Short-term (24h TTL)</div>
+                      </div>
+                      <div className="xs sub mt4">Last 20 decisions, current open positions, today&apos;s anomalies</div>
+                      <div className="mt8 xs">
+                        <div className="w7 mb4">Recent Decisions ({(botMemory.short?.decisions || []).length}):</div>
+                        {(botMemory.short?.decisions || []).slice(-8).reverse().map((d, i) => (
+                          <div key={i} style={{ padding: "4px 8px", marginBottom: 3, background: "#f8fafc", borderRadius: 4, fontSize: 11 }}>
+                            <span className="w7">{d.sym}</span> · {d.decision} · {d.family} · {d.conf}% · {d.regime}
+                            {d.outcome && (
+                              <span style={{ color: d.outcome.won ? "var(--green)" : "var(--red)", marginLeft: 6 }}>
+                                → {d.outcome.won ? "WIN" : "LOSS"} ${d.outcome.pnl.toFixed(2)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                        {Object.keys(botMemory.short?.positions || {}).length > 0 && (
+                          <>
+                            <div className="w7 mt8 mb4">Currently Open:</div>
+                            {Object.entries(botMemory.short.positions).map(([s, p]) => (
+                              <div key={s} style={{ padding: "4px 8px", marginBottom: 3, background: "#fef3c7", borderRadius: 4, fontSize: 11 }}>
+                                <span className="w7">{s}</span> · {p.family} · {p.regime} · {p.conf}%
+                              </div>
+                            ))}
+                          </>
+                        )}
+                        {(botMemory.short?.anomalies || []).length > 0 && (
+                          <>
+                            <div className="w7 mt8 mb4">Recent Anomalies:</div>
+                            {botMemory.short.anomalies.slice(-5).reverse().map((a, i) => (
+                              <div key={i} style={{ padding: "4px 8px", marginBottom: 3, background: "#fef2f2", borderRadius: 4, fontSize: 11 }}>
+                                <span className="w7">{a.type}</span>{a.sym ? ` · ${a.sym}` : ""} · {a.detail}
+                              </div>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Mid-term layer */}
+                    <div className="panel" style={{ borderLeft: "4px solid #f59e0b", padding: 14, marginTop: 12 }}>
+                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 18 }}>📅</span>
+                        <div style={{ fontWeight: 700 }}>Mid-term (7-day rolling)</div>
+                      </div>
+                      <div className="xs sub mt4">Recent insights from end-of-day reflections, per-instrument rolling stats</div>
+                      <div className="mt8 xs">
+                        {(botMemory.mid?.recentInsights || []).length === 0 ? (
+                          <div className="mut">No insights yet. Will populate after first daily reflection (21:00 UTC).</div>
+                        ) : (
+                          (botMemory.mid.recentInsights || []).slice(-5).reverse().map((i, idx) => (
+                            <div key={idx} style={{ padding: "6px 10px", marginBottom: 4, background: "#fffbeb", borderRadius: 4, fontSize: 11 }}>
+                              💡 {i.insight}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Long-term layer */}
+                    <div className="panel" style={{ borderLeft: "4px solid #15803d", padding: 14, marginTop: 12 }}>
+                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 18 }}>🧠</span>
+                        <div style={{ fontWeight: 700 }}>Long-term (permanent)</div>
+                      </div>
+                      <div className="xs sub mt4">Lifetime family priors per symbol + curated lessons (never expire)</div>
+                      <div className="mt8 xs">
+                        {(botMemory.long?.lessons || []).length > 0 && (
+                          <>
+                            <div className="w7 mb4">Lessons Learned ({(botMemory.long.lessons || []).length}):</div>
+                            {(botMemory.long.lessons || []).slice(-5).reverse().map((l, i) => (
+                              <div key={i} style={{ padding: "6px 10px", marginBottom: 4, background: "#f0fdf4", borderRadius: 4, fontSize: 11 }}>
+                                ✓ {l.lesson}
+                              </div>
+                            ))}
+                          </>
+                        )}
+                        {Object.keys(botMemory.long?.priors || {}).length > 0 && (
+                          <>
+                            <div className="w7 mt8 mb4">Lifetime Family Priors:</div>
+                            {Object.entries(botMemory.long.priors).slice(0, 12).map(([key, p]) => {
+                              const total = (p.wins || 0) + (p.losses || 0);
+                              const wr = total > 0 ? Math.round((p.wins / total) * 100) : 0;
+                              return (
+                                <div key={key} style={{ padding: "4px 8px", marginBottom: 3, background: "#f8fafc", borderRadius: 4, fontSize: 11 }}>
+                                  <span className="w7">{key}</span>: {p.wins}W/{p.losses}L ({wr}% WR, ${(p.totalPnl || 0).toFixed(0)})
+                                </div>
+                              );
+                            })}
+                          </>
+                        )}
+                        {(botMemory.long?.lessons || []).length === 0 && Object.keys(botMemory.long?.priors || {}).length === 0 && (
+                          <div className="mut">Empty. Will fill as bot learns.</div>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* ========== SETTINGS ========== */}
           {page === "settings" && (
