@@ -31,7 +31,11 @@ const ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mn'];
 // V10 BUGFIX: Cache values can go stale (e.g. when broker.js consolidation changed
 // behavior, or when a different account is set up). We now VALIDATE the cached value
 // before trusting it, and fall through to suffix probing if it 404s.
-async function resolveSymbol(baseSym) {
+async function resolveSymbol(rawSym) {
+  // V10 BUGFIX: Strip any pre-existing broker suffix from the input.
+  // If user/frontend sends "XAUUSD.S", normalize to "XAUUSD" before probing.
+  const baseSym = String(rawSym || '').toUpperCase().replace(/\.(S|PRO|RAW|M|ECN|STP|CENT)$/i, '');
+  if (!baseSym) return rawSym;
   const r = getRedis();
   // Try cache first
   if (r) {

@@ -952,7 +952,13 @@ const SFX = {
 export default function App() {
   const prefs = loadPrefs();
 
-  const [instruments, setInstruments] = useState(Array.isArray(prefs.instruments) ? prefs.instruments : []);
+  // V10 BUGFIX: Auto-clean any saved instruments that have broker suffixes (.s/.S/.pro/etc).
+  // V9 prefs may have stored "XAUUSD.S" which now causes price-fetch 404s.
+  const cleanInitialInstruments = (Array.isArray(prefs.instruments) ? prefs.instruments : [])
+    .map((s) => String(s).trim().toUpperCase().replace(/\.(S|PRO|RAW|M|ECN|STP|CENT)$/i, ""))
+    .filter((s, i, a) => s && a.indexOf(s) === i);  // unique non-empty
+
+  const [instruments, setInstruments] = useState(cleanInitialInstruments);
   const [sessions,    setSessions]    = useState(Array.isArray(prefs.sessions)    ? prefs.sessions    : ["LONDON", "NEW YORK"]);
   const [riskMode,    setRiskMode]    = useState(prefs.riskMode || "TEST");
   const [soundEnabled, setSoundEnabled] = useState(prefs.soundEnabled !== false); // default ON
@@ -1034,14 +1040,32 @@ export default function App() {
     try { const r = await fetch(API("history")); if (r.ok) { const d = await r.json(); setClosedTrades(Array.isArray(d.trades) ? d.trades : (Array.isArray(d.deals) ? d.deals : [])); } } catch (_) {}
   }, []);
   const fetchPrice = useCallback(async (sym) => {
+    if (!sym) { console.warn("[fetchPrice] called with empty sym"); return; }
+    const url = API(`broker?action=price&symbol=${encodeURIComponent(sym)}`);
     try {
-      const r = await fetch(API(`broker?action=price&symbol=${encodeURIComponent(sym)}`));
-      if (!r.ok) { console.warn(`[fetchPrice] ${sym} HTTP ${r.status}`); return; }
+      const r = await fetch(url);
+      if (!r.ok) {
+        console.warn(`[fetchPrice] ${sym} HTTP ${r.status} on ${url}`);
+        return;
+      }
       const d = await r.json();
-      if (d.error) { console.warn(`[fetchPrice] ${sym} backend error:`, d.error); return; }
-      if (d.price == null || !isFinite(d.price)) { console.warn(`[fetchPrice] ${sym} no price in response:`, d); return; }
-      setPrices((p) => ({ ...p, [sym]: d.price }));
-    } catch (e) { console.warn(`[fetchPrice] ${sym} threw:`, e.message); }
+      if (d && d.error) {
+        console.warn(`[fetchPrice] ${sym} backend error:`, d.error, "full response:", d);
+        return;
+      }
+      if (!d || d.price == null || !isFinite(d.price)) {
+        console.warn(`[fetchPrice] ${sym} bad payload (price=${d && d.price}). full response:`, d);
+        return;
+      }
+      // Success
+      setPrices((p) => {
+        const next = { ...p, [sym]: d.price };
+        if (typeof window !== "undefined") window.__lastFetchPrice = { sym, price: d.price, ts: Date.now() };
+        return next;
+      });
+    } catch (e) {
+      console.warn(`[fetchPrice] ${sym} threw on ${url}:`, e && e.message, e);
+    }
   }, []);
   const fetchLab = useCallback(async () => {
     // V10: Fetch family stats + V9 archive
@@ -1442,8 +1466,15 @@ export default function App() {
     else break;
   }
 
+  // V10 BUGFIX: Strip broker-specific suffixes (.s/.S/.pro/.raw) from user input.
+  // Symbols stored in `instruments` should always be the base (e.g. XAUUSD, not XAUUSD.S).
+  // The broker-side resolveSymbol() will add the right suffix when querying the broker.
+  const cleanSymbol = (raw) => {
+    if (!raw) return "";
+    return String(raw).trim().toUpperCase().replace(/\.(S|PRO|RAW|M|ECN|STP|CENT)$/i, "");
+  };
   const addInstrument = (rawSym) => {
-    const sym = (rawSym || newSymInput).trim().toUpperCase();
+    const sym = cleanSymbol(rawSym || newSymInput);
     if (!sym || instruments.includes(sym)) { setNewSymInput(""); return; }
     setInstruments((prev) => [...prev, sym]); setNewSymInput(""); addLog(`Added: ${sym}`, "info");
   };
