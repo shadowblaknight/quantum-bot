@@ -123,11 +123,18 @@ async function fetchCandles(baseSym, timeframe, count) {
   const sym = await resolveSymbol(baseSym);
   const tf = TF_MAP[timeframe] || timeframe;
   const n = Math.min(Math.max(count || 100, 10), 1000); // MetaAPI max 1000
-  const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/historical-market-data/symbols/' + encodeURIComponent(sym) + '/timeframes/' + tf + '/candles?limit=' + n;
+  // V10 BUGFIX: Historical market data uses a DIFFERENT hostname than client API.
+  // Client API:        mt-client-api-v1.{region}.agiliumtrade.ai            (positions, current-price, trades)
+  // Market Data API:   mt-market-data-client-api-v1.{region}.agiliumtrade.ai (historical candles, ticks)
+  // Using the wrong host returns 404, which we silently swallow into empty candles[],
+  // making the AI think every TF has no data. THIS is why ADX/ATR/BB were all 0 on day 1.
+  const region = process.env.META_REGION || 'london';
+  const marketDataHost = 'https://mt-market-data-client-api-v1.' + region + '.agiliumtrade.ai';
+  const url = marketDataHost + '/users/current/accounts/' + metaAccountId() + '/historical-market-data/symbols/' + encodeURIComponent(sym) + '/timeframes/' + tf + '/candles?limit=' + n;
   const r = await fetch(url, { headers: metaHeaders() });
   if (!r.ok) {
     const txt = await r.text().catch(() => '');
-    return { candles: [], error: 'candles ' + r.status + ': ' + txt.slice(0, 200) };
+    return { candles: [], error: 'candles ' + r.status + ': ' + txt.slice(0, 200), urlTried: url };
   }
   const data = await r.json().catch(() => []);
   const candles = (Array.isArray(data) ? data : []).map((c) => ({
@@ -200,6 +207,23 @@ module.exports = async (req, res) => {
       const sym = String(req.query.symbol || '').toUpperCase();
       if (!sym) return res.status(400).json({ error: 'symbol required' });
       return res.status(200).json(await fetchMultiTF(sym));
+    }
+    if (action === 'debug-candles') {
+      // V10: Diagnostic to verify candle fetch is hitting the right MetaAPI host.
+      // GET /api/broker?action=debug-candles&symbol=XAUUSD
+      const sym = String(req.query.symbol || 'XAUUSD').toUpperCase();
+      const out = {};
+      for (const tf of ['1m', '5m', '15m', '1h', '4h', '1d']) {
+        try {
+          const r = await fetchCandles(sym, tf, 30);
+          out[tf] = { count: r.count || 0, error: r.error || null, urlTried: r.urlTried || null, firstCandle: r.candles && r.candles[0] || null };
+        } catch (e) { out[tf] = { error: e.message }; }
+      }
+      return res.status(200).json({
+        baseSymbol: sym,
+        timeframes: out,
+        marketDataHost: 'mt-market-data-client-api-v1.' + (process.env.META_REGION || 'london') + '.agiliumtrade.ai',
+      });
     }
     if (action === 'debug-symbol') {
       // V10: Diagnostic helper to debug symbol resolution. Returns what suffixes work.
