@@ -78,8 +78,8 @@ async function fetchAccount() {
 }
 
 async function fetchPositions() {
-  // V10: 3-second cache. Frontend polls every 5s, cron fires every minute -- without cache
-  // we'd fire dozens of position fetches per minute and run into MetaAPI rate limits.
+  // V10: 8-second cache. Frontend polls every 10s, cron fires every minute -- without
+  // generous caching we'd fire dozens of position fetches per minute and hit MetaAPI rate limits.
   const r = getRedis();
   const cacheKey = 'v10:positions';
   if (r) {
@@ -112,14 +112,15 @@ async function fetchPositions() {
     comment:      p.comment || '',
   }));
   const result = { positions };
-  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 3 }).catch(() => {});
+  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 8 }).catch(() => {});
   return result;
 }
 
 async function fetchPrice(baseSym) {
   const sym = await resolveSymbol(baseSym);
-  // V10: 3-second Redis cache. Cron + frontend + AI all hit this -- without cache
-  // they'd hammer MetaAPI (429) and timeout (504). Price doesn't change meaningfully in 3s anyway.
+  // V10: 8-second Redis cache. Frontend polls every 15s + cron + AI all hit this -- without
+  // generous caching they'd hammer MetaAPI (429) and timeout (504). Price doesn't change
+  // meaningfully in 8s for our use case, and cache hits are essentially free.
   const r = getRedis();
   const cacheKey = 'v10:px:' + sym;
   if (r) {
@@ -145,7 +146,7 @@ async function fetchPrice(baseSym) {
     spread:     ask - bid,
     time:       data.time,
   };
-  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 3 }).catch(() => {});
+  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 8 }).catch(() => {});
   return result;
 }
 

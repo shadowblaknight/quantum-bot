@@ -1282,36 +1282,9 @@ export default function App() {
     setAiStatus((p) => ({ ...p, [sym]: "thinking" }));
     addLog(`Brain: ${sym} -- reading market...`, "info");
     try {
-      // V10 BUGFIX: broker.js uses lowercase TF names ('1m', '15m', etc.). V9 used uppercase.
-      const tfs = ["1m","5m","15m","1h","4h","1d","1w"]; const limits = [60,24,24,24,20,14,8];
-      const results = await Promise.all(tfs.map((tf, i) => fetch(API(`broker?action=candles&symbol=${encodeURIComponent(sym)}&tf=${tf}&n=${limits[i]}`)).then((r) => r.json()).catch(() => ({ candles: [] }))));
-      const [m1d, m5d, m15d, h1d, h4d, d1d, wkd] = results.map((r) => r.candles || []);
-      const sumC = (arr, n = 5) => {
-        if (!arr || !arr.length) return "no data";
-        const sl = arr.slice(-n); const c = sl[sl.length-1]; const o = sl[0];
-        const dir = c.close > o.close ? "up" : "down";
-        const chg = (((c.close - o.close) / o.close) * 100).toFixed(3);
-        const hi = Math.max(...sl.map((x) => x.high)); const lo = Math.min(...sl.map((x) => x.low));
-        const dp = hi > 1000 ? 0 : 5;
-        return `${dir}${chg}% H:${hi.toFixed(dp)} L:${lo.toFixed(dp)}`;
-      };
-      const atr = (() => {
-        if (m1d.length < 15) return 0;
-        const trs = m1d.slice(-14).map((c, i, a) => { const prev = a[Math.max(0,i-1)]; return Math.max(c.high-c.low, Math.abs(c.high-prev.close), Math.abs(c.low-prev.close)); });
-        return trs.reduce((a,b) => a+b, 0) / trs.length;
-      })();
-      const todayPnl = closedTrades.filter((t) => new Date(t.time||t.closeTime||"").toDateString() === new Date().toDateString()).reduce((s,t) => s+(t.profit||0), 0);
-      const s = sessionInfo;
-      const snap = {
-        price: prices[sym]||null, session: s.session, balance: accountBalance||0, todayPnl: todayPnl.toFixed(2), lossStreak: 0, winStreak: 0,
-        atr14: parseFloat(atr.toFixed(4)), weekly: sumC(wkd,4), d1: sumC(d1d,5), h4: sumC(h4d,5), h1: sumC(h1d,5), m15: sumC(m15d,6), m5: sumC(m5d,6), m1: sumC(m1d,8),
-        openCount: openPositions.filter((p) => normSym(p.symbol) === sym).length,
-        inKillZone: (s.utcH>=7&&s.utcH<10)||(s.utcH>=13&&s.utcH<16),
-        killZone: s.utcH>=7&&s.utcH<10 ? "London 07-10" : s.utcH>=13&&s.utcH<16 ? "NY 13-16" : "",
-        atrGuide: atr>0 ? `min SL ${(atr*0.8).toFixed(4)}` : "unknown",
-      };
-      // V10 AI fetches its own context (multi-TF, regime, memory, family stats)
-      // Frontend just sends symbol + riskMode for OBSERVATION ONLY — cron is the executor.
+      // V10: Backend AI fetches its own multi-TF, regime, memory, family stats, backtest data.
+      // Frontend is OBSERVATIONAL ONLY -- no candle fetching here, no double-work.
+      // We just hit /api/ai with symbol + riskMode and display whatever the AI decided.
       const r = await fetch(API("ai"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: sym, riskMode }) });
       if (!r.ok) { addLog(`AI error ${sym}: HTTP ${r.status}`, "error"); setAiStatus((p) => ({ ...p, [sym]: "error" })); return; }
       const dec = await r.json();
@@ -1321,12 +1294,9 @@ export default function App() {
       setAiStatus((p) => ({ ...p, [sym]: (dec.decision||"wait").toLowerCase() }));
       if (dec.newsBlocked) addLog(`${sym}: blocked by news -- ${dec.reason}`, "warn");
       else addLog(`${sym}: ${dec.decision||"WAIT"} ${dec.confidence||0}% [${dec.family||dec.rawTactic||"?"}]`, dec.decision==="WAIT" ? "warn" : "signal");
-
-      // V10: Frontend NO LONGER EXECUTES TRADES. The cron at /api/cron is the sole executor.
-      // This kills the dual-execution race that V9 had. Frontend is now observational —
-      // shows what the bot is doing, doesn't compete with it.
+      // Frontend does NOT execute trades. Cron at /api/cron is the sole executor.
     } catch (e) { setAiStatus((p) => ({ ...p, [sym]: "error" })); addLog(`Brain error ${sym}: ${e.message}`, "error"); }
-  }, [prices, openPositions, closedTrades, accountBalance, sessionInfo, riskMode, aiDecisions, learnedStats, crownLocks, blacklist, addLog, fetchPositions, fetchHistory]);
+  }, [prices, riskMode, addLog]);
 
   const manageTrades = useCallback(async () => {
     if (!openPositions.length) return;
@@ -1370,26 +1340,31 @@ export default function App() {
     } catch (_) {}
   }, [openPositions, tpLadders, addLog, soundEnabled]);
 
-  // V10 DEBUG: expose runtime state on window so you can inspect in DevTools console.
-  // Run window.qbDebug() in console to see what the React app actually has.
+  // V10 DEBUG: expose runtime state on window. Mount-only effect; uses refs to read current state
+  // so it doesn't re-run on every render and cause performance lag.
+  const debugStateRef = useRef({});
+  debugStateRef.current = { instruments, prices, openPositions, closedTrades, page, riskMode };
   useEffect(() => {
     if (typeof window !== "undefined") {
-      window.qbDebug = () => ({
-        instruments,
-        prices,
-        priceKeys: Object.keys(prices),
-        openPositions: openPositions.map(p => ({ symbol: p.symbol, type: p.type, profit: p.profit })),
-        closedTradesCount: closedTrades.length,
-        latestClosedTime: closedTrades.length > 0 ? (closedTrades[0].time || closedTrades[0].closeTime) : null,
-        page,
-        riskMode,
-      });
+      window.qbDebug = () => {
+        const s = debugStateRef.current;
+        return {
+          instruments: s.instruments,
+          prices: s.prices,
+          priceKeys: Object.keys(s.prices || {}),
+          openPositions: (s.openPositions || []).map(p => ({ symbol: p.symbol, type: p.type, profit: p.profit })),
+          closedTradesCount: (s.closedTrades || []).length,
+          latestClosedTime: (s.closedTrades || []).length > 0 ? (s.closedTrades[0].time || s.closedTrades[0].closeTime) : null,
+          page: s.page,
+          riskMode: s.riskMode,
+        };
+      };
       window.qbForceFetchPrice = (sym) => {
         console.log("[manual] fetching price for", sym);
         fetchPrice(sym);
       };
     }
-  }, [instruments, prices, openPositions, closedTrades, page, riskMode, fetchPrice]);
+  }, [fetchPrice]);
 
   useEffect(() => {
     fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
