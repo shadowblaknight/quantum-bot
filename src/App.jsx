@@ -1346,6 +1346,27 @@ export default function App() {
     } catch (_) {}
   }, [openPositions, tpLadders, addLog, soundEnabled]);
 
+  // V10 DEBUG: expose runtime state on window so you can inspect in DevTools console.
+  // Run window.qbDebug() in console to see what the React app actually has.
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.qbDebug = () => ({
+        instruments,
+        prices,
+        priceKeys: Object.keys(prices),
+        openPositions: openPositions.map(p => ({ symbol: p.symbol, type: p.type, profit: p.profit })),
+        closedTradesCount: closedTrades.length,
+        latestClosedTime: closedTrades.length > 0 ? (closedTrades[0].time || closedTrades[0].closeTime) : null,
+        page,
+        riskMode,
+      });
+      window.qbForceFetchPrice = (sym) => {
+        console.log("[manual] fetching price for", sym);
+        fetchPrice(sym);
+      };
+    }
+  }, [instruments, prices, openPositions, closedTrades, page, riskMode, fetchPrice]);
+
   useEffect(() => {
     fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
     fetchPairIntel(); fetchMemory(); fetchRegimes();

@@ -45,6 +45,17 @@ module.exports = async (req, res) => {
     const data = await r.json();
     const raw = Array.isArray(data) ? data : ((data && data.deals) || []);
 
+    // V10 DIAGNOSTIC: capture stats on the raw response BEFORE filtering
+    const rawSorted = [...raw].sort((a, b) => new Date(b.time || b.brokerTime || 0) - new Date(a.time || a.brokerTime || 0));
+    const rawCount = raw.length;
+    const rawLatestTime = rawSorted.length > 0 ? (rawSorted[0].time || rawSorted[0].brokerTime) : null;
+    const rawTypes = {};
+    const rawEntryTypes = {};
+    for (const d of raw) {
+      rawTypes[d.type || 'null'] = (rawTypes[d.type || 'null'] || 0) + 1;
+      rawEntryTypes[d.entryType || 'null'] = (rawEntryTypes[d.entryType || 'null'] || 0) + 1;
+    }
+
     // V10: also pull history-orders -- gives us a parallel view in case deals lag
     let ordersInfo = null;
     try {
@@ -111,6 +122,15 @@ module.exports = async (req, res) => {
       fetchedTo:   toStr,
       latestDealTime: deals.length > 0 ? deals[0].time : null,
       ordersInfo,                         // V10: parallel view from history-orders endpoint
+      // V10 DIAGNOSTIC: tells us if filter is dropping recent deals or MetaAPI doesn't have them
+      diagnostic: {
+        rawCount,
+        rawLatestTime,
+        filteredCount: deals.length,
+        filteredLatestTime: deals.length > 0 ? deals[0].time : null,
+        rawTypes,
+        rawEntryTypes,
+      },
     });
   } catch (e) {
     return res.status(500).json({
