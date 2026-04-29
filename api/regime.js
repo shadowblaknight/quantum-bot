@@ -125,24 +125,51 @@ function classifyRegime(h1Candles, h4Candles) {
 }
 
 // Chaos detector — call separately, uses M1 vs H1 ATR
+// V10 BUGFIX: Old math compared M1 ATR (hourly volatility / 60min) to H1 ATR / 60.
+// The /60 conversion was wrong -- H1 ATR is the typical bar range, not a per-minute rate.
+// We now compare M1 ATR (recent 10 bars = 10min volatility) to H1 ATR (typical 1h bar
+// volatility) directly. Chaos = M1's typical range exceeds 30% of H1 typical range.
+// Threshold: ratio > 0.30 means recent minute-bars are abnormally large vs typical hour-bar.
 async function detectChaos(sym) {
+  const r = getRedis();
+  const cacheKey = 'v10:chaos:' + normSym(sym);
+  if (r) {
+    try {
+      const cached = await r.get(cacheKey);
+      if (cached) {
+        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (parsed && typeof parsed.chaos === 'boolean') return parsed;
+      }
+    } catch (_) {}
+  }
   const m1 = await fetchCandles(sym, '1m', 60);
   const h1 = await fetchCandles(sym, '1h', 30);
-  if (m1.length < 30 || h1.length < 14) return { chaos: false, ratio: 0 };
+  if (m1.length < 30 || h1.length < 14) {
+    const out = { chaos: false, ratio: 0, reason: 'insufficient data' };
+    if (r) await r.set(cacheKey, JSON.stringify(out), { ex: 60 }).catch(() => {});
+    return out;
+  }
 
   const m1Atr10 = atr(m1, 10);
   const h1Atr14 = atr(h1, 14);
-  if (!m1Atr10 || !h1Atr14) return { chaos: false, ratio: 0 };
+  if (!m1Atr10 || !h1Atr14) {
+    const out = { chaos: false, ratio: 0, reason: 'atr null' };
+    if (r) await r.set(cacheKey, JSON.stringify(out), { ex: 60 }).catch(() => {});
+    return out;
+  }
 
-  // Convert h1Atr to per-minute equivalent (divide by ~60) before comparing
-  const h1AtrPerMin = h1Atr14 / 60;
-  const ratio = m1Atr10 / Math.max(1e-9, h1AtrPerMin);
-
-  return {
-    chaos: ratio > 3.0,
-    ratio: Math.round(ratio * 10) / 10,
-    m1Atr10, h1Atr14, h1AtrPerMin,
+  // Direct ratio: M1 typical bar range / H1 typical bar range.
+  // In normal markets a 1-min bar is ~5-10% of a 1-hour bar's range.
+  // If M1 bars are >25% of H1 typical, recent volatility is anomalously concentrated
+  // (news spike, flash event). Threshold 0.25.
+  const ratio = m1Atr10 / Math.max(1e-9, h1Atr14);
+  const out = {
+    chaos: ratio > 0.25,
+    ratio: Math.round(ratio * 100) / 100,
+    m1Atr10, h1Atr14,
   };
+  if (r) await r.set(cacheKey, JSON.stringify(out), { ex: 60 }).catch(() => {});
+  return out;
 }
 
 // Full regime read for a symbol, with caching

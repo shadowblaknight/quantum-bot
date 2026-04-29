@@ -1396,15 +1396,15 @@ export default function App() {
     fetchPairIntel(); fetchMemory(); fetchRegimes();
     instruments.forEach((sym) => fetchPrice(sym));
     const ii = [
-      setInterval(fetchAccount, 30000), setInterval(fetchPositions, 5000),
-      setInterval(fetchHistory, 30000), setInterval(fetchLab, 300000),
+      setInterval(fetchAccount, 60000), setInterval(fetchPositions, 10000),
+      setInterval(fetchHistory, 60000), setInterval(fetchLab, 300000),
       setInterval(fetchNews, 1800000),
       setInterval(fetchPairIntel, 600000),     // V10: refresh pair intel every 10min
       setInterval(fetchMemory, 60000),         // V10: refresh memory every 1min
       setInterval(fetchRegimes, 300000),       // V10: refresh regimes every 5min
       setInterval(() => setSessionInfo(getSessionInfo()), 60000),
     ];
-    instruments.forEach((sym) => { ii.push(setInterval(() => fetchPrice(sym), 5000)); });
+    instruments.forEach((sym) => { ii.push(setInterval(() => fetchPrice(sym), 15000)); });
     return () => ii.forEach(clearInterval);
   }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, fetchPairIntel, fetchMemory, fetchRegimes, instruments]);
 

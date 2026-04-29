@@ -78,10 +78,23 @@ async function fetchAccount() {
 }
 
 async function fetchPositions() {
+  // V10: 3-second cache. Frontend polls every 5s, cron fires every minute -- without cache
+  // we'd fire dozens of position fetches per minute and run into MetaAPI rate limits.
+  const r = getRedis();
+  const cacheKey = 'v10:positions';
+  if (r) {
+    try {
+      const cached = await r.get(cacheKey);
+      if (cached) {
+        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (parsed && parsed.positions) return parsed;
+      }
+    } catch (_) {}
+  }
   const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/positions';
-  const r = await fetch(url, { headers: metaHeaders() });
-  if (!r.ok) return { positions: [], error: 'positions fetch ' + r.status };
-  const data = await r.json().catch(() => []);
+  const resp = await fetch(url, { headers: metaHeaders() });
+  if (!resp.ok) return { positions: [], error: 'positions fetch ' + resp.status };
+  const data = await resp.json().catch(() => []);
   const positions = (Array.isArray(data) ? data : []).map((p) => ({
     id:           p.id || p.positionId,
     symbol:       p.symbol,
@@ -98,18 +111,33 @@ async function fetchPositions() {
     time:         p.time || p.openTime || null,
     comment:      p.comment || '',
   }));
-  return { positions };
+  const result = { positions };
+  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 3 }).catch(() => {});
+  return result;
 }
 
 async function fetchPrice(baseSym) {
   const sym = await resolveSymbol(baseSym);
+  // V10: 3-second Redis cache. Cron + frontend + AI all hit this -- without cache
+  // they'd hammer MetaAPI (429) and timeout (504). Price doesn't change meaningfully in 3s anyway.
+  const r = getRedis();
+  const cacheKey = 'v10:px:' + sym;
+  if (r) {
+    try {
+      const cached = await r.get(cacheKey);
+      if (cached) {
+        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (parsed && parsed.price) return parsed;
+      }
+    } catch (_) {}
+  }
   const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(sym) + '/current-price';
-  const r = await fetch(url, { headers: metaHeaders() });
-  if (!r.ok) return { error: 'price fetch ' + r.status, symbol: sym };
-  const data = await r.json();
+  const resp = await fetch(url, { headers: metaHeaders() });
+  if (!resp.ok) return { error: 'price fetch ' + resp.status, symbol: sym };
+  const data = await resp.json();
   const bid = data.bid, ask = data.ask;
   const mid = (bid + ask) / 2;
-  return {
+  const result = {
     symbol:     sym,
     baseSymbol: baseSym,
     bid, ask,
@@ -117,26 +145,44 @@ async function fetchPrice(baseSym) {
     spread:     ask - bid,
     time:       data.time,
   };
+  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 3 }).catch(() => {});
+  return result;
 }
 
 async function fetchCandles(baseSym, timeframe, count) {
   const sym = await resolveSymbol(baseSym);
   const tf = TF_MAP[timeframe] || timeframe;
   const n = Math.min(Math.max(count || 100, 10), 1000); // MetaAPI max 1000
+
+  // V10: Redis cache for candles. Different TFs have different appropriate TTLs.
+  // 1m candles change every minute, 1h every hour, 1d every day. Cache TTL = TF duration / 4.
+  // This crushes the 9-TF * 3-instrument storm into mostly cache hits after warmup.
+  const r = getRedis();
+  const cacheKey = 'v10:c:' + sym + ':' + tf + ':' + n;
+  const ttlMap = { '1m': 20, '5m': 60, '15m': 180, '30m': 300, '1h': 600, '4h': 1800, '1d': 3600, '1w': 7200, '1mn': 14400 };
+  const ttl = ttlMap[tf] || 300;
+  if (r) {
+    try {
+      const cached = await r.get(cacheKey);
+      if (cached) {
+        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (parsed && parsed.candles && parsed.candles.length > 0) return parsed;
+      }
+    } catch (_) {}
+  }
+
   // V10 BUGFIX: Historical market data uses a DIFFERENT hostname than client API.
   // Client API:        mt-client-api-v1.{region}.agiliumtrade.ai            (positions, current-price, trades)
   // Market Data API:   mt-market-data-client-api-v1.{region}.agiliumtrade.ai (historical candles, ticks)
-  // Using the wrong host returns 404, which we silently swallow into empty candles[],
-  // making the AI think every TF has no data. THIS is why ADX/ATR/BB were all 0 on day 1.
   const region = process.env.META_REGION || 'london';
   const marketDataHost = 'https://mt-market-data-client-api-v1.' + region + '.agiliumtrade.ai';
   const url = marketDataHost + '/users/current/accounts/' + metaAccountId() + '/historical-market-data/symbols/' + encodeURIComponent(sym) + '/timeframes/' + tf + '/candles?limit=' + n;
-  const r = await fetch(url, { headers: metaHeaders() });
-  if (!r.ok) {
-    const txt = await r.text().catch(() => '');
-    return { candles: [], error: 'candles ' + r.status + ': ' + txt.slice(0, 200), urlTried: url };
+  const resp = await fetch(url, { headers: metaHeaders() });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    return { candles: [], error: 'candles ' + resp.status + ': ' + txt.slice(0, 200), urlTried: url };
   }
-  const data = await r.json().catch(() => []);
+  const data = await resp.json().catch(() => []);
   const candles = (Array.isArray(data) ? data : []).map((c) => ({
     time:       c.time,
     open:       c.open,
@@ -146,7 +192,9 @@ async function fetchCandles(baseSym, timeframe, count) {
     volume:     c.volume || c.tickVolume || 0,
     tickVolume: c.tickVolume || 0,
   }));
-  return { symbol: sym, timeframe: tf, count: candles.length, candles };
+  const result = { symbol: sym, timeframe: tf, count: candles.length, candles };
+  if (r && candles.length > 0) await r.set(cacheKey, JSON.stringify(result), { ex: ttl }).catch(() => {});
+  return result;
 }
 
 // Multi-timeframe fetch — used by V10 AI to get full picture in one call
