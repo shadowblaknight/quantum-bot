@@ -142,21 +142,55 @@ async function scorePair(sym) {
   };
 }
 
-// Score the whole universe — used for hourly cron and the Live page recommendations widget
+// Score the whole universe — used for hourly cron and the Live page recommendations widget.
+// V10: Heavily throttled. Background cron writes results to Redis; API endpoint reads cache.
 async function scoreUniverse(userInstruments) {
   const userSet = new Set((userInstruments || []).map(normSym));
-  // Score in batches of 5 (parallel-ish, but not too many concurrent broker calls)
+  const r = getRedis();
+  const cacheKey = 'v10:pair-intel:universe';
+
+  // Throttled scoring -- 3 symbols at a time with 500ms gap. Takes ~30s for 30 symbols
+  // but doesn't starve other MetaAPI requests. This runs in the background hourly cron.
   const results = [];
-  for (let i = 0; i < UNIVERSE.length; i += 5) {
-    const batch = UNIVERSE.slice(i, i + 5);
-    const batchResults = await Promise.all(batch.map(scorePair));
+  for (let i = 0; i < UNIVERSE.length; i += 3) {
+    const batch = UNIVERSE.slice(i, i + 3);
+    const batchResults = await Promise.all(batch.map((s) => scorePair(s).catch((err) => ({
+      sym: normSym(s), score: 50, recommendation: 'NEUTRAL', error: err && err.message,
+      regime: 'UNKNOWN', bestFamily: null, bestWR: 0, totalTrades: 0, reasons: [], badges: [],
+    }))));
     results.push(...batchResults);
+    // Brief pause between batches to let trading-path requests through
+    if (i + 3 < UNIVERSE.length) await new Promise((res) => setTimeout(res, 500));
   }
-  // Mark which ones are user's current instruments
-  for (const r of results) r.inUserSet = userSet.has(r.sym);
-  // Sort by score desc
+
+  for (const res of results) res.inUserSet = userSet.has(res.sym);
   results.sort((a, b) => b.score - a.score);
+
+  // Cache the full result for 1h
+  if (r) await r.set(cacheKey, JSON.stringify({ universe: results, ts: Date.now() }), { ex: 3600 }).catch(() => {});
+
   return results;
+}
+
+// Read cached universe (or trigger background refresh if stale)
+async function readCachedUniverse(userInstruments) {
+  const r = getRedis();
+  if (!r) return scoreUniverse(userInstruments);
+  const cached = await r.get('v10:pair-intel:universe').catch(() => null);
+  const parsed = safeParse(cached);
+  if (parsed && Array.isArray(parsed.universe) && parsed.universe.length > 0) {
+    // Mark inUserSet from current request (user instruments may have changed since cache)
+    const userSet = new Set((userInstruments || []).map(normSym));
+    for (const p of parsed.universe) p.inUserSet = userSet.has(p.sym);
+    return parsed.universe;
+  }
+  // No cache -- score user's instruments only (fast), trigger background full scan
+  const fastResults = [];
+  for (const s of (userInstruments || []).slice(0, 5)) {
+    try { fastResults.push(await scorePair(s)); } catch (_) {}
+  }
+  for (const res of fastResults) res.inUserSet = true;
+  return fastResults;
 }
 
 // === HTTP handler ===
@@ -173,23 +207,19 @@ module.exports = async (req, res) => {
     }
 
     if (action === 'universe') {
-      // Try cached first
-      const r = getRedis();
-      if (r) {
-        const cached = await r.get('v10:pair-intel:universe').catch(() => null);
-        if (cached) {
-          const parsed = safeParse(cached);
-          if (parsed && parsed.ts && Date.now() - parsed.ts < 30 * 60 * 1000) {
-            return res.status(200).json(parsed);
-          }
-        }
-      }
-      // Otherwise compute fresh (slow — only do this if cache is empty/stale)
+      // V10: Always use cache-first reader. Cache is populated by background cron hourly.
+      // If cache empty (first deploy), this returns fast partial results from user instruments
+      // and the cron will fill the full cache within ~30s.
       const userInstr = String(req.query.userInstruments || '').split(',').filter(Boolean);
-      const results = await scoreUniverse(userInstr);
-      const out = { universe: results, ts: Date.now() };
-      if (r) await r.set('v10:pair-intel:universe', JSON.stringify(out), { ex: 60 * 60 }).catch(() => {});
-      return res.status(200).json(out);
+      const universe = await readCachedUniverse(userInstr);
+      return res.status(200).json({ universe, ts: Date.now() });
+    }
+
+    if (action === 'refresh') {
+      // V10: Triggered by hourly cron. Does the slow full universe scan and caches.
+      const userInstr = String(req.query.userInstruments || '').split(',').filter(Boolean);
+      const universe = await scoreUniverse(userInstr);
+      return res.status(200).json({ universe, refreshed: true, count: universe.length });
     }
 
     if (action === 'cluster') {

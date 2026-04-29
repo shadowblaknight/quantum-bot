@@ -12,7 +12,7 @@
       "schedule": "0 21 * * *"
     },
     {
-      "path": "/api/pair-intel?action=universe",
+      "path": "/api/pair-intel?action=refresh",
       "schedule": "0 * * * *"
     },
     {
