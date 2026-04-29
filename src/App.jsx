@@ -1034,7 +1034,14 @@ export default function App() {
     try { const r = await fetch(API("history")); if (r.ok) { const d = await r.json(); setClosedTrades(Array.isArray(d.trades) ? d.trades : (Array.isArray(d.deals) ? d.deals : [])); } } catch (_) {}
   }, []);
   const fetchPrice = useCallback(async (sym) => {
-    try { const r = await fetch(API(`broker?action=price&symbol=${encodeURIComponent(sym)}`)); if (r.ok) { const d = await r.json(); if (d.price != null) setPrices((p) => ({ ...p, [sym]: d.price })); } } catch (_) {}
+    try {
+      const r = await fetch(API(`broker?action=price&symbol=${encodeURIComponent(sym)}`));
+      if (!r.ok) { console.warn(`[fetchPrice] ${sym} HTTP ${r.status}`); return; }
+      const d = await r.json();
+      if (d.error) { console.warn(`[fetchPrice] ${sym} backend error:`, d.error); return; }
+      if (d.price == null || !isFinite(d.price)) { console.warn(`[fetchPrice] ${sym} no price in response:`, d); return; }
+      setPrices((p) => ({ ...p, [sym]: d.price }));
+    } catch (e) { console.warn(`[fetchPrice] ${sym} threw:`, e.message); }
   }, []);
   const fetchLab = useCallback(async () => {
     // V10: Fetch family stats + V9 archive
@@ -1251,7 +1258,8 @@ export default function App() {
     setAiStatus((p) => ({ ...p, [sym]: "thinking" }));
     addLog(`Brain: ${sym} -- reading market...`, "info");
     try {
-      const tfs = ["M1","M5","M15","H1","H4","D1","W1"]; const limits = [60,24,24,24,20,14,8];
+      // V10 BUGFIX: broker.js uses lowercase TF names ('1m', '15m', etc.). V9 used uppercase.
+      const tfs = ["1m","5m","15m","1h","4h","1d","1w"]; const limits = [60,24,24,24,20,14,8];
       const results = await Promise.all(tfs.map((tf, i) => fetch(API(`broker?action=candles&symbol=${encodeURIComponent(sym)}&tf=${tf}&n=${limits[i]}`)).then((r) => r.json()).catch(() => ({ candles: [] }))));
       const [m1d, m5d, m15d, h1d, h4d, d1d, wkd] = results.map((r) => r.candles || []);
       const sumC = (arr, n = 5) => {
@@ -1956,8 +1964,49 @@ export default function App() {
             const avgPnl = trades.length ? netPnl/trades.length : 0;
             const instMap = {}; trades.forEach((t) => { const k=normSym(t.symbol)||"UNKNOWN"; if (!instMap[k]) instMap[k]={t:0,w:0,pnl:0}; instMap[k].t++; instMap[k].pnl+=t.profit||0; if ((t.profit||0)>0) instMap[k].w++; });
             const sessMap = {}; trades.forEach((t) => { const s=getSessionLabel(t.time||t.closeTime); if (!sessMap[s]) sessMap[s]={t:0,w:0,pnl:0}; sessMap[s].t++; sessMap[s].pnl+=t.profit||0; if ((t.profit||0)>0) sessMap[s].w++; });
+            // V10: Compute "data freshness" status -- shows clearly if MetaAPI history is lagging.
+            const latestTradeTime = trades.length > 0 ? new Date(trades[0].time || trades[0].closeTime) : null;
+            const hoursSinceLatest = latestTradeTime ? (Date.now() - latestTradeTime.getTime()) / 3600000 : null;
+            const dataIsStale = hoursSinceLatest !== null && hoursSinceLatest > 36;  // >1.5 days = stale
+            const openCount = openPositions.length;
             return (
               <div className="s14">
+                {/* V10: Data freshness banner */}
+                {dataIsStale && (
+                  <div className="panel" style={{ borderLeft: "4px solid #f59e0b", padding: 12, background: "#fffbeb" }}>
+                    <div style={{ fontWeight: 700, color: "#92400e" }}>⚠ MetaAPI history may be lagging</div>
+                    <div className="xs sub mt4">
+                      Latest closed deal in MetaAPI: <strong>{latestTradeTime.toLocaleString()}</strong> ({hoursSinceLatest.toFixed(0)}h ago).
+                      {openCount > 0 && <> You currently have <strong>{openCount} position(s) still open</strong> — they will appear here only after they close.</>}
+                      {openCount === 0 && <> If you've had recent trades close, MetaAPI's deal history sync may be stalled. Check Vercel logs of /api/history for details.</>}
+                    </div>
+                  </div>
+                )}
+                {/* V10: Currently-open positions panel — these aren't in deal history yet */}
+                {openCount > 0 && (
+                  <div className="panel" style={{ borderLeft: "4px solid #3b82f6", padding: 12 }}>
+                    <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
+                      <div className="w7">In-progress positions ({openCount})</div>
+                      <div className="xs mut">Not yet in deal history — will appear after close</div>
+                    </div>
+                    <div className="g3 mt8">
+                      {openPositions.map((p) => (
+                        <div key={p.id || p.positionId} style={{ padding: 8, background: "#f8fafc", borderRadius: 6 }}>
+                          <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
+                            <span className="w7">{p.symbol}</span>
+                            <span style={{ color: p.direction === "LONG" ? "var(--green)" : "var(--red)", fontWeight: 700, fontSize: 11 }}>
+                              {p.direction || p.type}
+                            </span>
+                          </div>
+                          <div className="xs mut">@ {p.openPrice}</div>
+                          <div className="xs" style={{ color: (p.profit || 0) >= 0 ? "var(--green)" : "var(--red)", fontWeight: 700 }}>
+                            {pnlStr(p.profit || 0)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="g4c">
                   {[
                     ["Total Trades", trades.length, "var(--blue)"],

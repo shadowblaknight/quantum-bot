@@ -26,11 +26,10 @@ module.exports = async (req, res) => {
     const from = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
     const fromStr = from.toISOString();
     const toStr = now.toISOString();
+    const region = process.env.META_REGION || 'london';
+    const baseUrl = 'https://mt-client-api-v1.' + region + '.agiliumtrade.ai/users/current/accounts/' + ACCOUNT_ID;
 
-    const url =
-      'https://mt-client-api-v1.' + (process.env.META_REGION || 'london') + '.agiliumtrade.ai/users/current/accounts/' +
-      ACCOUNT_ID +
-      '/history-deals/time/' + encodeURIComponent(fromStr) + '/' + encodeURIComponent(toStr);
+    const url = baseUrl + '/history-deals/time/' + encodeURIComponent(fromStr) + '/' + encodeURIComponent(toStr);
 
     const r = await fetch(url, { method: 'GET', headers: { 'auth-token': TOKEN } });
 
@@ -38,12 +37,28 @@ module.exports = async (req, res) => {
       const text = await r.text();
       return res.status(r.status).json({
         deals: [],
+        trades: [],
         error: (text || 'Failed to fetch history').slice(0, 500),
       });
     }
 
     const data = await r.json();
     const raw = Array.isArray(data) ? data : ((data && data.deals) || []);
+
+    // V10: also pull history-orders -- gives us a parallel view in case deals lag
+    let ordersInfo = null;
+    try {
+      const orderUrl = baseUrl + '/history-orders/time/' + encodeURIComponent(fromStr) + '/' + encodeURIComponent(toStr);
+      const oR = await fetch(orderUrl, { headers: { 'auth-token': TOKEN } });
+      if (oR.ok) {
+        const oRaw = await oR.json();
+        const oArr = Array.isArray(oRaw) ? oRaw : ((oRaw && oRaw.historyOrders) || []);
+        ordersInfo = {
+          count: oArr.length,
+          latest: oArr.length > 0 ? oArr.sort((a, b) => new Date(b.doneTime || b.time) - new Date(a.doneTime || a.time))[0].doneTime || oArr[0].time : null,
+        };
+      }
+    } catch (_) {}
 
     const deals = raw
       .filter(function (d) {
@@ -95,6 +110,7 @@ module.exports = async (req, res) => {
       fetchedFrom: fromStr,               // diagnostic
       fetchedTo:   toStr,
       latestDealTime: deals.length > 0 ? deals[0].time : null,
+      ordersInfo,                         // V10: parallel view from history-orders endpoint
     });
   } catch (e) {
     return res.status(500).json({
