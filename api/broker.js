@@ -164,16 +164,22 @@ async function fetchMultiTF(baseSym) {
     '1mn': 24,
   };
   const sym = await resolveSymbol(baseSym);
-  // V10 BUGFIX: Parallel fetch (was sequential -- 3x slower than needed).
-  // MetaAPI handles 9 concurrent symbol-candle requests fine.
-  const results = await Promise.all(ALL_TFS.map(async (tf) => {
-    try {
-      const r = await fetchCandles(baseSym, tf, tfCounts[tf]);
-      return [tf, r.candles || []];
-    } catch (_) { return [tf, []]; }
-  }));
+  // V10 BUGFIX: MetaAPI limits to 5 concurrent historical-market-data requests per account.
+  // Firing all 9 TFs in parallel triggers LIMIT_CONCURRENT_MARKET_DATA_REQUESTS_PER_ACCOUNT
+  // and most calls get rejected -> empty candles -> AI sees zero data.
+  // We batch in groups of 4 (safely under the 5-concurrent limit, leaves room for cron / other calls).
+  const BATCH_SIZE = 4;
   const timeframes = {};
-  for (const [tf, candles] of results) timeframes[tf] = candles;
+  for (let i = 0; i < ALL_TFS.length; i += BATCH_SIZE) {
+    const batch = ALL_TFS.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map(async (tf) => {
+      try {
+        const r = await fetchCandles(baseSym, tf, tfCounts[tf]);
+        return [tf, r.candles || [], r.error];
+      } catch (e) { return [tf, [], e && e.message]; }
+    }));
+    for (const [tf, candles] of results) timeframes[tf] = candles;
+  }
   return { symbol: sym, baseSymbol: baseSym, timeframes };
 }
 

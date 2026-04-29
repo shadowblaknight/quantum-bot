@@ -16,14 +16,17 @@ const { atr, adx, bollingerWidth, getRedis, applyCors, normSym, instCategory, se
 
 const REGIME_TTL = 5 * 60; // cache regime per symbol for 5 minutes
 
-// Fetch candles for a symbol/timeframe via the broker layer
+// V10 BUGFIX: regime was calling /api/broker-candles which DOES NOT EXIST anymore
+// (consolidated into /api/broker?action=candles). Every call 404'd silently, returning [],
+// so every regime came back UNKNOWN with ADX=0 ATR=0. This is why the bot saw no market data.
+//
+// We now import broker.fetchCandles directly -- no HTTP round-trip, faster and avoids
+// concurrent-request pressure on MetaAPI.
+const brokerModule = require('./broker');
 async function fetchCandles(sym, timeframe, count) {
-  const url = selfBase() + '/api/broker-candles?symbol=' + encodeURIComponent(sym) + '&timeframe=' + timeframe + '&count=' + (count || 100);
   try {
-    const r = await fetch(url);
-    if (!r.ok) return [];
-    const d = await r.json();
-    return Array.isArray(d.candles) ? d.candles : [];
+    const r = await brokerModule.fetchCandles(sym, timeframe, count || 100);
+    return Array.isArray(r.candles) ? r.candles : [];
   } catch (_) { return []; }
 }
 
