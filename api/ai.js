@@ -168,25 +168,52 @@ ${famLines.join('\n')}
 ${openLines}
 
 === INSTRUCTIONS ===
-1. Choose a FAMILY first: TREND, REVERSION, STRUCTURE, BREAKOUT, RANGE, or NEWS. Or WAIT if nothing fits.
-2. Family selection MUST consider regime fit. Do not pick TREND in a clearly RANGING regime.
-3. Provide a specific raw tactic name (e.g. "TREND_H4+MOM_SESSION", "ICT_KILLZONE+SWEEP") for label/learning.
-4. Confidence 0-100. <35 = WAIT (no trade). 35-49 = small. 50-64 = standard. 65-79 = full. 80+ = oversized.
-5. If chaos detected, threshold for entry is 80+ confidence ONLY.
-6. Volume tags on each TF line:
-   - vol=SPIKE+Xσ -> very strong institutional participation (X std devs above mean). Confirms breakouts/reversals.
-   - vol=high+Xσ -> above-average. Mild confirmation.
-   - vol=normal -> nothing notable.
-   - vol=THIN-Xσ -> below-average. Setup signals are LESS reliable; lower confidence.
-   Use these to validate or reject technical setups. Strong setup + thin volume = lower confidence.
-7. Reason should be concise -- which TFs you read, what regime you see, why this family fits NOW, what volume confirms.
-8. Output JSON ONLY:
+You are an active trading decision maker. Your job is to TRADE setups when conditions warrant — not to find reasons NOT to trade. The bot has many other safety layers (chaos detector, correlation cap, position-already-open check, family Bayesian floor). Your job is the entry decision.
+
+1. **Family selection.** Choose TREND, REVERSION, STRUCTURE, BREAKOUT, RANGE, NEWS — or WAIT only if there is genuinely no actionable setup. Family must match regime: don't pick TREND in pure RANGING. STRUCTURE and BREAKOUT work in most regimes.
+
+2. **Raw tactic.** Specific label (e.g. "TREND_H4+MOM_SESSION", "ICT_KILLZONE+SWEEP") for learning.
+
+3. **Confidence scale.**
+   - 30+ = take the trade (small size). The system will scale position size.
+   - 50+ = standard size.
+   - 65+ = full size.
+   - 80+ = oversized.
+   - Below 30 = WAIT.
+
+   **Important:** A confidence of 45% does NOT mean "wait" — it means "take it small." Only output WAIT when conditions are genuinely confused, not just because confidence sits in the 35-50 range.
+
+4. **Volume tags.** Treat as ONE supporting signal among many, not a veto.
+   - SPIKE/high vol = nice confirmation, +5-10 confidence.
+   - normal vol = expected, no adjustment.
+   - THIN vol = mild caution, -5 confidence MAX. Asian-session and pre-news thin volume is normal — don't hard-reject.
+
+5. **Multi-TF conflict.** Conflicting TFs are normal. Use this hierarchy:
+   - **H1 + H4 alignment** = primary direction signal. If both agree, trade with them.
+   - **15m/30m** = entry timing only. Conflict with H1 just means the setup hasn't materialized yet, not that the setup is invalid.
+   - **D1/W** = backdrop. Disagreement with H1/H4 reduces confidence by ~5-10 but doesn't veto.
+
+6. **Backtest divergence (overfit warning).**
+   - Treat as soft signal, not a hard rule.
+   - If live WR > backtest WR (live edge): -5 to -10 confidence (real edge but be modest).
+   - If live WR < backtest WR significantly: -10 to -15 confidence (live underperforming).
+   - Never let this alone push you to WAIT. The Bayesian sampler already handles uncertainty separately.
+
+7. **Chaos veto.** If chaos flag is set: only trade with confidence 80+. Otherwise normal rules.
+
+8. **Pip distances.** slPips and tp1Pips in instrument-native pips:
+   - Forex: typical SL 15-40 pips, TP 30-100.
+   - Gold (XAUUSD): typical SL 50-150 pips ($0.50-$1.50), TP 100-400 pips.
+   - BTC: typical SL 200-600 pips, TP 500-1500.
+   - Indices: typical SL 30-80 points, TP 60-200.
+
+9. **Output JSON only:**
 {
   "decision": "BUY" | "SELL" | "WAIT",
   "family": "TREND" | "REVERSION" | "STRUCTURE" | "BREAKOUT" | "RANGE" | "NEWS",
   "rawTactic": "string -- specific label",
   "confidence": 0-100,
-  "reason": "concise multi-TF + regime reasoning",
+  "reason": "concise multi-TF + regime reasoning, MAX 2 sentences",
   "tp1Pips": number,
   "slPips": number,
   "memo": "optional one-line note for next AI call to remember"
@@ -205,10 +232,12 @@ function sizingFor(confidence, riskMode, category) {
              : category === 'CRYPTO' ? baseCrypto
              : category === 'INDEX'  ? baseIndex
              : baseFx;
-  if (confidence >= 80) return base;             // full
-  if (confidence >= 65) return base * 0.7;
-  if (confidence >= 50) return base * 0.4;
-  if (confidence >= 35) return base * 0.2;
+  // V10: tiers re-aligned with prompt thresholds
+  if (confidence >= 85) return base;             // oversized
+  if (confidence >= 70) return base * 0.8;       // full
+  if (confidence >= 55) return base * 0.5;       // standard
+  if (confidence >= 40) return base * 0.3;       // small
+  if (confidence >= 30) return base * 0.15;      // micro
   return 0;
 }
 
@@ -351,8 +380,8 @@ module.exports = async (req, res) => {
       decision.reason = 'Chaos detected (ratio ' + regime.chaos.ratio + 'x); confidence ' + decision.confidence + ' < 80 chaos threshold';
     }
 
-    // Below-min veto
-    if (decision.confidence < 35) {
+    // Below-min veto (matches prompt instruction #3)
+    if (decision.confidence < 30) {
       decision.decision = 'WAIT';
     }
 

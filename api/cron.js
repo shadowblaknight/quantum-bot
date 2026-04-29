@@ -210,7 +210,7 @@ async function runCronTick() {
           continue;
         }
 
-        if (decision.confidence < 35 || !decision.volume || decision.volume <= 0) {
+        if (decision.confidence < 30 || !decision.volume || decision.volume <= 0) {
           symInfo.action = 'wait-lowconf';
           symInfo.detail = 'conf ' + decision.confidence;
           continue;
