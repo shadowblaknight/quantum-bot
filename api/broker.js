@@ -28,14 +28,28 @@ const TF_MAP = {
 const ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mn'];
 
 // Symbol resolution cache — broker-specific suffixes (.s, .pro, etc.)
+// V10 BUGFIX: Cache values can go stale (e.g. when broker.js consolidation changed
+// behavior, or when a different account is set up). We now VALIDATE the cached value
+// before trusting it, and fall through to suffix probing if it 404s.
 async function resolveSymbol(baseSym) {
   const r = getRedis();
+  // Try cache first
   if (r) {
     const cached = await r.get('v9:sym:' + baseSym).catch(() => null);
-    if (cached) return typeof cached === 'string' ? cached : String(cached);
+    if (cached) {
+      const cachedStr = typeof cached === 'string' ? cached : String(cached);
+      // Validate the cached symbol actually returns a price
+      try {
+        const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(cachedStr) + '/current-price';
+        const resp = await fetch(url, { headers: metaHeaders() });
+        if (resp.ok) return cachedStr;
+        // 404 / 400 -> cached value is stale, fall through to probe and overwrite below
+      } catch (_) { /* fall through */ }
+    }
   }
-  // Try common suffixes — PU Prime uses .s
-  const candidates = [baseSym + '.s', baseSym, baseSym + '.pro', baseSym + '.raw'];
+  // Probe suffixes. PU Prime uses .s; some brokers use .pro / .raw / no suffix.
+  // Order: bare symbol first (most brokers), then .s, then .pro, .raw.
+  const candidates = [baseSym, baseSym + '.s', baseSym + '.pro', baseSym + '.raw'];
   for (const cand of candidates) {
     try {
       const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(cand) + '/current-price';
@@ -182,6 +196,51 @@ module.exports = async (req, res) => {
       const sym = String(req.query.symbol || '').toUpperCase();
       if (!sym) return res.status(400).json({ error: 'symbol required' });
       return res.status(200).json(await fetchMultiTF(sym));
+    }
+    if (action === 'debug-symbol') {
+      // V10: Diagnostic helper to debug symbol resolution. Returns what suffixes work.
+      const sym = String(req.query.symbol || '').toUpperCase();
+      if (!sym) return res.status(400).json({ error: 'symbol required' });
+      const r = getRedis();
+      const cached = r ? await r.get('v9:sym:' + sym).catch(() => null) : null;
+      const probes = [sym, sym + '.s', sym + '.pro', sym + '.raw'];
+      const results = [];
+      for (const cand of probes) {
+        try {
+          const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(cand) + '/current-price';
+          const resp = await fetch(url, { headers: metaHeaders() });
+          results.push({ candidate: cand, status: resp.status, ok: resp.ok });
+        } catch (e) {
+          results.push({ candidate: cand, error: e.message });
+        }
+      }
+      return res.status(200).json({
+        baseSymbol: sym,
+        cachedAs: cached,
+        probes: results,
+        currentRegion: process.env.META_REGION || 'london',
+      });
+    }
+    if (action === 'clear-symbol-cache') {
+      const r = getRedis();
+      if (!r) return res.status(500).json({ error: 'no redis' });
+      const sym = String(req.query.symbol || '').toUpperCase();
+      if (sym) {
+        await r.del('v9:sym:' + sym).catch(() => {});
+        return res.status(200).json({ cleared: 'v9:sym:' + sym });
+      }
+      // Clear all v9:sym:*
+      let cursor = 0;
+      let cleared = 0;
+      do {
+        const result = await r.scan(cursor, { match: 'v9:sym:*', count: 200 }).catch(() => [0, []]);
+        cursor = parseInt(result[0], 10);
+        for (const k of result[1]) {
+          await r.del(k).catch(() => {});
+          cleared++;
+        }
+      } while (cursor !== 0);
+      return res.status(200).json({ cleared, scope: 'all v9:sym:*' });
     }
     return res.status(400).json({ error: 'Unknown action: ' + action });
   } catch (e) {

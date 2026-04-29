@@ -28,7 +28,7 @@ module.exports = async (req, res) => {
     const toStr = now.toISOString();
 
     const url =
-      'https://mt-client-api-v1.london.agiliumtrade.ai/users/current/accounts/' +
+      'https://mt-client-api-v1.' + (process.env.META_REGION || 'london') + '.agiliumtrade.ai/users/current/accounts/' +
       ACCOUNT_ID +
       '/history-deals/time/' + encodeURIComponent(fromStr) + '/' + encodeURIComponent(toStr);
 
@@ -89,12 +89,17 @@ module.exports = async (req, res) => {
 
     return res.status(200).json({
       deals: deals,
+      trades: deals,                      // V10: alias, frontend may read either
       count: deals.length,
       source: 'puprime',
+      fetchedFrom: fromStr,               // diagnostic
+      fetchedTo:   toStr,
+      latestDealTime: deals.length > 0 ? deals[0].time : null,
     });
   } catch (e) {
     return res.status(500).json({
       deals: [],
+      trades: [],
       error: e && e.message ? e.message : 'Unknown server error',
     });
   }

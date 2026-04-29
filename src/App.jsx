@@ -1043,9 +1043,32 @@ export default function App() {
       if (r.ok) {
         const d = await r.json();
         setFamilyUniverse(d.universe || {});
-        setV9Archive(d.archive || []);
-        // Backwards compat for old UI bits
-        setLearnedStats(d.lab || {});
+        const archiveArr = Array.isArray(d.archive) ? d.archive : [];
+        setV9Archive(archiveArr);
+        // V10 BUGFIX: Re-shape v9Archive (flat array of {symbol, strategy, wins, losses, ...})
+        // into the {strategy: {totalWins, totalLosses, totalPnl, total, instruments: {sym: {...}}}}
+        // shape the existing archive UI expects. Without this, the "Tactic Archive (V9)" tab
+        // stays empty even though the data is there.
+        const labShape = {};
+        for (const item of archiveArr) {
+          const k = item.strategy;
+          if (!labShape[k]) {
+            labShape[k] = {
+              totalWins: 0, totalLosses: 0, totalPnl: 0, total: 0, crowns: 0,
+              instruments: {},
+            };
+          }
+          labShape[k].totalWins   += item.wins   || 0;
+          labShape[k].totalLosses += item.losses || 0;
+          labShape[k].totalPnl    += item.totalPnl || 0;
+          labShape[k].total       += item.total  || 0;
+          labShape[k].instruments[item.symbol] = {
+            wins: item.wins, losses: item.losses, totalPnl: item.totalPnl,
+            total: item.total, winRate: item.winRate,
+            avgPnl: item.total > 0 ? Math.round((item.totalPnl / item.total) * 100) / 100 : 0,
+          };
+        }
+        setLearnedStats(labShape);
         setCrownLocks(d.crownLocks || {});
         setBlacklist(d.blacklist || []);
       }
