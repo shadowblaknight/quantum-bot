@@ -281,8 +281,66 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ---- Telegram: brief notification on open. Full TP ladder shown after
-  // post-fill correction (see /api/manage-trades correctTPs). ----
+  // ---- V10: Build TP ladder server-side ----
+  // V9 used to do this on the frontend after fill confirmation, then POST to /api/manage-trades.
+  // V10 does it here, server-side, so the ladder works without a browser open.
+  // Ladder splits the distance from fill -> broker TP into 4 stages (25/50/75/100%).
+  if (positionId && verified.fillPrice) {
+    try {
+      const fill = verified.fillPrice;
+      const cat = /XAU|GOLD/i.test(trySym) ? 'GOLD'
+                : /XAG|SILVER/i.test(trySym) ? 'METAL'
+                : /BTC|ETH|XRP|SOL|DOGE|CRYPTO/i.test(trySym) ? 'CRYPTO'
+                : /NAS|SPX|US30|GER|UK100|JP225/i.test(trySym) ? 'INDEX'
+                : 'FOREX';
+      const sign = direction === 'LONG' ? 1 : -1;
+      // Distance from fill to broker TP becomes the 4-stage range
+      const tpRef = verified.brokerTP || tp;
+      let tp1, tp2, tp3, tp4;
+      if (tpRef && Math.abs(tpRef - fill) > 0) {
+        const totalDist = Math.abs(tpRef - fill);
+        tp1 = fill + sign * totalDist * 0.25;
+        tp2 = fill + sign * totalDist * 0.50;
+        tp3 = fill + sign * totalDist * 0.75;
+        tp4 = tpRef;
+      } else {
+        // No broker TP -> derive from SL distance with 2.5R total
+        const slRef = verified.brokerSL || sl;
+        const slDist = Math.abs(slRef - fill);
+        const totalDist = slDist * 2.5;
+        tp1 = fill + sign * totalDist * 0.25;
+        tp2 = fill + sign * totalDist * 0.50;
+        tp3 = fill + sign * totalDist * 0.75;
+        tp4 = fill + sign * totalDist;
+      }
+      const dp = priceDp(fill);
+      const ladder = {
+        positionId,
+        instrument: trySym,
+        direction,
+        fillPrice: fill,
+        tp1: parseFloat(tp1.toFixed(dp)),
+        tp2: parseFloat(tp2.toFixed(dp)),
+        tp3: parseFloat(tp3.toFixed(dp)),
+        tp4: parseFloat(tp4.toFixed(dp)),
+        sl: verified.brokerSL || sl,
+        cat,
+        createdAt: Date.now(),
+      };
+      // Store under v9:tp:{positionId} -- this is the key cron + manage-trades read from
+      const KV_URL = process.env.KV_REST_API_URL;
+      const KV_TOK = process.env.KV_REST_API_TOKEN;
+      if (KV_URL && KV_TOK) {
+        try {
+          const r = new Redis({ url: KV_URL, token: KV_TOK });
+          await r.set('v9:tp:' + positionId, JSON.stringify(ladder), { ex: 7 * 24 * 60 * 60 });
+          console.log('[EXECUTE] TP ladder stored for ' + positionId + ': tp1=' + ladder.tp1 + ' tp2=' + ladder.tp2 + ' tp3=' + ladder.tp3 + ' tp4=' + ladder.tp4);
+        } catch (e) { console.error('[EXECUTE] TP ladder store FAILED: ' + e.message); }
+      }
+    } catch (e) { console.error('[EXECUTE] TP ladder build threw: ' + e.message); }
+  }
+
+  // ---- Telegram: brief notification on open. ----
   const dp = priceDp(entryPrice);
   const icon = direction === 'LONG' ? '🟢' : '🔴';
   const strategy = (comment || '').replace('QB:', '') || 'V9';

@@ -155,12 +155,22 @@ async function fetchCandles(baseSym, timeframe, count) {
   const tf = TF_MAP[timeframe] || timeframe;
   const n = Math.min(Math.max(count || 100, 10), 1000); // MetaAPI max 1000
 
-  // V10: Redis cache for candles. Different TFs have different appropriate TTLs.
-  // 1m candles change every minute, 1h every hour, 1d every day. Cache TTL = TF duration / 4.
-  // This crushes the 9-TF * 3-instrument storm into mostly cache hits after warmup.
+  // V10: Redis cache for candles. Smart TTLs per timeframe — there's no point re-fetching
+  // a 1-month candle every minute. Following user's design: refresh roughly once per
+  // bar duration, not per cron tick.
   const r = getRedis();
   const cacheKey = 'v10:c:' + sym + ':' + tf + ':' + n;
-  const ttlMap = { '1m': 20, '5m': 60, '15m': 180, '30m': 300, '1h': 600, '4h': 1800, '1d': 3600, '1w': 7200, '1mn': 14400 };
+  const ttlMap = {
+    '1m':   30,             // 30s -- fresh enough for entries
+    '5m':   120,            // 2min
+    '15m':  300,            // 5min
+    '30m':  600,            // 10min
+    '1h':   1800,           // 30min
+    '4h':   7200,           // 2h
+    '1d':   43200,          // 12h
+    '1w':   86400,          // 1 day
+    '1mn':  259200,         // 3 days
+  };
   const ttl = ttlMap[tf] || 300;
   if (r) {
     try {

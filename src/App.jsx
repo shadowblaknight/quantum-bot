@@ -410,7 +410,6 @@ const CSS = `
 `;
 
 const NAV = [
-  { id: "live",     icon: "\u25CF", label: "Live Trade"   },
   { id: "trades",   icon: "\u25B6", label: "Active Trades" },
   { id: "intel",    icon: "\u25CE", label: "Pair Intel"    },
   { id: "memory",   icon: "\u26C2", label: "Bot Memory"    },
@@ -963,7 +962,7 @@ export default function App() {
   const [riskMode,    setRiskMode]    = useState(prefs.riskMode || "TEST");
   const [soundEnabled, setSoundEnabled] = useState(prefs.soundEnabled !== false); // default ON
 
-  const [page,           setPage]           = useState("live");
+  const [page,           setPage]           = useState("trades");
   const [prices,         setPrices]         = useState({});
   const [openPositions,  setOpenPositions]  = useState([]);
   const [closedTrades,   setClosedTrades]   = useState([]);
