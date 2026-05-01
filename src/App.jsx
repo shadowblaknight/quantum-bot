@@ -348,11 +348,65 @@ const CSS = `
     .stats-grid { grid-template-columns:1fr 1fr; }
     .inst-grid { grid-template-columns:1fr 1fr !important; }
     .tv-probs { grid-template-columns:1fr 1fr; }
+    /* Make room for the mobile bottom nav */
+    .content { padding-bottom:88px !important; }
   }
   @media (max-width: 600px) {
     .g2, .g3, .g4c { grid-template-columns:1fr; }
-    .content { padding:14px 14px 24px; }
-    .topbar { padding:10px 14px; }
+    .content { padding:14px 14px 88px; }
+    .topbar { padding:10px 14px; gap:6px; }
+    /* Topbar cards smaller on phone */
+    .tc { padding:6px 8px !important; min-width:0 !important; flex:1 1 auto !important; }
+    .tc-lbl { font-size:9px !important; }
+    .tc-val { font-size:13px !important; }
+    .tb-sep { display:none; }
+    .tb-time { width:100%; font-size:10px; text-align:center; padding-top:4px; border-top:1px solid var(--navy-l); margin-top:4px; }
+    /* Reduce panel padding on phone */
+    .panel { padding:12px !important; }
+    /* Buttons smaller */
+    .btn { padding:8px 12px; font-size:12px; }
+    /* Tables horizontal scroll instead of breaking layout */
+    table { font-size:11px; }
+    .tv-probs { grid-template-columns:1fr 1fr; gap:6px; }
+    .stat-mini-val { font-size:14px; }
+    /* Hide last-updated text on smallest screens to save space */
+  }
+
+  /* V11 — Mobile bottom navigation bar (visible only ≤ 900px) */
+  .mobile-nav {
+    display:none;
+    position:fixed; bottom:0; left:0; right:0;
+    background:rgba(15, 23, 42, 0.95);
+    backdrop-filter:blur(12px);
+    -webkit-backdrop-filter:blur(12px);
+    border-top:1px solid var(--navy-l);
+    z-index:50;
+    padding:8px 4px calc(8px + env(safe-area-inset-bottom)) 4px;
+  }
+  .mobile-nav-inner {
+    display:flex; justify-content:space-around; align-items:center;
+    overflow-x:auto;
+    scrollbar-width:none; -ms-overflow-style:none;
+  }
+  .mobile-nav-inner::-webkit-scrollbar { display:none; }
+  .mn-btn {
+    flex:0 0 auto;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:3px;
+    padding:6px 10px;
+    min-width:54px;
+    background:transparent; border:none;
+    color:#94a3b8;
+    font-size:9.5px; font-weight:600;
+    cursor:pointer;
+    border-radius:8px;
+    transition:all 150ms;
+  }
+  .mn-btn.on { color:#22d3ee; background:rgba(34, 211, 238, 0.08); }
+  .mn-icon { font-size:18px; line-height:1; }
+  .mn-label { font-size:9px; letter-spacing:0.2px; text-transform:uppercase; }
+  @media (max-width: 900px) {
+    .mobile-nav { display:block; }
   }
 
   /* ================ V9.7 -- CHARTS & DECODER ================ */
@@ -489,9 +543,12 @@ function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
   // Initialize chart once on mount
   useEffect(() => {
     if (!containerRef.current) return;
+    // V11: responsive chart height — shorter on mobile so it fits with overlays
+    const isMobile = typeof window !== "undefined" && window.innerWidth <= 600;
+    const chartHeight = isMobile ? 320 : 460;
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: 460,
+      height: chartHeight,
       layout: {
         background: { type: ColorType.Solid, color: "#0f172a" },
         textColor: "#cbd5e1",
@@ -515,15 +572,21 @@ function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
     });
     chartRef.current  = chart;
     candleRef.current = candleSeries;
-    // Resize on container resize
+    // Resize on container resize / orientation change
     const onResize = () => {
       if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: containerRef.current.clientWidth });
+        const mob = window.innerWidth <= 600;
+        chartRef.current.applyOptions({
+          width: containerRef.current.clientWidth,
+          height: mob ? 320 : 460,
+        });
       }
     };
     window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
     return () => {
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
       try { chart.remove(); } catch (_) {}
       chartRef.current = null;
       candleRef.current = null;
@@ -695,7 +758,7 @@ function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
       {err && <div style={{ padding: 10, background: "#7f1d1d", color: "#fff", borderRadius: 4, fontSize: 12, marginBottom: 10 }}>Error: {err}</div>}
 
       {/* The chart canvas */}
-      <div ref={containerRef} style={{ width: "100%", height: 460, background: "#0f172a", borderRadius: 6 }} />
+      <div ref={containerRef} className="aiwatch-chart-container" style={{ width: "100%", height: typeof window !== "undefined" && window.innerWidth <= 600 ? 320 : 460, background: "#0f172a", borderRadius: 6 }} />
 
       {/* Annotation summary */}
       <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
@@ -821,7 +884,7 @@ function AIWatchPage({ instruments, setPage }) {
             Live chart + AI annotations. Updates every 60s.
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           {/* Timeframe selector */}
           <div style={{ display: "flex", gap: 4 }}>
             {["5m", "15m", "1h", "4h", "1d"].map(t => (
@@ -829,14 +892,16 @@ function AIWatchPage({ instruments, setPage }) {
                 key={t}
                 onClick={() => setTf(t)}
                 style={{
-                  padding: "4px 10px",
-                  fontSize: 11,
+                  padding: "8px 12px",
+                  fontSize: 12,
                   background: tf === t ? "#2563eb" : "#1e293b",
                   color: tf === t ? "#fff" : "#94a3b8",
                   border: "none",
                   borderRadius: 4,
                   cursor: "pointer",
                   fontWeight: 600,
+                  minHeight: 36,
+                  minWidth: 40,
                 }}
               >{t}</button>
             ))}
@@ -844,8 +909,9 @@ function AIWatchPage({ instruments, setPage }) {
           <button
             onClick={() => setRefreshKey(k => k + 1)}
             style={{
-              padding: "4px 12px", fontSize: 11, background: "#1e293b", color: "#cbd5e1",
+              padding: "8px 14px", fontSize: 12, background: "#1e293b", color: "#cbd5e1",
               border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600,
+              minHeight: 36,
             }}
           >↻ Refresh</button>
         </div>
@@ -858,14 +924,15 @@ function AIWatchPage({ instruments, setPage }) {
             key={sym}
             onClick={() => setActiveSym(sym)}
             style={{
-              padding: "6px 14px",
-              fontSize: 12,
+              padding: "10px 14px",
+              fontSize: 13,
               background: activeSym === sym ? "#0f172a" : "#1e293b",
               color: activeSym === sym ? "#fff" : "#94a3b8",
               border: activeSym === sym ? "1px solid #2563eb" : "1px solid #334155",
-              borderRadius: 4,
+              borderRadius: 6,
               cursor: "pointer",
               fontWeight: 600,
+              minHeight: 38,
             }}
           >{sym}</button>
         ))}
@@ -3789,6 +3856,23 @@ export default function App() {
 
         </div>
       </div>
+
+      {/* V11 — Mobile bottom navigation. Hidden on desktop via CSS. */}
+      <nav className="mobile-nav">
+        <div className="mobile-nav-inner">
+          {NAV.map((n) => (
+            <button
+              key={n.id}
+              className={`mn-btn${page === n.id ? " on" : ""}`}
+              onClick={() => setPage(n.id)}
+              aria-label={n.label}
+            >
+              <span className="mn-icon">{n.icon}</span>
+              <span className="mn-label">{n.label.split(" ")[0]}</span>
+            </button>
+          ))}
+        </div>
+      </nav>
     </div>
   );
 }
