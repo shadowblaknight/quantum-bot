@@ -13,7 +13,7 @@
     },
     {
       "path": "/api/pair-intel?action=refresh",
-      "schedule": "0 * * * *"
+      "schedule": "30 21 * * *"
     },
     {
       "path": "/api/cron?action=weekly-backtest",
@@ -33,6 +33,10 @@
     "api/memory.js":           { "maxDuration": 15 },
     "api/history.js":          { "maxDuration": 30 },
     "api/historical-fetch.js": { "maxDuration": 60 },
-    "api/backtest.js":         { "maxDuration": 60 }
+    "api/backtest.js":         { "maxDuration": 60 },
+    "api/setup-detector.js":   { "maxDuration": 30 },
+    "api/observation-memory.js": { "maxDuration": 15 },
+    "api/pattern-learner.js":  { "maxDuration": 30 },
+    "api/ai-watch.js":         { "maxDuration": 30 }
   }
 }

@@ -18,6 +18,11 @@ const {
 } = require('./_lib');
 
 const { fetchMultiTF, fetchPositions } = require('./broker');
+// V11 step 2: setup detector + observation memory
+const { readSetupsFor }                    = require('./setup-detector');
+const { readObservations, writeObservations } = require('./observation-memory');
+// V11 step 3: pattern learner output (refreshed end-of-day)
+const { readPatternsForAI }                = require('./pattern-learner');
 const { getRegimeFor } = require('./regime');
 const { readMemory, buildPromptContext, appendDecision } = require('./memory');
 const { readFamilyForSymbol } = require('./trades');
@@ -99,7 +104,7 @@ function summarizeTF(tf, candles) {
 }
 
 // Build the AI prompt.
-function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtestStats, openPositions, correlationCluster, sessionLabel }) {
+function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtestStats, openPositions, correlationCluster, sessionLabel, setups, observations, patterns }) {
   const memCtx = buildPromptContext(memory, sym);
 
   const tfLines = [];
@@ -139,12 +144,80 @@ function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtes
     : '  (none)';
 
   const chaosLine = chaos && chaos.chaos
-    ? 'CHAOS DETECTED on ' + sym + ' (1m/1h ATR ratio ' + chaos.ratio + 'x). Strongly avoid new trades unless setup is overwhelming.'
+    ? 'CHAOS DETECTED on ' + sym + ' (1m/1h ATR ratio ' + chaos.ratio + 'x). Volatility is unusually concentrated -- consider in your sizing.'
     : 'No chaos signal.';
 
   const clusterLine = correlationCluster
     ? 'Correlation cluster: ' + correlationCluster + '. Check open positions in this cluster before adding.'
     : 'No correlation cluster.';
+
+  // V11 STEP 2: Active setups (mechanical pattern detector)
+  let setupsBlock = '';
+  if (Array.isArray(setups) && setups.length > 0) {
+    const lines = setups.map(s =>
+      '  • ' + s.pattern + ' ' + s.direction + ' (quality ' + (s.quality * 100).toFixed(0) + '%) @ ' + s.level.toFixed(5) +
+      '\n    invalidates if price ' + (s.direction === 'LONG' ? '<' : '>') + ' ' + s.invalidatesAt.toFixed(5) +
+      '\n    evidence: ' + (s.evidence || []).join('; ')
+    );
+    setupsBlock = '\n=== ACTIVE SETUPS DETECTED (V11) ===\n' + lines.join('\n') +
+                  '\nTreat these as mechanically-detected patterns. Quality is detector confidence (0-100%), not your trading confidence.\n';
+  } else {
+    setupsBlock = '\n=== ACTIVE SETUPS DETECTED (V11) ===\n  (none currently — no liquidity sweep, range break, session drive, news momentum, or confluence detected)\n';
+  }
+
+  // V11 STEP 2: Your past observations on this instrument
+  let obsBlock = '';
+  if (Array.isArray(observations) && observations.length > 0) {
+    const lines = observations.map(o => {
+      let line = '  • [' + o.id + '] ' + o.text;
+      if (o.direction && o.direction !== 'NEUTRAL') line += ' (lean: ' + o.direction + ')';
+      if (o.watchLevel != null) line += ' watchLevel=' + o.watchLevel;
+      if (o.invalidatesAt != null) line += ' invalidates@' + o.invalidatesAt;
+      const ageMin = Math.floor((Date.now() - o.createdAt) / 60000);
+      line += ' (age: ' + ageMin + 'min)';
+      return line;
+    });
+    obsBlock = '\n=== YOUR ACTIVE OBSERVATIONS ON ' + sym + ' (continuous study) ===\n' + lines.join('\n') +
+               '\nThese are notes you wrote in previous calls. You can refresh them (keep watching), let them expire (silence = expire in ' + Math.floor(4) + 'h), or invalidate them (price broke level).\n';
+  }
+
+  // V11 STEP 3: Pattern learner output (refreshed end-of-day from your own closed trades)
+  let patternsBlock = '';
+  if (patterns && patterns.totalTrades > 0) {
+    const symU = normSym(sym);
+    // Tight patterns matching this symbol (PRIORITIZE)
+    const tightForSym = (patterns.tight || []).filter(p => p.signature.startsWith(symU + '/'));
+    const avoidForSym = (patterns.avoid || []).filter(p => p.signature.startsWith(symU + '/'));
+    // Loose patterns matching this symbol
+    const looseForSym = (patterns.loose || []).filter(p => p.symbol === symU);
+
+    if (tightForSym.length > 0 || avoidForSym.length > 0 || looseForSym.length > 0) {
+      let lines = [];
+      lines.push('  Based on ' + patterns.totalTrades + ' closed trades over ' + patterns.daysBack + ' days (overall WR ' + patterns.overallWR + '%):');
+      if (tightForSym.length > 0) {
+        lines.push('  ✓ PRIORITIZE these signatures (proven winning combos):');
+        for (const p of tightForSym.slice(0, 5)) {
+          lines.push('    • ' + p.signature.replace(symU + '/', '') + ' — ' + p.wins + '/' + p.n + ' wins (' + p.wr + '% WR, expR=' + p.expectancyR + ')');
+        }
+      }
+      if (avoidForSym.length > 0) {
+        lines.push('  ✗ AVOID these signatures (consistently losing):');
+        for (const p of avoidForSym.slice(0, 5)) {
+          lines.push('    • ' + p.signature.replace(symU + '/', '') + ' — ' + p.wins + '/' + p.n + ' wins (' + p.wr + '% WR, expR=' + p.expectancyR + ')');
+        }
+      }
+      if (looseForSym.length > 0) {
+        lines.push('  ⚙ Single-dimension trends:');
+        for (const p of looseForSym.slice(0, 4)) {
+          lines.push('    • ' + p.dimension + ': ' + p.recommendation);
+        }
+      }
+      patternsBlock = '\n=== LEARNED PATTERNS FROM YOUR PRIOR TRADES ===\n' + lines.join('\n') +
+                     '\n  Use these as priors. A signature matching PRIORITIZE = +5-10 confidence. Matching AVOID = -10-15 confidence (or pick a different family).\n';
+    } else {
+      patternsBlock = '\n=== LEARNED PATTERNS FROM YOUR PRIOR TRADES ===\n  No patterns matching ' + symU + ' yet. Need ≥6 trades with same (family/mode/session/regime/aligned) signature for tight patterns, ≥10 trades total on symbol for loose patterns.\n  Total trades on all symbols: ' + patterns.totalTrades + '.\n';
+    }
+  }
 
   return `You are the decision layer of an algorithmic trading system. Make ONE decision now.
 
@@ -154,10 +227,10 @@ Symbol: ${sym}  ·  Category: ${instCategory(sym)}  ·  Session: ${sessionLabel}
 ${memCtx ? '=== YOUR MEMORY (continuous identity across calls) ===\n' + memCtx + '\n' : ''}
 === MARKET REGIME ===
 Current regime: ${regime.regime} (score ${regime.score}/100)
-Indicators: ADX=${(regime.indicators.h1Adx14 || 0).toFixed(1)} · ATR=${(regime.indicators.h1Atr14 || 0).toFixed(5)} · BB-width=${((regime.indicators.h1BBwidth || 0) * 100).toFixed(2)}% · MA-diff=${(regime.indicators.maDiff || 0).toFixed(2)} · H4 trend dir=${regime.indicators.h4TrendDir}
+Indicators: ADX=${((regime.indicators && regime.indicators.h1Adx14) || 0).toFixed(1)} · ATR=${((regime.indicators && regime.indicators.h1Atr14) || 0).toFixed(5)} · BB-width=${(((regime.indicators && regime.indicators.h1BBwidth) || 0) * 100).toFixed(2)}% · MA-diff=${((regime.indicators && regime.indicators.maDiff) || 0).toFixed(2)} · H4 trend dir=${(regime.indicators && regime.indicators.h4TrendDir) || 0}
 ${chaosLine}
 ${clusterLine}
-
+${setupsBlock}${obsBlock}${patternsBlock}
 === MULTI-TIMEFRAME VIEW ===
 ${tfLines.join('\n')}
 
@@ -168,7 +241,9 @@ ${famLines.join('\n')}
 ${openLines}
 
 === INSTRUCTIONS ===
-You are an active trading decision maker. Your job is to TRADE setups when conditions warrant — not to find reasons NOT to trade. The bot has many other safety layers (chaos detector, correlation cap, position-already-open check, family Bayesian floor). Your job is the entry decision.
+You are an active trading decision maker. Your job is to TRADE setups when conditions warrant — not to find reasons NOT to trade.
+
+**V11 — IMPORTANT: There are NO hard gates downstream of you.** The system will execute whatever you decide. Chaos info, correlation cluster, regime — all are informational signals you weigh in your decision. The only hard check is "position already open on this symbol" (broker enforces). So your decision really matters: there is no second layer that catches a bad trade for you.
 
 **ANTI-PATTERN TO AVOID:** If your memory shows several consecutive WAIT decisions on this symbol, do NOT treat that as evidence to wait again. Each decision must be made fresh on the current chart. A streak of WAITs is a hint that you may be over-cautious, not that the next answer should also be WAIT.
 
@@ -177,13 +252,14 @@ You are an active trading decision maker. Your job is to TRADE setups when condi
 2. **Raw tactic.** Specific label (e.g. "TREND_H4+MOM_SESSION", "ICT_KILLZONE+SWEEP") for learning.
 
 3. **Confidence scale.**
-   - 30+ = take the trade (small size). The system will scale position size.
-   - 50+ = standard size.
-   - 65+ = full size.
-   - 80+ = oversized.
-   - Below 30 = WAIT.
+   - 85+ = oversized full position (very high conviction, rare).
+   - 70+ = full size.
+   - 55+ = standard size.
+   - 40+ = small size.
+   - 25+ = micro size (you're committing but acknowledging uncertainty).
+   - Below 25 = nano size if you still want to enter (you're testing a marginal idea).
 
-   **Important:** A confidence of 45% does NOT mean "wait" — it means "take it small." Only output WAIT when conditions are genuinely confused, not just because confidence sits in the 35-50 range.
+   **No hard floor.** If you decide BUY or SELL, the system will size accordingly. Output WAIT only when there is genuinely no actionable read — not because confidence is "low." A confidence of 35 with a clear setup is better than WAIT.
 
 4. **Volume tags.** Treat as ONE supporting signal among many, not a veto.
    - SPIKE/high vol = nice confirmation, +5-10 confidence.
@@ -203,30 +279,56 @@ You are an active trading decision maker. Your job is to TRADE setups when condi
    - If live WR < backtest WR significantly: -10 to -15 confidence (live underperforming).
    - Never let this alone push you to WAIT. The Bayesian sampler already handles uncertainty separately.
 
-7. **Chaos veto.** If chaos flag is set: only trade with confidence 80+. Otherwise normal rules.
+7. **Chaos signal.** If chaos flag is set, conditions are unusually volatile (news spike, flash event). Consider this when sizing — chaos is a context flag, not a hard veto. You can still trade through chaos if the setup is strong enough. Reduce confidence by 10-15 in chaos unless the setup specifically benefits from it (e.g. news momentum trade).
 
-8. **Pip distances.** slPips and tp1Pips in instrument-native pips:
-   - Forex: typical SL 15-40 pips, TP 30-100.
-   - Gold (XAUUSD): typical SL 50-150 pips ($0.50-$1.50), TP 100-400 pips.
-   - BTC: typical SL 200-600 pips, TP 500-1500.
-   - Indices: typical SL 30-80 points, TP 60-200.
+8. **Trading mode (required).** You must specify ONE of:
+   - **SCALP**: quick reversal, 1-1.5R targets, hold ~minutes-1h. Use when the setup is a reactive bounce or fade with tight risk.
+   - **DAY**: intraday swing, 1-4R targets, hold ~1-8h. **Default for most setups.** Use when H1+H4 align and you expect a trending move during the active session.
+   - **SWING**: multi-day, 1.5-8R targets, hold ~1-3 days. Use only when D1/W structure supports it AND H4 is clearly aligned. Rare — most setups are DAY mode.
 
-9. **Output JSON only:**
+9. **slPips (required).** SL distance in instrument-native pips. Suggested 1R defaults:
+   - Forex non-JPY: SCALP 12, DAY 25, SWING 50
+   - JPY pairs: SCALP 15, DAY 30, SWING 60
+   - Gold: SCALP 150, DAY 400, SWING 1000 (in $0.01 pips, so DAY 400 = $4)
+   - BTC: SCALP 300, DAY 800, SWING 2000 ($)
+   - Indices: SCALP 25, DAY 60, SWING 150 (points)
+   You can scale by 1.5x for high-volatility conditions or 0.7x for tight ranges. The TP ladder is auto-built from SL distance + mode — don't compute TPs yourself.
+
+11. **Observations (V11 — your continuous study).**
+    Beyond the immediate trade decision, you can leave OBSERVATIONS for your future calls. These are notes you write to yourself that persist across cron ticks. Useful when the chart is "almost ready" but no trade yet.
+
+    Examples of good observations:
+    - { id: "EURUSD-asia-low", text: "Watching for sweep of Asia low at 1.1690. If sweep + reversal candle on H1, short setup.", direction: "SHORT", watchLevel: 1.1690, invalidatesAt: 1.1720, refreshHours: 4 }
+    - { id: "XAUUSD-range", text: "Gold consolidating 4585-4605 since London open. Break either side with volume = trade.", direction: "NEUTRAL", refreshHours: 4 }
+    - { id: "BTC-FOMC-fade", text: "BTC dumped 2% post-FOMC. Watching for institutional fade if M5 reverses near 76800.", direction: "LONG", watchLevel: 76800, invalidatesAt: 75500, refreshHours: 2 }
+
+    Rules:
+    - Write 0-3 observations per call. Empty array if you have nothing meaningful.
+    - Use stable IDs (e.g. "EURUSD-asia-low") so future calls can refresh the same observation rather than duplicating it.
+    - If a previous observation is still valid, repeat it with the SAME id to refresh it. If you don't include it, it expires after refreshHours.
+    - If a previous observation should be invalidated NOW (you saw the level break), add a new obs with the same id and { text: "INVALIDATED: <reason>", direction: "NEUTRAL", refreshHours: 0 }.
+
+12. **Output JSON only:**
 {
   "decision": "BUY" | "SELL" | "WAIT",
+  "mode": "SCALP" | "DAY" | "SWING",
   "family": "TREND" | "REVERSION" | "STRUCTURE" | "BREAKOUT" | "RANGE" | "NEWS",
   "rawTactic": "string -- specific label",
   "confidence": 0-100,
   "reason": "concise multi-TF + regime reasoning, MAX 2 sentences",
-  "tp1Pips": number,
   "slPips": number,
-  "memo": "optional one-line note for next AI call to remember"
+  "memo": "optional one-line note for next AI call to remember",
+  "observations": [
+    { "id": "...", "text": "...", "direction": "LONG|SHORT|NEUTRAL", "watchLevel": number?, "invalidatesAt": number?, "refreshHours": number? }
+  ]
 }
 
 DO NOT include anything before or after the JSON.`;
 }
 
 // Volume sizing tiers (V9 compatible)
+// V11 sizing: smooth scale, no hard cutoff. AI decided BUY/SELL — we honor it at any
+// confidence. Below 30 = nano position (5% of base). Up to 85+ = full base.
 function sizingFor(confidence, riskMode, category) {
   const baseFx     = riskMode === 'AGGRESSIVE' ? 0.50 : riskMode === 'REGULAR' ? 0.20 : 0.05;
   const baseGold   = riskMode === 'AGGRESSIVE' ? 0.20 : riskMode === 'REGULAR' ? 0.10 : 0.02;
@@ -236,13 +338,12 @@ function sizingFor(confidence, riskMode, category) {
              : category === 'CRYPTO' ? baseCrypto
              : category === 'INDEX'  ? baseIndex
              : baseFx;
-  // V10: tiers re-aligned with prompt thresholds
-  if (confidence >= 85) return base;             // oversized
+  if (confidence >= 85) return base;             // oversized / full
   if (confidence >= 70) return base * 0.8;       // full
   if (confidence >= 55) return base * 0.5;       // standard
   if (confidence >= 40) return base * 0.3;       // small
-  if (confidence >= 30) return base * 0.15;      // micro
-  return 0;
+  if (confidence >= 25) return base * 0.15;      // micro
+  return base * 0.05;                            // nano (AI is committing despite low conf)
 }
 
 function getSessionLabel() {
@@ -322,18 +423,23 @@ module.exports = async (req, res) => {
   const riskMode = body.riskMode || 'TEST';
 
   try {
-    // 1. Fetch all the context in parallel
-    const [multiTF, regime, memory, familyStats, positionsResp, backtestStats] = await Promise.all([
+    // 1. Fetch all the context in parallel (including V11 setups + observations + patterns)
+    const [multiTF, regime, memory, familyStats, positionsResp, backtestStats, setups, observations, patterns] = await Promise.all([
       fetchMultiTF(sym),
       getRegimeFor(sym),
       readMemory(),
       readFamilyForSymbol(sym),
       fetchPositions(),
       readBacktestStats(sym),
+      readSetupsFor(sym),
+      readObservations(sym),
+      readPatternsForAI(),
     ]);
     const openPositions = positionsResp.positions || [];
 
-    // Skip if already open on this symbol
+    // V11: Only ONE hard check remains — already-open on same symbol. Broker enforces this
+    // anyway, so we skip the AI call to avoid wasted tokens. Everything else (cluster,
+    // chaos, confidence) is now AI-informed soft signal, not hard gate.
     const alreadyOpen = openPositions.some(p => normSym(p.symbol) === sym);
     if (alreadyOpen) {
       return res.status(200).json({
@@ -343,24 +449,15 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 2. Correlation cluster check
+    // V11: Cluster info is passed to AI as context, but no hard veto.
     const myCluster = clusterFor(sym);
-    if (myCluster) {
-      const clusterMembers = openPositions.map(p => clusterFor(p.symbol)).filter(Boolean);
-      if (clusterMembers.includes(myCluster)) {
-        return res.status(200).json({
-          decision: 'WAIT',
-          reason: 'Correlation cluster ' + myCluster + ' already has an open position',
-          skipReason: 'correlation-cluster',
-        });
-      }
-    }
 
     // 3. Build prompt + call Claude
     const sessionLabel = getSessionLabel();
     const prompt = buildPrompt({
       sym, multiTF, regime, chaos: regime.chaos, memory, familyStats, backtestStats,
       openPositions, correlationCluster: myCluster, sessionLabel,
+      setups, observations, patterns,
     });
 
     const claudeResp = await callClaude(prompt);
@@ -372,22 +469,23 @@ module.exports = async (req, res) => {
       return res.status(200).json({ decision: 'WAIT', reason: 'AI did not return parseable decision', raw: (claudeResp.text || '').slice(0, 300) });
     }
 
-    // 4. Validate + adjust confidence with Bayesian sampling
+    // V11 STEP 2: Persist any observations the AI wrote in this call.
+    if (Array.isArray(decision.observations) && decision.observations.length > 0) {
+      try {
+        const result = await writeObservations(sym, decision.observations);
+        decision.observationsWritten = result.written;
+      } catch (e) { console.warn('[AI] observations write: ' + e.message); }
+    }
+
+    // 4. Validate family + adjust confidence with Bayesian sampling.
+    // V11: Bayesian adjustment is INFORMATIONAL only -- we record both raw and adjusted
+    // confidence but DON'T use the adjusted one to override AI's BUY/SELL decision.
     if (!FAMILIES.includes(decision.family)) decision.family = tacticFamily(decision.rawTactic || '');
     const adjustedConf = adjustConfidenceWithBayes(decision.confidence || 0, decision.family, familyStats, regime);
     decision.aiRawConfidence = decision.confidence;
-    decision.confidence = adjustedConf;
-
-    // Chaos veto
-    if (regime.chaos && regime.chaos.chaos && decision.confidence < 80) {
-      decision.decision = 'WAIT';
-      decision.reason = 'Chaos detected (ratio ' + regime.chaos.ratio + 'x); confidence ' + decision.confidence + ' < 80 chaos threshold';
-    }
-
-    // Below-min veto (matches prompt instruction #3)
-    if (decision.confidence < 30) {
-      decision.decision = 'WAIT';
-    }
+    decision.bayesianConfidence = adjustedConf;
+    // We keep AI's raw confidence as the canonical value (used for sizing).
+    // Bayesian shows up in logs but doesn't change the trade.
 
     // 5. Volume sizing
     const cat = instCategory(sym);

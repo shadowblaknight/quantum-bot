@@ -1,5 +1,8 @@
 /* eslint-disable */
 import { useState, useEffect, useCallback, useRef } from "react";
+// V11 Step 4: Lightweight Charts for the AI Watch visualization page.
+// Requires: npm install lightweight-charts@^4.2.0
+import { createChart, CrosshairMode, ColorType } from "lightweight-charts";
 
 const API = (path) => `/api/${path}`;
 const PREFS_KEY = "qb_v9_prefs";
@@ -410,14 +413,15 @@ const CSS = `
 `;
 
 const NAV = [
-  { id: "trades",   icon: "\u25B6", label: "Active Trades" },
-  { id: "intel",    icon: "\u25CE", label: "Pair Intel"    },
-  { id: "memory",   icon: "\u26C2", label: "Bot Memory"    },
-  { id: "backtest", icon: "\u29BF", label: "Backtest"      },
-  { id: "news",     icon: "\u26A0", label: "News"         },
-  { id: "reports",  icon: "\u2630", label: "Reports"      },
-  { id: "lab",      icon: "\u25C6", label: "Strategy Lab" },
-  { id: "settings", icon: "\u2699", label: "Settings"     },
+  { id: "aiwatch",  icon: "\u25C9", label: "AI Watch"       },
+  { id: "live",     icon: "\u25CF", label: "Live"           },
+  { id: "intel",    icon: "\u25CE", label: "Pair Intel"     },
+  { id: "memory",   icon: "\u26C2", label: "Bot Memory"     },
+  { id: "backtest", icon: "\u29BF", label: "Backtest"       },
+  { id: "news",     icon: "\u26A0", label: "News"           },
+  { id: "reports",  icon: "\u2630", label: "Reports"        },
+  { id: "lab",      icon: "\u25C6", label: "Strategy Lab"   },
+  { id: "settings", icon: "\u2699", label: "Settings"       },
 ];
 
 // Map news country code -> instruments in user's watchlist affected by this currency
@@ -434,6 +438,460 @@ const newsAffects = (country, userInstruments) => {
     return u.includes(c);
   });
 };
+
+// ============================================================
+// V11 STEP 4 — AI WATCH CHART COMPONENT
+// ============================================================
+// Renders a candlestick chart for one instrument with AI annotations:
+//   - Setup detector zones (boxes for range, lines for sweep levels)
+//   - Observation watchLevels (horizontal lines with text labels)
+//   - Position SL/TP1-4 lines with mode-aware colors
+//   - Setup direction badge in header
+//
+// Uses lightweight-charts. Chart instance is created once per component mount,
+// then series data is updated on each refresh. Cleanup on unmount.
+function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
+  const containerRef = useRef(null);
+  const chartRef     = useRef(null);
+  const candleRef    = useRef(null);
+  const priceLinesRef = useRef([]);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  // Fetch the AI watch payload for this symbol+timeframe
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const r = await fetch(API(`ai-watch?symbol=${encodeURIComponent(symbol)}&tf=${timeframe}&n=120`));
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      setData(d);
+      if (onLoaded) onLoaded(d);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [symbol, timeframe, onLoaded]);
+
+  // Re-fetch when symbol/timeframe/refreshKey changes
+  useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
+
+  // Auto-poll every 60s while mounted
+  useEffect(() => {
+    const t = setInterval(fetchData, 60000);
+    return () => clearInterval(t);
+  }, [fetchData]);
+
+  // Initialize chart once on mount
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height: 460,
+      layout: {
+        background: { type: ColorType.Solid, color: "#0f172a" },
+        textColor: "#cbd5e1",
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: "#1e293b" },
+        horzLines: { color: "#1e293b" },
+      },
+      crosshair: { mode: CrosshairMode.Normal },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#334155" },
+      rightPriceScale: { borderColor: "#334155" },
+    });
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#22c55e",
+      downColor: "#ef4444",
+      borderUpColor: "#22c55e",
+      borderDownColor: "#ef4444",
+      wickUpColor: "#16a34a",
+      wickDownColor: "#dc2626",
+    });
+    chartRef.current  = chart;
+    candleRef.current = candleSeries;
+    // Resize on container resize
+    const onResize = () => {
+      if (containerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({ width: containerRef.current.clientWidth });
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      try { chart.remove(); } catch (_) {}
+      chartRef.current = null;
+      candleRef.current = null;
+    };
+  }, []);
+
+  // Update chart data + overlays when payload changes
+  useEffect(() => {
+    if (!data || !candleRef.current) return;
+    const candlesRaw = (data.candles || []).map(c => ({
+      time:  Math.floor(new Date(c.time).getTime() / 1000),
+      open:  c.open,
+      high:  c.high,
+      low:   c.low,
+      close: c.close,
+    })).filter(c => c.time && isFinite(c.open) && isFinite(c.close));
+    if (candlesRaw.length === 0) return;
+    // Sort ascending by time + dedup (lightweight-charts requires strict ascending)
+    candlesRaw.sort((a, b) => a.time - b.time);
+    const candles = [];
+    let lastT = -1;
+    for (const c of candlesRaw) {
+      if (c.time !== lastT) { candles.push(c); lastT = c.time; }
+    }
+    candleRef.current.setData(candles);
+
+    // Clear previous price lines
+    for (const pl of priceLinesRef.current) {
+      try { candleRef.current.removePriceLine(pl); } catch (_) {}
+    }
+    priceLinesRef.current = [];
+
+    // 1. Active setups → horizontal lines at the setup level + invalidatesAt
+    for (const s of (data.setups || [])) {
+      const color = s.direction === "LONG" ? "#22c55e" : "#ef4444";
+      const setupLine = candleRef.current.createPriceLine({
+        price: s.level,
+        color: color,
+        lineWidth: 2,
+        lineStyle: 2, // dashed
+        axisLabelVisible: true,
+        title: `${s.pattern.split("_")[0]} ${s.direction} (${(s.quality * 100).toFixed(0)}%)`,
+      });
+      priceLinesRef.current.push(setupLine);
+      // Invalidation level
+      const invLine = candleRef.current.createPriceLine({
+        price: s.invalidatesAt,
+        color: "#64748b",
+        lineWidth: 1,
+        lineStyle: 1, // dotted
+        axisLabelVisible: true,
+        title: "× invalid",
+      });
+      priceLinesRef.current.push(invLine);
+    }
+
+    // 2. AI observations → labeled horizontal lines
+    for (const o of (data.observations || [])) {
+      if (o.watchLevel != null && isFinite(o.watchLevel)) {
+        const color = o.direction === "LONG" ? "#3b82f6" : o.direction === "SHORT" ? "#a855f7" : "#94a3b8";
+        const obsLine = candleRef.current.createPriceLine({
+          price: o.watchLevel,
+          color: color,
+          lineWidth: 1,
+          lineStyle: 0, // solid
+          axisLabelVisible: true,
+          title: `${o.id.slice(0, 12)}`,
+        });
+        priceLinesRef.current.push(obsLine);
+      }
+    }
+
+    // 3. Open positions → entry, SL, TP ladder lines
+    for (const p of (data.positions || [])) {
+      const sign = p.direction === "LONG" ? 1 : -1;
+      // Entry line
+      if (p.openPrice) {
+        const entryLine = candleRef.current.createPriceLine({
+          price: p.openPrice,
+          color: "#fbbf24",
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: `ENTRY ${p.direction}`,
+        });
+        priceLinesRef.current.push(entryLine);
+      }
+      // SL line
+      const slPx = p.ladder && p.ladder.slCurrent ? p.ladder.slCurrent : p.stopLoss;
+      if (slPx) {
+        const slLine = candleRef.current.createPriceLine({
+          price: slPx,
+          color: "#dc2626",
+          lineWidth: 2,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "SL",
+        });
+        priceLinesRef.current.push(slLine);
+      }
+      // TP ladder
+      if (p.ladder) {
+        const tps = [
+          { px: p.ladder.tp1, label: "TP1", hit: p.ladder.tpHits && p.ladder.tpHits.tp1 },
+          { px: p.ladder.tp2, label: "TP2", hit: p.ladder.tpHits && p.ladder.tpHits.tp2 },
+          { px: p.ladder.tp3, label: "TP3", hit: p.ladder.tpHits && p.ladder.tpHits.tp3 },
+          { px: p.ladder.tp4, label: "TP4", hit: p.ladder.tpHits && p.ladder.tpHits.tp4 },
+        ];
+        for (const tp of tps) {
+          if (!tp.px || !isFinite(tp.px)) continue;
+          const line = candleRef.current.createPriceLine({
+            price: tp.px,
+            color: tp.hit ? "#10b981" : "#22c55e",
+            lineWidth: 1,
+            lineStyle: tp.hit ? 0 : 2,
+            axisLabelVisible: true,
+            title: tp.hit ? `${tp.label} ✓` : tp.label,
+          });
+          priceLinesRef.current.push(line);
+        }
+      }
+    }
+
+    // Auto-fit visible range on first load
+    try { chartRef.current.timeScale().fitContent(); } catch (_) {}
+  }, [data]);
+
+  // Header summary
+  const dec = data && data.lastDecision;
+  const reg = data && data.regime;
+  const positionsCount = data && data.positions ? data.positions.length : 0;
+  const setupsCount = data && data.setups ? data.setups.length : 0;
+  const obsCount = data && data.observations ? data.observations.length : 0;
+
+  return (
+    <div className="panel" style={{ padding: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 12, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: "-0.3px" }}>{symbol}</span>
+          {data && data.currentPrice && (
+            <span style={{ fontSize: 14, color: "#94a3b8" }}>
+              @ {data.currentPrice > 1000 ? data.currentPrice.toFixed(2) : data.currentPrice.toFixed(5)}
+            </span>
+          )}
+          {reg && (
+            <span style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#cbd5e1", borderRadius: 4 }}>
+              {reg.regime} ({reg.score}/100)
+              {reg.chaos && <span style={{ color: "#f59e0b", marginLeft: 6 }}>⚠ chaos {reg.chaosRatio}</span>}
+            </span>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {dec && (
+            <span style={{ fontSize: 12, padding: "3px 10px", borderRadius: 4,
+              background: dec.decision === "BUY" ? "#15803d" : dec.decision === "SELL" ? "#b91c1c" : "#334155",
+              color: "#fff", fontWeight: 600 }}>
+              AI: {dec.decision} {dec.confidence}%{dec.family ? ` [${dec.family}]` : ""}
+            </span>
+          )}
+          {loading && <span style={{ fontSize: 11, color: "#64748b" }}>updating...</span>}
+          {data && (
+            <span style={{ fontSize: 11, color: "#64748b" }}>
+              {new Date(data.ts).toLocaleTimeString("en-GB")}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {err && <div style={{ padding: 10, background: "#7f1d1d", color: "#fff", borderRadius: 4, fontSize: 12, marginBottom: 10 }}>Error: {err}</div>}
+
+      {/* The chart canvas */}
+      <div ref={containerRef} style={{ width: "100%", height: 460, background: "#0f172a", borderRadius: 6 }} />
+
+      {/* Annotation summary */}
+      <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 200px" }}>
+          <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>
+            Setups detected ({setupsCount})
+          </div>
+          {data && data.setups && data.setups.length > 0 ? (
+            data.setups.map((s, i) => (
+              <div key={i} style={{ fontSize: 12, marginBottom: 4 }}>
+                <span style={{
+                  display: "inline-block", width: 10, height: 10, borderRadius: 2, marginRight: 6,
+                  background: s.direction === "LONG" ? "#22c55e" : "#ef4444",
+                }} />
+                <strong>{s.pattern}</strong> {s.direction} <span style={{ color: "#64748b" }}>· {(s.quality * 100).toFixed(0)}% quality</span>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginLeft: 16 }}>
+                  level: {s.level.toFixed(s.level > 1000 ? 2 : 5)} · invalidates: {s.invalidatesAt.toFixed(s.invalidatesAt > 1000 ? 2 : 5)}
+                </div>
+                {s.evidence && s.evidence.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#64748b", marginLeft: 16, fontStyle: "italic" }}>
+                    {s.evidence.join(" · ")}
+                  </div>
+                )}
+              </div>
+            ))
+          ) : (
+            <div style={{ fontSize: 11, color: "#64748b" }}>No active setup pattern detected on this instrument right now.</div>
+          )}
+        </div>
+
+        <div style={{ flex: "1 1 200px" }}>
+          <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>
+            AI observations ({obsCount})
+          </div>
+          {data && data.observations && data.observations.length > 0 ? (
+            data.observations.map((o, i) => {
+              const ageMin = Math.floor((Date.now() - o.createdAt) / 60000);
+              const dirColor = o.direction === "LONG" ? "#3b82f6" : o.direction === "SHORT" ? "#a855f7" : "#94a3b8";
+              return (
+                <div key={i} style={{ fontSize: 12, marginBottom: 6 }}>
+                  <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, marginRight: 6, background: dirColor }} />
+                  <strong>{o.id}</strong> <span style={{ color: "#64748b", fontSize: 10 }}>{ageMin}m old</span>
+                  <div style={{ marginLeft: 16, color: "#cbd5e1", fontSize: 11 }}>{o.text}</div>
+                </div>
+              );
+            })
+          ) : (
+            <div style={{ fontSize: 11, color: "#64748b" }}>No active observations. AI will write notes here as it studies the chart.</div>
+          )}
+        </div>
+      </div>
+
+      {/* Open positions summary */}
+      {positionsCount > 0 && (
+        <div style={{ marginTop: 12, padding: 10, background: "#1e293b", borderRadius: 6 }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase", marginBottom: 6 }}>
+            Open positions on {symbol} ({positionsCount})
+          </div>
+          {data.positions.map((p, i) => (
+            <div key={p.id || i} style={{ fontSize: 12, marginBottom: 4, color: "#e2e8f0" }}>
+              <span style={{ color: p.direction === "LONG" ? "#22c55e" : "#ef4444", fontWeight: 700 }}>
+                {p.direction}
+              </span>
+              {p.ladder && <span style={{ color: "#94a3b8" }}> · {p.ladder.mode}</span>}
+              {" "}· {p.volume}L @ {p.openPrice ? p.openPrice.toFixed(p.openPrice > 1000 ? 2 : 5) : "?"}
+              <span style={{ marginLeft: 8, color: (p.profit || 0) >= 0 ? "#22c55e" : "#ef4444", fontWeight: 600 }}>
+                {(p.profit || 0) >= 0 ? "+" : ""}${(p.profit || 0).toFixed(2)}
+              </span>
+              {p.ladder && p.ladder.tpHits && (
+                <span style={{ marginLeft: 8, color: "#64748b", fontSize: 10 }}>
+                  TPs hit: {Object.entries(p.ladder.tpHits).filter(([k, v]) => v).map(([k]) => k.toUpperCase()).join(", ") || "none"}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Legend */}
+      <div style={{ marginTop: 12, padding: 10, background: "#0f172a", border: "1px solid #1e293b", borderRadius: 6, fontSize: 10, color: "#94a3b8" }}>
+        <div style={{ marginBottom: 4, fontWeight: 700, color: "#cbd5e1" }}>Chart legend</div>
+        <div>━ <span style={{ color: "#22c55e" }}>green dashed</span> = LONG setup level · <span style={{ color: "#ef4444" }}>red dashed</span> = SHORT setup level · ⋯ <span style={{ color: "#64748b" }}>gray dotted</span> = setup invalidation</div>
+        <div>━ <span style={{ color: "#3b82f6" }}>blue solid</span> = LONG observation · <span style={{ color: "#a855f7" }}>purple solid</span> = SHORT observation · <span style={{ color: "#94a3b8" }}>gray solid</span> = neutral observation</div>
+        <div>━ <span style={{ color: "#fbbf24" }}>yellow</span> = position entry · <span style={{ color: "#dc2626" }}>red dashed</span> = SL · <span style={{ color: "#22c55e" }}>green dashed</span> = pending TP · <span style={{ color: "#10b981" }}>green solid</span> = TP hit</div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// V11 STEP 4 — AI WATCH PAGE WRAPPER
+// ============================================================
+// Manages: instrument tabs, timeframe selector, refresh button.
+// Renders one AIWatchChart per active instrument (only the active tab).
+function AIWatchPage({ instruments, setPage }) {
+  const [activeSym, setActiveSym] = useState(instruments[0] || null);
+  const [tf, setTf] = useState("1h");
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Update activeSym if instruments list changes and current sym is no longer in it
+  useEffect(() => {
+    if (instruments.length === 0) { setActiveSym(null); return; }
+    if (!activeSym || !instruments.includes(activeSym)) setActiveSym(instruments[0]);
+  }, [instruments, activeSym]);
+
+  if (instruments.length === 0) {
+    return (
+      <div className="panel empty">
+        <div className="empty-ico">&#9673;</div>
+        <div className="empty-title">No instruments selected</div>
+        <p className="xs mut mt6" style={{ marginBottom: 18 }}>Add instruments in Settings to start watching the AI study.</p>
+        <button className="btn btn-p" onClick={() => setPage("settings")}>Open Settings</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="s14">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>AI Watch</div>
+          <div style={{ fontSize: 11, color: "#64748b" }}>
+            Live chart + AI annotations. Updates every 60s.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {/* Timeframe selector */}
+          <div style={{ display: "flex", gap: 4 }}>
+            {["5m", "15m", "1h", "4h", "1d"].map(t => (
+              <button
+                key={t}
+                onClick={() => setTf(t)}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: 11,
+                  background: tf === t ? "#2563eb" : "#1e293b",
+                  color: tf === t ? "#fff" : "#94a3b8",
+                  border: "none",
+                  borderRadius: 4,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >{t}</button>
+            ))}
+          </div>
+          <button
+            onClick={() => setRefreshKey(k => k + 1)}
+            style={{
+              padding: "4px 12px", fontSize: 11, background: "#1e293b", color: "#cbd5e1",
+              border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600,
+            }}
+          >↻ Refresh</button>
+        </div>
+      </div>
+
+      {/* Instrument tabs */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
+        {instruments.map(sym => (
+          <button
+            key={sym}
+            onClick={() => setActiveSym(sym)}
+            style={{
+              padding: "6px 14px",
+              fontSize: 12,
+              background: activeSym === sym ? "#0f172a" : "#1e293b",
+              color: activeSym === sym ? "#fff" : "#94a3b8",
+              border: activeSym === sym ? "1px solid #2563eb" : "1px solid #334155",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >{sym}</button>
+        ))}
+      </div>
+
+      {/* Chart for active instrument */}
+      {activeSym && (
+        <AIWatchChart
+          key={activeSym + ":" + tf}
+          symbol={activeSym}
+          timeframe={tf}
+          refreshKey={refreshKey}
+        />
+      )}
+
+      <div style={{ marginTop: 14, fontSize: 11, color: "#64748b", lineHeight: 1.5 }}>
+        <strong style={{ color: "#94a3b8" }}>How to read this page:</strong> The chart shows recent candles for your selected instrument and timeframe. Overlay lines and zones come from three sources:
+        <ul style={{ marginTop: 6, marginBottom: 0 }}>
+          <li><strong>Setup detector</strong> — mechanical patterns (liquidity sweep, range break, session drive, news momentum, multi-level confluence). Each shows the trigger level + invalidation level.</li>
+          <li><strong>AI observations</strong> — qualitative notes the AI wrote in past calls. These persist across cron ticks and represent what the AI is actively studying.</li>
+          <li><strong>Open positions</strong> — entry, SL, and TP1-4 ladder for any live trade on this instrument.</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
 
 // ============================================================
 // TRADE VISUALIZER COMPONENT
@@ -962,7 +1420,7 @@ export default function App() {
   const [riskMode,    setRiskMode]    = useState(prefs.riskMode || "TEST");
   const [soundEnabled, setSoundEnabled] = useState(prefs.soundEnabled !== false); // default ON
 
-  const [page,           setPage]           = useState("trades");
+  const [page,           setPage]           = useState("aiwatch");
   const [prices,         setPrices]         = useState({});
   const [openPositions,  setOpenPositions]  = useState([]);
   const [closedTrades,   setClosedTrades]   = useState([]);
@@ -993,6 +1451,9 @@ export default function App() {
   const [v9Archive,      setV9Archive]      = useState([]);          // archived V9 raw tactics
   const [pairIntel,      setPairIntel]      = useState([]);          // [{ sym, score, recommendation, ...}]
   const [botMemory,      setBotMemory]      = useState(null);        // { short, mid, long }
+  // V11 Step 5: per-instrument observations + global pattern-learner output
+  const [v11Observations, setV11Observations] = useState({});       // { sym: [obs] }
+  const [v11Patterns,     setV11Patterns]     = useState(null);     // { tight, avoid, loose, totalTrades, ... }
   const [regimes,        setRegimes]        = useState({});          // { sym: { regime, score, chaos } }
   const [labView,        setLabView]        = useState("family");    // "family" | "archive"
   // V10 backtest state
@@ -1119,6 +1580,24 @@ export default function App() {
       if (r.ok) { const d = await r.json(); setBotMemory(d || null); }
     } catch (_) {}
   }, []);
+
+  // V11 STEP 5: fetch observations per instrument + pattern-learner output
+  const fetchV11Memory = useCallback(async () => {
+    try {
+      // Patterns (global, single fetch)
+      const pr = await fetch(API("pattern-learner"));
+      if (pr.ok) { const pd = await pr.json(); setV11Patterns(pd && pd.totalTrades !== undefined ? pd : null); }
+    } catch (_) {}
+    if (instruments.length === 0) { setV11Observations({}); return; }
+    const out = {};
+    for (const sym of instruments) {
+      try {
+        const r = await fetch(API("observation-memory?symbol=" + encodeURIComponent(sym)));
+        if (r.ok) { const d = await r.json(); out[sym] = d.observations || []; }
+      } catch (_) { out[sym] = []; }
+    }
+    setV11Observations(out);
+  }, [instruments]);
 
   const fetchRegimes = useCallback(async () => {
     if (!instruments.length) return;
@@ -1367,20 +1846,21 @@ export default function App() {
 
   useEffect(() => {
     fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
-    fetchPairIntel(); fetchMemory(); fetchRegimes();
+    fetchPairIntel(); fetchMemory(); fetchRegimes(); fetchV11Memory();
     instruments.forEach((sym) => fetchPrice(sym));
     const ii = [
       setInterval(fetchAccount, 60000), setInterval(fetchPositions, 10000),
       setInterval(fetchHistory, 60000), setInterval(fetchLab, 300000),
       setInterval(fetchNews, 1800000),
-      setInterval(fetchPairIntel, 600000),     // V10: refresh pair intel every 10min
+      setInterval(fetchPairIntel, 1800000),    // V11: pair intel refreshes once daily on backend; frontend rechecks cache every 30min
       setInterval(fetchMemory, 60000),         // V10: refresh memory every 1min
+      setInterval(fetchV11Memory, 120000),     // V11: refresh observations + patterns every 2min
       setInterval(fetchRegimes, 300000),       // V10: refresh regimes every 5min
       setInterval(() => setSessionInfo(getSessionInfo()), 60000),
     ];
     instruments.forEach((sym) => { ii.push(setInterval(() => fetchPrice(sym), 15000)); });
     return () => ii.forEach(clearInterval);
-  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, fetchPairIntel, fetchMemory, fetchRegimes, instruments]);
+  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, fetchPairIntel, fetchMemory, fetchV11Memory, fetchRegimes, instruments]);
 
   // V9.5: Fresh history fetch whenever user opens the Reports/History tab
   useEffect(() => {
@@ -1543,6 +2023,11 @@ export default function App() {
         </div>
 
         <div className="content">
+
+          {/* ========== V11 STEP 4: AI WATCH ========== */}
+          {page === "aiwatch" && (
+            <AIWatchPage instruments={instruments} setPage={setPage} />
+          )}
 
           {/* ========== LIVE ========== */}
           {page === "live" && (
@@ -1826,39 +2311,8 @@ export default function App() {
             </div>
           )}
 
-          {/* ========== ACTIVE TRADES ========== */}
-          {page === "trades" && (
-            <div className="s14">
-              {enrichedPositions.length === 0 ? (
-                <div className="panel empty">
-                  <div className="empty-ico">&#9656;</div>
-                  <div className="empty-title">No active trades</div>
-                  <p className="xs mut mt6">Open trades will appear here with live TP/SL visualization and probability tracking.</p>
-                </div>
-              ) : (
-                enrichedPositions.map((pos, i) => {
-                  const sym = normSym(pos.symbol);
-                  const dec = aiDecisions[sym];
-                  const posId = pos.id || pos.positionId;
-                  const tpState = tpLadders[posId];
-                  // V9.7: Extract strategy from MT5 comment for decoder
-                  const cmt = pos.comment || pos.tradeComment || "";
-                  const strat = cmt.startsWith("QB:") ? cmt.slice(3).trim() : (dec?.strategy || "");
-                  return (
-                    <div key={posId || i}>
-                      <TradeVisualizer pos={pos} dec={dec} tpState={tpState} fmtPrice={fl} />
-                      {strat && (
-                        <div className="panel" style={{ padding: 14, marginTop: -8 }}>
-                          <div className="chart-title" style={{ marginBottom: 10 }}>Tactic Breakdown · {strat}</div>
-                          <StrategyDecoder strategy={strat} />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
+          {/* ========== ACTIVE TRADES — REMOVED IN V11 ========== */}
+          {/* Will be re-added as part of the live "AI watching" visualization (V11 Step 4). */}
 
           {/* ========== NEWS ========== */}
           {page === "news" && (() => {
@@ -3084,6 +3538,98 @@ export default function App() {
                         )}
                         {(botMemory.long?.lessons || []).length === 0 && Object.keys(botMemory.long?.priors || {}).length === 0 && (
                           <div className="mut">Empty. Will fill as bot learns.</div>
+                        )}
+                      </div>
+                    </div>
+                    {/* V11 STEP 5 — Observations layer */}
+                    <div className="panel" style={{ borderLeft: "4px solid #3b82f6", padding: 14, marginTop: 12 }}>
+                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 18 }}>👁</span>
+                        <div style={{ fontWeight: 700 }}>V11 · Observations (per instrument, 24h TTL)</div>
+                      </div>
+                      <div className="xs sub mt4">Qualitative notes the AI writes to itself across cron ticks. Each observation tracks a level the AI is studying.</div>
+                      <div className="mt8 xs">
+                        {Object.keys(v11Observations).length === 0 || Object.values(v11Observations).every(o => !o || o.length === 0) ? (
+                          <div className="mut">No active observations. The AI writes these as it studies the chart.</div>
+                        ) : (
+                          Object.entries(v11Observations).map(([sym, obs]) => (
+                            obs.length === 0 ? null : (
+                              <div key={sym} style={{ marginBottom: 10 }}>
+                                <div className="w7 mb4">{sym} ({obs.length}):</div>
+                                {obs.map((o, i) => {
+                                  const ageMin = Math.floor((Date.now() - o.createdAt) / 60000);
+                                  const dirCol = o.direction === "LONG" ? "#3b82f6" : o.direction === "SHORT" ? "#a855f7" : "#94a3b8";
+                                  return (
+                                    <div key={i} style={{ padding: "6px 10px", marginBottom: 4, background: "#f8fafc", borderRadius: 4, fontSize: 11, borderLeft: `3px solid ${dirCol}` }}>
+                                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                        <span className="w7">[{o.id}]</span>
+                                        <span className="mut">{ageMin}m old · {o.direction}</span>
+                                      </div>
+                                      <div style={{ marginTop: 3 }}>{o.text}</div>
+                                      {o.watchLevel != null && <div className="xs mut mt4">watch: {o.watchLevel}{o.invalidatesAt != null ? ` · invalidates: ${o.invalidatesAt}` : ""}</div>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    {/* V11 STEP 5 — Pattern Learner panel */}
+                    <div className="panel" style={{ borderLeft: "4px solid #a855f7", padding: 14, marginTop: 12 }}>
+                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 18 }}>📊</span>
+                        <div style={{ fontWeight: 700 }}>V11 · Pattern Learner (refreshed end-of-day)</div>
+                      </div>
+                      <div className="xs sub mt4">Tight + loose patterns mined from your closed trades. Refreshes once per day after the reflection cron.</div>
+                      <div className="mt8 xs">
+                        {!v11Patterns || !v11Patterns.totalTrades ? (
+                          <div className="mut">No pattern data yet. Need closed trades. Patterns refresh after 21:00 UTC daily reflection cron.</div>
+                        ) : (
+                          <>
+                            <div className="w7 mb4">{v11Patterns.totalTrades} closed trades over {v11Patterns.daysBack}d · WR {v11Patterns.overallWR}%</div>
+                            {(v11Patterns.tight || []).length > 0 && (
+                              <>
+                                <div className="w7 mt8 mb4" style={{ color: "#15803d" }}>✓ PRIORITIZE ({v11Patterns.tight.length}):</div>
+                                {v11Patterns.tight.slice(0, 5).map((p, i) => {
+                                  const compact = p.signature.split('/').slice(1).join('/');
+                                  return (
+                                    <div key={i} style={{ padding: "5px 8px", marginBottom: 3, background: "#f0fdf4", borderRadius: 4, fontSize: 11 }}>
+                                      <span className="w7">{p.signature.split('/')[0]}</span> · {compact} · <span style={{ color: "#15803d" }}>{p.wins}/{p.n} ({p.wr}% WR, expR {p.expectancyR})</span>
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            )}
+                            {(v11Patterns.avoid || []).length > 0 && (
+                              <>
+                                <div className="w7 mt8 mb4" style={{ color: "#b91c1c" }}>✗ AVOID ({v11Patterns.avoid.length}):</div>
+                                {v11Patterns.avoid.slice(0, 5).map((p, i) => {
+                                  const compact = p.signature.split('/').slice(1).join('/');
+                                  return (
+                                    <div key={i} style={{ padding: "5px 8px", marginBottom: 3, background: "#fef2f2", borderRadius: 4, fontSize: 11 }}>
+                                      <span className="w7">{p.signature.split('/')[0]}</span> · {compact} · <span style={{ color: "#b91c1c" }}>{p.wins}/{p.n} ({p.wr}% WR, expR {p.expectancyR})</span>
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            )}
+                            {(v11Patterns.loose || []).length > 0 && (
+                              <>
+                                <div className="w7 mt8 mb4">Single-dim trends:</div>
+                                {v11Patterns.loose.slice(0, 6).map((p, i) => (
+                                  <div key={i} style={{ padding: "5px 8px", marginBottom: 3, background: "#f8fafc", borderRadius: 4, fontSize: 11 }}>
+                                    <span className="w7">{p.symbol}</span> · {p.dimension}: {p.recommendation}
+                                  </div>
+                                ))}
+                              </>
+                            )}
+                            {(v11Patterns.tight || []).length === 0 && (v11Patterns.avoid || []).length === 0 && (v11Patterns.loose || []).length === 0 && (
+                              <div className="mut">Patterns not statistically meaningful yet. Need ≥6 trades per signature for tight, ≥10 per symbol for loose.</div>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>

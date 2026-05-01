@@ -8,6 +8,7 @@
 //   - Instruments remain fully open -- no hardcoded symbol list
 
 const { Redis } = require('@upstash/redis');
+const { buildLadder, getTradingMode } = require('./_lib');
 
 const BASE = 'https://mt-client-api-v1.' + (process.env.META_REGION || 'london') + '.agiliumtrade.ai/users/current/accounts/' + (process.env.METAAPI_ACCOUNT_ID || '');
 const HEADERS = { 'Content-Type': 'application/json', 'auth-token': process.env.METAAPI_TOKEN || '' };
@@ -73,7 +74,7 @@ module.exports = async (req, res) => {
 
   console.log('[EXECUTE] IN', JSON.stringify(body).slice(0, 400));
 
-  const { instrument, direction, entry, stopLoss, takeProfit, volume, comment, lossStreak, riskPaused } = body;
+  const { instrument, direction, entry, stopLoss, takeProfit, volume, comment, lossStreak, riskPaused, mode } = body;
 
   // ---- Basic validation ----
   if (!instrument)                            return res.status(400).json({ error: 'Missing instrument' });
@@ -281,63 +282,56 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ---- V10: Build TP ladder server-side ----
-  // V9 used to do this on the frontend after fill confirmation, then POST to /api/manage-trades.
-  // V10 does it here, server-side, so the ladder works without a browser open.
-  // Ladder splits the distance from fill -> broker TP into 4 stages (25/50/75/100%).
+  // ---- V11: Build TP ladder server-side using mode-specific logic ----
+  // Mode comes from AI decision: SCALP / DAY / SWING. Default DAY.
+  // Each mode has its own R-multiples, close fractions, SL-move triggers.
   if (positionId && verified.fillPrice) {
     try {
       const fill = verified.fillPrice;
-      const cat = /XAU|GOLD/i.test(trySym) ? 'GOLD'
-                : /XAG|SILVER/i.test(trySym) ? 'METAL'
-                : /BTC|ETH|XRP|SOL|DOGE|CRYPTO/i.test(trySym) ? 'CRYPTO'
-                : /NAS|SPX|US30|GER|UK100|JP225/i.test(trySym) ? 'INDEX'
-                : 'FOREX';
-      const sign = direction === 'LONG' ? 1 : -1;
-      // Distance from fill to broker TP becomes the 4-stage range
-      const tpRef = verified.brokerTP || tp;
-      let tp1, tp2, tp3, tp4;
-      if (tpRef && Math.abs(tpRef - fill) > 0) {
-        const totalDist = Math.abs(tpRef - fill);
-        tp1 = fill + sign * totalDist * 0.25;
-        tp2 = fill + sign * totalDist * 0.50;
-        tp3 = fill + sign * totalDist * 0.75;
-        tp4 = tpRef;
-      } else {
-        // No broker TP -> derive from SL distance with 2.5R total
-        const slRef = verified.brokerSL || sl;
-        const slDist = Math.abs(slRef - fill);
-        const totalDist = slDist * 2.5;
-        tp1 = fill + sign * totalDist * 0.25;
-        tp2 = fill + sign * totalDist * 0.50;
-        tp3 = fill + sign * totalDist * 0.75;
-        tp4 = fill + sign * totalDist;
-      }
-      const dp = priceDp(fill);
-      const ladder = {
-        positionId,
-        instrument: trySym,
-        direction,
+      const slRef = verified.brokerSL || sl;
+      const tradeMode = (mode || 'DAY').toUpperCase();
+      const ladderCore = buildLadder({
         fillPrice: fill,
-        tp1: parseFloat(tp1.toFixed(dp)),
-        tp2: parseFloat(tp2.toFixed(dp)),
-        tp3: parseFloat(tp3.toFixed(dp)),
-        tp4: parseFloat(tp4.toFixed(dp)),
-        sl: verified.brokerSL || sl,
-        cat,
-        createdAt: Date.now(),
-      };
-      // Store under v9:tp:{positionId} -- this is the key cron + manage-trades read from
-      const KV_URL = process.env.KV_REST_API_URL;
-      const KV_TOK = process.env.KV_REST_API_TOKEN;
-      if (KV_URL && KV_TOK) {
-        try {
-          const r = new Redis({ url: KV_URL, token: KV_TOK });
-          await r.set('v9:tp:' + positionId, JSON.stringify(ladder), { ex: 7 * 24 * 60 * 60 });
-          console.log('[EXECUTE] TP ladder stored for ' + positionId + ': tp1=' + ladder.tp1 + ' tp2=' + ladder.tp2 + ' tp3=' + ladder.tp3 + ' tp4=' + ladder.tp4);
-        } catch (e) { console.error('[EXECUTE] TP ladder store FAILED: ' + e.message); }
+        slPrice:   slRef,
+        direction,
+        sym:       trySym,
+        mode:      tradeMode,
+      });
+      if (ladderCore) {
+        const ladder = {
+          positionId,
+          instrument: trySym,
+          direction,
+          mode:       tradeMode,
+          fillPrice:  fill,
+          slOriginal: slRef,
+          slCurrent:  slRef,             // updated by manage-trades when SL moves
+          tp1: ladderCore.tp1,
+          tp2: ladderCore.tp2,
+          tp3: ladderCore.tp3,
+          tp4: ladderCore.tp4,
+          tpHits: { tp1: false, tp2: false, tp3: false, tp4: false },
+          closes:           ladderCore.closes,
+          slMoves:          ladderCore.slMoves,
+          trailAfterTp3:    ladderCore.trailAfterTp3,
+          staleTimeoutHours: ladderCore.staleTimeoutHours,
+          createdAt: Date.now(),
+        };
+        const KV_URL = process.env.KV_REST_API_URL;
+        const KV_TOK = process.env.KV_REST_API_TOKEN;
+        if (KV_URL && KV_TOK) {
+          try {
+            const r = new Redis({ url: KV_URL, token: KV_TOK });
+            await r.set('v9:tp:' + positionId, JSON.stringify(ladder), { ex: 7 * 24 * 60 * 60 });
+            console.log('[EXECUTE] V11 ladder stored: posId=' + positionId + ' mode=' + tradeMode +
+                        ' tp1=' + ladder.tp1 + ' tp2=' + ladder.tp2 + ' tp3=' + ladder.tp3 + ' tp4=' + ladder.tp4 +
+                        ' (' + ladderCore.closes.map(c => Math.round(c * 100) + '%').join('/') + ')');
+          } catch (e) { console.error('[EXECUTE] ladder store FAILED: ' + e.message); }
+        }
+      } else {
+        console.warn('[EXECUTE] buildLadder returned null (slDist=0?) for ' + positionId);
       }
-    } catch (e) { console.error('[EXECUTE] TP ladder build threw: ' + e.message); }
+    } catch (e) { console.error('[EXECUTE] ladder build threw: ' + e.message); }
   }
 
   // ---- Telegram: brief notification on open. ----

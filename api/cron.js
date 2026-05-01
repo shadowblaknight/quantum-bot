@@ -17,10 +17,12 @@
 //   5. At 21:00 UTC daily, trigger /api/reflect
 
 const { applyCors, getRedis, safeParse, normSym, instCategory, selfBase, tg } = require('./_lib');
-const { fetchPositions, fetchPrice } = require('./broker');
+const { fetchPositions, fetchPrice, fetchCandles } = require('./broker');
 const { getRegimeFor } = require('./regime');
 const { recordOutcome } = require('./memory');
 const { recordTrade } = require('./trades');
+const { scanAndStore } = require('./setup-detector');
+const { invalidateBrokenObservations } = require('./observation-memory');
 
 const SYMBOL_LOCK_TTL = 90; // seconds — long enough to cover full AI + execute roundtrip
 
@@ -75,18 +77,54 @@ async function detectClosedAndRecord() {
         for (const ct of closed) {
           const cmt = ct.comment || '';
           const strategy = cmt.startsWith('QB:') ? cmt.slice(3).trim() : 'UNKNOWN';
-          if (strategy === 'UNKNOWN' || strategy.length < 3) continue;
           const won = (ct.profit || 0) > 0;
           const sessionLabel = sessionOf(new Date(ct.time || Date.now()).getUTCHours());
-          await recordTrade({
-            symbol: ct.symbol,
-            strategy,
-            pnl: ct.profit || 0,
-            won,
-            positionId: ct.id,
-            session: sessionLabel,
-          }).catch(() => {});
-          await recordOutcome({ sym: normSym(ct.symbol), pnl: ct.profit || 0, won }).catch(() => {});
+
+          // V9 path: only record family stats when we have a real strategy
+          if (strategy !== 'UNKNOWN' && strategy.length >= 3) {
+            await recordTrade({
+              symbol: ct.symbol,
+              strategy,
+              pnl: ct.profit || 0,
+              won,
+              positionId: ct.id,
+              session: sessionLabel,
+            }).catch(() => {});
+            await recordOutcome({ sym: normSym(ct.symbol), pnl: ct.profit || 0, won }).catch(() => {});
+          }
+
+          // V11 STEP 3: Always join entry features + outcome → store for pattern learner.
+          // This runs even for broker-auto-closes (SL/TP hit) where comment is empty.
+          // The entry record we wrote at open time has the strategy/family/mode, so we
+          // don't need to derive them from the close comment.
+          try {
+            const entryRaw = await r.get('v11:entry:' + ct.id).catch(() => null);
+            const entry = safeParse(entryRaw);
+            if (entry) {
+              const closeTs = new Date(ct.time || Date.now()).getTime();
+              const holdMin = entry.openTs ? Math.round((closeTs - entry.openTs) / 60000) : null;
+              const joined = {
+                ...entry,
+                closedTs: closeTs,
+                pnl: ct.profit || 0,
+                won,
+                holdMin,
+                closingComment: cmt,
+              };
+              const dateKey = new Date(closeTs).toISOString().slice(0, 10);  // YYYY-MM-DD
+              const dayKey = 'v11:closed:' + dateKey;
+              const existingRaw = await r.get(dayKey).catch(() => null);
+              const existing = safeParse(existingRaw);
+              const arr = Array.isArray(existing) ? existing : [];
+              arr.push(joined);
+              await r.set(dayKey, JSON.stringify(arr), { ex: 60 * 24 * 60 * 60 }).catch(() => {}); // 60 days
+              // Cleanup the entry record (no longer needed)
+              await r.del('v11:entry:' + ct.id).catch(() => {});
+              console.log('[CRON] V11 closed-trade record stored for ' + ct.id + ' (won=' + won + ', pnl=$' + (ct.profit || 0).toFixed(2) + ', cmt=' + (cmt || 'broker-auto') + ')');
+            }
+          } catch (e) {
+            console.warn('[CRON] V11 close-feature join failed: ' + e.message);
+          }
         }
       }
     } catch (_) {}
@@ -183,13 +221,21 @@ async function runCronTick() {
       }
 
       try {
-        // Get regime + chaos for this symbol
+        // V11: Get regime + chaos for AI's awareness, but DON'T veto on it.
+        // AI sees chaos info in its prompt and decides whether to trade through it.
         const regime = await getRegimeFor(sym);
-        if (regime.chaos && regime.chaos.chaos) {
-          symInfo.action = 'skip-chaos';
-          symInfo.detail = 'ratio ' + regime.chaos.ratio + 'x';
-          continue;
-        }
+
+        // V11 STEP 2: Run setup detector. Stores active setups to Redis. AI reads them
+        // via observation-memory's read paths in ai.js. Cheap (broker candles cached).
+        try {
+          await scanAndStore(sym);
+        } catch (e) { console.warn('[CRON] setup scan ' + sym + ': ' + e.message); }
+
+        // V11 STEP 2: Invalidate any observations broken by current price.
+        try {
+          const px = await fetchPrice(sym);
+          if (px && px.price) await invalidateBrokenObservations(sym, px.price);
+        } catch (e) { console.warn('[CRON] obs-invalidate ' + sym + ': ' + e.message); }
 
         // Call AI for decision
         const aiResp = await fetch(selfBase() + '/api/ai', {
@@ -210,9 +256,11 @@ async function runCronTick() {
           continue;
         }
 
-        if (decision.confidence < 30 || !decision.volume || decision.volume <= 0) {
-          symInfo.action = 'wait-lowconf';
-          symInfo.detail = 'conf ' + decision.confidence;
+        // V11: No confidence floor. AI decided BUY/SELL — we trust it.
+        // Only sanity check is positive volume (zero-volume trade is a no-op).
+        if (!decision.volume || decision.volume <= 0) {
+          symInfo.action = 'wait-zerovol';
+          symInfo.detail = 'AI returned 0 volume';
           continue;
         }
 
@@ -224,14 +272,11 @@ async function runCronTick() {
         }
         const entry = decision.decision === 'BUY' ? priceData.ask : priceData.bid;
 
-        // Calculate SL/TP from pip values returned by AI
+        // V11: Mode-aware SL distance.
+        // AI is required to return mode + slPips. If AI omits mode (legacy), default DAY.
+        // If AI omits slPips, look up the per-instrument 1R distance for that mode.
+        const tradeMode = (decision.mode || 'DAY').toUpperCase();
         const cat = instCategory(sym);
-        // V10: Per-instrument pip multiplier. AI returns slPips/tpPips in INSTRUMENT-NATIVE pips.
-        // - Forex non-JPY: 0.0001  (1 pip = 0.0001)
-        // - Forex JPY: 0.01
-        // - Gold/Silver: 0.01      (XAUUSD pip is conventionally $0.01)
-        // - Crypto BTC: 1.0        (1 BTC pip = $1; AI should return slPips ~ 200-500 for BTC)
-        // - Indices: 1.0           (NAS100 pip = 1 point)
         let pipMult;
         if (cat === 'GOLD' || cat === 'METAL') pipMult = 0.01;
         else if (cat === 'CRYPTO')             pipMult = 1.0;
@@ -239,16 +284,28 @@ async function runCronTick() {
         else if (sym.includes('JPY'))          pipMult = 0.01;
         else                                   pipMult = 0.0001;
 
-        // Sanity-check AI pip values against realistic ranges per category
-        let slPips = decision.slPips || 30;
-        let tpPips = decision.tp1Pips || (slPips * 2.5);
-        if (cat === 'CRYPTO' && slPips < 100) slPips = 200;     // BTC needs wider SL
-        if (cat === 'INDEX'  && slPips < 20)  slPips = 30;      // index pip is 1pt
-        if (slPips > 500 && cat !== 'CRYPTO') slPips = 100;     // sanity cap
-        if (tpPips < slPips) tpPips = slPips * 2;               // ensure positive R:R
+        // SL distance: AI value if given, else table lookup
+        let slPips = decision.slPips;
+        if (!slPips || !isFinite(slPips) || slPips <= 0) {
+          // Lookup 1R from R_DISTANCE_TABLE via getRDistance
+          const { getRDistance } = require('./_lib');
+          slPips = getRDistance(sym, tradeMode);
+        }
+        // Sanity caps per category (defense against AI hallucinations)
+        if (cat === 'CRYPTO' && slPips < 100) slPips = 300;
+        if (cat === 'INDEX'  && slPips < 20)  slPips = 30;
+        if (cat === 'GOLD'   && slPips < 50)  slPips = 150;
+        if (cat === 'FOREX'  && slPips < 8)   slPips = 12;
+        // No upper cap -- SWING mode legitimately uses large distances
+
+        // TP for broker: use the mode's TP4 R-multiple (final target).
+        // The full ladder is built server-side in execute.js using buildLadder.
+        const { getTradingMode } = require('./_lib');
+        const modeDef = getTradingMode(tradeMode);
+        const tp4Mult = modeDef.tps[3];
         const sign = decision.decision === 'BUY' ? 1 : -1;
         const sl = entry - sign * slPips * pipMult;
-        const tp = entry + sign * tpPips * pipMult;
+        const tp = entry + sign * slPips * tp4Mult * pipMult;
 
         // Execute
         const execResp = await fetch(selfBase() + '/api/execute', {
@@ -261,6 +318,7 @@ async function runCronTick() {
             stopLoss:   sl,
             takeProfit: tp,
             volume:     decision.volume,
+            mode:       tradeMode,
             comment:    'QB:' + (decision.rawTactic || decision.family || 'AI').slice(0, 28),
           }),
         });
@@ -270,20 +328,101 @@ async function runCronTick() {
         symInfo.decision = decision;
         symInfo.exec = execData;
 
+        // V11 STEP 3: Capture entry-time features for the pattern learner.
+        // Stored under v11:entry:{positionId}, joined with closing-trade outcome later.
+        if (execData.success && execData.positionId) {
+          try {
+            const { readSetupsFor } = require('./setup-detector');
+            const activeSetups = await readSetupsFor(sym);
+            // Determine multi-TF alignment (H1 + H4 same direction at entry)
+            let h1h4Aligned = null;
+            try {
+              const [h1Resp, h4Resp] = await Promise.all([
+                fetchCandles(sym, '1h', 5),
+                fetchCandles(sym, '4h', 5),
+              ]);
+              const h1 = h1Resp.candles || [];
+              const h4 = h4Resp.candles || [];
+              if (h1.length >= 2 && h4.length >= 2) {
+                const h1Sign = h1[h1.length - 1].close > h1[0].close ? 1 : h1[h1.length - 1].close < h1[0].close ? -1 : 0;
+                const h4Sign = h4[h4.length - 1].close > h4[0].close ? 1 : h4[h4.length - 1].close < h4[0].close ? -1 : 0;
+                h1h4Aligned = h1Sign !== 0 && h1Sign === h4Sign;
+              }
+            } catch (_) {}
+
+            const features = {
+              positionId:  execData.positionId,
+              symbol:      sym,
+              direction:   decision.decision === 'BUY' ? 'LONG' : 'SHORT',
+              family:      decision.family || null,
+              rawTactic:   decision.rawTactic || null,
+              mode:        tradeMode,
+              confidence:  decision.confidence || 0,
+              aiRawConf:   decision.aiRawConfidence || 0,
+              session:     decision.session || null,
+              regime:      decision.regime || regime.regime || null,
+              chaos:       !!(regime.chaos && regime.chaos.chaos),
+              chaosRatio:  (regime.chaos && regime.chaos.ratio) || 0,
+              setupPattern: activeSetups[0] ? activeSetups[0].pattern : null,
+              setupQuality: activeSetups[0] ? activeSetups[0].quality : null,
+              h1h4Aligned: h1h4Aligned,
+              entryPrice:  entry,
+              sl:          sl,
+              slPips:      slPips,
+              tp4:         tp,
+              volume:      decision.volume,
+              riskMode:    config.riskMode,
+              openTs:      Date.now(),
+            };
+            await r.set('v11:entry:' + execData.positionId, JSON.stringify(features), { ex: 30 * 24 * 60 * 60 }).catch(() => {});
+            console.log('[CRON] entry features captured for ' + execData.positionId);
+          } catch (e) {
+            console.warn('[CRON] entry-feature capture failed: ' + e.message);
+          }
+        }
+
         // Telegram notification on success
         if (execData.success) {
+          // V11 STEP 5: Pull active setups + observations to surface in the open message
+          let setupsLine = '';
+          let obsLine = '';
+          try {
+            const { readSetupsFor }     = require('./setup-detector');
+            const { readObservations }  = require('./observation-memory');
+            const [activeSetups, obs] = await Promise.all([
+              readSetupsFor(sym),
+              readObservations(sym),
+            ]);
+            if (activeSetups.length > 0) {
+              const top = activeSetups.sort((a, b) => b.quality - a.quality)[0];
+              setupsLine = 'Setup:     ' + top.pattern + ' ' + top.direction + ' (' + (top.quality * 100).toFixed(0) + '%)\n';
+            }
+            if (obs.length > 0) {
+              const matching = obs.filter(o =>
+                (decision.decision === 'BUY' && o.direction === 'LONG') ||
+                (decision.decision === 'SELL' && o.direction === 'SHORT')
+              );
+              if (matching.length > 0) {
+                obsLine = 'Obs:       [' + matching[0].id + '] ' + matching[0].text.slice(0, 80) + '\n';
+              }
+            }
+          } catch (_) {}
+
           await tg(
-            '✨ <b>V10 OPEN · ' + sym + '</b>\n\n' +
+            '✨ <b>V11 OPEN · ' + sym + ' · ' + tradeMode + '</b>\n\n' +
             '<pre>' +
             decision.decision + ' ' + decision.volume + 'L @ ' + entry.toFixed(5) + '\n' +
+            'Mode:      ' + tradeMode + '\n' +
             'Family:    ' + decision.family + '\n' +
             'Tactic:    ' + (decision.rawTactic || '?') + '\n' +
             'Confidence: ' + decision.confidence + '% (raw ' + decision.aiRawConfidence + ')\n' +
             'Regime:    ' + decision.regime + '\n' +
             'Session:   ' + decision.session + '\n' +
+            setupsLine +
+            obsLine +
             '──────────────────\n' +
             'SL:        ' + sl.toFixed(5) + ' (' + slPips + ' pips)\n' +
-            'TP:        ' + tp.toFixed(5) + ' (' + tpPips + ' pips)' +
+            'TP4:       ' + tp.toFixed(5) + ' (' + Math.round(slPips * tp4Mult) + ' pips, ' + tp4Mult + 'R)' +
             '</pre>\n' +
             '<i>' + (decision.reason || '').slice(0, 200) + '</i>'
           );

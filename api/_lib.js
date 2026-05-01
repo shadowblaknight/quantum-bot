@@ -294,6 +294,159 @@ function selfBase() {
   return process.env.QB_PUBLIC_URL || 'https://quantum-bot-mocha.vercel.app';
 }
 
+// =================================================================
+// V11 — Trading mode definitions (SCALP / DAY / SWING)
+// =================================================================
+// Each mode defines:
+//   - 4 TP levels as multiples of R (where 1R = SL distance)
+//   - Volume % to close at each TP
+//   - SL move behavior: which TP triggers a move, and where to move
+//
+// AI returns mode in its decision JSON. Default = DAY.
+
+const TRADING_MODES = {
+  SCALP: {
+    name: 'SCALP',
+    description: 'Quick reversal, tight risk, fast TP',
+    tps:        [1.0, 1.5, 2.0, 2.5],   // R multiples
+    closes:     [0.40, 0.30, 0.20, 0.10], // close fraction at each TP
+    slMoves: {
+      atTp1: 'BE',          // move SL to breakeven at TP1
+      atTp2: 'TP1',         // move SL to TP1 price at TP2
+      atTp3: 'TP2',
+      atTp4: null,
+    },
+    trailAfterTp3: false,
+    staleTimeoutHours: 1,
+  },
+  DAY: {
+    name: 'DAY',
+    description: 'Intraday swing, hours hold, default mode',
+    tps:        [1.0, 2.0, 3.0, 4.0],
+    closes:     [0.25, 0.25, 0.25, 0.25],
+    slMoves: {
+      atTp1: null,          // no SL move at TP1, give runner room
+      atTp2: 'BE',          // BE at TP2
+      atTp3: 'TP1',         // SL to TP1 price at TP3
+      atTp4: null,
+    },
+    trailAfterTp3: true,    // 1R trail after TP3
+    staleTimeoutHours: 4,
+  },
+  SWING: {
+    name: 'SWING',
+    description: 'Multi-day, 4H/D1 alignment, patient',
+    tps:        [1.5, 3.0, 5.0, 8.0],
+    closes:     [0.20, 0.25, 0.25, 0.30],
+    slMoves: {
+      atTp1: null,
+      atTp2: 'BE',
+      atTp3: 'TP1',
+      atTp4: 'TP2',
+    },
+    trailAfterTp3: true,
+    staleTimeoutHours: 12,
+  },
+};
+
+// Per-instrument 1R baseline distance per mode.
+// 1R = the natural SL distance for that instrument at that mode.
+// Stored as the pip count (in instrument-native pips).
+// AI can override by passing slPips directly; if not, this lookup is the default.
+const R_DISTANCE_TABLE = {
+  // Forex majors (non-JPY)
+  'EURUSD':  { SCALP: 12, DAY: 25, SWING: 50 },
+  'GBPUSD':  { SCALP: 14, DAY: 28, SWING: 55 },
+  'AUDUSD':  { SCALP: 12, DAY: 25, SWING: 50 },
+  'NZDUSD':  { SCALP: 13, DAY: 26, SWING: 52 },
+  'USDCAD':  { SCALP: 12, DAY: 25, SWING: 50 },
+  'USDCHF':  { SCALP: 12, DAY: 25, SWING: 50 },
+  // JPY pairs (slightly wider, JPY pip = 0.01)
+  'USDJPY':  { SCALP: 15, DAY: 30, SWING: 60 },
+  'EURJPY':  { SCALP: 18, DAY: 35, SWING: 70 },
+  'GBPJPY':  { SCALP: 22, DAY: 45, SWING: 90 },
+  'AUDJPY':  { SCALP: 16, DAY: 32, SWING: 65 },
+  // Cross majors
+  'EURGBP':  { SCALP: 10, DAY: 20, SWING: 40 },
+  'EURAUD':  { SCALP: 18, DAY: 36, SWING: 72 },
+  'GBPAUD':  { SCALP: 22, DAY: 44, SWING: 88 },
+  // Metals (gold pip = 0.01, $1 = 100 pips)
+  'XAUUSD':  { SCALP: 150, DAY: 400, SWING: 1000 },  // $1.50 / $4 / $10
+  'XAGUSD':  { SCALP: 30,  DAY: 80,  SWING: 200 },   // $0.30 / $0.80 / $2
+  // Crypto (BTC pip = $1)
+  'BTCUSD':  { SCALP: 300, DAY: 800, SWING: 2000 },
+  'ETHUSD':  { SCALP: 20,  DAY: 50,  SWING: 150 },
+  // Indices (1 point = 1 pip in our system)
+  'NAS100':  { SCALP: 25, DAY: 60,  SWING: 150 },
+  'SPX500':  { SCALP: 8,  DAY: 20,  SWING: 50 },
+  'US30':    { SCALP: 50, DAY: 120, SWING: 300 },
+  'GER40':   { SCALP: 25, DAY: 60,  SWING: 150 },
+  'UK100':   { SCALP: 15, DAY: 35,  SWING: 90 },
+  'JP225':   { SCALP: 80, DAY: 200, SWING: 500 },
+};
+
+// Get default 1R pip distance for symbol + mode. Falls back to category default.
+function getRDistance(sym, mode) {
+  const s = normSym(sym);
+  const m = (mode || 'DAY').toUpperCase();
+  if (R_DISTANCE_TABLE[s] && R_DISTANCE_TABLE[s][m] != null) {
+    return R_DISTANCE_TABLE[s][m];
+  }
+  // Category fallback
+  const cat = instCategory(s);
+  const defaults = {
+    FOREX:     { SCALP: 12, DAY: 25, SWING: 50 },
+    GOLD:      { SCALP: 150, DAY: 400, SWING: 1000 },
+    METAL:     { SCALP: 30, DAY: 80, SWING: 200 },
+    CRYPTO:    { SCALP: 300, DAY: 800, SWING: 2000 },
+    INDEX:     { SCALP: 25, DAY: 60, SWING: 150 },
+    COMMODITY: { SCALP: 15, DAY: 35, SWING: 90 },
+  };
+  return (defaults[cat] && defaults[cat][m]) || 25;
+}
+
+// Get the trading mode definition. Returns DAY if invalid.
+function getTradingMode(modeName) {
+  const m = String(modeName || 'DAY').toUpperCase();
+  return TRADING_MODES[m] || TRADING_MODES.DAY;
+}
+
+// Get pip multiplier for an instrument (the price-units-per-pip).
+// Used to convert pip distances into price distances.
+function pipMult(sym) {
+  const s = normSym(sym);
+  const cat = instCategory(s);
+  if (cat === 'GOLD' || cat === 'METAL') return 0.01;
+  if (cat === 'CRYPTO') return 1.0;
+  if (cat === 'INDEX') return 1.0;
+  if (s.includes('JPY')) return 0.01;
+  return 0.0001;
+}
+
+// Build a TP ladder given fill price, SL price, direction, and mode.
+// Returns { tp1, tp2, tp3, tp4, closes, slMoves, trailAfterTp3, staleTimeoutHours, mode }
+function buildLadder({ fillPrice, slPrice, direction, sym, mode }) {
+  const m = getTradingMode(mode);
+  const sign = direction === 'LONG' || direction === 'BUY' ? 1 : -1;
+  const slDist = Math.abs(fillPrice - slPrice);
+  if (slDist <= 0) return null;
+  const dp = priceDp(fillPrice);
+  return {
+    mode:      m.name,
+    fillPrice,
+    slPrice,
+    slDistance: slDist,
+    tp1: parseFloat((fillPrice + sign * slDist * m.tps[0]).toFixed(dp)),
+    tp2: parseFloat((fillPrice + sign * slDist * m.tps[1]).toFixed(dp)),
+    tp3: parseFloat((fillPrice + sign * slDist * m.tps[2]).toFixed(dp)),
+    tp4: parseFloat((fillPrice + sign * slDist * m.tps[3]).toFixed(dp)),
+    closes:           m.closes,
+    slMoves:          m.slMoves,
+    trailAfterTp3:    m.trailAfterTp3,
+    staleTimeoutHours: m.staleTimeoutHours,
+  };
+}
+
 module.exports = {
   getRedis, metaBase, metaHeaders, metaAccountId, META_REGIONS,
   normSym, instCategory,
@@ -302,4 +455,7 @@ module.exports = {
   safeParse,
   atr, adx, bollingerWidth, priceDp,
   tg, applyCors, selfBase,
+  // V11 trading-mode helpers
+  TRADING_MODES, R_DISTANCE_TABLE,
+  getRDistance, getTradingMode, pipMult, buildLadder,
 };

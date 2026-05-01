@@ -625,6 +625,36 @@ module.exports = async (req, res) => {
       const fTP3 = state.tp3 || tp3;
       const fTP4 = state.tp4 || tp4;
 
+      // V11: mode-aware close fractions and SL-move triggers.
+      // If state.mode is set (V11 ladder) use stored closes/slMoves arrays.
+      // Otherwise fall back to V9 hardcoded behavior (40/30/20/10 + BE-at-TP1).
+      const v11Mode = state.mode || null;
+      const closes = Array.isArray(state.closes) && state.closes.length === 4
+                     ? state.closes
+                     : [0.40, 0.30, 0.20, 0.10];                    // V9 default
+      const slMoves = state.slMoves || {
+        atTp1: 'BE',
+        atTp2: 'TP1',
+        atTp3: 'TP2',
+        atTp4: null,
+      };
+      const trailAfterTp3 = state.trailAfterTp3 === true;
+      const staleHours = state.staleTimeoutHours || 4;
+
+      // Helper: resolve symbolic SL move target ('BE', 'TP1', 'TP2', 'TP3', null)
+      // into actual price. Returns null = don't move SL.
+      const resolveSLTarget = (target) => {
+        if (!target) return null;
+        if (target === 'BE') {
+          // Breakeven-plus: open + 30% of d1 (V9 convention) so we lock a tiny profit
+          return direction === 'LONG' ? openPrice + (d1 || 0) * 0.3 : openPrice - (d1 || 0) * 0.3;
+        }
+        if (target === 'TP1') return fTP1 || null;
+        if (target === 'TP2') return fTP2 || null;
+        if (target === 'TP3') return fTP3 || null;
+        return null;
+      };
+
       const profit = direction === 'LONG' ? currentPrice - openPrice : openPrice - currentPrice;
       const d1 = Math.abs(fTP1 - openPrice);
       const d2 = fTP2 ? Math.abs(fTP2 - openPrice) : null;
@@ -795,44 +825,47 @@ module.exports = async (req, res) => {
 
       // ---- TP1 ----
       if (!state.tp1Hit && profit >= d1 * 0.95) {
-        const { ok, vol, pnl } = await closePartial(0.4, 'QB:TP1');
+        const closeFrac = closes[0];
+        const closePct  = Math.round(closeFrac * 100);
+        const { ok, vol, pnl } = await closePartial(closeFrac, 'QB:TP1');
         if (ok) {
           state.tp1Hit = true;
-          const beLevel = direction === 'LONG' ? openPrice + d1 * 0.3 : openPrice - d1 * 0.3;
-          const slr = await modifySL(beLevel, 'TP1_BE');
+          // V11: SL move target is mode-aware. DAY mode = no move at TP1.
+          const slTarget = resolveSLTarget(slMoves.atTp1);
+          let slr = { ok: true, sl: null };
+          if (slTarget != null) slr = await modifySL(slTarget, 'TP1_' + (slMoves.atTp1 || ''));
           result.actions.push({ type: 'TP1', volume: vol, price: currentPrice, pnl });
 
           if (slr.ok) {
-            state.slMovedConfirmed = true;
+            if (slTarget != null) state.slMovedConfirmed = true;
+            if (slr.sl != null) state.slCurrent = slr.sl;
             await saveState(state);
+            const slLine = slTarget != null
+              ? 'SL:       ' + (slMoves.atTp1 === 'BE' ? 'BE+ ' : slMoves.atTp1 + ' ') + slr.sl.toFixed(priceDp(slr.sl))
+              : 'SL:       unchanged (mode=' + (v11Mode || 'V9') + ' holds SL until TP2)';
             await tg(
-              '🎯 <b>TP1 · ' + symbol + '</b>\n\n' +
+              '🎯 <b>TP1 · ' + symbol + (v11Mode ? ' · ' + v11Mode : '') + '</b>\n\n' +
               '<pre>' +
               direction + '\n' +
               '──────────────────\n' +
-              'Closed:   40% @ ' + currentPrice.toFixed(dp) + '\n' +
+              'Closed:   ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\n' +
               'P&L:      +$' + pnl.toFixed(2) + '\n' +
-              'SL:       BE+ ' + slr.sl.toFixed(priceDp(slr.sl)) + '\n' +
-              'Running:  60%' +
+              slLine + '\n' +
+              'Running:  ' + (100 - closePct) + '%' +
               '</pre>'
             );
           } else {
-            // V9.7: SL move failed. DON'T emergency close -- the runner is still in profit,
-            // original SL is still attached as worst-case safety net, and self-healing block
-            // at the top of the next cron tick will retry the SL move.
-            // We only emergency close on TP1-fail if profit on the runner has already
-            // gone negative (meaning the original SL wouldn't lock TP1 net profit anyway).
             console.warn('[TP1] SL move failed -- keeping runner with original SL, self-heal will retry');
             await saveState(state);
             await tg(
-              '🎯 <b>TP1 · ' + symbol + '</b>\n\n' +
+              '🎯 <b>TP1 · ' + symbol + (v11Mode ? ' · ' + v11Mode : '') + '</b>\n\n' +
               '<pre>' +
               direction + '\n' +
               '──────────────────\n' +
-              'Closed:    40% @ ' + currentPrice.toFixed(dp) + '\n' +
+              'Closed:    ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\n' +
               'P&L:       +$' + pnl.toFixed(2) + '\n' +
               'SL:        unchanged (move pending retry)\n' +
-              'Running:   60% · original SL still attached' +
+              'Running:   ' + (100 - closePct) + '% · original SL still attached' +
               '</pre>\n' +
               '<i>SL move retry will run next cycle.</i>'
             );
@@ -840,75 +873,130 @@ module.exports = async (req, res) => {
         }
       }
       else if (state.tp1Hit && !state.tp2Hit && d2 && profit >= d2 * 0.95) {
-        const { ok, vol, pnl } = await closePartial(0.3, 'QB:TP2');
+        const closeFrac = closes[1];
+        const closePct  = Math.round(closeFrac * 100);
+        const { ok, vol, pnl } = await closePartial(closeFrac, 'QB:TP2');
         if (ok) {
           state.tp2Hit = true;
-          const slr = fTP1 ? await modifySL(fTP1, 'TP2_TRAIL') : { ok: true, sl: null };
+          const slTarget = resolveSLTarget(slMoves.atTp2);
+          let slr = { ok: true, sl: null };
+          if (slTarget != null) slr = await modifySL(slTarget, 'TP2_' + (slMoves.atTp2 || ''));
           result.actions.push({ type: 'TP2', volume: vol, price: currentPrice, pnl });
 
           if (slr.ok) {
+            if (slr.sl != null) state.slCurrent = slr.sl;
             await saveState(state);
+            const slLine = slTarget != null
+              ? 'SL:       ' + slMoves.atTp2 + ' ' + slr.sl.toFixed(priceDp(slr.sl))
+              : 'SL:       unchanged';
             await tg(
-              '🎯 <b>TP2 · ' + symbol + '</b>\n\n' +
+              '🎯 <b>TP2 · ' + symbol + (v11Mode ? ' · ' + v11Mode : '') + '</b>\n\n' +
               '<pre>' +
               direction + '\n' +
               '──────────────────\n' +
-              'Closed:   30% @ ' + currentPrice.toFixed(dp) + '\n' +
+              'Closed:   ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\n' +
               'P&L:      +$' + pnl.toFixed(2) + '\n' +
-              'SL:       TP1 ' + (fTP1||0).toFixed(priceDp(fTP1||0)) + '\n' +
-              'Running:  30%' +
+              slLine + '\n' +
+              'Running:  ' + Math.round((1 - closes[0] - closes[1]) * 100) + '%' +
               '</pre>'
             );
           } else {
-            // V9.7: Trail SL failed -- runner is way ahead in profit, just keep going.
-            // Original SL still attached as worst-case. Self-heal will retry next tick.
-            console.warn('[TP2] Trail SL failed -- keeping runner with prior SL');
+            console.warn('[TP2] SL move failed -- keeping runner with prior SL');
             await saveState(state);
-            await tg('🎯 <b>TP2 · ' + symbol + '</b>\n\n<pre>Closed: 30% @ ' + currentPrice.toFixed(dp) + '\nP&L:    +$' + pnl.toFixed(2) + '\nSL:     unchanged (trail pending retry)\nRunning: 30%</pre>');
+            await tg('🎯 <b>TP2 · ' + symbol + '</b>\n\n<pre>Closed: ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\nP&L:    +$' + pnl.toFixed(2) + '\nSL:     unchanged (move pending retry)</pre>');
           }
         }
       }
       else if (state.tp2Hit && !state.tp3Hit && d3 && profit >= d3 * 0.95) {
-        const { ok, vol, pnl } = await closePartial(0.2, 'QB:TP3');
+        const closeFrac = closes[2];
+        const closePct  = Math.round(closeFrac * 100);
+        const { ok, vol, pnl } = await closePartial(closeFrac, 'QB:TP3');
         if (ok) {
           state.tp3Hit = true;
-          const slr = fTP2 ? await modifySL(fTP2, 'TP3_TRAIL') : { ok: true, sl: null };
+          const slTarget = resolveSLTarget(slMoves.atTp3);
+          let slr = { ok: true, sl: null };
+          if (slTarget != null) slr = await modifySL(slTarget, 'TP3_' + (slMoves.atTp3 || ''));
           result.actions.push({ type: 'TP3', volume: vol, price: currentPrice, pnl });
 
           if (slr.ok) {
+            if (slr.sl != null) state.slCurrent = slr.sl;
             await saveState(state);
+            const slLine = slTarget != null
+              ? 'SL:       ' + slMoves.atTp3 + ' ' + slr.sl.toFixed(priceDp(slr.sl))
+              : 'SL:       unchanged';
             await tg(
-              '🎯 <b>TP3 · ' + symbol + '</b>\n\n' +
+              '🎯 <b>TP3 · ' + symbol + (v11Mode ? ' · ' + v11Mode : '') + '</b>\n\n' +
               '<pre>' +
               direction + '\n' +
               '──────────────────\n' +
-              'Closed:   20% @ ' + currentPrice.toFixed(dp) + '\n' +
+              'Closed:   ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\n' +
               'P&L:      +$' + pnl.toFixed(2) + '\n' +
-              'SL:       TP2 ' + (fTP2||0).toFixed(priceDp(fTP2||0)) + '\n' +
-              'Running:  10%' +
+              slLine + '\n' +
+              'Running:  ' + Math.round((1 - closes[0] - closes[1] - closes[2]) * 100) + '%' +
+              (trailAfterTp3 ? ' · trailing' : '') +
               '</pre>'
             );
           } else {
-            console.warn('[TP3] Trail SL failed -- keeping runner with prior SL');
+            console.warn('[TP3] SL move failed -- keeping runner with prior SL');
             await saveState(state);
-            await tg('🎯 <b>TP3 · ' + symbol + '</b>\n\n<pre>Closed: 20% @ ' + currentPrice.toFixed(dp) + '\nP&L:    +$' + pnl.toFixed(2) + '\nSL:     unchanged (trail pending retry)\nRunning: 10%</pre>');
+            await tg('🎯 <b>TP3 · ' + symbol + '</b>\n\n<pre>Closed: ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\nP&L:    +$' + pnl.toFixed(2) + '\nSL:     unchanged (move pending retry)</pre>');
           }
         }
       }
       else if (state.tp3Hit && !state.tp4Hit && d4 && profit >= d4 * 0.95) {
-        const pnl = parseFloat((profit * volume * 0.1 * mult).toFixed(2));
+        const closeFrac = closes[3];
+        const closePct  = Math.round(closeFrac * 100);
+        const pnl = parseFloat((profit * volume * closeFrac * mult).toFixed(2));
         const closed = await closeFull('QB:TP4');
         if (closed) {
           state.tp4Hit = true;
           result.actions.push({ type: 'TP4_FINAL', price: currentPrice, pnl });
           await redis.del(stateKey).catch(() => {});
           await tg(
-            '🏆 <b>TP4 COMPLETE · ' + symbol + '</b>\n\n' +
+            '🏆 <b>TP4 COMPLETE · ' + symbol + (v11Mode ? ' · ' + v11Mode : '') + '</b>\n\n' +
             '<pre>' +
             'All targets achieved.\n' +
             '──────────────────\n' +
-            'Final:   10% @ ' + currentPrice.toFixed(dp) + '\n' +
+            'Final:   ' + closePct + '% @ ' + currentPrice.toFixed(dp) + '\n' +
             'P&L:     +$' + pnl.toFixed(2) +
+            '</pre>'
+          );
+        }
+      }
+
+      // V11: Trailing-stop after TP3 for DAY/SWING modes.
+      // Once TP3 is hit and trailAfterTp3 is set, trail SL behind price by 1R
+      // so a runner that goes parabolic locks in increasing profit.
+      if (state.tp3Hit && !state.tp4Hit && trailAfterTp3 && d1) {
+        const trailDist = d1; // 1R behind current price
+        const newSL = direction === 'LONG' ? currentPrice - trailDist : currentPrice + trailDist;
+        const currentSL = state.slCurrent || stopLoss || 0;
+        // Only move SL forward (closer to price), never backward
+        const shouldMove = direction === 'LONG' ? newSL > currentSL : newSL < currentSL;
+        if (shouldMove) {
+          const slr = await modifySL(newSL, 'TRAIL_1R');
+          if (slr.ok && slr.sl != null) {
+            state.slCurrent = slr.sl;
+            await saveState(state);
+            result.actions.push({ type: 'TRAIL', sl: slr.sl });
+          }
+        }
+      }
+
+      // V11: Stale-trade detector. If position has been open longer than mode's stale timeout
+      // and profit is still under 0.5R, the setup is failing -- log + notify (no auto-close,
+      // AI decides on next call whether to close).
+      if (!state.staleNotified && state.openTs && d1) {
+        const ageHours = (Date.now() - state.openTs) / 3600000;
+        if (ageHours >= staleHours && profit < d1 * 0.5) {
+          state.staleNotified = true;
+          await saveState(state);
+          await tg(
+            '⏳ <b>STALE · ' + symbol + (v11Mode ? ' · ' + v11Mode : '') + '</b>\n\n' +
+            '<pre>' +
+            'Open ' + ageHours.toFixed(1) + 'h, no progress.\n' +
+            'Profit: ' + (profit / d1).toFixed(2) + 'R · target was ' + closes.length + 'TPs.\n' +
+            'Original SL still attached. AI may close on next call.' +
             '</pre>'
           );
         }

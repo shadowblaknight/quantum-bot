@@ -153,7 +153,75 @@ module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   // Manual trigger or cron — accept GET or POST
   try {
-    return res.status(200).json(await runReflection());
+    const refl = await runReflection();
+    // V11 STEP 3: Run pattern learner end-of-day right after reflection.
+    let patterns = null;
+    try {
+      const { runPatternLearner } = require('./pattern-learner');
+      patterns = await runPatternLearner(30);
+    } catch (e) {
+      console.warn('[REFLECT] pattern-learner failed: ' + e.message);
+    }
+
+    // V11 STEP 5: Surface pattern findings in Telegram + long-term memory.
+    if (patterns && patterns.totalTrades >= 5) {
+      const lines = [];
+      lines.push('Patterns over last ' + patterns.daysBack + 'd · ' + patterns.totalTrades + ' trades · WR ' + patterns.overallWR + '%');
+      const top = (patterns.tight || []).slice(0, 3);
+      const avoidTop = (patterns.avoid || []).slice(0, 3);
+      const looseTop = (patterns.loose || []).slice(0, 3);
+      if (top.length > 0) {
+        lines.push('');
+        lines.push('✓ PRIORITIZE:');
+        for (const p of top) {
+          const compact = p.signature.split('/').slice(1).join('/');
+          lines.push('  ' + compact + '  ' + p.wins + '/' + p.n + '  WR ' + p.wr + '%  expR ' + p.expectancyR);
+        }
+      }
+      if (avoidTop.length > 0) {
+        lines.push('');
+        lines.push('✗ AVOID:');
+        for (const p of avoidTop) {
+          const compact = p.signature.split('/').slice(1).join('/');
+          lines.push('  ' + compact + '  ' + p.wins + '/' + p.n + '  WR ' + p.wr + '%  expR ' + p.expectancyR);
+        }
+      }
+      if (looseTop.length > 0) {
+        lines.push('');
+        lines.push('Single-dim trends:');
+        for (const p of looseTop) {
+          lines.push('  ' + p.symbol + '/' + p.dimension + ': ' + p.recommendation);
+        }
+      }
+      if (top.length === 0 && avoidTop.length === 0 && looseTop.length === 0) {
+        lines.push('No statistically meaningful patterns yet (need more closed trades).');
+      }
+      await tg('📊 <b>Pattern Learner</b>\n\n<pre>' + lines.join('\n') + '</pre>');
+
+      // Persist top 2 prioritize + top 2 avoid as long-term memory lessons (so AI remembers)
+      try {
+        const { addLesson } = require('./memory');
+        const today = new Date().toISOString().slice(0, 10);
+        for (const p of top.slice(0, 2)) {
+          const compact = p.signature.split('/').slice(1).join('/');
+          await addLesson(
+            p.signature.split('/')[0] + ': ' + compact + ' has been a winning combo (' + p.wins + '/' + p.n + ', WR ' + p.wr + '%, expR ' + p.expectancyR + '). Lean into setups matching this signature.',
+            'pattern-priority-' + today
+          );
+        }
+        for (const p of avoidTop.slice(0, 2)) {
+          const compact = p.signature.split('/').slice(1).join('/');
+          await addLesson(
+            p.signature.split('/')[0] + ': ' + compact + ' has been a losing combo (' + p.wins + '/' + p.n + ', WR ' + p.wr + '%, expR ' + p.expectancyR + '). Skip or downsize when this signature lines up.',
+            'pattern-avoid-' + today
+          );
+        }
+      } catch (e) {
+        console.warn('[REFLECT] pattern->memory write failed: ' + e.message);
+      }
+    }
+
+    return res.status(200).json({ reflection: refl, patterns });
   } catch (e) {
     return res.status(500).json({ error: e && e.message ? e.message : 'unknown' });
   }
