@@ -74,7 +74,7 @@ module.exports = async (req, res) => {
 
   console.log('[EXECUTE] IN', JSON.stringify(body).slice(0, 400));
 
-  const { instrument, direction, entry, stopLoss, takeProfit, volume, comment, lossStreak, riskPaused, mode } = body;
+  const { instrument, direction, entry, stopLoss, takeProfit, volume, comment, lossStreak, riskPaused, mode, customTps } = body;
 
   // ---- Basic validation ----
   if (!instrument)                            return res.status(400).json({ error: 'Missing instrument' });
@@ -298,6 +298,26 @@ module.exports = async (req, res) => {
         mode:      tradeMode,
       });
       if (ladderCore) {
+        // V11 STRUCTURAL TPs: if AI provided customTps array of 4 valid prices,
+        // use them instead of R-multiple-derived TPs. Validate: 4 prices, all positive,
+        // monotonic, all on correct side of fillPrice.
+        let useCustom = false;
+        if (Array.isArray(customTps) && customTps.length === 4) {
+          const allValid = customTps.every(p => typeof p === 'number' && isFinite(p) && p > 0);
+          if (allValid) {
+            const sign = direction === 'LONG' || direction === 'BUY' ? 1 : -1;
+            const okSide = customTps.every(p => sign === 1 ? p > fill : p < fill);
+            const okOrder = sign === 1
+              ? customTps[0] < customTps[1] && customTps[1] < customTps[2] && customTps[2] < customTps[3]
+              : customTps[0] > customTps[1] && customTps[1] > customTps[2] && customTps[2] > customTps[3];
+            if (okSide && okOrder) useCustom = true;
+            else console.warn('[EXECUTE] customTps failed validation (side/order). Using R-multiples.');
+          }
+        }
+        const finalTPs = useCustom
+          ? { tp1: customTps[0], tp2: customTps[1], tp3: customTps[2], tp4: customTps[3] }
+          : { tp1: ladderCore.tp1, tp2: ladderCore.tp2, tp3: ladderCore.tp3, tp4: ladderCore.tp4 };
+
         const ladder = {
           positionId,
           instrument: trySym,
@@ -306,10 +326,11 @@ module.exports = async (req, res) => {
           fillPrice:  fill,
           slOriginal: slRef,
           slCurrent:  slRef,             // updated by manage-trades when SL moves
-          tp1: ladderCore.tp1,
-          tp2: ladderCore.tp2,
-          tp3: ladderCore.tp3,
-          tp4: ladderCore.tp4,
+          tp1: finalTPs.tp1,
+          tp2: finalTPs.tp2,
+          tp3: finalTPs.tp3,
+          tp4: finalTPs.tp4,
+          tpSource: useCustom ? 'STRUCTURAL' : 'R_MULTIPLE',  // for diagnostics
           tpHits: { tp1: false, tp2: false, tp3: false, tp4: false },
           closes:           ladderCore.closes,
           slMoves:          ladderCore.slMoves,
@@ -324,6 +345,7 @@ module.exports = async (req, res) => {
             const r = new Redis({ url: KV_URL, token: KV_TOK });
             await r.set('v9:tp:' + positionId, JSON.stringify(ladder), { ex: 7 * 24 * 60 * 60 });
             console.log('[EXECUTE] V11 ladder stored: posId=' + positionId + ' mode=' + tradeMode +
+                        ' source=' + ladder.tpSource +
                         ' tp1=' + ladder.tp1 + ' tp2=' + ladder.tp2 + ' tp3=' + ladder.tp3 + ' tp4=' + ladder.tp4 +
                         ' (' + ladderCore.closes.map(c => Math.round(c * 100) + '%').join('/') + ')');
           } catch (e) { console.error('[EXECUTE] ladder store FAILED: ' + e.message); }

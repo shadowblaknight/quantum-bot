@@ -274,7 +274,7 @@ async function runCronTick() {
 
         // V11: Mode-aware SL distance.
         // AI is required to return mode + slPips. If AI omits mode (legacy), default DAY.
-        // If AI omits slPips, look up the per-instrument 1R distance for that mode.
+        // If AI omits slPips, use ATR-aware default (volatility-aware, much better than fixed table).
         const tradeMode = (decision.mode || 'DAY').toUpperCase();
         const cat = instCategory(sym);
         let pipMult;
@@ -284,28 +284,80 @@ async function runCronTick() {
         else if (sym.includes('JPY'))          pipMult = 0.01;
         else                                   pipMult = 0.0001;
 
-        // SL distance: AI value if given, else table lookup
+        // SL distance: AI value if given, else ATR-aware default
         let slPips = decision.slPips;
         if (!slPips || !isFinite(slPips) || slPips <= 0) {
-          // Lookup 1R from R_DISTANCE_TABLE via getRDistance
           const { getRDistance } = require('./_lib');
-          slPips = getRDistance(sym, tradeMode);
+          // Use current H1 ATR for volatility-aware default
+          const currentH1ATR = (regime.indicators && regime.indicators.h1Atr14) || null;
+          slPips = getRDistance(sym, tradeMode, currentH1ATR);
         }
-        // Sanity caps per category (defense against AI hallucinations)
+        // Sanity caps per category (defense against AI hallucinations — these are minimums)
         if (cat === 'CRYPTO' && slPips < 100) slPips = 300;
         if (cat === 'INDEX'  && slPips < 20)  slPips = 30;
         if (cat === 'GOLD'   && slPips < 50)  slPips = 150;
         if (cat === 'FOREX'  && slPips < 8)   slPips = 12;
-        // No upper cap -- SWING mode legitimately uses large distances
 
         // TP for broker: use the mode's TP4 R-multiple (final target).
-        // The full ladder is built server-side in execute.js using buildLadder.
-        const { getTradingMode } = require('./_lib');
+        const { getTradingMode, capTPDistance } = require('./_lib');
         const modeDef = getTradingMode(tradeMode);
         const tp4Mult = modeDef.tps[3];
+
+        // V11 FIX (Nov 2): Cap TP4 distance as % of price.
+        // Prevents unreachable TP4 like "BTC +$3000 in DAY mode". If the cap kicks in,
+        // slPips is reduced so all 4 TPs scale down proportionally.
+        const slPipsBeforeCap = slPips;
+        slPips = capTPDistance(sym, tradeMode, entry, slPips, tp4Mult);
+        if (slPips !== slPipsBeforeCap) {
+          console.log('[CRON] TP4 cap applied for ' + sym + ' ' + tradeMode +
+                      ': slPips ' + slPipsBeforeCap + ' → ' + slPips +
+                      ' (TP4 reach=' + (slPips * tp4Mult * pipMult).toFixed(2) + ' price units)');
+        }
+
         const sign = decision.decision === 'BUY' ? 1 : -1;
         const sl = entry - sign * slPips * pipMult;
-        const tp = entry + sign * slPips * tp4Mult * pipMult;
+
+        // V11 STRUCTURAL TPs: if AI returned a tps array of 4 prices, validate and use them.
+        // Otherwise fall back to R-multiple ladder.
+        let aiTps = null;
+        if (Array.isArray(decision.tps) && decision.tps.length === 4) {
+          const valid = decision.tps.every(p => typeof p === 'number' && isFinite(p) && p > 0);
+          // Direction sanity: all TPs must be on correct side of entry, monotonically progressive
+          if (valid) {
+            const okSide = decision.tps.every(p => sign === 1 ? p > entry : p < entry);
+            const okOrder = sign === 1
+              ? decision.tps[0] < decision.tps[1] && decision.tps[1] < decision.tps[2] && decision.tps[2] < decision.tps[3]
+              : decision.tps[0] > decision.tps[1] && decision.tps[1] > decision.tps[2] && decision.tps[2] > decision.tps[3];
+
+            // TP4 reach validation: use the same % cap as the R-multiple path.
+            // Compute the maximum allowed TP4 distance based on the per-mode % cap.
+            // We re-derive it by calling capTPDistance with a large slPips and seeing how it caps.
+            // This is the price-units distance allowed.
+            const cappedSlPips = capTPDistance(sym, tradeMode, entry, 99999, tp4Mult);
+            const maxAllowedTp4Dist = cappedSlPips * tp4Mult * pipMult;
+            const tp4Reach = Math.abs(decision.tps[3] - entry);
+            // Allow a 50% buffer over the R-multiple cap because structural levels can
+            // legitimately extend beyond R-multiples (that's the point).
+            const okReach = tp4Reach <= maxAllowedTp4Dist * 1.5;
+
+            if (okSide && okOrder && okReach) {
+              aiTps = decision.tps;
+              const reachStr = entry > 100 ? tp4Reach.toFixed(2) : tp4Reach.toFixed(5);
+              console.log('[CRON] Using AI structural TPs for ' + sym + ' ' + tradeMode + ': ' +
+                          decision.tps.map(p => p > 1000 ? p.toFixed(2) : p.toFixed(5)).join(', ') +
+                          ' (TP4 reach=' + reachStr + ', max=' + (maxAllowedTp4Dist * 1.5).toFixed(entry > 100 ? 2 : 5) + ')');
+            } else {
+              console.warn('[CRON] AI tps rejected for ' + sym + ': okSide=' + okSide +
+                           ' okOrder=' + okOrder + ' okReach=' + okReach +
+                           ' (TP4 reach=' + tp4Reach.toFixed(2) + ', max=' + (maxAllowedTp4Dist * 1.5).toFixed(2) + ')' +
+                           '. Falling back to R-multiple ladder.');
+            }
+          } else {
+            console.warn('[CRON] AI tps invalid (non-numeric). Falling back to R-multiple ladder.');
+          }
+        }
+        // tp4 for broker — either AI's TP4 or R-multiple
+        const tp = aiTps ? aiTps[3] : (entry + sign * slPips * tp4Mult * pipMult);
 
         // Execute
         const execResp = await fetch(selfBase() + '/api/execute', {
@@ -319,6 +371,7 @@ async function runCronTick() {
             takeProfit: tp,
             volume:     decision.volume,
             mode:       tradeMode,
+            customTps:  aiTps,                    // V11: AI's structural TP1..TP4 prices, null if using R-multiples
             comment:    'QB:' + (decision.rawTactic || decision.family || 'AI').slice(0, 28),
           }),
         });
@@ -408,10 +461,16 @@ async function runCronTick() {
             }
           } catch (_) {}
 
+          // Compute all 4 TP levels for the telegram message (matches what execute.js stores)
+          const tpMults = modeDef.tps;  // e.g. [1, 2, 3, 4] for DAY
+          const closesPct = modeDef.closes.map(c => Math.round(c * 100));
+          const tpPrice = (rMult) => entry + sign * slPips * rMult * pipMult;
+          const fmt = (px) => px > 1000 ? px.toFixed(2) : px.toFixed(5);
+
           await tg(
             '✨ <b>V11 OPEN · ' + sym + ' · ' + tradeMode + '</b>\n\n' +
             '<pre>' +
-            decision.decision + ' ' + decision.volume + 'L @ ' + entry.toFixed(5) + '\n' +
+            decision.decision + ' ' + decision.volume + 'L @ ' + fmt(entry) + '\n' +
             'Mode:      ' + tradeMode + '\n' +
             'Family:    ' + decision.family + '\n' +
             'Tactic:    ' + (decision.rawTactic || '?') + '\n' +
@@ -421,8 +480,11 @@ async function runCronTick() {
             setupsLine +
             obsLine +
             '──────────────────\n' +
-            'SL:        ' + sl.toFixed(5) + ' (' + slPips + ' pips)\n' +
-            'TP4:       ' + tp.toFixed(5) + ' (' + Math.round(slPips * tp4Mult) + ' pips, ' + tp4Mult + 'R)' +
+            'SL:        ' + fmt(sl) + ' (' + slPips + ' pips)\n' +
+            'TP1:       ' + fmt(tpPrice(tpMults[0])) + ' (' + tpMults[0] + 'R, close ' + closesPct[0] + '%)\n' +
+            'TP2:       ' + fmt(tpPrice(tpMults[1])) + ' (' + tpMults[1] + 'R, close ' + closesPct[1] + '%)\n' +
+            'TP3:       ' + fmt(tpPrice(tpMults[2])) + ' (' + tpMults[2] + 'R, close ' + closesPct[2] + '%)\n' +
+            'TP4:       ' + fmt(tpPrice(tpMults[3])) + ' (' + tpMults[3] + 'R, close ' + closesPct[3] + '%)' +
             '</pre>\n' +
             '<i>' + (decision.reason || '').slice(0, 200) + '</i>'
           );

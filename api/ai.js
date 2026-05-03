@@ -23,6 +23,8 @@ const { readSetupsFor }                    = require('./setup-detector');
 const { readObservations, writeObservations } = require('./observation-memory');
 // V11 step 3: pattern learner output (refreshed end-of-day)
 const { readPatternsForAI }                = require('./pattern-learner');
+// V11 follow-up: structural liquidity levels
+const { findLevelsFor }                    = require('./level-finder');
 const { getRegimeFor } = require('./regime');
 const { readMemory, buildPromptContext, appendDecision } = require('./memory');
 const { readFamilyForSymbol } = require('./trades');
@@ -104,7 +106,7 @@ function summarizeTF(tf, candles) {
 }
 
 // Build the AI prompt.
-function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtestStats, openPositions, correlationCluster, sessionLabel, setups, observations, patterns }) {
+function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtestStats, openPositions, correlationCluster, sessionLabel, setups, observations, patterns, levels }) {
   const memCtx = buildPromptContext(memory, sym);
 
   const tfLines = [];
@@ -219,6 +221,32 @@ function buildPrompt({ sym, multiTF, regime, chaos, memory, familyStats, backtes
     }
   }
 
+  // V11 follow-up: structural liquidity levels — TP target candidates
+  let levelsBlock = '';
+  if (levels && levels.currentPrice && (levels.above.length > 0 || levels.below.length > 0)) {
+    const fmt = (p) => p > 1000 ? p.toFixed(2) : p > 100 ? p.toFixed(2) : p > 10 ? p.toFixed(3) : p.toFixed(5);
+    const fmtLevel = (l) => '  • ' + fmt(l.price).padEnd(10) +
+      '[' + l.type.padEnd(11) + '] ' +
+      'dist ' + l.distancePips + 'p, ' +
+      'age ' + l.age.toFixed(1) + 'h, ' +
+      'strength ' + l.strength.toFixed(2);
+
+    const aboveLines = levels.above.slice(0, 8).map(fmtLevel);
+    const belowLines = levels.below.slice(0, 8).map(fmtLevel);
+
+    levelsBlock = '\n=== STRUCTURAL LIQUIDITY LEVELS (use these as TP targets) ===\n' +
+      'Current price: ' + fmt(levels.currentPrice) + '   ·   Session: ' + (levels.session || '?') + '\n\n' +
+      (aboveLines.length > 0
+        ? 'ABOVE current price (LONG TP candidates, nearest first):\n' + aboveLines.join('\n')
+        : 'ABOVE: (none detected within range)') + '\n\n' +
+      (belowLines.length > 0
+        ? 'BELOW current price (SHORT TP candidates, nearest first):\n' + belowLines.join('\n')
+        : 'BELOW: (none detected within range)') + '\n\n' +
+      'These are real chart levels (session highs/lows, prior day H/L, swing fractals, round numbers, weekly open). ' +
+      'Use them as TP targets instead of arbitrary R-multiples. Stronger levels (higher strength score) ' +
+      'are better magnets. Pick TPs that align with these levels for higher hit rate.\n';
+  }
+
   return `You are the decision layer of an algorithmic trading system. Make ONE decision now.
 
 === CONTEXT ===
@@ -230,7 +258,7 @@ Current regime: ${regime.regime} (score ${regime.score}/100)
 Indicators: ADX=${((regime.indicators && regime.indicators.h1Adx14) || 0).toFixed(1)} · ATR=${((regime.indicators && regime.indicators.h1Atr14) || 0).toFixed(5)} · BB-width=${(((regime.indicators && regime.indicators.h1BBwidth) || 0) * 100).toFixed(2)}% · MA-diff=${((regime.indicators && regime.indicators.maDiff) || 0).toFixed(2)} · H4 trend dir=${(regime.indicators && regime.indicators.h4TrendDir) || 0}
 ${chaosLine}
 ${clusterLine}
-${setupsBlock}${obsBlock}${patternsBlock}
+${setupsBlock}${obsBlock}${patternsBlock}${levelsBlock}
 === MULTI-TIMEFRAME VIEW ===
 ${tfLines.join('\n')}
 
@@ -286,13 +314,34 @@ You are an active trading decision maker. Your job is to TRADE setups when condi
    - **DAY**: intraday swing, 1-4R targets, hold ~1-8h. **Default for most setups.** Use when H1+H4 align and you expect a trending move during the active session.
    - **SWING**: multi-day, 1.5-8R targets, hold ~1-3 days. Use only when D1/W structure supports it AND H4 is clearly aligned. Rare — most setups are DAY mode.
 
-9. **slPips (required).** SL distance in instrument-native pips. Suggested 1R defaults:
-   - Forex non-JPY: SCALP 12, DAY 25, SWING 50
-   - JPY pairs: SCALP 15, DAY 30, SWING 60
-   - Gold: SCALP 150, DAY 400, SWING 1000 (in $0.01 pips, so DAY 400 = $4)
-   - BTC: SCALP 300, DAY 800, SWING 2000 ($)
-   - Indices: SCALP 25, DAY 60, SWING 150 (points)
-   You can scale by 1.5x for high-volatility conditions or 0.7x for tight ranges. The TP ladder is auto-built from SL distance + mode — don't compute TPs yourself.
+9. **slPips (required) — SL distance, anchored to volatility.**
+   SL is your downside risk. Use H1 ATR from regime block as the anchor:
+   - SCALP: SL ≈ 0.4 × H1 ATR  (very tight)
+   - DAY:   SL ≈ 1.0 × H1 ATR  (one hour of normal volatility)
+   - SWING: SL ≈ 1.5 × H1 ATR  (room to breathe)
+
+   Convert to pips using: pip mult = 0.0001 (non-JPY forex), 0.01 (JPY/gold), 1.0 (BTC/indices). So SCALP gold with H1 ATR = $4 → SL ≈ $1.60 → 160 pips.
+
+10. **Target structure, not arbitrary R-multiples.**
+    Look at the STRUCTURAL LIQUIDITY LEVELS block above. **TP1, TP2, TP3, TP4 should land on real chart levels** (Asian high, London low, PDH, swing fractal, round number, etc.) — not at "1R, 2R, 3R, 4R from entry." Real levels are where actual orders sit; price gravitates to them.
+
+    Process:
+    1. Pick slPips per rule 9 (volatility-anchored SL)
+    2. Look at the levels list. For LONG: pick 4 levels ABOVE current price. For SHORT: pick 4 levels BELOW.
+    3. TPs should be progressive: TP1 nearest, TP4 furthest. Skip levels that are "too close" (under 0.3 × slPips distance) or "too far" (over 8 × slPips for DAY mode). Use stronger levels (higher strength score) preferentially.
+    4. If only 2-3 good levels exist, pad the remaining TPs at fixed R-multiples beyond the last level.
+    5. Return both slPips AND the actual TP prices.
+
+    **Example BTC LONG @ 78440, ATR=200, DAY mode:**
+    - SL: 200 × 1.0 = $200 below = 78240, slPips = 200
+    - Levels above: ASIAN_HIGH 78900 (str 0.7), PDH 79200 (str 0.85), ROUND 79000 (str 0.55), SWING_H 79800 (str 0.5)
+    - TP1 = 78900 (Asian high, 460 pips reach, 2.3R)
+    - TP2 = 79200 (PDH, 760 pips, 3.8R)
+    - TP3 = 79800 (next swing high, 1360 pips, 6.8R)
+    - TP4 = 80500 (extended target at round number cluster)
+    - Return: { "slPips": 200, "tps": [78900, 79200, 79800, 80500] }
+
+    If no clear levels, fall back to fixed R-multiples (1R/2R/3R/4R for DAY) and OMIT the "tps" field — the bot will use defaults.
 
 11. **Observations (V11 — your continuous study).**
     Beyond the immediate trade decision, you can leave OBSERVATIONS for your future calls. These are notes you write to yourself that persist across cron ticks. Useful when the chart is "almost ready" but no trade yet.
@@ -317,6 +366,7 @@ You are an active trading decision maker. Your job is to TRADE setups when condi
   "confidence": 0-100,
   "reason": "concise multi-TF + regime reasoning, MAX 2 sentences",
   "slPips": number,
+  "tps": [number, number, number, number],   // optional — explicit TP1..TP4 PRICES (not pips). Use structural levels. Omit to use R-multiple defaults.
   "memo": "optional one-line note for next AI call to remember",
   "observations": [
     { "id": "...", "text": "...", "direction": "LONG|SHORT|NEUTRAL", "watchLevel": number?, "invalidatesAt": number?, "refreshHours": number? }
@@ -423,8 +473,8 @@ module.exports = async (req, res) => {
   const riskMode = body.riskMode || 'TEST';
 
   try {
-    // 1. Fetch all the context in parallel (including V11 setups + observations + patterns)
-    const [multiTF, regime, memory, familyStats, positionsResp, backtestStats, setups, observations, patterns] = await Promise.all([
+    // 1. Fetch all the context in parallel (including V11 setups + observations + patterns + levels)
+    const [multiTF, regime, memory, familyStats, positionsResp, backtestStats, setups, observations, patterns, levels] = await Promise.all([
       fetchMultiTF(sym),
       getRegimeFor(sym),
       readMemory(),
@@ -434,6 +484,7 @@ module.exports = async (req, res) => {
       readSetupsFor(sym),
       readObservations(sym),
       readPatternsForAI(),
+      findLevelsFor(sym).catch(() => null),
     ]);
     const openPositions = positionsResp.positions || [];
 
@@ -457,7 +508,7 @@ module.exports = async (req, res) => {
     const prompt = buildPrompt({
       sym, multiTF, regime, chaos: regime.chaos, memory, familyStats, backtestStats,
       openPositions, correlationCluster: myCluster, sessionLabel,
-      setups, observations, patterns,
+      setups, observations, patterns, levels,
     });
 
     const claudeResp = await callClaude(prompt);

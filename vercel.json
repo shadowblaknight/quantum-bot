@@ -37,6 +37,7 @@
     "api/setup-detector.js":   { "maxDuration": 30 },
     "api/observation-memory.js": { "maxDuration": 15 },
     "api/pattern-learner.js":  { "maxDuration": 30 },
-    "api/ai-watch.js":         { "maxDuration": 30 }
+    "api/ai-watch.js":         { "maxDuration": 30 },
+    "api/level-finder.js":     { "maxDuration": 20 }
   }
 }

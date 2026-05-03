@@ -659,6 +659,32 @@ function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
       }
     }
 
+    // 2b. Structural levels (V11 follow-up) → translucent dotted lines.
+    // Only show top 4 above + top 4 below by strength to avoid clutter.
+    const lvlData = (data && data.levels) || { above: [], below: [] };
+    const levelTypeColor = {
+      'PDH': '#fb923c', 'PDL': '#fb923c',
+      'ASIAN_HIGH': '#a78bfa', 'ASIAN_LOW': '#a78bfa',
+      'LONDON_HIGH': '#22d3ee', 'LONDON_LOW': '#22d3ee',
+      'SWING_H': '#94a3b8', 'SWING_L': '#94a3b8',
+      'ROUND': '#64748b',
+      'WEEKLY_OPEN': '#f59e0b',
+    };
+    const renderLevel = (l) => {
+      const color = levelTypeColor[l.type] || '#475569';
+      const line = candleRef.current.createPriceLine({
+        price: l.price,
+        color: color,
+        lineWidth: 1,
+        lineStyle: 1, // dotted
+        axisLabelVisible: true,
+        title: `${l.type.replace('_', '')}`,
+      });
+      priceLinesRef.current.push(line);
+    };
+    (lvlData.above || []).slice().sort((a, b) => (b.strength || 0) - (a.strength || 0)).slice(0, 4).forEach(renderLevel);
+    (lvlData.below || []).slice().sort((a, b) => (b.strength || 0) - (a.strength || 0)).slice(0, 4).forEach(renderLevel);
+
     // 3. Open positions → entry, SL, TP ladder lines
     for (const p of (data.positions || [])) {
       const sign = p.direction === "LONG" ? 1 : -1;
@@ -842,6 +868,7 @@ function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
         <div style={{ marginBottom: 4, fontWeight: 700, color: "#cbd5e1" }}>Chart legend</div>
         <div>━ <span style={{ color: "#22c55e" }}>green dashed</span> = LONG setup level · <span style={{ color: "#ef4444" }}>red dashed</span> = SHORT setup level · ⋯ <span style={{ color: "#64748b" }}>gray dotted</span> = setup invalidation</div>
         <div>━ <span style={{ color: "#3b82f6" }}>blue solid</span> = LONG observation · <span style={{ color: "#a855f7" }}>purple solid</span> = SHORT observation · <span style={{ color: "#94a3b8" }}>gray solid</span> = neutral observation</div>
+        <div>⋯ <span style={{ color: "#fb923c" }}>orange dotted</span> = PDH/PDL · <span style={{ color: "#a78bfa" }}>violet dotted</span> = Asian session · <span style={{ color: "#22d3ee" }}>cyan dotted</span> = London session · <span style={{ color: "#94a3b8" }}>gray dotted</span> = swing fractal · <span style={{ color: "#f59e0b" }}>amber dotted</span> = weekly open</div>
         <div>━ <span style={{ color: "#fbbf24" }}>yellow</span> = position entry · <span style={{ color: "#dc2626" }}>red dashed</span> = SL · <span style={{ color: "#22c55e" }}>green dashed</span> = pending TP · <span style={{ color: "#10b981" }}>green solid</span> = TP hit</div>
       </div>
     </div>

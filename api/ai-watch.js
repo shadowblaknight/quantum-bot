@@ -16,6 +16,7 @@ const { fetchCandles, fetchPrice, fetchPositions } = require('./broker');
 const { getRegimeFor } = require('./regime');
 const { readSetupsFor } = require('./setup-detector');
 const { readObservations } = require('./observation-memory');
+const { findLevelsFor } = require('./level-finder');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -25,13 +26,14 @@ module.exports = async (req, res) => {
   const n  = Math.min(Math.max(parseInt(req.query.n || '100', 10), 20), 200);
 
   try {
-    const [candlesResp, priceResp, positionsResp, regime, setups, observations] = await Promise.all([
+    const [candlesResp, priceResp, positionsResp, regime, setups, observations, levels] = await Promise.all([
       fetchCandles(sym, tf, n),
       fetchPrice(sym),
       fetchPositions(),
       getRegimeFor(sym),
       readSetupsFor(sym),
       readObservations(sym),
+      findLevelsFor(sym).catch(() => null),
     ]);
 
     // Filter positions to this symbol and merge with TP ladder state
@@ -116,6 +118,7 @@ module.exports = async (req, res) => {
       },
       setups,
       observations,
+      levels:       levels || { above: [], below: [], currentPrice: null },
       positions:    positionsWithLadder,
       lastDecision,
       ts:           Date.now(),
