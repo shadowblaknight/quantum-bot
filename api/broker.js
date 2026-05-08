@@ -156,55 +156,46 @@ async function fetchPrice(assetIdOrSym, userId) {
 // =================================================================
 // PUBLIC API: CANDLES
 // =================================================================
+//
+// Candles come from candle-source.js (Binance for crypto, TwelveData for
+// everything else). Decoupled from MetaAPI because not all MetaAPI accounts
+// have the Market Data add-on.
+//
+// IMPORTANT: this function takes assetIdOrSym for backward compatibility with
+// V11 callers. New V12 callers should pass assetId directly. If a broker
+// symbol is passed, we resolve it back to assetId via reverseLookup.
 
-// Accepts asset ID or broker symbol. Cached in Redis per-TF.
 async function fetchCandles(assetIdOrSym, tf, n, userId) {
-  const sym = await toBrokerSymbol(assetIdOrSym, userId);
-  if (!sym) return { error: 'symbol unresolved', candles: [] };
   if (!ALL_TFS.includes(tf)) return { error: `invalid tf ${tf}`, candles: [] };
   const count = Math.max(1, Math.min(500, parseInt(n, 10) || 100));
 
-  const r = getRedis();
-  const cacheKey = `v12:candles:${sym}:${tf}:${count}`;
-  const ttl = TF_CACHE_TTL[tf] || 60;
-
-  // Try cache
-  if (r) {
-    try {
-      const raw = await r.get(cacheKey);
-      if (raw) {
-        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        if (parsed && Array.isArray(parsed.candles)) return parsed;
-      }
-    } catch (_) {}
+  // Normalize to assetId
+  let assetId = assetIdOrSym;
+  // If it's a broker symbol (contains broker-suffix patterns), resolve back
+  if (typeof assetIdOrSym === 'string' && (
+    assetIdOrSym.includes('.') || assetIdOrSym.match(/[A-Z]{6,}/)
+  )) {
+    const { resolveAsset } = require('./symbol-resolver');
+    const reversed = await resolveAsset(assetIdOrSym, userId).catch(() => null);
+    if (reversed) assetId = reversed;
   }
 
-  // Fetch from MetaAPI
-  const url = `${metaapiBase()}/users/current/accounts/${accountId()}/historical-market-data/symbols/${sym}/timeframes/${tf}/candles?limit=${count}`;
-  try {
-    const resp = await fetch(url, { headers: metaapiHeaders() });
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => '');
-      return { candles: [], error: `candles ${resp.status}: ${txt.slice(0, 200)}`, urlTried: url };
-    }
-    const data = await resp.json().catch(() => []);
-    const candles = (Array.isArray(data) ? data : []).map((c) => ({
-      time:       c.time,
-      open:       c.open,
-      high:       c.high,
-      low:        c.low,
-      close:      c.close,
-      volume:     c.volume || c.tickVolume || 0,
-      tickVolume: c.tickVolume || 0,
-    }));
-    const result = { symbol: sym, timeframe: tf, count: candles.length, candles };
-    if (r && candles.length > 0) {
-      await r.set(cacheKey, JSON.stringify(result), { ex: ttl }).catch(() => {});
-    }
-    return result;
-  } catch (e) {
-    return { candles: [], error: e.message };
+  // Delegate to candle-source
+  const { fetchCandles: fetchFromSource } = require('./candle-source');
+  const result = await fetchFromSource(assetId, tf, count);
+
+  if (result.error) {
+    return { candles: [], error: result.error, source: result.source };
   }
+
+  return {
+    symbol: assetId,
+    timeframe: tf,
+    count: result.candles.length,
+    candles: result.candles,
+    source: result.source,
+    warning: result.warning,
+  };
 }
 
 // =================================================================

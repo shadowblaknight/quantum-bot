@@ -37,6 +37,9 @@
     "api/news-context.js": {
       "maxDuration": 15
     },
+    "api/candle-source.js": {
+      "maxDuration": 15
+    },
     "api/recognition-memory.js": {
       "maxDuration": 15
     },
