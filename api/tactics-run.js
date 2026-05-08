@@ -34,12 +34,17 @@ const fakeoutSignature  = require('./tactics/fakeout-signature');
 const roundNumbers      = require('./tactics/round-numbers');
 
 // Tactic registry: ID → { detector, defaultTimeframes }
+//
+// V12 default TFs deliberately exclude M5 to fit within TwelveData free tier
+// (800 req/day). This disables SCALP mode detection. DAY and SWING modes work
+// normally on M15+. Re-enable M5 by adding it back to a tactic's defaultTFs
+// when you upgrade to a paid candle source.
 const TACTICS = {
   orderBlock:        { run: orderBlock.detect,        defaultTFs: ['15m', '1h', '4h'] },
-  fvg:               { run: fvg.detect,               defaultTFs: ['5m', '15m', '1h', '4h'] },
+  fvg:               { run: fvg.detect,               defaultTFs: ['15m', '1h', '4h'] },
   bos:               { run: bos.detect,               defaultTFs: ['15m', '1h', '4h'] },
   trendStructure:    { run: trendStructure.detect,    defaultTFs: ['1h', '4h', '1d'] },
-  liquiditySweep:    { run: liquiditySweep.detect,    defaultTFs: ['5m', '15m', '1h'] },
+  liquiditySweep:    { run: liquiditySweep.detect,    defaultTFs: ['15m', '1h'] },
   sessionLevels:     { run: sessionLevels.detect,     defaultTFs: ['1h'] },
   unfilledImbalance: { run: unfilledImbalance.detect, defaultTFs: ['1h', '4h', '1d'] },
   fakeout:           { run: fakeoutSignature.detect,  defaultTFs: ['15m', '1h', '4h'] },

@@ -63,7 +63,8 @@ const CACHE_KEY = (asset, tf) => `v12:candles:${asset}:${tf}`;
 function pickProvider(asset) {
   const meta = getAssetById(asset);
   if (!meta) return null;
-  if (meta.category === 'crypto') return 'binance';
+  // All assets use TwelveData. (Binance available as fallback if needed —
+  // geo-restricted on some Vercel regions, so we use TwelveData for crypto too.)
   return 'twelvedata';
 }
 
@@ -156,6 +157,11 @@ const TWELVEDATA_SYMBOL = {
   gold:     'XAU/USD',
   silver:   'XAG/USD',
   platinum: 'XPT/USD',
+  // Crypto — TwelveData uses slash format
+  btc: 'BTC/USD',
+  eth: 'ETH/USD',
+  sol: 'SOL/USD',
+  xrp: 'XRP/USD',
   // Indices — TwelveData uses tickers
   nas100: 'NDX',          // Nasdaq 100
   us30:   'DJI',          // Dow Jones
