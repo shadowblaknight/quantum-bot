@@ -91,6 +91,36 @@ async function fetchBrokerSymbols() {
 // SYNC: BUILD THE PER-USER MAP
 // =================================================================
 
+// Score a broker symbol for "tradeability priority" when multiple match the same asset.
+// Higher score = preferred. PU Prime convention: `.s` suffix = standard tradeable spot;
+// futures (`ft`), cash (`.cash`), or non-suffixed equity tickers should be deprioritized.
+function symbolPriority(sym, matchType) {
+  let score = 0;
+  // Exact match strongly preferred over fuzzy
+  if (matchType === 'exact') score += 100;
+
+  const upper = String(sym).toUpperCase();
+
+  // Strong positive signals
+  if (upper.endsWith('.S')) score += 30;     // .s = PU Prime standard tradeable
+  if (upper.endsWith('M')) score += 20;      // m = micro/MT4 standard
+  if (upper.endsWith('.STD')) score += 15;
+  if (upper.endsWith('.PRO')) score += 10;
+  if (upper.endsWith('.RAW')) score += 10;
+
+  // Strong negatives — these aren't the canonical tradeable spot/CFD
+  if (upper.endsWith('FT.S')) score -= 25;   // futures: NAS100FT.S, DJ30FT.S, JPN225FT.S
+  if (upper.endsWith('.CASH')) score -= 10;
+  if (upper.endsWith('.CRP')) score -= 25;
+  if (upper.endsWith('.24H')) score -= 15;
+  if (upper.includes('FT')) score -= 5;
+
+  // Minor tie-breaker
+  score -= upper.length * 0.1;
+
+  return score;
+}
+
 // Fetch broker symbols, auto-match each one against asset registry, persist the map.
 // Returns: { ok, mapped, unmapped, brokerSymbols, syncedAt, error? }
 async function syncBrokerSymbols(userId) {
@@ -116,15 +146,19 @@ async function syncBrokerSymbols(userId) {
     const assetId = match.asset.id;
     if (mapped[assetId]) {
       // Two broker symbols match the same asset (e.g., "XAUUSD" AND "XAUUSDm" both present)
-      // Prefer the exact match over fuzzy. If both exact, prefer non-suffixed (cleaner).
+      // Resolution rules (in order of priority):
+      //   1. Exact match wins over fuzzy match
+      //   2. PU Prime suffix `.s` (standard) wins over no-suffix
+      //      (PU Prime standard symbols like XAUUSD.s are the canonical tradeable contract)
+      //   3. Avoid `.cash`, `.crp`, `ft`, futures suffixes
+      //   4. Otherwise prefer shorter
       const existing = mapped[assetId];
       const existingMatch = matchBrokerSymbol(existing);
-      const preferNew = (
-        match.matchType === 'exact' && existingMatch.matchType === 'fuzzy'
-      ) || (
-        match.matchType === existingMatch.matchType &&
-        brokerSym.length < existing.length
-      );
+
+      const newPriority = symbolPriority(brokerSym, match.matchType);
+      const existingPriority = symbolPriority(existing, existingMatch.matchType);
+      const preferNew = newPriority > existingPriority;
+
       if (preferNew) {
         conflicts.push({ assetId, kept: brokerSym, dropped: existing });
         mapped[assetId] = brokerSym;
@@ -140,12 +174,16 @@ async function syncBrokerSymbols(userId) {
   }
 
   // Persist
+  // Trim unmapped to a reasonable preview size to avoid huge Redis payloads.
+  // Full unmapped list returned in API response, only preview persisted.
+  const unmappedPreview = unmapped.slice(0, 200);
   const meta = {
     syncedAt: Date.now(),
     brokerSymbolCount: brokerSymbols.length,
     mappedCount: Object.keys(mapped).length,
     unmappedCount: unmapped.length,
-    unmapped,
+    unmapped: unmappedPreview,
+    unmappedTrimmed: unmapped.length > 200,
     conflicts,
   };
   try {
@@ -154,6 +192,9 @@ async function syncBrokerSymbols(userId) {
   } catch (e) {
     return { ok: false, error: 'Persist failed: ' + e.message };
   }
+
+  // Invalidate in-memory cache so next loadMap fetches fresh data
+  clearCache(userId);
 
   return {
     ok: true,
@@ -176,13 +217,20 @@ async function syncBrokerSymbols(userId) {
 const _memCache = {};
 
 async function loadMap(userId) {
-  if (_memCache[userId || DEFAULT_USER]) return _memCache[userId || DEFAULT_USER];
+  const key = userId || DEFAULT_USER;
+  // Return cached only if it has actual content (don't cache empty as "loaded")
+  if (_memCache[key] && Object.keys(_memCache[key]).length > 0) {
+    return _memCache[key];
+  }
   const r = getRedis();
   if (!r) return null;
   try {
     const raw = await r.get(symMapKey(userId));
     const map = safeParse(raw) || {};
-    _memCache[userId || DEFAULT_USER] = map;
+    // Only cache non-empty maps (otherwise we'd cache emptiness forever)
+    if (Object.keys(map).length > 0) {
+      _memCache[key] = map;
+    }
     return map;
   } catch (_) {
     return null;

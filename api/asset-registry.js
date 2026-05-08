@@ -337,7 +337,7 @@ const ASSETS = [
     preferredSessions: ['NEW_YORK', 'OVERLAP'],
     aliases: [
       'US30', 'US30.cash', 'US30m', 'US30#', 'US30.s',
-      'DJ30', 'DJI', 'DOWJONES', 'WALL30', 'DOW',
+      'DJ30', 'DJ30.s', 'DJI', 'DOWJONES', 'WALL30', 'DOW',
     ],
   },
   {
@@ -353,7 +353,7 @@ const ASSETS = [
     preferredSessions: ['NEW_YORK', 'OVERLAP'],
     aliases: [
       'US500', 'US500.cash', 'US500m', 'US500#', 'US500.s',
-      'SPX500', 'SP500', 'SPX', 'SPY',
+      'SPX500', 'SP500', 'SP500.s', 'SPX', 'SPY',
     ],
   },
   {
@@ -396,7 +396,7 @@ const ASSETS = [
     typicalSpreadPips: 8,
     typicalH1ATR: 100,
     preferredSessions: ['ASIAN'],
-    aliases: ['JP225', 'JP225.cash', 'JP225m', 'NIKKEI', 'NIKKEI225', 'JPN225', 'N225'],
+    aliases: ['JP225', 'JP225.cash', 'JP225m', 'NIKKEI', 'NIKKEI225', 'NIKKEI225.S', 'JPN225', 'N225'],
   },
 
   // ===================================================================
@@ -413,7 +413,7 @@ const ASSETS = [
     typicalSpreadPips: 3,
     typicalH1ATR: 0.5,
     preferredSessions: ['LONDON', 'NEW_YORK'],
-    aliases: ['XTIUSD', 'WTI', 'WTI.cash', 'USOIL', 'USOIL.cash', 'CL', 'CLUSD', 'OIL', 'CRUDE'],
+    aliases: ['XTIUSD', 'USOUSD', 'USOUSD.s', 'WTI', 'WTI.cash', 'USOIL', 'USOIL.cash', 'CL', 'CL-OIL.s', 'CLUSD', 'OIL', 'CRUDE'],
   },
   {
     id: 'oil_brent',
@@ -426,7 +426,7 @@ const ASSETS = [
     typicalSpreadPips: 3,
     typicalH1ATR: 0.5,
     preferredSessions: ['LONDON', 'NEW_YORK'],
-    aliases: ['XBRUSD', 'BRENT', 'BRENT.cash', 'UKOIL', 'UKOIL.cash', 'BRN'],
+    aliases: ['XBRUSD', 'UKOUSD', 'UKOUSD.s', 'BRENT', 'BRENT.cash', 'UKOIL', 'UKOIL.cash', 'BRN'],
   },
   {
     id: 'natgas',
