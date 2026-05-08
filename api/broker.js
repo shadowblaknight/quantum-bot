@@ -1,255 +1,255 @@
 /* eslint-disable */
-// V10 — api/broker.js
-// Consolidated MetaAPI broker layer. Replaces V9's account.js + positions.js +
-// broker-price.js + broker-candles.js. Single endpoint, action-based routing.
+// V12 — api/broker.js
 //
-// Routes:
-//   GET  /api/broker?action=account                          -> account info
-//   GET  /api/broker?action=positions                        -> open positions
-//   GET  /api/broker?action=price&symbol=XAUUSD              -> bid/ask/spread
-//   GET  /api/broker?action=candles&symbol=XAUUSD&tf=1h&n=200 -> OHLCV candles
-//   GET  /api/broker?action=multi-tf&symbol=XAUUSD            -> all 9 timeframes at once
+// Thin wrapper over MetaAPI (PU Prime / any MT5 broker via MetaAPI).
+//
+// CRITICAL V12 CHANGE: All public functions accept ASSET IDs (e.g., 'gold', 'btc')
+// and internally resolve to broker-specific symbol strings via symbol-resolver.
+// This decouples our internal logic from broker symbol conventions forever.
+//
+// BACKWARD COMPAT: If caller passes something that looks like a broker symbol
+// (uppercase, contains digits/dots/hashes), we treat it as already-resolved and
+// pass it through. This eases the migration from V11.
+// ----------------------------------------------------------------------------
 
-const { metaBase, metaHeaders, metaAccountId, applyCors, normSym, getRedis, safeParse } = require('./_lib');
-
-// MetaAPI timeframe mapping (theirs uses different strings)
-const TF_MAP = {
-  '1m':  '1m',
-  '5m':  '5m',
-  '15m': '15m',
-  '30m': '30m',
-  '1h':  '1h',
-  '4h':  '4h',
-  '1d':  '1d',
-  '1w':  '1w',
-  '1mn': '1mn',
-};
+const { Redis } = require('@upstash/redis');
+const { getAssetById } = require('./asset-registry');
+const { resolveSymbol: resolveAssetToBroker, resolveAsset } = require('./symbol-resolver');
 
 const ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mn'];
 
-// Symbol resolution cache — broker-specific suffixes (.s, .pro, etc.)
-// V10 BUGFIX: Cache values can go stale (e.g. when broker.js consolidation changed
-// behavior, or when a different account is set up). We now VALIDATE the cached value
-// before trusting it, and fall through to suffix probing if it 404s.
-async function resolveSymbol(rawSym) {
-  // V10 BUGFIX: Strip any pre-existing broker suffix from the input.
-  // If user/frontend sends "XAUUSD.S", normalize to "XAUUSD" before probing.
-  const baseSym = String(rawSym || '').toUpperCase().replace(/\.(S|PRO|RAW|M|ECN|STP|CENT)$/i, '');
-  if (!baseSym) return rawSym;
-  const r = getRedis();
-  // Try cache first
-  if (r) {
-    const cached = await r.get('v9:sym:' + baseSym).catch(() => null);
-    if (cached) {
-      const cachedStr = typeof cached === 'string' ? cached : String(cached);
-      // Validate the cached symbol actually returns a price
-      try {
-        const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(cachedStr) + '/current-price';
-        const resp = await fetch(url, { headers: metaHeaders() });
-        if (resp.ok) return cachedStr;
-        // 404 / 400 -> cached value is stale, fall through to probe and overwrite below
-      } catch (_) { /* fall through */ }
-    }
-  }
-  // Probe suffixes. PU Prime uses .s; some brokers use .pro / .raw / no suffix.
-  // Order: bare symbol first (most brokers), then .s, then .pro, .raw.
-  const candidates = [baseSym, baseSym + '.s', baseSym + '.pro', baseSym + '.raw'];
-  for (const cand of candidates) {
-    try {
-      const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(cand) + '/current-price';
-      const resp = await fetch(url, { headers: metaHeaders() });
-      if (resp.ok) {
-        if (r) await r.set('v9:sym:' + baseSym, cand, { ex: 86400 * 7 }).catch(() => {});
-        return cand;
-      }
-    } catch (_) {}
-  }
-  return baseSym; // fallback
+// Per-TF Redis cache TTLs (seconds). Same as V11.
+const TF_CACHE_TTL = {
+  '1m':   30,        // 30 seconds
+  '5m':   2 * 60,
+  '15m':  5 * 60,
+  '30m':  10 * 60,
+  '1h':   30 * 60,
+  '4h':   2 * 60 * 60,
+  '1d':   12 * 60 * 60,
+  '1w':   24 * 60 * 60,
+  '1mn':  3 * 24 * 60 * 60,
+};
+
+// =================================================================
+// REDIS / ENV
+// =================================================================
+
+function getRedis() {
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
+  if (!url || !token) return null;
+  try { return new Redis({ url, token }); } catch (_) { return null; }
 }
+
+function metaapiBase() {
+  const region = process.env.METAAPI_REGION || 'london';
+  return `https://mt-client-api-v1.${region}.agiliumtrade.ai`;
+}
+
+function metaapiHeaders() {
+  return { 'auth-token': process.env.METAAPI_TOKEN, 'Accept': 'application/json' };
+}
+
+function accountId() {
+  return process.env.METAAPI_ACCOUNT_ID;
+}
+
+// =================================================================
+// ASSET ↔ BROKER SYMBOL RESOLVER (the V12 magic)
+// =================================================================
+
+// Smart resolver: accepts either an asset ID or a broker symbol, returns a broker symbol.
+// - "gold" → "XAUUSD.s"   (asset ID, looked up in user's map)
+// - "XAUUSD.s" → "XAUUSD.s"   (already a broker symbol, pass through)
+//
+// Detection heuristic: asset IDs are lowercase, no digits, no dots/hashes.
+// Broker symbols have uppercase + maybe digits/dots/hashes.
+function looksLikeAssetId(s) {
+  if (typeof s !== 'string' || !s) return false;
+  // asset IDs: all lowercase letters and underscores only
+  return /^[a-z][a-z0-9_]*$/.test(s);
+}
+
+async function toBrokerSymbol(assetIdOrSym, userId) {
+  if (!assetIdOrSym) return null;
+  if (looksLikeAssetId(assetIdOrSym)) {
+    // It's an asset ID — resolve via symbol-resolver
+    const broker = await resolveAssetToBroker(assetIdOrSym, userId);
+    if (!broker) {
+      console.warn(`[broker] Asset "${assetIdOrSym}" has no broker mapping. Run symbol-resolver sync.`);
+    }
+    return broker;
+  }
+  // Looks like a broker symbol already — pass through
+  return assetIdOrSym;
+}
+
+// =================================================================
+// PUBLIC API: ACCOUNT
+// =================================================================
 
 async function fetchAccount() {
-  const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/account-information';
-  const r = await fetch(url, { headers: metaHeaders() });
-  if (!r.ok) {
-    const txt = await r.text().catch(() => '');
-    return { error: 'account fetch ' + r.status + ': ' + txt.slice(0, 200) };
+  const url = `${metaapiBase()}/users/current/accounts/${accountId()}/account-information`;
+  try {
+    const resp = await fetch(url, { headers: metaapiHeaders() });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return { error: `account ${resp.status}: ${txt.slice(0, 200)}` };
+    }
+    return await resp.json();
+  } catch (e) {
+    return { error: e.message };
   }
-  return await r.json();
 }
+
+// =================================================================
+// PUBLIC API: POSITIONS
+// =================================================================
 
 async function fetchPositions() {
-  // V10: 8-second cache. Frontend polls every 10s, cron fires every minute -- without
-  // generous caching we'd fire dozens of position fetches per minute and hit MetaAPI rate limits.
-  const r = getRedis();
-  const cacheKey = 'v10:positions';
-  if (r) {
-    try {
-      const cached = await r.get(cacheKey);
-      if (cached) {
-        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
-        if (parsed && parsed.positions) return parsed;
-      }
-    } catch (_) {}
-  }
-  const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/positions';
-  const resp = await fetch(url, { headers: metaHeaders() });
-  if (!resp.ok) return { positions: [], error: 'positions fetch ' + resp.status };
-  const data = await resp.json().catch(() => []);
-  const positions = (Array.isArray(data) ? data : []).map((p) => ({
-    id:           p.id || p.positionId,
-    symbol:       p.symbol,
-    type:         p.type === 'POSITION_TYPE_BUY' ? 'BUY' : 'SELL',
-    direction:    p.type === 'POSITION_TYPE_BUY' ? 'LONG' : 'SHORT',
-    volume:       p.volume,
-    openPrice:    p.openPrice,
-    currentPrice: p.currentPrice,
-    stopLoss:     p.stopLoss || null,
-    takeProfit:   p.takeProfit || null,
-    profit:       p.profit || 0,
-    swap:         p.swap || 0,
-    commission:   p.commission || 0,
-    time:         p.time || p.openTime || null,
-    comment:      p.comment || '',
-  }));
-  const result = { positions };
-  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 8 }).catch(() => {});
-  return result;
-}
-
-async function fetchPrice(baseSym) {
-  const sym = await resolveSymbol(baseSym);
-  // V10: 8-second Redis cache. Frontend polls every 15s + cron + AI all hit this -- without
-  // generous caching they'd hammer MetaAPI (429) and timeout (504). Price doesn't change
-  // meaningfully in 8s for our use case, and cache hits are essentially free.
-  const r = getRedis();
-  const cacheKey = 'v10:px:' + sym;
-  if (r) {
-    try {
-      const cached = await r.get(cacheKey);
-      if (cached) {
-        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
-        if (parsed && parsed.price) return parsed;
-      }
-    } catch (_) {}
-  }
-  const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(sym) + '/current-price';
-  const resp = await fetch(url, { headers: metaHeaders() });
-  if (!resp.ok) return { error: 'price fetch ' + resp.status, symbol: sym };
-  const data = await resp.json();
-  const bid = data.bid, ask = data.ask;
-  const mid = (bid + ask) / 2;
-  const result = {
-    symbol:     sym,
-    baseSymbol: baseSym,
-    bid, ask,
-    price:      mid,
-    spread:     ask - bid,
-    time:       data.time,
-  };
-  if (r) await r.set(cacheKey, JSON.stringify(result), { ex: 8 }).catch(() => {});
-  return result;
-}
-
-async function fetchCandles(baseSym, timeframe, count) {
-  const sym = await resolveSymbol(baseSym);
-  const tf = TF_MAP[timeframe] || timeframe;
-  const n = Math.min(Math.max(count || 100, 10), 1000); // MetaAPI max 1000
-
-  // V10: Redis cache for candles. Smart TTLs per timeframe — there's no point re-fetching
-  // a 1-month candle every minute. Following user's design: refresh roughly once per
-  // bar duration, not per cron tick.
-  const r = getRedis();
-  const cacheKey = 'v10:c:' + sym + ':' + tf + ':' + n;
-  const ttlMap = {
-    '1m':   30,             // 30s -- fresh enough for entries
-    '5m':   120,            // 2min
-    '15m':  300,            // 5min
-    '30m':  600,            // 10min
-    '1h':   1800,           // 30min
-    '4h':   7200,           // 2h
-    '1d':   43200,          // 12h
-    '1w':   86400,          // 1 day
-    '1mn':  259200,         // 3 days
-  };
-  const ttl = ttlMap[tf] || 300;
-  if (r) {
-    try {
-      const cached = await r.get(cacheKey);
-      if (cached) {
-        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
-        if (parsed && parsed.candles && parsed.candles.length > 0) return parsed;
-      }
-    } catch (_) {}
-  }
-
-  // V10 BUGFIX: Historical market data uses a DIFFERENT hostname than client API.
-  // Client API:        mt-client-api-v1.{region}.agiliumtrade.ai            (positions, current-price, trades)
-  // Market Data API:   mt-market-data-client-api-v1.{region}.agiliumtrade.ai (historical candles, ticks)
-  const region = process.env.META_REGION || 'london';
-  const marketDataHost = 'https://mt-market-data-client-api-v1.' + region + '.agiliumtrade.ai';
-  const url = marketDataHost + '/users/current/accounts/' + metaAccountId() + '/historical-market-data/symbols/' + encodeURIComponent(sym) + '/timeframes/' + tf + '/candles?limit=' + n;
-  const resp = await fetch(url, { headers: metaHeaders() });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => '');
-    return { candles: [], error: 'candles ' + resp.status + ': ' + txt.slice(0, 200), urlTried: url };
-  }
-  const data = await resp.json().catch(() => []);
-  const candles = (Array.isArray(data) ? data : []).map((c) => ({
-    time:       c.time,
-    open:       c.open,
-    high:       c.high,
-    low:        c.low,
-    close:      c.close,
-    volume:     c.volume || c.tickVolume || 0,
-    tickVolume: c.tickVolume || 0,
-  }));
-  const result = { symbol: sym, timeframe: tf, count: candles.length, candles };
-  if (r && candles.length > 0) await r.set(cacheKey, JSON.stringify(result), { ex: ttl }).catch(() => {});
-  return result;
-}
-
-// Multi-timeframe fetch — used by V10 AI to get full picture in one call
-async function fetchMultiTF(baseSym) {
-  // Counts per timeframe — more recent for fast TFs, fewer for slow
-  const tfCounts = {
-    '1m':  60,
-    '5m':  60,
-    '15m': 60,
-    '30m': 50,
-    '1h':  100,
-    '4h':  60,
-    '1d':  60,
-    '1w':  30,
-    '1mn': 24,
-  };
-  const sym = await resolveSymbol(baseSym);
-  // V10 BUGFIX: MetaAPI limits to 5 concurrent historical-market-data requests per account.
-  // Firing all 9 TFs in parallel triggers LIMIT_CONCURRENT_MARKET_DATA_REQUESTS_PER_ACCOUNT
-  // and most calls get rejected -> empty candles -> AI sees zero data.
-  // We batch in groups of 4 (safely under the 5-concurrent limit, leaves room for cron / other calls).
-  const BATCH_SIZE = 4;
-  const timeframes = {};
-  for (let i = 0; i < ALL_TFS.length; i += BATCH_SIZE) {
-    const batch = ALL_TFS.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(batch.map(async (tf) => {
-      try {
-        const r = await fetchCandles(baseSym, tf, tfCounts[tf]);
-        return [tf, r.candles || [], r.error];
-      } catch (e) { return [tf, [], e && e.message]; }
-    }));
-    for (const [tf, candles] of results) timeframes[tf] = candles;
-  }
-  return { symbol: sym, baseSymbol: baseSym, timeframes };
-}
-
-// === HTTP handler ===
-module.exports = async (req, res) => {
-  if (applyCors(req, res)) return;
-  if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
-
-  const action = String(req.query.action || '').toLowerCase();
-
+  const url = `${metaapiBase()}/users/current/accounts/${accountId()}/positions`;
   try {
+    const resp = await fetch(url, { headers: metaapiHeaders() });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return { error: `positions ${resp.status}: ${txt.slice(0, 200)}`, positions: [] };
+    }
+    const positions = await resp.json();
+    // Annotate each with assetId if we can resolve it
+    const annotated = await Promise.all((positions || []).map(async (p) => {
+      const assetId = await resolveAsset(p.symbol).catch(() => null);
+      return { ...p, assetId };
+    }));
+    return annotated;
+  } catch (e) {
+    return { error: e.message, positions: [] };
+  }
+}
+
+// =================================================================
+// PUBLIC API: PRICE
+// =================================================================
+
+// Accepts asset ID or broker symbol.
+async function fetchPrice(assetIdOrSym, userId) {
+  const sym = await toBrokerSymbol(assetIdOrSym, userId);
+  if (!sym) return { error: 'symbol unresolved', price: null };
+  const url = `${metaapiBase()}/users/current/accounts/${accountId()}/symbols/${sym}/current-price`;
+  try {
+    const resp = await fetch(url, { headers: metaapiHeaders() });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return { error: `price ${resp.status}: ${txt.slice(0, 200)}`, symbol: sym, price: null };
+    }
+    const data = await resp.json();
+    // Use mid price; bid/ask available as well
+    const bid = data.bid;
+    const ask = data.ask;
+    const price = (bid != null && ask != null) ? (bid + ask) / 2 : (bid ?? ask ?? null);
+    return { symbol: sym, price, bid, ask, time: data.time };
+  } catch (e) {
+    return { error: e.message, symbol: sym, price: null };
+  }
+}
+
+// =================================================================
+// PUBLIC API: CANDLES
+// =================================================================
+
+// Accepts asset ID or broker symbol. Cached in Redis per-TF.
+async function fetchCandles(assetIdOrSym, tf, n, userId) {
+  const sym = await toBrokerSymbol(assetIdOrSym, userId);
+  if (!sym) return { error: 'symbol unresolved', candles: [] };
+  if (!ALL_TFS.includes(tf)) return { error: `invalid tf ${tf}`, candles: [] };
+  const count = Math.max(1, Math.min(500, parseInt(n, 10) || 100));
+
+  const r = getRedis();
+  const cacheKey = `v12:candles:${sym}:${tf}:${count}`;
+  const ttl = TF_CACHE_TTL[tf] || 60;
+
+  // Try cache
+  if (r) {
+    try {
+      const raw = await r.get(cacheKey);
+      if (raw) {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (parsed && Array.isArray(parsed.candles)) return parsed;
+      }
+    } catch (_) {}
+  }
+
+  // Fetch from MetaAPI
+  const url = `${metaapiBase()}/users/current/accounts/${accountId()}/historical-market-data/symbols/${sym}/timeframes/${tf}/candles?limit=${count}`;
+  try {
+    const resp = await fetch(url, { headers: metaapiHeaders() });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return { candles: [], error: `candles ${resp.status}: ${txt.slice(0, 200)}`, urlTried: url };
+    }
+    const data = await resp.json().catch(() => []);
+    const candles = (Array.isArray(data) ? data : []).map((c) => ({
+      time:       c.time,
+      open:       c.open,
+      high:       c.high,
+      low:        c.low,
+      close:      c.close,
+      volume:     c.volume || c.tickVolume || 0,
+      tickVolume: c.tickVolume || 0,
+    }));
+    const result = { symbol: sym, timeframe: tf, count: candles.length, candles };
+    if (r && candles.length > 0) {
+      await r.set(cacheKey, JSON.stringify(result), { ex: ttl }).catch(() => {});
+    }
+    return result;
+  } catch (e) {
+    return { candles: [], error: e.message };
+  }
+}
+
+// =================================================================
+// PUBLIC API: MULTI-TF (used by tactic validators + recognition)
+// =================================================================
+
+async function fetchMultiTF(assetIdOrSym, userId) {
+  const sym = await toBrokerSymbol(assetIdOrSym, userId);
+  if (!sym) return { error: 'symbol unresolved', timeframes: {} };
+
+  // V12: counts per TF, more recent for fast TFs, fewer for slow
+  const tfCounts = {
+    '1m': 60, '5m': 60, '15m': 60, '30m': 50, '1h': 100, '4h': 60, '1d': 30,
+  };
+
+  const tfs = Object.keys(tfCounts);
+  const results = await Promise.all(
+    tfs.map(async (tf) => {
+      const r = await fetchCandles(sym, tf, tfCounts[tf]);
+      return [tf, r.candles || [], r.error];
+    })
+  );
+
+  const timeframes = {};
+  const errors = [];
+  for (const [tf, candles, err] of results) {
+    timeframes[tf] = candles;
+    if (err) errors.push({ tf, error: err });
+  }
+
+  return {
+    symbol: sym,
+    timeframes,
+    errors: errors.length > 0 ? errors : undefined,
+  };
+}
+
+// =================================================================
+// HTTP HANDLER (debug / forced fetch)
+// =================================================================
+
+module.exports = async (req, res) => {
+  try {
+    const action = String(req.query.action || 'account');
+
     if (action === 'account') {
       return res.status(200).json(await fetchAccount());
     }
@@ -257,87 +257,28 @@ module.exports = async (req, res) => {
       return res.status(200).json(await fetchPositions());
     }
     if (action === 'price') {
-      const sym = String(req.query.symbol || '').toUpperCase();
-      if (!sym) return res.status(400).json({ error: 'symbol required' });
-      return res.status(200).json(await fetchPrice(sym));
+      const asset = String(req.query.asset || req.query.symbol || '');
+      if (!asset) return res.status(400).json({ error: 'asset or symbol required' });
+      return res.status(200).json(await fetchPrice(asset));
     }
     if (action === 'candles') {
-      const sym = String(req.query.symbol || '').toUpperCase();
-      const tf  = String(req.query.tf || req.query.timeframe || '1h');
-      const n   = parseInt(String(req.query.n || req.query.count || '100'), 10);
-      if (!sym) return res.status(400).json({ error: 'symbol required' });
-      return res.status(200).json(await fetchCandles(sym, tf, n));
+      const asset = String(req.query.asset || req.query.symbol || '');
+      const tf = String(req.query.tf || '1h');
+      const n = parseInt(req.query.n || '100', 10);
+      if (!asset) return res.status(400).json({ error: 'asset or symbol required' });
+      return res.status(200).json(await fetchCandles(asset, tf, n));
     }
-    if (action === 'multi-tf') {
-      const sym = String(req.query.symbol || '').toUpperCase();
-      if (!sym) return res.status(400).json({ error: 'symbol required' });
-      return res.status(200).json(await fetchMultiTF(sym));
+    if (action === 'multi') {
+      const asset = String(req.query.asset || req.query.symbol || '');
+      if (!asset) return res.status(400).json({ error: 'asset or symbol required' });
+      return res.status(200).json(await fetchMultiTF(asset));
     }
-    if (action === 'debug-candles') {
-      // V10: Diagnostic to verify candle fetch is hitting the right MetaAPI host.
-      // GET /api/broker?action=debug-candles&symbol=XAUUSD
-      const sym = String(req.query.symbol || 'XAUUSD').toUpperCase();
-      const out = {};
-      for (const tf of ['1m', '5m', '15m', '1h', '4h', '1d']) {
-        try {
-          const r = await fetchCandles(sym, tf, 30);
-          out[tf] = { count: r.count || 0, error: r.error || null, urlTried: r.urlTried || null, firstCandle: r.candles && r.candles[0] || null };
-        } catch (e) { out[tf] = { error: e.message }; }
-      }
-      return res.status(200).json({
-        baseSymbol: sym,
-        timeframes: out,
-        marketDataHost: 'mt-market-data-client-api-v1.' + (process.env.META_REGION || 'london') + '.agiliumtrade.ai',
-      });
-    }
-    if (action === 'debug-symbol') {
-      // V10: Diagnostic helper to debug symbol resolution. Returns what suffixes work.
-      const sym = String(req.query.symbol || '').toUpperCase();
-      if (!sym) return res.status(400).json({ error: 'symbol required' });
-      const r = getRedis();
-      const cached = r ? await r.get('v9:sym:' + sym).catch(() => null) : null;
-      const probes = [sym, sym + '.s', sym + '.pro', sym + '.raw'];
-      const results = [];
-      for (const cand of probes) {
-        try {
-          const url = metaBase() + '/users/current/accounts/' + metaAccountId() + '/symbols/' + encodeURIComponent(cand) + '/current-price';
-          const resp = await fetch(url, { headers: metaHeaders() });
-          results.push({ candidate: cand, status: resp.status, ok: resp.ok });
-        } catch (e) {
-          results.push({ candidate: cand, error: e.message });
-        }
-      }
-      return res.status(200).json({
-        baseSymbol: sym,
-        cachedAs: cached,
-        probes: results,
-        currentRegion: process.env.META_REGION || 'london',
-      });
-    }
-    if (action === 'clear-symbol-cache') {
-      const r = getRedis();
-      if (!r) return res.status(500).json({ error: 'no redis' });
-      const sym = String(req.query.symbol || '').toUpperCase();
-      if (sym) {
-        await r.del('v9:sym:' + sym).catch(() => {});
-        return res.status(200).json({ cleared: 'v9:sym:' + sym });
-      }
-      // Clear all v9:sym:*
-      let cursor = 0;
-      let cleared = 0;
-      do {
-        const result = await r.scan(cursor, { match: 'v9:sym:*', count: 200 }).catch(() => [0, []]);
-        cursor = parseInt(result[0], 10);
-        for (const k of result[1]) {
-          await r.del(k).catch(() => {});
-          cleared++;
-        }
-      } while (cursor !== 0);
-      return res.status(200).json({ cleared, scope: 'all v9:sym:*' });
-    }
-    return res.status(400).json({ error: 'Unknown action: ' + action });
+    return res.status(400).json({
+      error: 'unknown action',
+      validActions: ['account', 'positions', 'price', 'candles', 'multi'],
+    });
   } catch (e) {
-    return res.status(500).json({ error: e && e.message ? e.message : 'Unknown error' });
+    return res.status(500).json({ error: e.message || 'Unknown error' });
   }
 };
 
@@ -346,5 +287,5 @@ module.exports.fetchPositions = fetchPositions;
 module.exports.fetchPrice     = fetchPrice;
 module.exports.fetchCandles   = fetchCandles;
 module.exports.fetchMultiTF   = fetchMultiTF;
-module.exports.resolveSymbol  = resolveSymbol;
+module.exports.toBrokerSymbol = toBrokerSymbol;
 module.exports.ALL_TFS        = ALL_TFS;

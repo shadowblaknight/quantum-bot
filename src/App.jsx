@@ -1,3905 +1,3236 @@
 /* eslint-disable */
-import { useState, useEffect, useCallback, useRef } from "react";
-// V11 Step 4: Lightweight Charts for the AI Watch visualization page.
-// Requires: npm install lightweight-charts@^4.2.0
+// =====================================================================
+// QUANTUM BOT V12 — FRONTEND
+// =====================================================================
+// Crystal black cockpit. Asset-aware throughout. No Claude in the runtime.
+//
+// Single-file React app following the same convention as V11.
+//
+// PAGES:
+//   /          — Cockpit (chart-first trading workstation)
+//   /portfolio — Equity curve + per-instrument overview
+//   /reports   — Performance + Recognition + Activity log
+//   /settings  — Theme + Tools & Display + Account + Instruments
+//
+// The backend V12 endpoints come online progressively across sessions 1-4.
+// In session 2 (this file), some panels will show "no data yet" — that's
+// expected. The visual shell is complete; the data plumbing fills in.
+// =====================================================================
+
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createChart, CrosshairMode, ColorType } from "lightweight-charts";
 
+// =====================================================================
+// SECTION 1: CONSTANTS, ENDPOINTS, STORAGE KEYS
+// =====================================================================
+
 const API = (path) => `/api/${path}`;
-const PREFS_KEY = "qb_v9_prefs";
+const PREFS_KEY = "qb_v12_prefs";
+const THEME_KEY = "qb_v12_theme";
 
-const SESSION_COLORS = { LONDON: "#1e3a8a", OVERLAP: "#b45309", "NEW YORK": "#15803d", ASIAN: "#6b21a8" };
+// Trading sessions — used for context labeling
+const SESSION_LABELS = ["ASIAN", "LONDON", "OVERLAP", "NEW_YORK"];
 
-const pnlColor = (v) => (v > 0 ? "#15803d" : v < 0 ? "#b91c1c" : "#64748b");
-const pnlStr   = (v) => `${v >= 0 ? "+" : ""}$${Math.abs(v).toFixed(2)}`;
-const fmtTime  = (d) => new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-const fmtDate  = (d) => new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit" });
-const fmtTimeS = (d) => new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// =====================================================================
+// SECTION 2: THEME SYSTEM
+// =====================================================================
+// Crystal black + cyan accent default. User can override every color in
+// Settings → Theme. Stored in localStorage + synced to Redis (later).
+// =====================================================================
 
-const normSym = (raw) => { if (!raw) return null; return raw.toUpperCase().replace(".S", "").replace(".PRO", "").trim(); };
+const DEFAULT_THEME = {
+  // Backgrounds (crystal black with subtle blue-violet undertone)
+  bgBase:       "#0a0b0f",
+  bgLayer:      "#0e1014",
+  bgGlass:      "rgba(15,17,22,0.5)",  // for transparent overlays
 
-const instCategory = (sym) => {
-  if (!sym) return "OTHER";
-  const u = sym.toUpperCase();
-  if (u.includes("XAU") || u.includes("GOLD")) return "GOLD";
-  if (u.includes("BTC") || u.includes("ETH") || u.includes("CRYPTO") || u.includes("COIN")) return "CRYPTO";
-  return "FOREX";
+  // Borders
+  border:       "rgba(255,255,255,0.06)",
+  borderActive: "rgba(0,217,255,0.4)",
+
+  // Text
+  textPrimary:  "#e8e8ed",
+  textMuted:    "#7a7a85",
+  textDim:      "#4a4a55",
+
+  // Accent (the "alive" color)
+  accent:       "#00d9ff",     // cyan glow
+  accentSoft:   "rgba(0,217,255,0.15)",
+
+  // Direction colors (TradingView-style)
+  upStrong:     "#00e676",     // bright green for candles, P&L positive
+  downStrong:   "#ff3b5c",     // bright red for candles, P&L negative
+  upSoft:       "rgba(0,230,118,0.15)",
+  downSoft:     "rgba(255,59,92,0.15)",
+
+  // News indicator
+  newsScheduled: "#ffd166",    // yellow — news today
+  newsImminent:  "#ff9a3c",    // amber — within 30 min
+  newsLive:      "#ff2050",    // red — happening now (pulses)
+
+  // Tactic overlay colors
+  obBullish:    "rgba(0,230,118,0.10)",
+  obBearish:    "rgba(255,59,92,0.10)",
+  fvgBullish:   "rgba(0,230,118,0.08)",
+  fvgBearish:   "rgba(255,59,92,0.08)",
+  asianLevel:   "#a78bfa",     // violet
+  londonLevel:  "#22d3ee",     // cyan
+  nyLevel:      "#f59e0b",     // amber
+  pdhPdl:       "#fb923c",     // orange
+  swingLevel:   "#94a3b8",     // slate
+  weeklyOpen:   "#f59e0b",     // amber
+  roundLevel:   "#64748b",     // muted
+
+  // Position lines
+  posEntry:     "#fbbf24",     // gold yellow
+  posSL:        "#dc2626",     // red
+  posTPpending: "#22c55e",     // green dashed (pending TP)
+  posTPhit:     "#10b981",     // green solid (hit TP)
+
+  // Chart grid
+  gridIntensity: 0.05,         // 5% white
+
+  // Fonts
+  fontMono:     "'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace",
+  fontSans:     "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
 };
 
-const getSessionInfo = () => {
-  const now = new Date();
-  const h = now.getUTCHours() + now.getUTCMinutes() / 60;
-  const day = now.getUTCDay();
-  const isWeekend = day === 0 || day === 6;
-  const isLondon  = h >= 8  && h < 16;
-  const isNY      = h >= 13 && h < 21;
-  const isOverlap = h >= 13 && h < 16;
-  let session = "ASIAN";
-  if (isOverlap) session = "OVERLAP";
-  else if (isNY) session = "NEW YORK";
-  else if (isLondon) session = "LONDON";
-  return { session, isLondon, isNY, isOverlap, isWeekend, utcH: h };
+function loadTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      return { ...DEFAULT_THEME, ...parsed };
+    }
+  } catch (_) {}
+  return DEFAULT_THEME;
+}
+
+function saveTheme(theme) {
+  try { localStorage.setItem(THEME_KEY, JSON.stringify(theme)); } catch (_) {}
+}
+
+// Apply theme as CSS variables on root (so anywhere can use them)
+function applyThemeToRoot(theme) {
+  const root = document.documentElement;
+  for (const [k, v] of Object.entries(theme)) {
+    if (typeof v === "string" || typeof v === "number") {
+      root.style.setProperty("--qb-" + camelToKebab(k), String(v));
+    }
+  }
+}
+
+function camelToKebab(s) {
+  return s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
+}
+
+// =====================================================================
+// SECTION 3: PREFERENCES / SETTINGS PERSISTENCE
+// =====================================================================
+
+const DEFAULT_PREFS = {
+  selectedAsset:    "gold",
+  selectedTF:       "1h",
+  watchlist:        ["gold", "btc", "eurusd"],   // asset IDs
+  perInstrumentLot: { gold: 0.05, btc: 0.01, eurusd: 0.05 },
+  pauseOnAsset:     {},                          // { gold: false, btc: false, ... }
+  pauseSettings: {
+    suggestStopAfterDailyLoss: 200,    // dollars
+    suggestStopAfterDailyGain: 500,
+    suggestStopAfterLossStreak: 3,
+  },
+  toolsConfig: {
+    // tactic: [showOnChart, useInAnalysis] — keys MATCH backend op.tactic exactly
+    orderBlock:        [true, true],
+    fvg:               [true, true],
+    bos:               [true, true],
+    trendStructure:    [true, true],
+    liquiditySweep:    [true, true],
+    sessionLevel:      [true, true],     // singular — matches backend
+    unfilledImbalance: [true, true],
+    fakeout:           [true, true],
+    roundNumber:       [false, true],    // singular — matches backend; off by default on chart
+    fibonacci:         [false, false],
+    ema21:             [false, false],
+    ema50:             [false, false],
+    ema200:            [false, false],
+    vwap:              [false, false],
+    bollinger:         [false, false],
+    rsi:               [false, false],
+  },
+  sideBarOpen:      false,
+  bottomBarOpen:    true,
+  tutorialMode:     true,    // verbose tooltips for new users
 };
 
-const sessionKeyFromInfo = (info) => info.session;
-const isSelectedSessionActive = (selected, info) => {
-  const k = sessionKeyFromInfo(info);
-  if (k === "ASIAN") return false;
-  return selected.includes(k);
-};
-const isTradeable = (sym, utcH, isWeekend) => {
-  if (!sym) return false;
-  const cat = instCategory(sym);
-  if (isWeekend) return false;
-  if (cat === "CRYPTO") return utcH >= 7 && utcH < 23;
-  // V9.6: Cut late NY (18-21 UTC) — proven loser zone, low liquidity after London close.
-  return utcH >= 8 && utcH < 18;
-};
-const getSessionLabel = (timeStr) => {
-  const h = new Date(timeStr || "").getUTCHours();
-  if (h >= 13 && h < 16) return "OVERLAP";
-  if (h >= 13 && h < 21) return "NEW YORK";
-  if (h >= 8  && h < 16) return "LONDON";
-  return "ASIAN";
-};
+function loadPrefs() {
+  try {
+    const saved = localStorage.getItem(PREFS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      return {
+        ...DEFAULT_PREFS,
+        ...parsed,
+        perInstrumentLot: { ...DEFAULT_PREFS.perInstrumentLot, ...(parsed.perInstrumentLot || {}) },
+        pauseSettings: { ...DEFAULT_PREFS.pauseSettings, ...(parsed.pauseSettings || {}) },
+        toolsConfig: { ...DEFAULT_PREFS.toolsConfig, ...(parsed.toolsConfig || {}) },
+      };
+    }
+  } catch (_) {}
+  return DEFAULT_PREFS;
+}
 
-const loadPrefs = () => { try { const r = localStorage.getItem(PREFS_KEY); return r ? JSON.parse(r) : {}; } catch (e) { return {}; } };
-const savePrefs = (p) => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch (e) {} };
+function savePrefs(prefs) {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (_) {}
+}
 
-const QUICK_SYMBOLS = ["XAUUSD", "BTCUSDT", "GBPUSD", "EURUSD", "US30", "NAS100"];
+// =====================================================================
+// SECTION 4: FORMATTERS / HELPERS
+// =====================================================================
 
-// TP probability estimate based on distance, ATR, time elapsed
-const tpProbability = (currentPrice, openPrice, target, sl, direction, ageMs) => {
-  if (!currentPrice || !openPrice || !target || !sl) return 0;
-  const sign = direction === "LONG" ? 1 : -1;
-  const distToTarget = (target - currentPrice) * sign;
-  const distToSL     = (currentPrice - sl) * sign;
-  const totalDist    = (target - sl) * sign;
-  if (totalDist <= 0) return 50;
-  // Base probability: how much of the path is already covered toward TP
-  const coverage = Math.max(0, Math.min(1, ((currentPrice - sl) * sign) / totalDist));
-  let prob = coverage * 100;
-  // Already past TP -> 100%
-  if (distToTarget <= 0) prob = 100;
-  // Hit SL -> 0%
-  if (distToSL <= 0) prob = 0;
-  // Time decay: positions older than 4 hours lose probability if they haven't hit
-  const hours = ageMs / (1000 * 60 * 60);
-  if (hours > 4 && distToTarget > 0) prob *= Math.max(0.3, 1 - (hours - 4) * 0.05);
-  return Math.round(Math.max(0, Math.min(100, prob)));
-};
+function fmtMoney(v) {
+  if (v == null || !isFinite(v)) return "--";
+  const sign = v >= 0 ? "+" : "-";
+  const abs = Math.abs(v);
+  return `${sign}$${abs.toFixed(2)}`;
+}
 
-const CSS = `
-  :root {
-    --navy:#0a2540; --navy2:#0f3260; --navy3:#1a3a6e; --navy-l:#1e4480;
-    --bg:#f5f7fa; --surface:#ffffff;
-    --border:#e1e7ef; --border2:#cbd5e1;
-    --text:#0f172a; --text2:#475569; --text3:#94a3b8;
-    --blue:#1e3a8a; --blue2:#2563eb;
-    --green:#15803d; --green2:#22c55e;
-    --red:#b91c1c; --red2:#ef4444;
-    --gold:#b45309; --gold2:#f59e0b;
-    --purple:#7c3aed;
-    --r:8px; --r2:6px; --r3:4px;
-  }
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html { height: 100%; }
-  body { font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); min-height:100vh; font-size:13px; line-height:1.5; -webkit-font-smoothing:antialiased; }
-  .app { display:flex; min-height:100vh; }
+function fmtMoneyPlain(v) {
+  if (v == null || !isFinite(v)) return "--";
+  return `$${v.toFixed(2)}`;
+}
 
-  /* Sidebar */
-  .sidebar { width:240px; background:var(--navy); flex-shrink:0; display:flex; flex-direction:column; position:sticky; top:0; height:100vh; overflow:hidden; color:#cbd5e1; }
-  .sb-head { padding:22px 20px 18px; border-bottom:1px solid rgba(255,255,255,0.08); flex-shrink:0; }
-  .sb-brand { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:700; color:#fff; letter-spacing:-0.2px; }
-  .sb-logo { width:32px; height:32px; border-radius:8px; background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%); display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:800; color:#fff; flex-shrink:0; box-shadow:0 2px 6px rgba(37,99,235,0.4); }
-  .sb-sub { font-size:10px; color:#64748b; margin-top:3px; letter-spacing:0.04em; }
-  .sb-nav { flex-shrink:0; padding:8px 0 4px; }
-  .sb-item { display:flex; align-items:center; gap:10px; padding:10px 20px; cursor:pointer; font-size:13px; color:#94a3b8; transition:all 0.12s; border-left:3px solid transparent; user-select:none; }
-  .sb-item:hover { color:#fff; background:rgba(255,255,255,0.04); }
-  .sb-item.on { color:#fff; background:rgba(37,99,235,0.18); border-left-color:var(--blue2); font-weight:600; }
-  .sb-icon { width:16px; text-align:center; font-size:12px; opacity:0.75; }
-  .sb-item.on .sb-icon { opacity:1; }
-  .sb-div { height:1px; background:rgba(255,255,255,0.06); flex-shrink:0; }
-  .sb-wl { flex:1; overflow-y:auto; min-height:0; }
-  .sb-wl::-webkit-scrollbar { width:4px; }
-  .sb-wl::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.1); border-radius:4px; }
-  .sb-wl-hd { padding:12px 20px 6px; font-size:9.5px; font-weight:700; color:#64748b; letter-spacing:0.12em; text-transform:uppercase; }
-  .sb-wl-empty { padding:12px 20px; font-size:11.5px; color:#64748b; }
-  .sb-row { padding:7px 20px; display:flex; align-items:center; justify-content:space-between; gap:8px; transition:background 0.1s; }
-  .sb-row:hover { background:rgba(255,255,255,0.03); }
-  .sb-sym { font-size:12px; font-weight:600; color:#e2e8f0; }
-  .sb-px { font-size:12.5px; font-weight:700; color:#cbd5e1; font-variant-numeric:tabular-nums; }
-  .sb-foot { flex-shrink:0; padding:12px 20px 16px; border-top:1px solid rgba(255,255,255,0.06); }
-  .sf-row { display:flex; align-items:center; justify-content:space-between; padding:4px 0; }
-  .sf-lbl { font-size:10px; color:#64748b; font-weight:500; }
-  .sf-val { font-size:11px; font-weight:700; color:#e2e8f0; font-variant-numeric:tabular-nums; }
+function fmtPrice(p) {
+  if (p == null || !isFinite(p)) return "--";
+  const abs = Math.abs(p);
+  if (abs >= 10000) return p.toFixed(2);
+  if (abs >= 100) return p.toFixed(2);
+  if (abs >= 10) return p.toFixed(3);
+  if (abs >= 1) return p.toFixed(4);
+  return p.toFixed(5);
+}
 
-  /* Main */
-  .main { flex:1; display:flex; flex-direction:column; min-width:0; overflow:auto; }
-  .topbar { background:var(--navy2); color:#fff; padding:12px 24px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex-shrink:0; position:sticky; top:0; z-index:10; border-bottom:1px solid var(--navy-l); }
-  .tc { padding:6px 14px 7px; border-radius:var(--r2); background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.08); display:flex; flex-direction:column; gap:2px; min-width:90px; }
-  .tc-lbl { font-size:9px; font-weight:700; color:#94a3b8; letter-spacing:0.09em; text-transform:uppercase; }
-  .tc-val { font-size:16px; font-weight:700; color:#fff; letter-spacing:-0.4px; line-height:1.25; }
-  .tb-sep { flex:1; }
-  .tb-time { font-size:11.5px; color:#cbd5e1; font-variant-numeric:tabular-nums; white-space:nowrap; }
-  .content { padding:22px 24px 32px; flex:1; }
+function fmtPercent(p, digits = 2) {
+  if (p == null || !isFinite(p)) return "--";
+  const sign = p >= 0 ? "+" : "";
+  return `${sign}${(p * 100).toFixed(digits)}%`;
+}
 
-  .panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:18px 20px; box-shadow:0 1px 2px rgba(15,23,42,0.04); }
-  .pt { font-size:10px; font-weight:700; color:var(--text2); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:14px; }
-  .pt0 { margin-bottom:0; }
+function fmtTime(d) {
+  return new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+}
 
-  .bdg { display:inline-flex; align-items:center; padding:2.5px 8px; border-radius:var(--r3); font-size:9.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; white-space:nowrap; }
-  .bdg-long { background:#dcfce7; color:#15803d; border:1px solid #bbf7d0; }
-  .bdg-short { background:#fee2e2; color:#b91c1c; border:1px solid #fecaca; }
-  .bdg-wait { background:#f1f5f9; color:#64748b; border:1px solid #e2e8f0; }
-  .bdg-gold { background:#fef3c7; color:#b45309; border:1px solid #fde68a; }
-  .bdg-purple { background:#ede9fe; color:#7c3aed; border:1px solid #ddd6fe; }
-  .bdg-red { background:#fee2e2; color:#b91c1c; border:1px solid #fecaca; }
-  .bdg-blue { background:#dbeafe; color:#1e3a8a; border:1px solid #bfdbfe; }
+function fmtTimeS(d) {
+  return new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
 
-  .btn { padding:8px 16px; border-radius:var(--r2); border:none; cursor:pointer; font-size:12.5px; font-weight:600; transition:all 0.12s; font-family:inherit; }
-  .btn:disabled { opacity:0.4; cursor:not-allowed; }
-  .btn-p { background:var(--navy); color:#fff; }
-  .btn-p:hover:not(:disabled) { background:var(--navy2); }
-  .btn-sm { padding:5px 11px; font-size:11px; }
-  .btn-g { background:#fff; border:1px solid var(--border2); color:var(--text2); }
-  .btn-g:hover:not(:disabled) { background:var(--bg); color:var(--text); }
-  .btn-d { background:#fff; border:1px solid #fecaca; color:var(--red); }
-  .btn-d:hover:not(:disabled) { background:#fef2f2; }
+function fmtRelTime(ts) {
+  const diffMs = Date.now() - ts;
+  const m = Math.floor(diffMs / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h";
+  const d = Math.floor(h / 24);
+  return d + "d";
+}
 
-  .inp { background:#fff; border:1px solid var(--border2); color:var(--text); padding:9px 12px; border-radius:var(--r2); font-size:13px; outline:none; width:100%; transition:border-color 0.15s; font-family:inherit; }
-  .inp::placeholder { color:var(--text3); }
-  .inp:focus { border-color:var(--navy); }
+// =====================================================================
+// SECTION 5: GLOBAL STYLES (injected once, uses theme variables)
+// =====================================================================
 
-  /* Instrument cards */
-  .inst-grid { display:grid; gap:14px; }
-  .inst-card { background:#fff; border:1px solid var(--border); border-radius:var(--r); padding:16px 18px; position:relative; overflow:hidden; box-shadow:0 1px 2px rgba(15,23,42,0.04); }
-  .inst-bar { position:absolute; top:0; left:0; right:0; height:3px; }
-  .inst-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; }
-  .inst-sym { font-size:13px; font-weight:700; color:var(--text); letter-spacing:0.02em; }
-  .inst-px { font-size:26px; font-weight:700; color:var(--text); letter-spacing:-1.2px; line-height:1; font-variant-numeric:tabular-nums; margin-bottom:10px; }
-  .inst-px-empty { color:var(--text3); }
-  .inst-strat { font-size:10px; font-weight:600; color:var(--blue2); word-break:break-word; line-height:1.3; margin-top:4px; }
-  .inst-tp { display:flex; gap:8px; margin-top:5px; font-size:10px; }
-  .inst-why { font-size:10.5px; color:var(--text2); line-height:1.45; margin-top:5px; }
-  .inst-crown { font-size:9.5px; color:var(--gold); font-weight:600; margin-top:5px; }
-  .inst-off { font-size:9.5px; color:var(--text3); margin-top:4px; }
-  .cring { width:44px; height:44px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:800; }
+const GLOBAL_STYLES = `
+  * { box-sizing: border-box; }
+  html, body, #root { margin: 0; padding: 0; height: 100%; background: var(--qb-bg-base); color: var(--qb-text-primary); font-family: var(--qb-font-sans); -webkit-font-smoothing: antialiased; }
+  body { overflow: hidden; }
 
-  /* AI Reasoning panel */
-  .ai-card { background:#fff; border:1px solid var(--border); border-radius:var(--r); overflow:hidden; box-shadow:0 1px 2px rgba(15,23,42,0.04); border-left-width:3px; }
-  .ai-head { padding:14px 18px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
-  .ai-body { padding:14px 18px; }
-  .ai-strat { display:inline-flex; background:#dbeafe; border:1px solid #bfdbfe; color:#1e3a8a; border-radius:5px; padding:5px 11px; font-size:11px; font-weight:600; word-break:break-word; line-height:1.3; }
-  .ai-reason { font-size:12.5px; color:var(--text); line-height:1.6; padding:10px 12px; background:#f8fafc; border-radius:var(--r2); border-left:3px solid var(--blue2); }
-  .ai-reason-wait { border-left-color:var(--gold); background:#fffbeb; }
-
-  /* Tables */
-  .ptbl { width:100%; border-collapse:collapse; }
-  .ptbl th { font-size:9.5px; font-weight:700; color:var(--text2); text-transform:uppercase; letter-spacing:0.08em; padding:0 10px 10px 0; text-align:left; white-space:nowrap; }
-  .ptbl td { padding:10px 10px 10px 0; border-top:1px solid var(--border); font-size:12.5px; vertical-align:middle; }
-  .ptbl tr:first-child td { border-top:none; }
-
-  /* Animated trade visualizer */
-  .trade-viz { background:#fff; border:1px solid var(--border); border-radius:var(--r); padding:18px 20px; box-shadow:0 1px 2px rgba(15,23,42,0.04); margin-bottom:14px; }
-  .tv-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:8px; }
-  .tv-title { font-size:14px; font-weight:700; color:var(--text); }
-  .tv-meta { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:11px; color:var(--text2); }
-  .tv-track {
-    position:relative; height:80px; background:linear-gradient(to right, #fef2f2 0%, #fef2f2 var(--sl-pct, 0%), #f8fafc var(--sl-pct, 0%), #f8fafc var(--entry-pct, 50%), #f0fdf4 var(--entry-pct, 50%), #f0fdf4 100%);
-    border:1px solid var(--border); border-radius:var(--r2); overflow:visible;
-  }
-  .tv-marker { position:absolute; top:0; bottom:0; width:2px; pointer-events:none; }
-  .tv-marker.sl     { background:var(--red); }
-  .tv-marker.entry  { background:var(--text2); border-left:1px dashed var(--text2); background:transparent; border-left-width:2px; border-left-style:dashed; }
-  .tv-marker.tp1    { background:#84cc16; }
-  .tv-marker.tp2    { background:#22c55e; }
-  .tv-marker.tp3    { background:#15803d; }
-  .tv-marker.tp4    { background:var(--gold2); }
-  .tv-label {
-    position:absolute; top:-22px; transform:translateX(-50%); font-size:9.5px; font-weight:700; padding:2px 6px;
-    border-radius:3px; white-space:nowrap; pointer-events:none;
-  }
-  .tv-label.sl     { background:#fee2e2; color:var(--red); }
-  .tv-label.entry  { background:var(--text2); color:#fff; }
-  .tv-label.tp1    { background:#ecfccb; color:#65a30d; }
-  .tv-label.tp2    { background:#dcfce7; color:#16a34a; }
-  .tv-label.tp3    { background:#bbf7d0; color:#15803d; }
-  .tv-label.tp4    { background:#fef3c7; color:var(--gold); }
-  .tv-price-label { position:absolute; bottom:-22px; transform:translateX(-50%); font-size:10px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--text3); white-space:nowrap; pointer-events:none; }
-  .tv-current {
-    position:absolute; top:-6px; bottom:-6px; width:3px; background:var(--blue2);
-    box-shadow:0 0 8px rgba(37,99,235,0.6);
-    transition:left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-    z-index:5;
-  }
-  .tv-current::before {
-    content:""; position:absolute; top:-6px; left:50%; transform:translateX(-50%);
-    width:0; height:0; border-left:6px solid transparent; border-right:6px solid transparent; border-top:7px solid var(--blue2);
-  }
-  .tv-current::after {
-    content:""; position:absolute; bottom:-6px; left:50%; transform:translateX(-50%);
-    width:0; height:0; border-left:6px solid transparent; border-right:6px solid transparent; border-bottom:7px solid var(--blue2);
-  }
-  .tv-current-label {
-    position:absolute; top:-44px; left:50%; transform:translateX(-50%);
-    background:var(--blue2); color:#fff; padding:3px 8px; border-radius:4px;
-    font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap;
-    box-shadow:0 2px 6px rgba(37,99,235,0.4);
-  }
-  .tv-pnl-label { position:absolute; bottom:-46px; left:50%; transform:translateX(-50%); font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; white-space:nowrap; }
-
-  .tv-probs { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:64px; }
-  .tv-prob { background:#f8fafc; border:1px solid var(--border); border-radius:var(--r2); padding:10px 12px; }
-  .tv-prob-lbl { font-size:9.5px; color:var(--text2); font-weight:700; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:6px; }
-  .tv-prob-bar-bg { height:6px; background:#e2e8f0; border-radius:3px; overflow:hidden; }
-  .tv-prob-bar { height:100%; border-radius:3px; transition:width 0.6s ease; }
-  .tv-prob-row { display:flex; justify-content:space-between; align-items:baseline; margin-top:5px; }
-  .tv-prob-pct { font-size:14px; font-weight:800; font-variant-numeric:tabular-nums; }
-  .tv-prob-status { font-size:9px; font-weight:700; padding:1px 6px; border-radius:3px; text-transform:uppercase; }
-  .tv-prob-status.hit { background:#dcfce7; color:#15803d; }
-  .tv-prob-status.live { background:#dbeafe; color:#1e3a8a; }
-  .tv-prob-status.miss { background:#f1f5f9; color:#64748b; }
-
-  @keyframes pulse-blue { 0%, 100% { box-shadow:0 0 8px rgba(37,99,235,0.6); } 50% { box-shadow:0 0 16px rgba(37,99,235,0.9); } }
-  .tv-current-active { animation:pulse-blue 2s ease-in-out infinite; }
-
-  /* Live stats */
-  .stats-grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-bottom:14px; }
-  .stat-mini { background:#fff; border:1px solid var(--border); border-radius:var(--r2); padding:10px 12px; box-shadow:0 1px 2px rgba(15,23,42,0.03); }
-  .stat-mini-lbl { font-size:9px; color:var(--text2); font-weight:700; letter-spacing:0.08em; text-transform:uppercase; margin-bottom:4px; }
-  .stat-mini-val { font-size:18px; font-weight:700; letter-spacing:-0.4px; line-height:1.2; font-variant-numeric:tabular-nums; }
-
-  /* Equity chart sparkline */
-  .spark { display:block; width:100%; height:60px; }
-
-  /* Log */
-  .log-wrap { height:220px; overflow-y:auto; background:#f8fafc; border-radius:var(--r2); padding:8px 12px; }
-  .log-wrap::-webkit-scrollbar { width:4px; }
-  .log-wrap::-webkit-scrollbar-thumb { background:var(--border2); border-radius:4px; }
-  .log-ln { display:flex; gap:10px; padding:3px 0; font-family:"SF Mono",ui-monospace,monospace; font-size:11px; line-height:1.55; }
-  .log-ts { color:var(--text3); flex-shrink:0; }
-  .log-info .log-m { color:var(--text2); }
-  .log-success .log-m { color:var(--green); }
-  .log-warn .log-m { color:var(--gold); }
-  .log-error .log-m { color:var(--red); }
-  .log-signal .log-m { color:var(--purple); }
-
-  .srow { display:flex; align-items:center; padding:9px 0; border-bottom:1px solid var(--border); gap:10px; }
-  .srow:last-child { border-bottom:none; }
-
-  /* Strategy Lab */
-  .lc { background:#fff; border:1px solid var(--border); border-radius:var(--r); overflow:hidden; border-left-width:4px; box-shadow:0 1px 2px rgba(15,23,42,0.04); }
-  .lc-head { padding:16px 20px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:12px; }
-  .lc-body { padding:14px 20px; }
-  .lic { background:#f8fafc; border:1px solid var(--border); border-radius:var(--r2); padding:11px 13px; transition:border-color 0.15s; }
-  .wrb { background:#e2e8f0; border-radius:2px; height:4px; margin-top:6px; }
-  .wrf { height:4px; border-radius:2px; transition:width 0.5s; }
-  .fail-note { font-size:11px; color:var(--red); font-style:italic; padding:8px 12px; background:#fef2f2; border-radius:var(--r2); border-left:3px solid var(--red); margin-top:10px; }
-  .tpd-bar { flex:1; height:6px; background:#e2e8f0; border-radius:3px; overflow:hidden; display:flex; }
-  .tpd-seg { height:6px; transition:width 0.3s; }
-
-  /* Settings */
-  .set-col { max-width:620px; display:flex; flex-direction:column; gap:14px; }
-  .stags { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
-  .stag { display:flex; align-items:center; gap:6px; background:#f1f5f9; border:1px solid var(--border2); border-radius:6px; padding:5px 8px 5px 11px; font-size:12px; font-weight:600; }
-  .stag-n { color:var(--gold); }
-  .stag-p { color:var(--text2); font-size:10.5px; font-variant-numeric:tabular-nums; }
-  .stag-rm { background:none; border:none; color:var(--text3); cursor:pointer; padding:0; font-size:15px; line-height:1; display:flex; align-items:center; transition:color 0.1s; }
-  .stag-rm:hover { color:var(--red); }
-  .qrow { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
-  .qbtn { padding:5px 11px; border-radius:var(--r3); font-size:11.5px; font-weight:600; background:#f1f5f9; border:1px solid var(--border2); color:var(--text2); cursor:pointer; transition:all 0.1s; font-family:inherit; }
-  .qbtn:hover { border-color:var(--navy); color:var(--navy); background:#fff; }
-  .qbtn.on { background:var(--navy); border-color:var(--navy); color:#fff; }
-  .segs { display:flex; gap:7px; }
-  .seg { flex:1; padding:8px 4px; border-radius:var(--r2); border:1px solid var(--border2); background:#fff; color:var(--text2); cursor:pointer; font-size:12px; font-weight:600; transition:all 0.1s; text-align:center; font-family:inherit; }
-  .seg:hover { color:var(--text); background:var(--bg); }
-  .seg.on { background:var(--navy); border-color:var(--navy); color:#fff; }
-  .seg.agg.on { background:var(--red); border-color:var(--red); color:#fff; }
-  .kv { display:flex; justify-content:space-between; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--border); gap:12px; }
-  .kv:last-child { border-bottom:none; }
-  .kv-k { font-size:11px; color:var(--text2); font-weight:600; }
-  .kv-v { font-size:11.5px; font-weight:600; color:var(--text); text-align:right; max-width:320px; word-break:break-word; }
-
-  /* Utility */
-  .r { display:flex; align-items:center; }
-  .g4 { gap:4px; } .g6 { gap:6px; } .g8 { gap:8px; } .g10 { gap:10px; } .g12 { gap:12px; } .g16 { gap:16px; }
-  .ml { margin-left:auto; }
-  .g2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-  .g4c { display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; }
-  .g3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
-  .mt4 { margin-top:4px; } .mt6 { margin-top:6px; } .mt8 { margin-top:8px; }
-  .mt10 { margin-top:10px; } .mt12 { margin-top:12px; } .mt14 { margin-top:14px; }
-  .mb8 { margin-bottom:8px; } .mb12 { margin-bottom:12px; } .mb14 { margin-bottom:14px; }
-  .col { display:flex; flex-direction:column; }
-  .s10 { display:flex; flex-direction:column; gap:10px; }
-  .s12 { display:flex; flex-direction:column; gap:12px; }
-  .s14 { display:flex; flex-direction:column; gap:14px; }
-  .xs { font-size:10.5px; } .sm { font-size:11.5px; }
-  .mut { color:var(--text3); } .sub { color:var(--text2); }
-  .w6 { font-weight:600; } .w7 { font-weight:700; } .w8 { font-weight:800; }
-  .tn { font-variant-numeric:tabular-nums; }
-  .empty { text-align:center; padding:56px 24px; color:var(--text3); }
-  .empty-ico { font-size:26px; margin-bottom:12px; opacity:0.4; }
-  .empty-title { font-size:15px; font-weight:600; color:var(--text2); margin-bottom:6px; }
-
-  @media (max-width: 900px) {
-    .sidebar { display:none; }
-    .g4c { grid-template-columns:1fr 1fr; }
-    .stats-grid { grid-template-columns:1fr 1fr; }
-    .inst-grid { grid-template-columns:1fr 1fr !important; }
-    .tv-probs { grid-template-columns:1fr 1fr; }
-    /* Make room for the mobile bottom nav */
-    .content { padding-bottom:88px !important; }
-  }
-  @media (max-width: 600px) {
-    .g2, .g3, .g4c { grid-template-columns:1fr; }
-    .content { padding:14px 14px 88px; }
-    .topbar { padding:10px 14px; gap:6px; }
-    /* Topbar cards smaller on phone */
-    .tc { padding:6px 8px !important; min-width:0 !important; flex:1 1 auto !important; }
-    .tc-lbl { font-size:9px !important; }
-    .tc-val { font-size:13px !important; }
-    .tb-sep { display:none; }
-    .tb-time { width:100%; font-size:10px; text-align:center; padding-top:4px; border-top:1px solid var(--navy-l); margin-top:4px; }
-    /* Reduce panel padding on phone */
-    .panel { padding:12px !important; }
-    /* Buttons smaller */
-    .btn { padding:8px 12px; font-size:12px; }
-    /* Tables horizontal scroll instead of breaking layout */
-    table { font-size:11px; }
-    .tv-probs { grid-template-columns:1fr 1fr; gap:6px; }
-    .stat-mini-val { font-size:14px; }
-    /* Hide last-updated text on smallest screens to save space */
+  /* Glass surface — used everywhere for overlays */
+  .qb-glass {
+    background: var(--qb-bg-glass);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    border: 1px solid var(--qb-border);
   }
 
-  /* V11 — Mobile bottom navigation bar (visible only ≤ 900px) */
-  .mobile-nav {
-    display:none;
-    position:fixed; bottom:0; left:0; right:0;
-    background:rgba(15, 23, 42, 0.95);
-    backdrop-filter:blur(12px);
-    -webkit-backdrop-filter:blur(12px);
-    border-top:1px solid var(--navy-l);
-    z-index:50;
-    padding:8px 4px calc(8px + env(safe-area-inset-bottom)) 4px;
+  /* Mono numbers */
+  .qb-mono { font-family: var(--qb-font-mono); font-variant-numeric: tabular-nums; }
+
+  /* Pulse animation for live indicators */
+  @keyframes qbPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
-  .mobile-nav-inner {
-    display:flex; justify-content:space-around; align-items:center;
-    overflow-x:auto;
-    scrollbar-width:none; -ms-overflow-style:none;
+  .qb-pulse { animation: qbPulse 2s ease-in-out infinite; }
+
+  /* Smooth glow */
+  @keyframes qbGlow {
+    0%, 100% { box-shadow: 0 0 8px var(--qb-accent-soft), 0 0 16px var(--qb-accent-soft); }
+    50% { box-shadow: 0 0 12px var(--qb-accent-soft), 0 0 24px var(--qb-accent-soft); }
   }
-  .mobile-nav-inner::-webkit-scrollbar { display:none; }
-  .mn-btn {
-    flex:0 0 auto;
-    display:flex; flex-direction:column; align-items:center; justify-content:center;
-    gap:3px;
-    padding:6px 10px;
-    min-width:54px;
-    background:transparent; border:none;
-    color:#94a3b8;
-    font-size:9.5px; font-weight:600;
-    cursor:pointer;
-    border-radius:8px;
-    transition:all 150ms;
-  }
-  .mn-btn.on { color:#22d3ee; background:rgba(34, 211, 238, 0.08); }
-  .mn-icon { font-size:18px; line-height:1; }
-  .mn-label { font-size:9px; letter-spacing:0.2px; text-transform:uppercase; }
-  @media (max-width: 900px) {
-    .mobile-nav { display:block; }
-  }
+  .qb-glow { animation: qbGlow 3s ease-in-out infinite; }
 
-  /* ================ V9.7 -- CHARTS & DECODER ================ */
+  /* Hover lift */
+  .qb-hover:hover { transform: translateY(-1px); transition: transform 200ms; }
 
-  /* Strategy Decoder */
-  .strat-decoder { width:100%; }
-  .tac-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:14px; border:1px solid; font-size:11px; }
-  .tac-details { display:grid; gap:8px; }
-  .tac-card { padding:10px 12px; background:#f8fafc; border-left:3px solid; border-radius:6px; }
+  /* Custom scrollbar */
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
 
-  /* Donut */
-  .dnt-wrap { position:relative; display:inline-block; }
-  .dnt-empty { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:11px; border:2px dashed #cbd5e1; border-radius:50%; }
-  .dnt-center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
-  .dnt-label { font-size:22px; font-weight:800; letter-spacing:-0.5px; }
-  .dnt-sub { font-size:10px; color:#64748b; margin-top:2px; }
+  /* Inputs */
+  input, button, select { font-family: inherit; color: inherit; }
+  input:focus, button:focus, select:focus { outline: none; }
 
-  /* Bar chart */
-  .bch-wrap { display:flex; align-items:flex-end; gap:6px; padding:8px 4px 28px; position:relative; }
-  .bch-empty { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:11px; }
-  .bch-col { flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; min-width:0; height:100%; }
-  .bch-val { font-size:10px; font-weight:700; }
-  .bch-track { flex:1; width:100%; max-width:30px; display:flex; align-items:flex-end; background:rgba(226,232,240,0.5); border-radius:3px; overflow:hidden; }
-  .bch-fill { width:100%; border-radius:3px; transition:height 600ms ease; min-height:2px; }
-  .bch-lbl { font-size:9px; color:#64748b; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:100%; }
-
-  /* Progress ring */
-  .prg-wrap { position:relative; display:inline-block; }
-  .prg-center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
-  .prg-label { font-size:18px; font-weight:800; letter-spacing:-0.5px; }
-  .prg-sub { font-size:9px; color:#64748b; margin-top:1px; text-transform:uppercase; letter-spacing:0.5px; }
-
-  /* Pyramid */
-  .pyr-wrap { display:flex; flex-direction:column; gap:6px; padding:8px 0; }
-  .pyr-row { display:flex; flex-direction:column; align-items:center; gap:3px; }
-  .pyr-bar-shell { width:100%; display:flex; justify-content:center; }
-  .pyr-bar { padding:6px 12px; border-radius:6px; min-width:50px; text-align:center; transition:width 600ms ease; box-shadow:0 1px 2px rgba(0,0,0,0.08); }
-  .pyr-val { color:#fff; font-weight:800; font-size:13px; }
-  .pyr-label { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; }
-
-  /* Equity curve */
-  .eq-svg { display:block; width:100%; }
-  .eq-empty { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:11px; border:2px dashed #cbd5e1; border-radius:8px; }
-
-  /* Chart panel grid */
-  .chart-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px; }
-  .chart-card { background:linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border:1px solid var(--border); border-radius:10px; padding:14px; }
-  .chart-title { font-size:11px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:10px; }
-
-  /* Sound toggle */
-  .snd-toggle { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:14px; border:1px solid var(--border2); background:#fff; font-size:11px; cursor:pointer; }
-  .snd-toggle.on { background:#dcfce7; border-color:#22c55e; color:#15803d; }
-  .snd-toggle.off { background:#fef2f2; border-color:#ef4444; color:#b91c1c; }
-
-  @media (max-width: 600px) {
-    .chart-grid { grid-template-columns:1fr 1fr; }
-  }
+  /* Chart container — let lightweight-charts fill its parent */
+  .qb-chart-container { position: relative; width: 100%; height: 100%; }
 `;
 
-const NAV = [
-  { id: "aiwatch",  icon: "\u25C9", label: "AI Watch"       },
-  { id: "live",     icon: "\u25CF", label: "Live"           },
-  { id: "intel",    icon: "\u25CE", label: "Pair Intel"     },
-  { id: "memory",   icon: "\u26C2", label: "Bot Memory"     },
-  { id: "backtest", icon: "\u29BF", label: "Backtest"       },
-  { id: "news",     icon: "\u26A0", label: "News"           },
-  { id: "reports",  icon: "\u2630", label: "Reports"        },
-  { id: "lab",      icon: "\u25C6", label: "Strategy Lab"   },
-  { id: "settings", icon: "\u2699", label: "Settings"       },
+// =====================================================================
+// SECTION 6: ASSET REGISTRY (mirrored frontend-side for the modal)
+// =====================================================================
+// This duplicates a subset of the backend asset-registry. The backend is
+// authoritative; this is just for the Add Instrument modal UI when the
+// backend hasn't loaded yet.
+// =====================================================================
+
+const ASSET_CATALOG = [
+  // Forex majors
+  { id: "eurusd", name: "EUR/USD", category: "forex", description: "Euro vs US Dollar" },
+  { id: "gbpusd", name: "GBP/USD", category: "forex", description: "British Pound vs US Dollar" },
+  { id: "usdjpy", name: "USD/JPY", category: "forex", description: "US Dollar vs Japanese Yen" },
+  { id: "usdchf", name: "USD/CHF", category: "forex", description: "US Dollar vs Swiss Franc" },
+  { id: "audusd", name: "AUD/USD", category: "forex", description: "Australian Dollar vs US Dollar" },
+  { id: "nzdusd", name: "NZD/USD", category: "forex", description: "New Zealand Dollar vs US Dollar" },
+  { id: "usdcad", name: "USD/CAD", category: "forex", description: "US Dollar vs Canadian Dollar" },
+  // Crosses
+  { id: "eurjpy", name: "EUR/JPY", category: "forex", description: "Euro vs Japanese Yen" },
+  { id: "gbpjpy", name: "GBP/JPY", category: "forex", description: "British Pound vs Japanese Yen — high vol" },
+  { id: "eurgbp", name: "EUR/GBP", category: "forex", description: "Euro vs British Pound" },
+  { id: "audjpy", name: "AUD/JPY", category: "forex", description: "Australian Dollar vs Japanese Yen" },
+  // Metals
+  { id: "gold",     name: "Gold",     category: "metal", description: "Spot Gold (XAU/USD)" },
+  { id: "silver",   name: "Silver",   category: "metal", description: "Spot Silver (XAG/USD)" },
+  { id: "platinum", name: "Platinum", category: "metal", description: "Spot Platinum (XPT/USD)" },
+  // Crypto
+  { id: "btc", name: "Bitcoin",  category: "crypto", description: "Bitcoin vs USD — 24/7" },
+  { id: "eth", name: "Ethereum", category: "crypto", description: "Ethereum vs USD — 24/7" },
+  { id: "sol", name: "Solana",   category: "crypto", description: "Solana vs USD" },
+  { id: "xrp", name: "Ripple",   category: "crypto", description: "Ripple vs USD" },
+  // Indices
+  { id: "nas100", name: "Nasdaq 100", category: "index", description: "US tech-heavy index" },
+  { id: "us30",   name: "Dow Jones",  category: "index", description: "Dow Jones Industrial Average" },
+  { id: "us500",  name: "S&P 500",    category: "index", description: "S&P 500 futures" },
+  { id: "ger40",  name: "DAX 40",     category: "index", description: "German DAX 40" },
+  { id: "uk100",  name: "FTSE 100",   category: "index", description: "UK FTSE 100" },
+  { id: "jp225",  name: "Nikkei 225", category: "index", description: "Japan Nikkei 225" },
+  // Commodities
+  { id: "oil_wti",   name: "WTI Crude Oil",   category: "commodity", description: "West Texas Intermediate" },
+  { id: "oil_brent", name: "Brent Crude Oil", category: "commodity", description: "Brent crude oil" },
+  { id: "natgas",    name: "Natural Gas",     category: "commodity", description: "Natural gas futures" },
 ];
 
-// Map news country code -> instruments in user's watchlist affected by this currency
-const newsAffects = (country, userInstruments) => {
-  const c = (country || '').toUpperCase();
-  return (userInstruments || []).filter((sym) => {
-    const u = sym.toUpperCase();
-    if (c === 'USD') {
-      if (u.includes('XAU') || u.includes('GOLD')) return true;
-      if (u.includes('BTC') || u.includes('ETH')) return true;
-      if (u.includes('US30') || u.includes('NAS') || u.includes('SPX')) return true;
-      return u.includes('USD');
-    }
-    return u.includes(c);
-  });
+const CATEGORY_LABELS = {
+  forex:     "Forex",
+  metal:     "Metals",
+  crypto:    "Crypto",
+  index:     "Indices",
+  commodity: "Commodities",
 };
 
-// ============================================================
-// V11 STEP 4 — AI WATCH CHART COMPONENT
-// ============================================================
-// Renders a candlestick chart for one instrument with AI annotations:
-//   - Setup detector zones (boxes for range, lines for sweep levels)
-//   - Observation watchLevels (horizontal lines with text labels)
-//   - Position SL/TP1-4 lines with mode-aware colors
-//   - Setup direction badge in header
-//
-// Uses lightweight-charts. Chart instance is created once per component mount,
-// then series data is updated on each refresh. Cleanup on unmount.
-function AIWatchChart({ symbol, timeframe = "1h", refreshKey = 0, onLoaded }) {
-  const containerRef = useRef(null);
-  const chartRef     = useRef(null);
-  const candleRef    = useRef(null);
-  const priceLinesRef = useRef([]);
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState(null);
+function getAssetById(id) {
+  return ASSET_CATALOG.find((a) => a.id === id) || null;
+}
 
-  // Fetch the AI watch payload for this symbol+timeframe
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
-    try {
-      const r = await fetch(API(`ai-watch?symbol=${encodeURIComponent(symbol)}&tf=${timeframe}&n=120`));
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      const d = await r.json();
-      if (d.error) throw new Error(d.error);
-      setData(d);
-      if (onLoaded) onLoaded(d);
-    } catch (e) {
-      setErr(e.message || String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [symbol, timeframe, onLoaded]);
+// =====================================================================
+// SECTION 7: TACTIC LABELS (UI display)
+// =====================================================================
 
-  // Re-fetch when symbol/timeframe/refreshKey changes
-  useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
+const TACTIC_LABELS = {
+  orderBlock:        "Order Blocks",
+  fvg:               "Fair Value Gaps",
+  bos:               "Break of Structure",
+  trendStructure:    "Trend Structure (HH/HL)",
+  liquiditySweep:    "Liquidity Sweeps",
+  sessionLevel:      "Session H/L + PDH/PDL",
+  unfilledImbalance: "Unfilled Imbalances",
+  fakeout:           "Fakeout Signatures",
+  roundNumber:       "Round Numbers",
+  fibonacci:         "Fibonacci Retracement",
+  ema21:             "EMA 21",
+  ema50:             "EMA 50",
+  ema200:            "EMA 200",
+  vwap:              "VWAP",
+  bollinger:         "Bollinger Bands",
+  rsi:               "RSI",
+};
 
-  // Auto-poll every 60s while mounted
+const TACTIC_DESCRIPTIONS = {
+  orderBlock:        "Last opposite candle before strong directional move. Often acts as support/resistance on retest.",
+  fvg:               "Fair Value Gap: 3-candle imbalance where price moved too fast. Market often returns to fill.",
+  bos:               "Break of Structure: clean close beyond a previous swing high/low. Confirms trend continuation.",
+  trendStructure:    "Higher Highs/Higher Lows (uptrend) or Lower Highs/Lower Lows (downtrend) on the chart.",
+  liquiditySweep:    "Price spikes past a level to grab stops, then reverses. Real reversal vs fakeout.",
+  sessionLevel:      "Asian/London/NY session highs and lows + Prior Day H/L + Weekly Open. Magnets and reversal zones.",
+  unfilledImbalance: "Larger gaps in price action (weekend gaps, news gaps). Markets often fill the gap.",
+  fakeout:           "Failed breakout: price breaks a level then reverses, trapping breakout traders.",
+  roundNumber:       "Psychologically significant prices (1.10, 4500, 80000). Magnetic levels.",
+  fibonacci:         "Retracement levels (0.382, 0.5, 0.618, 0.786) from last impulse.",
+  ema21:             "21-period Exponential Moving Average. Short-term trend.",
+  ema50:             "50-period EMA. Medium-term trend.",
+  ema200:            "200-period EMA. Long-term trend.",
+  vwap:              "Volume-Weighted Average Price. Institutional benchmark.",
+  bollinger:         "Volatility bands. Price extremes.",
+  rsi:               "Relative Strength Index. Overbought/oversold.",
+};
+
+// =====================================================================
+// SECTION 8: ROOT APP
+// =====================================================================
+
+export default function App() {
+  // Theme — applied as CSS variables on root
+  const [theme, setTheme] = useState(loadTheme);
+  useEffect(() => { applyThemeToRoot(theme); saveTheme(theme); }, [theme]);
+
+  // Inject global styles once
   useEffect(() => {
-    const t = setInterval(fetchData, 60000);
-    return () => clearInterval(t);
-  }, [fetchData]);
+    const id = "qb-global-styles";
+    if (document.getElementById(id)) return;
+    const style = document.createElement("style");
+    style.id = id;
+    style.textContent = GLOBAL_STYLES;
+    document.head.appendChild(style);
+  }, []);
 
-  // Initialize chart once on mount
+  // Preferences (selected asset, watchlist, lots, tools, etc.)
+  const [prefs, setPrefs] = useState(loadPrefs);
+  useEffect(() => { savePrefs(prefs); }, [prefs]);
+
+  // Routing — simple state-based, no router library
+  const [page, setPage] = useState("cockpit");
+
+  // Live data shared across pages
+  const [account, setAccount] = useState(null);
+  const [positions, setPositions] = useState([]);
+
+  // Poll account + positions every 5 seconds
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const a = await fetch(API("broker?action=account")).then((r) => r.json()).catch(() => null);
+        if (alive && a && !a.error) setAccount(a);
+        const p = await fetch(API("broker?action=positions")).then((r) => r.json()).catch(() => []);
+        if (alive) setPositions(Array.isArray(p) ? p : []);
+      } catch (_) {}
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  return (
+    <div style={{ width: "100vw", height: "100vh", overflow: "hidden", position: "relative" }}>
+      {page === "cockpit" && (
+        <CockpitPage
+          prefs={prefs}
+          setPrefs={setPrefs}
+          theme={theme}
+          account={account}
+          positions={positions}
+          onNavigate={setPage}
+        />
+      )}
+      {page === "portfolio" && (
+        <PortfolioPage
+          prefs={prefs}
+          theme={theme}
+          account={account}
+          positions={positions}
+          onNavigate={setPage}
+        />
+      )}
+      {page === "reports" && (
+        <ReportsPage prefs={prefs} theme={theme} onNavigate={setPage} />
+      )}
+      {page === "settings" && (
+        <SettingsPage
+          prefs={prefs}
+          setPrefs={setPrefs}
+          theme={theme}
+          setTheme={setTheme}
+          onNavigate={setPage}
+        />
+      )}
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 9: COCKPIT PAGE
+// =====================================================================
+
+function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate }) {
+  const [sideBarOpen, setSideBarOpen] = useState(prefs.sideBarOpen);
+  const [bottomBarOpen, setBottomBarOpen] = useState(prefs.bottomBarOpen);
+  const [logoMenuOpen, setLogoMenuOpen] = useState(false);
+  const [assetModalOpen, setAssetModalOpen] = useState(false);
+  const [pausePopoverOpen, setPausePopoverOpen] = useState(false);
+  const [toolsPopoverOpen, setToolsPopoverOpen] = useState(false);
+
+  const selectedAsset = prefs.selectedAsset || "gold";
+  const selectedAssetMeta = getAssetById(selectedAsset);
+  const isPaused = prefs.pauseOnAsset?.[selectedAsset] || false;
+
+  // Live price / candles for the selected asset + TF
+  const [chartData, setChartData] = useState(null);
+  const [chartLoading, setChartLoading] = useState(false);
+
+  // Position on the selected asset (if any)
+  const myPosition = positions.find((p) => p.assetId === selectedAsset) || null;
+
+  // Fetch chart data for the selected asset/TF
+  useEffect(() => {
+    let alive = true;
+    setChartLoading(true);
+    (async () => {
+      try {
+        const r = await fetch(
+          API(`broker?action=candles&asset=${selectedAsset}&tf=${prefs.selectedTF}&n=200`)
+        ).then((r) => r.json());
+        if (alive) {
+          setChartData(r);
+          setChartLoading(false);
+        }
+      } catch (e) {
+        if (alive) setChartLoading(false);
+      }
+    })();
+    const id = setInterval(async () => {
+      try {
+        const r = await fetch(
+          API(`broker?action=candles&asset=${selectedAsset}&tf=${prefs.selectedTF}&n=200`)
+        ).then((r) => r.json());
+        if (alive) setChartData(r);
+      } catch (_) {}
+    }, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, [selectedAsset, prefs.selectedTF]);
+
+  // Persist sidebar/bottom-bar state to prefs
+  useEffect(() => {
+    setPrefs((p) => ({ ...p, sideBarOpen, bottomBarOpen }));
+  }, [sideBarOpen, bottomBarOpen]);
+
+  // Live state from V12 backend (watcher's mental model) — polled
+  const [assetState, setAssetState] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API(`state?asset=${selectedAsset}`)).then((r) => r.json());
+        if (alive && r && !r.error) setAssetState(r);
+      } catch (_) {}
+    };
+    tick();
+    const id = setInterval(tick, 15000);  // poll every 15s
+    return () => { alive = false; clearInterval(id); };
+  }, [selectedAsset]);
+
+  // Handle pause toggle
+  const togglePause = useCallback(() => {
+    setPrefs((p) => ({
+      ...p,
+      pauseOnAsset: { ...(p.pauseOnAsset || {}), [selectedAsset]: !isPaused },
+    }));
+  }, [selectedAsset, isPaused, setPrefs]);
+
+  // Handle asset switch from sidebar
+  const switchAsset = useCallback((assetId) => {
+    setPrefs((p) => ({ ...p, selectedAsset: assetId }));
+  }, [setPrefs]);
+
+  // Handle add instrument from modal
+  const addInstrument = useCallback((assetId) => {
+    setPrefs((p) => ({
+      ...p,
+      watchlist: p.watchlist.includes(assetId) ? p.watchlist : [...p.watchlist, assetId],
+      perInstrumentLot: { ...(p.perInstrumentLot || {}), [assetId]: p.perInstrumentLot?.[assetId] || 0.01 },
+      selectedAsset: assetId,
+    }));
+    setAssetModalOpen(false);
+  }, [setPrefs]);
+
+  return (
+    <div style={{ width: "100%", height: "100%", position: "relative", background: "var(--qb-bg-base)" }}>
+      {/* TOP BAR */}
+      <CockpitTopBar
+        theme={theme}
+        prefs={prefs}
+        setPrefs={setPrefs}
+        selectedAssetMeta={selectedAssetMeta}
+        chartData={chartData}
+        account={account}
+        isPaused={isPaused}
+        onTogglePause={togglePause}
+        onLogoClick={() => setLogoMenuOpen((v) => !v)}
+        logoMenuOpen={logoMenuOpen}
+        onCloseLogoMenu={() => setLogoMenuOpen(false)}
+        onNavigate={onNavigate}
+        onPauseSettings={() => setPausePopoverOpen(true)}
+        onAddInstrument={() => setAssetModalOpen(true)}
+        myPosition={myPosition}
+        assetState={assetState}
+      />
+
+      {/* SIDE BAR */}
+      <CockpitSideBar
+        theme={theme}
+        open={sideBarOpen}
+        onToggle={() => setSideBarOpen((v) => !v)}
+        prefs={prefs}
+        setPrefs={setPrefs}
+        positions={positions}
+        onSwitchAsset={switchAsset}
+        onAddInstrument={() => setAssetModalOpen(true)}
+        onSettings={() => onNavigate("settings")}
+        assetState={assetState}
+      />
+
+      {/* CHART */}
+      <div
+        style={{
+          position: "absolute",
+          top: 44,
+          left: sideBarOpen ? 280 : 8,
+          right: 8,
+          bottom: bottomBarOpen ? 76 : 16,
+          transition: "left 250ms, bottom 250ms",
+        }}
+      >
+        <CockpitChart
+          theme={theme}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          assetId={selectedAsset}
+          chartData={chartData}
+          chartLoading={chartLoading}
+          myPosition={myPosition}
+          assetState={assetState}
+          onToolsClick={() => setToolsPopoverOpen((v) => !v)}
+          toolsPopoverOpen={toolsPopoverOpen}
+          onCloseToolsPopover={() => setToolsPopoverOpen(false)}
+        />
+      </div>
+
+      {/* BOTTOM BAR */}
+      <CockpitBottomBar
+        theme={theme}
+        open={bottomBarOpen}
+        onToggle={() => setBottomBarOpen((v) => !v)}
+        commentary={assetState?.commentary || []}
+        assetId={selectedAsset}
+      />
+
+      {/* MODALS / POPOVERS */}
+      {assetModalOpen && (
+        <AssetSelectionModal
+          theme={theme}
+          watchlist={prefs.watchlist}
+          onAdd={addInstrument}
+          onClose={() => setAssetModalOpen(false)}
+        />
+      )}
+
+      {pausePopoverOpen && (
+        <PauseSettingsPopover
+          theme={theme}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          onClose={() => setPausePopoverOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 9.1: COCKPIT — TOP BAR
+// =====================================================================
+
+function CockpitTopBar({
+  theme, prefs, setPrefs, selectedAssetMeta, chartData, account, isPaused,
+  onTogglePause, onLogoClick, logoMenuOpen, onCloseLogoMenu, onNavigate,
+  onPauseSettings, onAddInstrument, myPosition, assetState,
+}) {
+  const selectedAsset = prefs.selectedAsset || "gold";
+  const lot = prefs.perInstrumentLot?.[selectedAsset] || 0.01;
+
+  // Last close from chart data = current price approximation
+  const lastCandle = chartData?.candles?.[chartData.candles.length - 1];
+  const currentPrice = lastCandle?.close;
+  const prevPrice = chartData?.candles?.[chartData.candles.length - 2]?.close;
+  const priceChange = currentPrice && prevPrice ? ((currentPrice - prevPrice) / prevPrice) : 0;
+  const priceColor = priceChange >= 0 ? "var(--qb-up-strong)" : "var(--qb-down-strong)";
+
+  const balance = account?.balance ?? null;
+
+  // Suggested lot from V12 backend (watcher includes sizing in pending setups)
+  const suggestedLot = assetState?.pending?.[0]?.sizing?.recommendedLot || null;
+
+  return (
+    <div
+      className="qb-glass"
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 40,
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        padding: "0 12px",
+        zIndex: 10,
+        borderBottom: "1px solid var(--qb-border)",
+      }}
+    >
+      {/* Logo */}
+      <div style={{ position: "relative" }}>
+        <button
+          onClick={onLogoClick}
+          style={{
+            width: 28, height: 28, borderRadius: "50%",
+            background: "linear-gradient(135deg, var(--qb-accent), #0066cc)",
+            border: "none", cursor: "pointer", padding: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 0 12px var(--qb-accent-soft)",
+          }}
+          className="qb-glow"
+          title="Menu"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="7" />
+            <line x1="16" y1="16" x2="20" y2="20" />
+          </svg>
+        </button>
+        {logoMenuOpen && (
+          <LogoMenu
+            theme={theme}
+            onNavigate={(p) => { onNavigate(p); onCloseLogoMenu(); }}
+            onClose={onCloseLogoMenu}
+          />
+        )}
+      </div>
+
+      {/* Asset symbol switcher */}
+      <button
+        onClick={onAddInstrument}
+        style={{
+          background: "transparent",
+          border: "1px solid var(--qb-border)",
+          borderRadius: 4,
+          padding: "4px 10px",
+          color: "var(--qb-text-primary)",
+          fontFamily: "var(--qb-font-mono)",
+          fontSize: 13,
+          fontWeight: 600,
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+        title="Switch instrument or add new"
+      >
+        {selectedAssetMeta?.id?.toUpperCase() || selectedAsset.toUpperCase()}
+        <span style={{ color: "var(--qb-text-muted)", fontSize: 10 }}>▾</span>
+      </button>
+
+      {/* Current price */}
+      {currentPrice && (
+        <div
+          className="qb-mono"
+          style={{ fontSize: 14, color: priceColor, fontWeight: 600, minWidth: 80 }}
+        >
+          {fmtPrice(currentPrice)}
+          {priceChange !== 0 && (
+            <span style={{ marginLeft: 6, fontSize: 11 }}>
+              {priceChange > 0 ? "▲" : "▼"} {fmtPercent(priceChange)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Spacer */}
+      <div style={{ flex: 1 }} />
+
+      {/* Balance */}
+      {balance != null && (
+        <div className="qb-mono" style={{ fontSize: 13, color: "var(--qb-text-muted)" }}>
+          ${balance.toFixed(2)}
+        </div>
+      )}
+
+      {/* Lot input */}
+      <LotInput
+        lot={lot}
+        onChange={(newLot) => {
+          setPrefs((p) => ({
+            ...p,
+            perInstrumentLot: { ...(p.perInstrumentLot || {}), [selectedAsset]: newLot },
+          }));
+        }}
+        suggested={suggestedLot}
+      />
+
+      {/* Pause toggle */}
+      <button
+        onClick={onTogglePause}
+        onContextMenu={(e) => { e.preventDefault(); onPauseSettings(); }}
+        style={{
+          background: isPaused ? "var(--qb-news-imminent)" : "transparent",
+          color: isPaused ? "#0a0b0f" : "var(--qb-text-primary)",
+          border: `1px solid ${isPaused ? "var(--qb-news-imminent)" : "var(--qb-border)"}`,
+          borderRadius: 4,
+          padding: "4px 10px",
+          fontSize: 11,
+          fontWeight: 600,
+          cursor: "pointer",
+          letterSpacing: 0.5,
+          textTransform: "uppercase",
+        }}
+        title={isPaused ? "Trading paused — click to resume. Right-click for thresholds." : "Trading active — click to pause new entries. Right-click for thresholds."}
+      >
+        {isPaused ? "⏸ Paused" : "● Active"}
+      </button>
+
+      {/* News indicator (real data from V12 backend) */}
+      <NewsIndicator theme={theme} assetId={selectedAsset} news={assetState?.news} />
+
+      {/* Recognition indicator (real data from V12 backend) */}
+      <RecognitionIndicator theme={theme} assetId={selectedAsset} pending={assetState?.pending} />
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 9.2: COCKPIT — LOGO MENU
+// =====================================================================
+
+function LogoMenu({ theme, onNavigate, onClose }) {
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e.target.closest(".qb-logo-menu") && !e.target.closest("button")) onClose();
+    };
+    document.addEventListener("click", handler);
+    return () => document.removeEventListener("click", handler);
+  }, []);
+
+  const items = [
+    { id: "cockpit",   label: "Cockpit",   icon: "▣" },
+    { id: "portfolio", label: "Portfolio", icon: "▤" },
+    { id: "reports",   label: "Reports",   icon: "▦" },
+    { id: "settings",  label: "Settings",  icon: "⚙" },
+  ];
+
+  return (
+    <div
+      className="qb-glass qb-logo-menu"
+      style={{
+        position: "absolute",
+        top: 36,
+        left: 0,
+        minWidth: 180,
+        borderRadius: 6,
+        padding: 4,
+        zIndex: 100,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+      }}
+    >
+      {items.map((it) => (
+        <button
+          key={it.id}
+          onClick={() => onNavigate(it.id)}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "8px 12px",
+            background: "transparent",
+            border: "none",
+            borderRadius: 4,
+            color: "var(--qb-text-primary)",
+            cursor: "pointer",
+            fontSize: 13,
+            textAlign: "left",
+            transition: "background 150ms",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--qb-accent-soft)")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+        >
+          <span style={{ width: 16, color: "var(--qb-accent)" }}>{it.icon}</span>
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 9.3: COCKPIT — LOT INPUT
+// =====================================================================
+
+function LotInput({ lot, onChange, suggested }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(lot));
+  const inputRef = useRef(null);
+
+  useEffect(() => { setDraft(String(lot)); }, [lot]);
+
+  useEffect(() => {
+    if (editing && inputRef.current) inputRef.current.select();
+  }, [editing]);
+
+  const commit = () => {
+    const n = parseFloat(draft);
+    if (isFinite(n) && n > 0) onChange(n);
+    setEditing(false);
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <span style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>Lot:</span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setDraft(String(lot)); setEditing(false); } }}
+          style={{
+            width: 60,
+            background: "var(--qb-bg-layer)",
+            border: "1px solid var(--qb-accent)",
+            borderRadius: 4,
+            padding: "4px 8px",
+            color: "var(--qb-text-primary)",
+            fontFamily: "var(--qb-font-mono)",
+            fontSize: 13,
+            textAlign: "right",
+          }}
+        />
+      ) : (
+        <button
+          onClick={() => setEditing(true)}
+          className="qb-mono"
+          style={{
+            background: "transparent",
+            border: "1px solid var(--qb-border)",
+            borderRadius: 4,
+            padding: "4px 10px",
+            color: "var(--qb-text-primary)",
+            fontSize: 13,
+            cursor: "pointer",
+            minWidth: 60,
+            textAlign: "right",
+          }}
+          title="Click to edit lot size"
+        >
+          {lot.toFixed(2)}
+        </button>
+      )}
+      {suggested != null && Math.abs(suggested - lot) > 0.001 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }} title={`Bot suggests ${suggested.toFixed(2)} based on current setup`}>
+          <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-muted)" }}>
+            sugg. {suggested.toFixed(2)}
+          </span>
+          <button
+            onClick={() => onChange(suggested)}
+            style={{
+              background: "var(--qb-accent-soft)",
+              border: "1px solid var(--qb-accent)",
+              borderRadius: 3,
+              padding: "2px 6px",
+              color: "var(--qb-accent)",
+              fontSize: 9,
+              fontWeight: 700,
+              cursor: "pointer",
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+            }}
+          >
+            use
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 9.4: COCKPIT — NEWS INDICATOR
+// =====================================================================
+// Three intensities: scheduled today (yellow dot), within 30 min (amber pill),
+// live (red pulsing pill). Wired up properly in session 4.
+// =====================================================================
+
+function NewsIndicator({ theme, assetId, news }) {
+  // news is a NewsContext object: { state, currencies, events: { live, imminent, today }, summary }
+  if (!news || news.state === 'none') return null;
+
+  if (news.state === 'live') {
+    const event = news.events?.live?.[0];
+    return (
+      <div
+        className="qb-pulse"
+        style={{
+          background: "var(--qb-news-live)",
+          color: "white",
+          padding: "3px 10px",
+          borderRadius: 12,
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: 0.5,
+        }}
+        title={news.summary}
+      >
+        ● {event?.currency || ''} LIVE
+      </div>
+    );
+  }
+
+  if (news.state === 'imminent') {
+    const event = news.events?.imminent?.[0];
+    return (
+      <div
+        style={{
+          background: "var(--qb-news-imminent)",
+          color: "#0a0b0f",
+          padding: "3px 10px",
+          borderRadius: 12,
+          fontSize: 11,
+          fontWeight: 600,
+        }}
+        title={news.summary}
+      >
+        {event?.currency} {Math.round(event?.minsUntil || 0)}m
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        width: 8, height: 8, borderRadius: "50%",
+        background: "var(--qb-news-scheduled)",
+      }}
+      title={news.summary || "News scheduled"}
+    />
+  );
+}
+
+// =====================================================================
+// SECTION 9.5: COCKPIT — RECOGNITION INDICATOR
+// =====================================================================
+// Visible when bot has identified a coherent setup. Shows match % and count.
+// Wires up in session 4.
+// =====================================================================
+
+function RecognitionIndicator({ theme, assetId, pending }) {
+  // Show only when there's an active pending setup with recognition data
+  const activePending = pending?.find?.((p) => p.status === 'pending' || p.status === 'placed');
+  const recognition = activePending?.recognition;
+
+  if (!recognition || recognition.matchCount === 0) return null;
+
+  const winRatePercent = recognition.winRate != null
+    ? Math.round(recognition.winRate * 100)
+    : null;
+
+  if (winRatePercent == null) return null;
+
+  return (
+    <div
+      style={{
+        background: "var(--qb-accent-soft)",
+        color: "var(--qb-accent)",
+        padding: "3px 10px",
+        borderRadius: 12,
+        fontSize: 11,
+        fontWeight: 600,
+        fontFamily: "var(--qb-font-mono)",
+        border: "1px solid var(--qb-accent)",
+      }}
+      title={`Configuration matches ${recognition.matchCount} past setups: ${recognition.wins} wins, ${recognition.losses} losses (${recognition.confidence})`}
+    >
+      ◉ {winRatePercent}%
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 9.6: COCKPIT — SIDE BAR
+// =====================================================================
+
+function CockpitSideBar({
+  theme, open, onToggle, prefs, setPrefs, positions,
+  onSwitchAsset, onAddInstrument, onSettings, assetState,
+}) {
+  const watchlist = prefs.watchlist || [];
+  const selectedAsset = prefs.selectedAsset || "gold";
+
+  const removeInstrument = (assetId) => {
+    if (watchlist.length <= 1) return;
+    setPrefs((p) => ({
+      ...p,
+      watchlist: p.watchlist.filter((a) => a !== assetId),
+      selectedAsset: p.selectedAsset === assetId ? p.watchlist[0] : p.selectedAsset,
+    }));
+  };
+
+  return (
+    <>
+      {/* Edge strip (always visible, click to toggle) */}
+      <div
+        onClick={onToggle}
+        style={{
+          position: "absolute",
+          top: 44,
+          left: 0,
+          width: 6,
+          bottom: 76,
+          background: "var(--qb-border)",
+          cursor: "pointer",
+          zIndex: 5,
+          borderRight: open ? "1px solid var(--qb-accent)" : "none",
+          transition: "border-color 200ms, background 200ms",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--qb-accent-soft)")}
+        onMouseLeave={(e) => (e.currentTarget.style.background = "var(--qb-border)")}
+        title={open ? "Collapse sidebar" : "Open sidebar"}
+      />
+
+      {/* Side bar content */}
+      {open && (
+        <div
+          className="qb-glass"
+          style={{
+            position: "absolute",
+            top: 44,
+            left: 6,
+            width: 274,
+            bottom: 76,
+            zIndex: 6,
+            padding: 10,
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+          }}
+        >
+          {/* Header */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase", letterSpacing: 0.8 }}>
+              Watchlist
+            </div>
+            <button
+              onClick={onAddInstrument}
+              style={{
+                background: "var(--qb-accent-soft)",
+                border: "none",
+                borderRadius: 3,
+                color: "var(--qb-accent)",
+                fontSize: 11,
+                padding: "3px 8px",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              + Add
+            </button>
+          </div>
+
+          {/* Instrument list */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {watchlist.map((assetId) => {
+              const meta = getAssetById(assetId);
+              const pos = positions.find((p) => p.assetId === assetId);
+              const selected = assetId === selectedAsset;
+              return (
+                <div
+                  key={assetId}
+                  onClick={() => onSwitchAsset(assetId)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "8px 10px",
+                    background: selected ? "var(--qb-accent-soft)" : "transparent",
+                    border: `1px solid ${selected ? "var(--qb-accent)" : "var(--qb-border)"}`,
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    transition: "all 150ms",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!selected) e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!selected) e.currentTarget.style.background = "transparent";
+                  }}
+                >
+                  <div>
+                    <div className="qb-mono" style={{ fontSize: 13, fontWeight: 600 }}>
+                      {assetId.toUpperCase()}
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--qb-text-muted)" }}>
+                      {meta?.name || ""}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {pos && (
+                      <div
+                        style={{
+                          width: 6, height: 6, borderRadius: "50%",
+                          background: pos.profit > 0 ? "var(--qb-up-strong)" : pos.profit < 0 ? "var(--qb-down-strong)" : "var(--qb-text-muted)",
+                        }}
+                        title={`Open position: ${fmtMoney(pos.profit)}`}
+                      />
+                    )}
+                    {watchlist.length > 1 && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeInstrument(assetId); }}
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          color: "var(--qb-text-muted)",
+                          cursor: "pointer",
+                          fontSize: 14,
+                          padding: 0,
+                          opacity: 0.5,
+                          transition: "opacity 150ms",
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.opacity = 1)}
+                        onMouseLeave={(e) => (e.currentTarget.style.opacity = 0.5)}
+                        title="Remove from watchlist"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Active tactics for selected instrument */}
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 6 }}>
+              Active tactics on {selectedAsset.toUpperCase()}
+            </div>
+            {assetState?.state?.opinions?.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {assetState.state.opinions.slice(0, 12).map((op, i) => {
+                  const dirColor = op.direction === "LONG" ? "var(--qb-up-strong)"
+                    : op.direction === "SHORT" ? "var(--qb-down-strong)"
+                    : "var(--qb-text-muted)";
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        padding: "4px 8px",
+                        fontSize: 10,
+                        background: "rgba(255,255,255,0.02)",
+                        borderRadius: 3,
+                        borderLeft: `2px solid ${dirColor}`,
+                      }}
+                      title={op.description}
+                    >
+                      <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-primary)" }}>
+                        {op.timeframe} {TACTIC_LABELS[op.tactic] || op.tactic}
+                      </span>
+                      <span style={{ color: dirColor, fontSize: 9, fontWeight: 600 }}>
+                        {op.direction !== "NEUTRAL" ? op.direction : "lvl"}
+                      </span>
+                    </div>
+                  );
+                })}
+                {assetState.state.opinions.length > 12 && (
+                  <div style={{ fontSize: 9, color: "var(--qb-text-dim)", textAlign: "center", marginTop: 4 }}>
+                    + {assetState.state.opinions.length - 12} more
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 10, color: "var(--qb-text-dim)", padding: "8px 0", fontStyle: "italic" }}>
+                {assetState ? "No opinions detected right now" : "Loading..."}
+              </div>
+            )}
+          </div>
+
+          {/* Settings shortcut */}
+          <div style={{ marginTop: "auto" }}>
+            <button
+              onClick={onSettings}
+              style={{
+                width: "100%",
+                background: "transparent",
+                border: "1px solid var(--qb-border)",
+                borderRadius: 4,
+                padding: "8px 10px",
+                color: "var(--qb-text-muted)",
+                fontSize: 12,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--qb-text-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--qb-text-muted)")}
+            >
+              <span>⚙</span> Settings
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// =====================================================================
+// SECTION 9.7: COCKPIT — CHART
+// =====================================================================
+
+function CockpitChart({
+  theme, prefs, setPrefs, assetId, chartData, chartLoading, myPosition, assetState,
+  onToolsClick, toolsPopoverOpen, onCloseToolsPopover,
+}) {
+  const containerRef = useRef(null);
+  const chartRef = useRef(null);
+  const seriesRef = useRef(null);
+  const priceLinesRef = useRef([]);
+
+  // Build chart on mount, destroy on unmount
   useEffect(() => {
     if (!containerRef.current) return;
-    // V11: responsive chart height — shorter on mobile so it fits with overlays
-    const isMobile = typeof window !== "undefined" && window.innerWidth <= 600;
-    const chartHeight = isMobile ? 320 : 460;
+
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: chartHeight,
+      height: containerRef.current.clientHeight,
       layout: {
-        background: { type: ColorType.Solid, color: "#0f172a" },
-        textColor: "#cbd5e1",
-        fontSize: 11,
+        background: { type: ColorType.Solid, color: "transparent" },
+        textColor: "#7a7a85",
       },
       grid: {
-        vertLines: { color: "#1e293b" },
-        horzLines: { color: "#1e293b" },
+        vertLines: { color: "rgba(255,255,255,0.04)" },
+        horzLines: { color: "rgba(255,255,255,0.04)" },
       },
-      crosshair: { mode: CrosshairMode.Normal },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#334155" },
-      rightPriceScale: { borderColor: "#334155" },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: "rgba(255,255,255,0.08)",
+      },
+      rightPriceScale: {
+        borderColor: "rgba(255,255,255,0.08)",
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: "rgba(0,217,255,0.3)", width: 1, style: 3, labelBackgroundColor: "#00d9ff" },
+        horzLine: { color: "rgba(0,217,255,0.3)", width: 1, style: 3, labelBackgroundColor: "#00d9ff" },
+      },
     });
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      borderUpColor: "#22c55e",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#16a34a",
-      wickDownColor: "#dc2626",
+
+    const series = chart.addCandlestickSeries({
+      upColor: "#00e676",
+      downColor: "#ff3b5c",
+      borderVisible: false,
+      wickUpColor: "#00e676",
+      wickDownColor: "#ff3b5c",
     });
-    chartRef.current  = chart;
-    candleRef.current = candleSeries;
-    // Resize on container resize / orientation change
-    const onResize = () => {
-      if (containerRef.current && chartRef.current) {
-        const mob = window.innerWidth <= 600;
+
+    chartRef.current = chart;
+    seriesRef.current = series;
+
+    // Resize handler
+    const ro = new ResizeObserver(() => {
+      if (chartRef.current && containerRef.current) {
         chartRef.current.applyOptions({
           width: containerRef.current.clientWidth,
-          height: mob ? 320 : 460,
+          height: containerRef.current.clientHeight,
         });
       }
-    };
-    window.addEventListener("resize", onResize);
-    window.addEventListener("orientationchange", onResize);
+    });
+    ro.observe(containerRef.current);
+
     return () => {
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("orientationchange", onResize);
+      ro.disconnect();
       try { chart.remove(); } catch (_) {}
       chartRef.current = null;
-      candleRef.current = null;
+      seriesRef.current = null;
+      priceLinesRef.current = [];
     };
   }, []);
 
-  // Update chart data + overlays when payload changes
+  // Update candles when chartData changes
   useEffect(() => {
-    if (!data || !candleRef.current) return;
-    const candlesRaw = (data.candles || []).map(c => ({
-      time:  Math.floor(new Date(c.time).getTime() / 1000),
-      open:  c.open,
-      high:  c.high,
-      low:   c.low,
-      close: c.close,
-    })).filter(c => c.time && isFinite(c.open) && isFinite(c.close));
+    if (!seriesRef.current || !chartData?.candles) return;
+
+    const candlesRaw = chartData.candles
+      .map((c) => ({
+        time: Math.floor(new Date(c.time).getTime() / 1000),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }))
+      .filter((c) => c.time && isFinite(c.open) && isFinite(c.close));
+
     if (candlesRaw.length === 0) return;
-    // Sort ascending by time + dedup (lightweight-charts requires strict ascending)
     candlesRaw.sort((a, b) => a.time - b.time);
-    const candles = [];
+    const dedup = [];
     let lastT = -1;
     for (const c of candlesRaw) {
-      if (c.time !== lastT) { candles.push(c); lastT = c.time; }
+      if (c.time !== lastT) { dedup.push(c); lastT = c.time; }
     }
-    candleRef.current.setData(candles);
 
-    // Clear previous price lines
+    seriesRef.current.setData(dedup);
+
+    // Clear existing price lines
     for (const pl of priceLinesRef.current) {
-      try { candleRef.current.removePriceLine(pl); } catch (_) {}
+      try { seriesRef.current.removePriceLine(pl); } catch (_) {}
     }
     priceLinesRef.current = [];
 
-    // 1. Active setups → horizontal lines at the setup level + invalidatesAt
-    for (const s of (data.setups || [])) {
-      const color = s.direction === "LONG" ? "#22c55e" : "#ef4444";
-      const setupLine = candleRef.current.createPriceLine({
-        price: s.level,
-        color: color,
-        lineWidth: 2,
-        lineStyle: 2, // dashed
-        axisLabelVisible: true,
-        title: `${s.pattern.split("_")[0]} ${s.direction} (${(s.quality * 100).toFixed(0)}%)`,
-      });
-      priceLinesRef.current.push(setupLine);
-      // Invalidation level
-      const invLine = candleRef.current.createPriceLine({
-        price: s.invalidatesAt,
-        color: "#64748b",
-        lineWidth: 1,
-        lineStyle: 1, // dotted
-        axisLabelVisible: true,
-        title: "× invalid",
-      });
-      priceLinesRef.current.push(invLine);
-    }
-
-    // 2. AI observations → labeled horizontal lines
-    for (const o of (data.observations || [])) {
-      if (o.watchLevel != null && isFinite(o.watchLevel)) {
-        const color = o.direction === "LONG" ? "#3b82f6" : o.direction === "SHORT" ? "#a855f7" : "#94a3b8";
-        const obsLine = candleRef.current.createPriceLine({
-          price: o.watchLevel,
-          color: color,
-          lineWidth: 1,
-          lineStyle: 0, // solid
-          axisLabelVisible: true,
-          title: `${o.id.slice(0, 12)}`,
-        });
-        priceLinesRef.current.push(obsLine);
+    // Add position lines if we have an open position OR a pending setup
+    if (seriesRef.current) {
+      const pending = assetState?.pending;
+      if (myPosition || (pending && pending.length > 0)) {
+        addPositionLines(seriesRef.current, myPosition, priceLinesRef.current, pending, assetState);
       }
     }
-
-    // 2b. Structural levels (V11 follow-up) → translucent dotted lines.
-    // Only show top 4 above + top 4 below by strength to avoid clutter.
-    const lvlData = (data && data.levels) || { above: [], below: [] };
-    const levelTypeColor = {
-      'PDH': '#fb923c', 'PDL': '#fb923c',
-      'ASIAN_HIGH': '#a78bfa', 'ASIAN_LOW': '#a78bfa',
-      'LONDON_HIGH': '#22d3ee', 'LONDON_LOW': '#22d3ee',
-      'SWING_H': '#94a3b8', 'SWING_L': '#94a3b8',
-      'ROUND': '#64748b',
-      'WEEKLY_OPEN': '#f59e0b',
-    };
-    const renderLevel = (l) => {
-      const color = levelTypeColor[l.type] || '#475569';
-      const line = candleRef.current.createPriceLine({
-        price: l.price,
-        color: color,
-        lineWidth: 1,
-        lineStyle: 1, // dotted
-        axisLabelVisible: true,
-        title: `${l.type.replace('_', '')}`,
-      });
-      priceLinesRef.current.push(line);
-    };
-    (lvlData.above || []).slice().sort((a, b) => (b.strength || 0) - (a.strength || 0)).slice(0, 4).forEach(renderLevel);
-    (lvlData.below || []).slice().sort((a, b) => (b.strength || 0) - (a.strength || 0)).slice(0, 4).forEach(renderLevel);
-
-    // 3. Open positions → entry, SL, TP ladder lines
-    for (const p of (data.positions || [])) {
-      const sign = p.direction === "LONG" ? 1 : -1;
-      // Entry line
-      if (p.openPrice) {
-        const entryLine = candleRef.current.createPriceLine({
-          price: p.openPrice,
-          color: "#fbbf24",
-          lineWidth: 2,
-          lineStyle: 0,
-          axisLabelVisible: true,
-          title: `ENTRY ${p.direction}`,
-        });
-        priceLinesRef.current.push(entryLine);
-      }
-      // SL line
-      const slPx = p.ladder && p.ladder.slCurrent ? p.ladder.slCurrent : p.stopLoss;
-      if (slPx) {
-        const slLine = candleRef.current.createPriceLine({
-          price: slPx,
-          color: "#dc2626",
-          lineWidth: 2,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title: "SL",
-        });
-        priceLinesRef.current.push(slLine);
-      }
-      // TP ladder
-      if (p.ladder) {
-        const tps = [
-          { px: p.ladder.tp1, label: "TP1", hit: p.ladder.tpHits && p.ladder.tpHits.tp1 },
-          { px: p.ladder.tp2, label: "TP2", hit: p.ladder.tpHits && p.ladder.tpHits.tp2 },
-          { px: p.ladder.tp3, label: "TP3", hit: p.ladder.tpHits && p.ladder.tpHits.tp3 },
-          { px: p.ladder.tp4, label: "TP4", hit: p.ladder.tpHits && p.ladder.tpHits.tp4 },
-        ];
-        for (const tp of tps) {
-          if (!tp.px || !isFinite(tp.px)) continue;
-          const line = candleRef.current.createPriceLine({
-            price: tp.px,
-            color: tp.hit ? "#10b981" : "#22c55e",
-            lineWidth: 1,
-            lineStyle: tp.hit ? 0 : 2,
-            axisLabelVisible: true,
-            title: tp.hit ? `${tp.label} ✓` : tp.label,
-          });
-          priceLinesRef.current.push(line);
-        }
-      }
-    }
-
-    // Auto-fit visible range on first load
-    try { chartRef.current.timeScale().fitContent(); } catch (_) {}
-  }, [data]);
-
-  // Header summary
-  const dec = data && data.lastDecision;
-  const reg = data && data.regime;
-  const positionsCount = data && data.positions ? data.positions.length : 0;
-  const setupsCount = data && data.setups ? data.setups.length : 0;
-  const obsCount = data && data.observations ? data.observations.length : 0;
+  }, [chartData, myPosition, assetState]);
 
   return (
-    <div className="panel" style={{ padding: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 12, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: "-0.3px" }}>{symbol}</span>
-          {data && data.currentPrice && (
-            <span style={{ fontSize: 14, color: "#94a3b8" }}>
-              @ {data.currentPrice > 1000 ? data.currentPrice.toFixed(2) : data.currentPrice.toFixed(5)}
-            </span>
-          )}
-          {reg && (
-            <span style={{ fontSize: 11, padding: "2px 8px", background: "#1e293b", color: "#cbd5e1", borderRadius: 4 }}>
-              {reg.regime} ({reg.score}/100)
-              {reg.chaos && <span style={{ color: "#f59e0b", marginLeft: 6 }}>⚠ chaos {reg.chaosRatio}</span>}
-            </span>
-          )}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {dec && (
-            <span style={{ fontSize: 12, padding: "3px 10px", borderRadius: 4,
-              background: dec.decision === "BUY" ? "#15803d" : dec.decision === "SELL" ? "#b91c1c" : "#334155",
-              color: "#fff", fontWeight: 600 }}>
-              AI: {dec.decision} {dec.confidence}%{dec.family ? ` [${dec.family}]` : ""}
-            </span>
-          )}
-          {loading && <span style={{ fontSize: 11, color: "#64748b" }}>updating...</span>}
-          {data && (
-            <span style={{ fontSize: 11, color: "#64748b" }}>
-              {new Date(data.ts).toLocaleTimeString("en-GB")}
-            </span>
-          )}
-        </div>
+    <div
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        background: "var(--qb-bg-base)",
+        border: "1px solid var(--qb-border)",
+        borderRadius: 6,
+        overflow: "hidden",
+      }}
+    >
+      {/* Chart canvas */}
+      <div
+        ref={containerRef}
+        style={{ position: "absolute", inset: 0 }}
+      />
+
+      {/* Tactic annotations overlay — only renders when bot is acting on a setup */}
+      <TacticAnnotationOverlay
+        chartRef={chartRef}
+        seriesRef={seriesRef}
+        containerRef={containerRef}
+        chartData={chartData}
+        assetState={assetState}
+        myPosition={myPosition}
+        prefs={prefs}
+      />
+
+      {/* Top-left controls: TF selector + tools toggle */}
+      <div
+        style={{
+          position: "absolute",
+          top: 8,
+          left: 8,
+          display: "flex",
+          gap: 4,
+          alignItems: "center",
+          zIndex: 5,
+        }}
+      >
+        <TFSelector selectedTF={prefs.selectedTF} onChange={(tf) => setPrefs((p) => ({ ...p, selectedTF: tf }))} />
+        <ToolsButton onClick={onToolsClick} active={toolsPopoverOpen} />
       </div>
 
-      {err && <div style={{ padding: 10, background: "#7f1d1d", color: "#fff", borderRadius: 4, fontSize: 12, marginBottom: 10 }}>Error: {err}</div>}
+      {/* Tools popover */}
+      {toolsPopoverOpen && (
+        <ToolsPopover
+          theme={theme}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          onClose={onCloseToolsPopover}
+        />
+      )}
 
-      {/* The chart canvas */}
-      <div ref={containerRef} className="aiwatch-chart-container" style={{ width: "100%", height: typeof window !== "undefined" && window.innerWidth <= 600 ? 320 : 460, background: "#0f172a", borderRadius: 6 }} />
-
-      {/* Annotation summary */}
-      <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 200px" }}>
-          <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>
-            Setups detected ({setupsCount})
-          </div>
-          {data && data.setups && data.setups.length > 0 ? (
-            data.setups.map((s, i) => (
-              <div key={i} style={{ fontSize: 12, marginBottom: 4 }}>
-                <span style={{
-                  display: "inline-block", width: 10, height: 10, borderRadius: 2, marginRight: 6,
-                  background: s.direction === "LONG" ? "#22c55e" : "#ef4444",
-                }} />
-                <strong>{s.pattern}</strong> {s.direction} <span style={{ color: "#64748b" }}>· {(s.quality * 100).toFixed(0)}% quality</span>
-                <div style={{ fontSize: 11, color: "#94a3b8", marginLeft: 16 }}>
-                  level: {s.level.toFixed(s.level > 1000 ? 2 : 5)} · invalidates: {s.invalidatesAt.toFixed(s.invalidatesAt > 1000 ? 2 : 5)}
-                </div>
-                {s.evidence && s.evidence.length > 0 && (
-                  <div style={{ fontSize: 11, color: "#64748b", marginLeft: 16, fontStyle: "italic" }}>
-                    {s.evidence.join(" · ")}
-                  </div>
-                )}
-              </div>
-            ))
-          ) : (
-            <div style={{ fontSize: 11, color: "#64748b" }}>No active setup pattern detected on this instrument right now.</div>
-          )}
-        </div>
-
-        <div style={{ flex: "1 1 200px" }}>
-          <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>
-            AI observations ({obsCount})
-          </div>
-          {data && data.observations && data.observations.length > 0 ? (
-            data.observations.map((o, i) => {
-              const ageMin = Math.floor((Date.now() - o.createdAt) / 60000);
-              const dirColor = o.direction === "LONG" ? "#3b82f6" : o.direction === "SHORT" ? "#a855f7" : "#94a3b8";
-              return (
-                <div key={i} style={{ fontSize: 12, marginBottom: 6 }}>
-                  <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, marginRight: 6, background: dirColor }} />
-                  <strong>{o.id}</strong> <span style={{ color: "#64748b", fontSize: 10 }}>{ageMin}m old</span>
-                  <div style={{ marginLeft: 16, color: "#cbd5e1", fontSize: 11 }}>{o.text}</div>
-                </div>
-              );
-            })
-          ) : (
-            <div style={{ fontSize: 11, color: "#64748b" }}>No active observations. AI will write notes here as it studies the chart.</div>
-          )}
-        </div>
-      </div>
-
-      {/* Open positions summary */}
-      {positionsCount > 0 && (
-        <div style={{ marginTop: 12, padding: 10, background: "#1e293b", borderRadius: 6 }}>
-          <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase", marginBottom: 6 }}>
-            Open positions on {symbol} ({positionsCount})
-          </div>
-          {data.positions.map((p, i) => (
-            <div key={p.id || i} style={{ fontSize: 12, marginBottom: 4, color: "#e2e8f0" }}>
-              <span style={{ color: p.direction === "LONG" ? "#22c55e" : "#ef4444", fontWeight: 700 }}>
-                {p.direction}
-              </span>
-              {p.ladder && <span style={{ color: "#94a3b8" }}> · {p.ladder.mode}</span>}
-              {" "}· {p.volume}L @ {p.openPrice ? p.openPrice.toFixed(p.openPrice > 1000 ? 2 : 5) : "?"}
-              <span style={{ marginLeft: 8, color: (p.profit || 0) >= 0 ? "#22c55e" : "#ef4444", fontWeight: 600 }}>
-                {(p.profit || 0) >= 0 ? "+" : ""}${(p.profit || 0).toFixed(2)}
-              </span>
-              {p.ladder && p.ladder.tpHits && (
-                <span style={{ marginLeft: 8, color: "#64748b", fontSize: 10 }}>
-                  TPs hit: {Object.entries(p.ladder.tpHits).filter(([k, v]) => v).map(([k]) => k.toUpperCase()).join(", ") || "none"}
-                </span>
-              )}
-            </div>
-          ))}
+      {/* Loading state */}
+      {chartLoading && !chartData && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--qb-text-muted)",
+            fontSize: 12,
+            background: "rgba(10,11,15,0.8)",
+          }}
+        >
+          Loading chart...
         </div>
       )}
 
-      {/* Legend */}
-      <div style={{ marginTop: 12, padding: 10, background: "#0f172a", border: "1px solid #1e293b", borderRadius: 6, fontSize: 10, color: "#94a3b8" }}>
-        <div style={{ marginBottom: 4, fontWeight: 700, color: "#cbd5e1" }}>Chart legend</div>
-        <div>━ <span style={{ color: "#22c55e" }}>green dashed</span> = LONG setup level · <span style={{ color: "#ef4444" }}>red dashed</span> = SHORT setup level · ⋯ <span style={{ color: "#64748b" }}>gray dotted</span> = setup invalidation</div>
-        <div>━ <span style={{ color: "#3b82f6" }}>blue solid</span> = LONG observation · <span style={{ color: "#a855f7" }}>purple solid</span> = SHORT observation · <span style={{ color: "#94a3b8" }}>gray solid</span> = neutral observation</div>
-        <div>⋯ <span style={{ color: "#fb923c" }}>orange dotted</span> = PDH/PDL · <span style={{ color: "#a78bfa" }}>violet dotted</span> = Asian session · <span style={{ color: "#22d3ee" }}>cyan dotted</span> = London session · <span style={{ color: "#94a3b8" }}>gray dotted</span> = swing fractal · <span style={{ color: "#f59e0b" }}>amber dotted</span> = weekly open</div>
-        <div>━ <span style={{ color: "#fbbf24" }}>yellow</span> = position entry · <span style={{ color: "#dc2626" }}>red dashed</span> = SL · <span style={{ color: "#22c55e" }}>green dashed</span> = pending TP · <span style={{ color: "#10b981" }}>green solid</span> = TP hit</div>
+      {/* Empty / error state */}
+      {!chartLoading && (!chartData?.candles || chartData.candles.length === 0) && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            color: "var(--qb-text-muted)",
+            fontSize: 12,
+            background: "rgba(10,11,15,0.8)",
+          }}
+        >
+          <div style={{ fontSize: 14, color: "var(--qb-text-primary)" }}>
+            {assetId.toUpperCase()} not available
+          </div>
+          <div style={{ maxWidth: 320, textAlign: "center" }}>
+            {chartData?.error || "Run /api/symbol-resolver?action=sync to map this asset to your broker"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function addPositionLines(series, position, container, pending, assetState) {
+  if (!series) return;
+  const isLong = position
+    ? (position.type === "POSITION_TYPE_BUY") || (position.direction === "LONG")
+    : pending?.[0]?.setup?.direction === "LONG";
+
+  // Find the live pending setup if any
+  const activePending = pending?.find?.((p) => p.status === "pending" || p.status === "placed" || p.status === "filled");
+
+  const entry = position?.openPrice || position?.entry || activePending?.actualEntry || activePending?.plannedEntry;
+  const sl = position?.stopLoss || activePending?.slPrice;
+  const tpLevels = activePending?.tpLevels || [];
+  const lot = position?.volume || activePending?.sizing?.recommendedLot || 0.01;
+  const asset = activePending?.asset || assetState?.asset;
+
+  // Get the asset metadata for $/pip math
+  const assetMeta = ASSET_CATALOG.find((a) => a.id === asset);
+  const dollarPerPip = assetMeta ? getPipDollar(asset) : 1;
+  const pipSize = assetMeta ? getPipSize(asset) : 0.0001;
+
+  function dollarFor(price) {
+    if (!entry || !price || !pipSize || !dollarPerPip || !lot) return null;
+    const pips = Math.abs(price - entry) / pipSize;
+    return pips * dollarPerPip * lot;
+  }
+
+  if (entry) {
+    const line = series.createPriceLine({
+      price: entry,
+      color: "#fbbf24",
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: `ENTRY ${isLong ? "LONG" : "SHORT"} ${lot}`,
+    });
+    container.push(line);
+  }
+  if (sl) {
+    const slDollars = dollarFor(sl);
+    const slLabel = slDollars != null ? `SL -$${slDollars.toFixed(0)}` : `SL`;
+    const line = series.createPriceLine({
+      price: sl,
+      color: "#dc2626",
+      lineWidth: 1,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      title: slLabel,
+    });
+    container.push(line);
+  }
+
+  // Draw all TPs from pending if available
+  if (tpLevels.length > 0) {
+    for (let i = 0; i < tpLevels.length && i < 4; i++) {
+      const tp = tpLevels[i];
+      const tpDollars = dollarFor(tp.price);
+      const tpLabel = tpDollars != null
+        ? `TP${i + 1} +$${tpDollars.toFixed(0)} (${tp.rMultiple.toFixed(1)}R)`
+        : `TP${i + 1} ${tp.rMultiple.toFixed(1)}R`;
+      const line = series.createPriceLine({
+        price: tp.price,
+        color: "#22c55e",
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: tpLabel,
+      });
+      container.push(line);
+    }
+  } else if (position?.takeProfit) {
+    // Fallback: just the broker's single TP
+    const tpDollars = dollarFor(position.takeProfit);
+    const line = series.createPriceLine({
+      price: position.takeProfit,
+      color: "#22c55e",
+      lineWidth: 1,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      title: tpDollars != null ? `TP +$${tpDollars.toFixed(0)}` : `TP`,
+    });
+    container.push(line);
+  }
+}
+
+// Pip dollar value per lot (mirrors backend asset-registry)
+function getPipDollar(assetId) {
+  const map = {
+    eurusd: 10, gbpusd: 10, audusd: 10, nzdusd: 10,
+    usdjpy: 6.7, usdchf: 11, usdcad: 7.5,
+    eurjpy: 6.7, gbpjpy: 6.7, eurgbp: 13, audjpy: 6.7,
+    gold: 1, silver: 5, platinum: 1,
+    btc: 1, eth: 0.01, sol: 0.01, xrp: 0.0001,
+    nas100: 1, us30: 1, us500: 0.1, ger40: 0.1, uk100: 0.1, jp225: 1,
+    oil_wti: 1, oil_brent: 1, natgas: 1,
+  };
+  return map[assetId] || 10;
+}
+
+function getPipSize(assetId) {
+  const map = {
+    eurusd: 0.0001, gbpusd: 0.0001, audusd: 0.0001, nzdusd: 0.0001,
+    usdjpy: 0.01, usdchf: 0.0001, usdcad: 0.0001,
+    eurjpy: 0.01, gbpjpy: 0.01, eurgbp: 0.0001, audjpy: 0.01,
+    gold: 0.01, silver: 0.01, platinum: 0.01,
+    btc: 1, eth: 0.01, sol: 0.01, xrp: 0.0001,
+    nas100: 1, us30: 1, us500: 0.1, ger40: 0.1, uk100: 0.1, jp225: 1,
+    oil_wti: 0.01, oil_brent: 0.01, natgas: 0.001,
+  };
+  return map[assetId] || 0.0001;
+}
+
+// =====================================================================
+// TACTIC ANNOTATION OVERLAY
+// =====================================================================
+// Renders bot's contributing tactics on the chart ONLY when bot is acting.
+// Uses HTML overlay aligned to chart's coordinate system via lightweight-charts'
+// timeToCoordinate / priceToCoordinate.
+//
+// Visibility rule: only renders when there's a pending setup, filled position,
+// or current TRADE decision. During quiet times, chart stays clean.
+//
+// Tactics rendered:
+//   - Order Block: shaded rectangle from OB candle to current bar
+//   - FVG: shaded rectangle in the gap zone, opacity reflects fill %
+//   - BOS: horizontal line at broken level + label
+//   - Liquidity Sweep: small starburst marker + reversal arrow
+//   - Session Levels: dotted horizontal lines (asian violet, london cyan, ny amber)
+//   - Trend Structure: HH/HL/LH/LL labels at swing points
+//   - Unfilled Imbalance: wider shaded gap zone
+//   - Fakeout: failed-breakout marker
+//   - Round Numbers: thin horizontal lines
+// =====================================================================
+
+function TacticAnnotationOverlay({ chartRef, seriesRef, containerRef, chartData, assetState, myPosition, prefs }) {
+  const overlayRef = useRef(null);
+  const [tick, setTick] = useState(0);
+  const [hoveredAnnotation, setHoveredAnnotation] = useState(null);
+
+  // Subscribe to chart's coordinate changes (zoom, pan, resize) to redraw
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const chart = chartRef.current;
+
+    const handler = () => setTick((t) => t + 1);
+
+    // lightweight-charts API: subscribe to visible time range changes
+    try {
+      chart.timeScale().subscribeVisibleTimeRangeChange(handler);
+      chart.timeScale().subscribeVisibleLogicalRangeChange?.(handler);
+    } catch (_) {}
+
+    // Resize observer on container
+    let ro = null;
+    if (containerRef.current && typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(handler);
+      ro.observe(containerRef.current);
+    }
+
+    return () => {
+      try { chart.timeScale().unsubscribeVisibleTimeRangeChange(handler); } catch (_) {}
+      try { chart.timeScale().unsubscribeVisibleLogicalRangeChange?.(handler); } catch (_) {}
+      if (ro) ro.disconnect();
+    };
+  }, [chartRef.current, containerRef.current]);
+
+  // Determine if bot is currently acting (the visibility rule)
+  const isActing = useMemo(() => {
+    if (myPosition) return true;
+    const pending = assetState?.pending || [];
+    if (pending.some((p) => p.status === "pending" || p.status === "placed" || p.status === "filled")) return true;
+    if (assetState?.state?.coherence?.decision === "TRADE") return true;
+    return false;
+  }, [assetState, myPosition]);
+
+  // Get the contributing opinions to draw
+  // Source priority:
+  //   1. Active pending setup's opinions (most accurate — frozen at setup time)
+  //   2. Current state's coherence.opinionsUsed (live)
+  const contributingOpinions = useMemo(() => {
+    if (!isActing) return [];
+    const pending = assetState?.pending?.find?.(
+      (p) => p.status === "pending" || p.status === "placed" || p.status === "filled"
+    );
+    if (pending?.setup?.contributingTactics && assetState?.state?.opinions) {
+      // Filter live opinions to those matching contributing tactics
+      const contributingSet = new Set(pending.setup.contributingTactics);
+      return assetState.state.opinions.filter((op) =>
+        contributingSet.has(op.tactic) && op.direction === pending.setup.direction
+      );
+    }
+    return assetState?.state?.coherence?.opinionsUsed || [];
+  }, [assetState, isActing]);
+
+  // Also pull NEUTRAL session-level opinions to show (they're TP target context)
+  const neutralOpinions = useMemo(() => {
+    if (!isActing) return [];
+    return (assetState?.state?.coherence?.neutralsUsed || []).slice(0, 6);
+  }, [assetState, isActing]);
+
+  // Build renderable annotations
+  const annotations = useMemo(() => {
+    if (!isActing || !chartData?.candles?.length) return [];
+    if (!seriesRef.current || !chartRef.current) return [];
+
+    const showFlags = prefs?.toolsConfig || {};
+    const isShownOnChart = (tacticId) => {
+      const cfg = showFlags[tacticId];
+      // Default: show if not explicitly disabled
+      return !cfg || cfg[0] !== false;
+    };
+
+    const out = [];
+
+    // Render each contributing opinion
+    for (const op of contributingOpinions) {
+      if (!isShownOnChart(op.tactic)) continue;
+
+      const a = renderOpinion(op, chartData.candles, chartRef.current, seriesRef.current);
+      if (a) out.push(a);
+    }
+
+    // Render neutrals (session levels, round numbers) — only if shown
+    for (const op of neutralOpinions) {
+      if (!isShownOnChart(op.tactic)) continue;
+      const a = renderOpinion(op, chartData.candles, chartRef.current, seriesRef.current);
+      if (a) out.push(a);
+    }
+
+    return out;
+  }, [contributingOpinions, neutralOpinions, chartData, tick, prefs, isActing]);
+
+  if (!isActing) return null;
+
+  return (
+    <div
+      ref={overlayRef}
+      style={{
+        position: "absolute",
+        inset: 0,
+        pointerEvents: "none", // chart still reacts to mouse
+        zIndex: 3,
+        overflow: "hidden",
+      }}
+    >
+      {annotations.map((a, i) => (
+        <AnnotationShape
+          key={a.key || i}
+          annotation={a}
+          onHover={setHoveredAnnotation}
+        />
+      ))}
+      {hoveredAnnotation && (
+        <AnnotationTooltip annotation={hoveredAnnotation} />
+      )}
+    </div>
+  );
+}
+
+// Render a single opinion to overlay coordinates.
+// Returns annotation object or null if can't be rendered (e.g. zone outside visible range).
+function renderOpinion(op, candles, chart, series) {
+  try {
+    const lastCandle = candles[candles.length - 1];
+    const lastTime = Math.floor(new Date(lastCandle.time).getTime() / 1000);
+    const formedTime = Math.floor(op.formedAt / 1000);
+
+    const dirColor = op.direction === "LONG" ? "rgba(0,230,118," : op.direction === "SHORT" ? "rgba(255,59,92," : "rgba(167,139,250,";
+
+    // Order Block & Unfilled Imbalance: rectangles spanning from formation to current
+    if ((op.tactic === "orderBlock" || op.tactic === "unfilledImbalance") && op.zone) {
+      const xStart = chart.timeScale().timeToCoordinate(formedTime);
+      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
+      const yUpper = series.priceToCoordinate(op.zone.upper);
+      const yLower = series.priceToCoordinate(op.zone.lower);
+      if (xStart == null || xEnd == null || yUpper == null || yLower == null) return null;
+
+      return {
+        type: "rect",
+        key: `${op.tactic}-${formedTime}`,
+        opinion: op,
+        rect: {
+          left: Math.min(xStart, xEnd),
+          top: Math.min(yUpper, yLower),
+          width: Math.abs(xEnd - xStart),
+          height: Math.abs(yUpper - yLower),
+        },
+        fill: dirColor + "0.10)",
+        border: dirColor + "0.35)",
+        label: tacticLabel(op),
+      };
+    }
+
+    // FVG: rectangle, fill opacity reflects fill %
+    if (op.tactic === "fvg" && op.zone) {
+      const xStart = chart.timeScale().timeToCoordinate(formedTime);
+      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
+      const yUpper = series.priceToCoordinate(op.zone.upper);
+      const yLower = series.priceToCoordinate(op.zone.lower);
+      if (xStart == null || xEnd == null || yUpper == null || yLower == null) return null;
+
+      const fillPercent = parseFloat(op.evidence?.fillPercent || "0");
+      const opacity = (1 - fillPercent) * 0.18 + 0.04;
+
+      return {
+        type: "rect",
+        key: `fvg-${formedTime}`,
+        opinion: op,
+        rect: {
+          left: Math.min(xStart, xEnd),
+          top: Math.min(yUpper, yLower),
+          width: Math.abs(xEnd - xStart),
+          height: Math.abs(yUpper - yLower),
+        },
+        fill: dirColor + opacity.toFixed(2) + ")",
+        border: dirColor + "0.30)",
+        label: tacticLabel(op) + " " + Math.round(fillPercent * 100) + "% filled",
+      };
+    }
+
+    // BOS: horizontal line at broken level
+    if (op.tactic === "bos") {
+      const xStart = chart.timeScale().timeToCoordinate(formedTime);
+      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
+      const y = series.priceToCoordinate(op.level);
+      if (xStart == null || xEnd == null || y == null) return null;
+
+      return {
+        type: "line",
+        key: `bos-${formedTime}`,
+        opinion: op,
+        line: {
+          x1: Math.min(xStart, xEnd),
+          x2: Math.max(xStart, xEnd),
+          y1: y,
+          y2: y,
+        },
+        color: dirColor + "0.7)",
+        dashed: false,
+        thickness: 2,
+        label: "BOS " + (op.direction === "LONG" ? "↑" : "↓"),
+      };
+    }
+
+    // Liquidity Sweep: marker at the sweep candle (small starburst)
+    if (op.tactic === "liquiditySweep") {
+      const x = chart.timeScale().timeToCoordinate(formedTime);
+      const y = series.priceToCoordinate(op.level);
+      if (x == null || y == null) return null;
+
+      return {
+        type: "marker",
+        key: `sweep-${formedTime}`,
+        opinion: op,
+        x, y,
+        symbol: "✦",
+        color: dirColor + "0.9)",
+        size: 14,
+        label: "Sweep " + (op.direction === "LONG" ? "↑" : "↓"),
+      };
+    }
+
+    // Session Levels & Round Numbers: dotted horizontal line
+    if (op.tactic === "sessionLevel" || op.tactic === "roundNumber") {
+      const lastIdx = candles.length - 1;
+      const startTime = Math.floor(new Date(candles[Math.max(0, lastIdx - 100)].time).getTime() / 1000);
+      const xStart = chart.timeScale().timeToCoordinate(startTime);
+      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
+      const y = series.priceToCoordinate(op.level);
+      if (xStart == null || xEnd == null || y == null) return null;
+
+      const sessionType = op.evidence?.type || "";
+      let color = "rgba(148,163,184,0.5)"; // default slate
+      if (sessionType.startsWith("ASIAN")) color = "rgba(167,139,250,0.6)";
+      else if (sessionType.startsWith("LONDON")) color = "rgba(34,211,238,0.6)";
+      else if (sessionType.includes("PDH") || sessionType.includes("PDL")) color = "rgba(251,146,60,0.6)";
+      else if (sessionType === "weeklyOpen") color = "rgba(245,158,11,0.6)";
+      else if (op.tactic === "roundNumber") color = "rgba(100,116,139,0.4)";
+
+      return {
+        type: "line",
+        key: `level-${op.tactic}-${op.level}`,
+        opinion: op,
+        line: {
+          x1: Math.min(xStart, xEnd),
+          x2: Math.max(xStart, xEnd),
+          y1: y,
+          y2: y,
+        },
+        color,
+        dashed: true,
+        thickness: 1,
+        label: levelShortLabel(op),
+      };
+    }
+
+    // Trend Structure: marker at last swing
+    if (op.tactic === "trendStructure") {
+      // Don't render — it's chart-wide context, not a specific point
+      return null;
+    }
+
+    // Fakeout: marker at the failed breakout candle
+    if (op.tactic === "fakeout") {
+      const x = chart.timeScale().timeToCoordinate(formedTime);
+      const y = series.priceToCoordinate(op.level);
+      if (x == null || y == null) return null;
+
+      return {
+        type: "marker",
+        key: `fakeout-${formedTime}`,
+        opinion: op,
+        x, y,
+        symbol: op.direction === "LONG" ? "↗↘" : "↘↗",
+        color: dirColor + "0.9)",
+        size: 12,
+        label: "Fakeout",
+      };
+    }
+
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function tacticLabel(op) {
+  const tfPart = op.timeframe.toUpperCase();
+  switch (op.tactic) {
+    case "orderBlock":        return `${tfPart} OB ${op.direction === "LONG" ? "↑" : "↓"}`;
+    case "fvg":               return `${tfPart} FVG ${op.direction === "LONG" ? "↑" : "↓"}`;
+    case "bos":               return `${tfPart} BOS ${op.direction === "LONG" ? "↑" : "↓"}`;
+    case "liquiditySweep":    return `${tfPart} Sweep`;
+    case "unfilledImbalance": return `${tfPart} Gap ${op.direction === "LONG" ? "↑" : "↓"}`;
+    case "fakeout":           return `${tfPart} Fakeout`;
+    default:                  return tfPart + " " + op.tactic;
+  }
+}
+
+function levelShortLabel(op) {
+  const t = op.evidence?.type || "";
+  if (t === "ASIAN_HIGH") return "Asia H";
+  if (t === "ASIAN_LOW") return "Asia L";
+  if (t === "LONDON_HIGH") return "London H";
+  if (t === "LONDON_LOW") return "London L";
+  if (t === "PDH") return "PDH";
+  if (t === "PDL") return "PDL";
+  if (t === "weeklyOpen") return "Wk Open";
+  if (op.tactic === "roundNumber") return op.level.toFixed(op.level > 100 ? 0 : 2);
+  return t;
+}
+
+function AnnotationShape({ annotation, onHover }) {
+  if (annotation.type === "rect") {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          left: annotation.rect.left,
+          top: annotation.rect.top,
+          width: annotation.rect.width,
+          height: annotation.rect.height,
+          background: annotation.fill,
+          border: `1px dashed ${annotation.border}`,
+          borderRadius: 2,
+          pointerEvents: "auto",
+          cursor: "help",
+          transition: "opacity 200ms",
+        }}
+        onMouseEnter={() => onHover(annotation)}
+        onMouseLeave={() => onHover(null)}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 2,
+            left: 4,
+            fontSize: 9,
+            fontFamily: "var(--qb-font-mono)",
+            color: annotation.border,
+            fontWeight: 600,
+            pointerEvents: "none",
+            textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+          }}
+        >
+          {annotation.label}
+        </div>
+      </div>
+    );
+  }
+
+  if (annotation.type === "line") {
+    const { x1, x2, y } = annotation.line;
+    const yPos = annotation.line.y1;
+    return (
+      <>
+        <div
+          style={{
+            position: "absolute",
+            left: x1,
+            top: yPos - 1,
+            width: x2 - x1,
+            height: 2,
+            background: annotation.dashed
+              ? `repeating-linear-gradient(to right, ${annotation.color} 0 4px, transparent 4px 8px)`
+              : annotation.color,
+            pointerEvents: "auto",
+            cursor: "help",
+          }}
+          onMouseEnter={() => onHover(annotation)}
+          onMouseLeave={() => onHover(null)}
+        />
+        <div
+          style={{
+            position: "absolute",
+            left: x2 + 4,
+            top: yPos - 7,
+            fontSize: 9,
+            fontFamily: "var(--qb-font-mono)",
+            color: annotation.color,
+            fontWeight: 600,
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+            textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+          }}
+        >
+          {annotation.label}
+        </div>
+      </>
+    );
+  }
+
+  if (annotation.type === "marker") {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          left: annotation.x - annotation.size / 2,
+          top: annotation.y - annotation.size / 2,
+          width: annotation.size,
+          height: annotation.size,
+          color: annotation.color,
+          fontSize: annotation.size,
+          textAlign: "center",
+          lineHeight: 1,
+          pointerEvents: "auto",
+          cursor: "help",
+          textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+        }}
+        onMouseEnter={() => onHover(annotation)}
+        onMouseLeave={() => onHover(null)}
+      >
+        {annotation.symbol}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function AnnotationTooltip({ annotation }) {
+  const op = annotation.opinion;
+  if (!op) return null;
+
+  const explanation = TACTIC_DESCRIPTIONS[op.tactic] || "Detected pattern";
+  const reasoning = buildReasoning(op);
+
+  // Position tooltip near top-right of annotation, with bounds checking
+  let left = 0, top = 0;
+  if (annotation.type === "rect") {
+    left = annotation.rect.left + annotation.rect.width + 8;
+    top = annotation.rect.top;
+  } else if (annotation.type === "line") {
+    left = annotation.line.x2 + 8;
+    top = annotation.line.y1 - 30;
+  } else if (annotation.type === "marker") {
+    left = annotation.x + annotation.size + 4;
+    top = annotation.y - 30;
+  }
+
+  // Estimate viewport width (we're inside the chart container, so use parent's width if known)
+  // Conservative: clamp to 1200 max horizontal, with 320px tooltip buffer
+  const maxLeft = typeof window !== "undefined" ? window.innerWidth - 320 : 1200;
+  if (left > maxLeft) {
+    // Flip to left side of annotation
+    if (annotation.type === "rect") left = annotation.rect.left - 308;
+    else if (annotation.type === "line") left = annotation.line.x1 - 308;
+    else if (annotation.type === "marker") left = annotation.x - 308;
+  }
+  left = Math.max(8, left);
+  top = Math.max(8, top);
+
+  return (
+    <div
+      className="qb-glass"
+      style={{
+        position: "absolute",
+        left,
+        top,
+        maxWidth: 300,
+        padding: "8px 10px",
+        borderRadius: 4,
+        fontSize: 11,
+        color: "var(--qb-text-primary)",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+        pointerEvents: "none",
+        zIndex: 10,
+      }}
+    >
+      <div style={{ fontWeight: 700, marginBottom: 3, fontSize: 12 }}>
+        {tacticLabel(op)}
+      </div>
+      <div style={{ color: "var(--qb-text-muted)", marginBottom: 6, lineHeight: 1.4 }}>
+        {explanation}
+      </div>
+      {reasoning && (
+        <div style={{
+          fontSize: 10,
+          color: "var(--qb-accent)",
+          paddingTop: 6,
+          borderTop: "1px solid var(--qb-border)",
+          fontFamily: "var(--qb-font-mono)",
+          lineHeight: 1.5,
+        }}>
+          {reasoning}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Build the bot's specific reasoning for THIS opinion (the educational part)
+function buildReasoning(op) {
+  const ev = op.evidence || {};
+  const lines = [];
+
+  if (op.tactic === "orderBlock") {
+    if (ev.impulseATR) lines.push(`Impulse: ${ev.impulseATR} ATR after the OB candle`);
+    if (ev.bodyRatio) lines.push(`Body ratio: ${ev.bodyRatio}`);
+    if (ev.bosConfirmed) lines.push(`Confirmed by BOS`);
+    if (ev.barsAgo != null) lines.push(`Untested for ${ev.barsAgo} bars`);
+  } else if (op.tactic === "fvg") {
+    if (ev.gapSizeATR) lines.push(`Gap size: ${ev.gapSizeATR} ATR`);
+    if (ev.fillPercent) lines.push(`${Math.round(parseFloat(ev.fillPercent) * 100)}% filled`);
+  } else if (op.tactic === "bos") {
+    if (ev.brokenLevel) lines.push(`Broke ${ev.brokenLevel.toFixed(ev.brokenLevel > 100 ? 2 : 5)}`);
+    if (ev.displacementATR) lines.push(`Displacement: ${ev.displacementATR} ATR`);
+  } else if (op.tactic === "liquiditySweep") {
+    if (ev.rejectionRatio) lines.push(`Rejection: ${ev.rejectionRatio}`);
+    if (ev.reversalATR) lines.push(`Reversal: ${ev.reversalATR} ATR`);
+    if (ev.sweptLevelType) lines.push(`Swept: ${ev.sweptLevelType}`);
+  } else if (op.tactic === "unfilledImbalance") {
+    if (ev.gapSizeATR) lines.push(`Gap: ${ev.gapSizeATR} ATR`);
+    if (ev.isWeekendGap) lines.push(`Weekend gap`);
+  } else if (op.tactic === "fakeout") {
+    if (ev.confirmations) lines.push(`${ev.confirmations} confirming bars`);
+  } else if (op.tactic === "sessionLevel") {
+    if (ev.type) lines.push(ev.type);
+  } else if (op.tactic === "roundNumber") {
+    if (ev.distanceATR) lines.push(`${ev.distanceATR} ATR ${ev.type === "roundAbove" ? "above" : "below"}`);
+  }
+
+  return lines.join(" · ");
+}
+
+function TFSelector({ selectedTF, onChange }) {
+  const tfs = [
+    { id: "1m", label: "1m" },
+    { id: "5m", label: "5m" },
+    { id: "15m", label: "15m" },
+    { id: "1h", label: "1h" },
+    { id: "4h", label: "4h" },
+    { id: "1d", label: "1d" },
+    { id: "1w", label: "1w" },
+  ];
+  return (
+    <div className="qb-glass" style={{ display: "flex", borderRadius: 4, padding: 2, gap: 1 }}>
+      {tfs.map((tf) => (
+        <button
+          key={tf.id}
+          onClick={() => onChange(tf.id)}
+          style={{
+            background: selectedTF === tf.id ? "var(--qb-accent-soft)" : "transparent",
+            border: "none",
+            color: selectedTF === tf.id ? "var(--qb-accent)" : "var(--qb-text-muted)",
+            padding: "4px 8px",
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: "pointer",
+            borderRadius: 3,
+            fontFamily: "var(--qb-font-mono)",
+          }}
+        >
+          {tf.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ToolsButton({ onClick, active }) {
+  return (
+    <button
+      onClick={onClick}
+      className="qb-glass"
+      style={{
+        background: active ? "var(--qb-accent-soft)" : undefined,
+        color: active ? "var(--qb-accent)" : "var(--qb-text-muted)",
+        border: "none",
+        padding: "5px 8px",
+        borderRadius: 4,
+        fontSize: 11,
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+      }}
+      title="Tools — show/hide chart annotations"
+    >
+      🛠
+    </button>
+  );
+}
+
+// =====================================================================
+// SECTION 9.8: COCKPIT — TOOLS POPOVER
+// =====================================================================
+
+function ToolsPopover({ theme, prefs, setPrefs, onClose }) {
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e.target.closest(".qb-tools-popover")) onClose();
+    };
+    setTimeout(() => document.addEventListener("click", handler), 0);
+    return () => document.removeEventListener("click", handler);
+  }, []);
+
+  const updateToolConfig = (toolId, idx, value) => {
+    setPrefs((p) => {
+      const cur = (p.toolsConfig?.[toolId]) || [false, false];
+      const next = [...cur];
+      next[idx] = value;
+      return { ...p, toolsConfig: { ...(p.toolsConfig || {}), [toolId]: next } };
+    });
+  };
+
+  // Group: Show/Use checkboxes
+  return (
+    <div
+      className="qb-glass qb-tools-popover"
+      style={{
+        position: "absolute",
+        top: 36,
+        left: 116,
+        width: 280,
+        borderRadius: 6,
+        padding: 12,
+        zIndex: 50,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+      }}
+    >
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase",
+        letterSpacing: 0.8, marginBottom: 8,
+      }}>
+        <span>Tools</span>
+        <span style={{ display: "flex", gap: 16, fontSize: 9 }}>
+          <span title="Drawn on chart">SHOW</span>
+          <span title="Bot considers">USE</span>
+        </span>
+      </div>
+
+      <div style={{ maxHeight: 360, overflowY: "auto" }}>
+        {Object.keys(TACTIC_LABELS).map((toolId) => {
+          const cfg = prefs.toolsConfig?.[toolId] || [false, false];
+          return (
+            <div
+              key={toolId}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "5px 4px",
+                fontSize: 12,
+              }}
+              title={TACTIC_DESCRIPTIONS[toolId]}
+            >
+              <span style={{ flex: 1, color: "var(--qb-text-primary)" }}>
+                {TACTIC_LABELS[toolId]}
+              </span>
+              <div style={{ display: "flex", gap: 16 }}>
+                <input
+                  type="checkbox"
+                  checked={cfg[0]}
+                  onChange={(e) => updateToolConfig(toolId, 0, e.target.checked)}
+                  style={{ accentColor: "var(--qb-accent)", cursor: "pointer" }}
+                />
+                <input
+                  type="checkbox"
+                  checked={cfg[1]}
+                  onChange={(e) => updateToolConfig(toolId, 1, e.target.checked)}
+                  style={{ accentColor: "var(--qb-accent)", cursor: "pointer" }}
+                />
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-// ============================================================
-// V11 STEP 4 — AI WATCH PAGE WRAPPER
-// ============================================================
-// Manages: instrument tabs, timeframe selector, refresh button.
-// Renders one AIWatchChart per active instrument (only the active tab).
-function AIWatchPage({ instruments, setPage }) {
-  const [activeSym, setActiveSym] = useState(instruments[0] || null);
-  const [tf, setTf] = useState("1h");
-  const [refreshKey, setRefreshKey] = useState(0);
+// =====================================================================
+// SECTION 9.9: COCKPIT — BOTTOM BAR
+// =====================================================================
 
-  // Update activeSym if instruments list changes and current sym is no longer in it
+function CockpitBottomBar({ theme, open, onToggle, commentary, assetId }) {
+  return (
+    <>
+      {/* Edge strip */}
+      <div
+        onClick={onToggle}
+        style={{
+          position: "absolute",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: 8,
+          background: "var(--qb-border)",
+          cursor: "pointer",
+          zIndex: 5,
+          transition: "background 200ms",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--qb-accent-soft)")}
+        onMouseLeave={(e) => (e.currentTarget.style.background = "var(--qb-border)")}
+        title={open ? "Collapse" : "Expand"}
+      />
+
+      {/* Content */}
+      {open && (
+        <div
+          className="qb-glass"
+          style={{
+            position: "absolute",
+            bottom: 8,
+            left: 8,
+            right: 8,
+            height: 60,
+            zIndex: 6,
+            padding: "8px 14px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            justifyContent: "center",
+            overflow: "hidden",
+            borderTop: "1px solid var(--qb-border)",
+          }}
+        >
+          {commentary.length === 0 ? (
+            <div style={{ fontSize: 11, color: "var(--qb-text-dim)", fontStyle: "italic" }}>
+              Bot is watching {assetId.toUpperCase()}... commentary will appear here once the engine is live (session 3-4).
+            </div>
+          ) : (
+            commentary.slice(-3).map((c, i) => (
+              <div
+                key={i}
+                style={{
+                  fontSize: 12,
+                  color: "var(--qb-text-primary)",
+                  display: "flex",
+                  gap: 12,
+                  opacity: 1 - (commentary.slice(-3).length - 1 - i) * 0.25,
+                }}
+              >
+                <span className="qb-mono" style={{ color: "var(--qb-text-muted)", minWidth: 50 }}>
+                  {fmtTimeS(c.ts)}
+                </span>
+                <span>{c.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// =====================================================================
+// SECTION 10: ASSET SELECTION MODAL
+// =====================================================================
+
+function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
+  const [search, setSearch] = useState("");
+  const [resolverStatus, setResolverStatus] = useState(null);
+
+  // Fetch the user's asset map from backend so we can show what's available
   useEffect(() => {
-    if (instruments.length === 0) { setActiveSym(null); return; }
-    if (!activeSym || !instruments.includes(activeSym)) setActiveSym(instruments[0]);
-  }, [instruments, activeSym]);
+    fetch(API("symbol-resolver?action=status"))
+      .then((r) => r.json())
+      .then((data) => setResolverStatus(data))
+      .catch(() => setResolverStatus({ error: "Backend not available" }));
+  }, []);
 
-  if (instruments.length === 0) {
-    return (
-      <div className="panel empty">
-        <div className="empty-ico">&#9673;</div>
-        <div className="empty-title">No instruments selected</div>
-        <p className="xs mut mt6" style={{ marginBottom: 18 }}>Add instruments in Settings to start watching the AI study.</p>
-        <button className="btn btn-p" onClick={() => setPage("settings")}>Open Settings</button>
-      </div>
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return ASSET_CATALOG;
+    return ASSET_CATALOG.filter((a) =>
+      a.id.toLowerCase().includes(q) ||
+      a.name.toLowerCase().includes(q) ||
+      a.description.toLowerCase().includes(q)
     );
-  }
+  }, [search]);
+
+  const grouped = useMemo(() => {
+    const out = {};
+    for (const a of filtered) {
+      if (!out[a.category]) out[a.category] = [];
+      out[a.category].push(a);
+    }
+    return out;
+  }, [filtered]);
+
+  const mapped = resolverStatus?.mapped || [];
+  const isMapped = (assetId) => mapped.includes(assetId);
+  const isInWatchlist = (assetId) => watchlist.includes(assetId);
 
   return (
-    <div className="s14">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>AI Watch</div>
-          <div style={{ fontSize: 11, color: "#64748b" }}>
-            Live chart + AI annotations. Updates every 60s.
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {/* Timeframe selector */}
-          <div style={{ display: "flex", gap: 4 }}>
-            {["5m", "15m", "1h", "4h", "1d"].map(t => (
-              <button
-                key={t}
-                onClick={() => setTf(t)}
-                style={{
-                  padding: "8px 12px",
-                  fontSize: 12,
-                  background: tf === t ? "#2563eb" : "#1e293b",
-                  color: tf === t ? "#fff" : "#94a3b8",
-                  border: "none",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontWeight: 600,
-                  minHeight: 36,
-                  minWidth: 40,
-                }}
-              >{t}</button>
-            ))}
-          </div>
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.75)",
+        backdropFilter: "blur(4px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="qb-glass"
+        style={{
+          width: "min(90vw, 560px)",
+          maxHeight: "85vh",
+          borderRadius: 8,
+          padding: 20,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>Add instrument</div>
           <button
-            onClick={() => setRefreshKey(k => k + 1)}
+            onClick={onClose}
             style={{
-              padding: "8px 14px", fontSize: 12, background: "#1e293b", color: "#cbd5e1",
-              border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600,
-              minHeight: 36,
+              background: "transparent", border: "none",
+              color: "var(--qb-text-muted)", cursor: "pointer",
+              fontSize: 20, padding: 0, lineHeight: 1,
             }}
-          >↻ Refresh</button>
+          >×</button>
+        </div>
+
+        {/* Resolver status */}
+        {resolverStatus && (
+          <div
+            style={{
+              fontSize: 11,
+              padding: "6px 10px",
+              borderRadius: 4,
+              background: mapped.length > 0 ? "var(--qb-accent-soft)" : "var(--qb-down-soft)",
+              color: mapped.length > 0 ? "var(--qb-accent)" : "var(--qb-down-strong)",
+              border: `1px solid ${mapped.length > 0 ? "var(--qb-accent)" : "var(--qb-down-strong)"}`,
+            }}
+          >
+            {resolverStatus.error
+              ? `⚠ ${resolverStatus.error}`
+              : mapped.length === 0
+              ? "⚠ No broker symbols detected. Run /api/symbol-resolver?action=sync"
+              : `✓ ${mapped.length} assets mapped to your broker`}
+          </div>
+        )}
+
+        {/* Search */}
+        <input
+          type="text"
+          placeholder="Search instruments..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          autoFocus
+          style={{
+            background: "var(--qb-bg-layer)",
+            border: "1px solid var(--qb-border)",
+            borderRadius: 4,
+            padding: "8px 12px",
+            color: "var(--qb-text-primary)",
+            fontSize: 13,
+          }}
+        />
+
+        {/* List */}
+        <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
+          {Object.entries(grouped).map(([cat, items]) => (
+            <div key={cat}>
+              <div style={{
+                fontSize: 11, color: "var(--qb-text-muted)",
+                textTransform: "uppercase", letterSpacing: 0.8,
+                marginBottom: 6,
+              }}>
+                {CATEGORY_LABELS[cat] || cat}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {items.map((a) => {
+                  const inWL = isInWatchlist(a.id);
+                  const mapped_ = isMapped(a.id);
+                  return (
+                    <button
+                      key={a.id}
+                      onClick={() => !inWL && mapped_ && onAdd(a.id)}
+                      disabled={inWL || !mapped_}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        padding: "10px 12px",
+                        background: inWL ? "var(--qb-accent-soft)" : !mapped_ ? "transparent" : "var(--qb-bg-layer)",
+                        border: `1px solid ${inWL ? "var(--qb-accent)" : "var(--qb-border)"}`,
+                        borderRadius: 4,
+                        color: !mapped_ ? "var(--qb-text-dim)" : "var(--qb-text-primary)",
+                        cursor: inWL || !mapped_ ? "default" : "pointer",
+                        textAlign: "left",
+                        opacity: !mapped_ ? 0.5 : 1,
+                      }}
+                    >
+                      <div>
+                        <div className="qb-mono" style={{ fontSize: 13, fontWeight: 600 }}>
+                          {a.name}
+                        </div>
+                        <div style={{ fontSize: 10, color: "var(--qb-text-muted)" }}>
+                          {a.description}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 10 }}>
+                        {inWL ? <span style={{ color: "var(--qb-accent)" }}>✓ Added</span> :
+                         !mapped_ ? <span style={{ color: "var(--qb-text-dim)" }}>not mapped</span> :
+                         <span style={{ color: "var(--qb-accent)" }}>+ Add</span>}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          {Object.keys(grouped).length === 0 && (
+            <div style={{ textAlign: "center", color: "var(--qb-text-muted)", padding: 20, fontSize: 12 }}>
+              No matches.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 11: PAUSE SETTINGS POPOVER
+// =====================================================================
+
+function PauseSettingsPopover({ theme, prefs, setPrefs, onClose }) {
+  const ps = prefs.pauseSettings || {};
+
+  const update = (k, v) => {
+    setPrefs((p) => ({
+      ...p,
+      pauseSettings: { ...(p.pauseSettings || {}), [k]: v },
+    }));
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        backdropFilter: "blur(2px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 999,
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="qb-glass"
+        style={{
+          width: "min(90vw, 360px)",
+          borderRadius: 8,
+          padding: 20,
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Pause suggestion thresholds</div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent", border: "none",
+              color: "var(--qb-text-muted)", cursor: "pointer",
+              fontSize: 20, lineHeight: 1, padding: 0,
+            }}
+          >×</button>
+        </div>
+
+        <div style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>
+          Bot suggests stopping when these limits are reached. Suggestions only — never enforced.
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <NumberRow
+            label="Daily loss"
+            value={ps.suggestStopAfterDailyLoss}
+            prefix="$"
+            onChange={(v) => update("suggestStopAfterDailyLoss", v)}
+          />
+          <NumberRow
+            label="Daily gain"
+            value={ps.suggestStopAfterDailyGain}
+            prefix="$"
+            onChange={(v) => update("suggestStopAfterDailyGain", v)}
+          />
+          <NumberRow
+            label="Losing streak"
+            value={ps.suggestStopAfterLossStreak}
+            suffix=" trades"
+            onChange={(v) => update("suggestStopAfterLossStreak", v)}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NumberRow({ label, value, prefix, suffix, onChange }) {
+  return (
+    <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
+      <span>{label}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        {prefix && <span style={{ color: "var(--qb-text-muted)", fontFamily: "var(--qb-font-mono)" }}>{prefix}</span>}
+        <input
+          type="number"
+          value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+          style={{
+            width: 80,
+            background: "var(--qb-bg-layer)",
+            border: "1px solid var(--qb-border)",
+            borderRadius: 4,
+            padding: "5px 8px",
+            color: "var(--qb-text-primary)",
+            fontFamily: "var(--qb-font-mono)",
+            fontSize: 12,
+            textAlign: "right",
+          }}
+        />
+        {suffix && <span style={{ color: "var(--qb-text-muted)", fontSize: 11 }}>{suffix}</span>}
+      </div>
+    </label>
+  );
+}
+
+// =====================================================================
+// SECTION 12: PORTFOLIO PAGE (skeleton — full design in later session)
+// =====================================================================
+
+function PortfolioPage({ prefs, theme, account, positions, onNavigate }) {
+  const [tab, setTab] = useState("equity");
+
+  return (
+    <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
+      <PageHeader
+        title="Portfolio"
+        onBack={() => onNavigate("cockpit")}
+        tabs={[{ id: "equity", label: "Equity" }, { id: "instruments", label: "Instruments" }]}
+        activeTab={tab}
+        onTabChange={setTab}
+      />
+      <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+        {tab === "equity" && <PortfolioEquityTab account={account} />}
+        {tab === "instruments" && <PortfolioInstrumentsTab prefs={prefs} positions={positions} onNavigate={onNavigate} />}
+      </div>
+    </div>
+  );
+}
+
+function PortfolioEquityTab({ account }) {
+  const balance = account?.balance ?? 10000;
+
+  return (
+    <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
+      {/* Hero balance */}
+      <div style={{ textAlign: "center", padding: "24px 0" }}>
+        <div className="qb-mono" style={{ fontSize: 56, fontWeight: 700, color: "var(--qb-text-primary)", letterSpacing: -1 }}>
+          ${balance.toFixed(2)}
+        </div>
+        <div style={{ fontSize: 13, color: "var(--qb-text-muted)", marginTop: 4 }}>
+          Account balance
         </div>
       </div>
 
-      {/* Instrument tabs */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 12, flexWrap: "wrap" }}>
-        {instruments.map(sym => (
-          <button
-            key={sym}
-            onClick={() => setActiveSym(sym)}
+      {/* Equity curve placeholder */}
+      <div className="qb-glass" style={{ padding: 20, borderRadius: 8, minHeight: 280, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--qb-text-muted)" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 14, marginBottom: 4 }}>Equity curve</div>
+          <div style={{ fontSize: 11, color: "var(--qb-text-dim)" }}>
+            Will populate once V12 trades start closing (session 4)
+          </div>
+        </div>
+      </div>
+
+      {/* Period stats placeholder */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        {["Today", "This week", "This month", "All-time"].map((label) => (
+          <div key={label} className="qb-glass" style={{ padding: 16, borderRadius: 6, textAlign: "center" }}>
+            <div style={{ fontSize: 10, color: "var(--qb-text-muted)", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 6 }}>
+              {label}
+            </div>
+            <div className="qb-mono" style={{ fontSize: 18, fontWeight: 600, color: "var(--qb-text-dim)" }}>
+              --
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PortfolioInstrumentsTab({ prefs, positions, onNavigate }) {
+  const watchlist = prefs.watchlist || [];
+
+  return (
+    <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12 }}>
+      {watchlist.map((assetId) => {
+        const meta = getAssetById(assetId);
+        const pos = positions.find((p) => p.assetId === assetId);
+        return (
+          <div
+            key={assetId}
+            className="qb-glass qb-hover"
+            onClick={() => { /* switch in cockpit */ onNavigate("cockpit"); }}
             style={{
-              padding: "10px 14px",
-              fontSize: 13,
-              background: activeSym === sym ? "#0f172a" : "#1e293b",
-              color: activeSym === sym ? "#fff" : "#94a3b8",
-              border: activeSym === sym ? "1px solid #2563eb" : "1px solid #334155",
+              padding: 16,
               borderRadius: 6,
               cursor: "pointer",
-              fontWeight: 600,
-              minHeight: 38,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
             }}
-          >{sym}</button>
+          >
+            <div>
+              <div className="qb-mono" style={{ fontSize: 16, fontWeight: 700 }}>
+                {assetId.toUpperCase()}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--qb-text-muted)", marginTop: 2 }}>
+                {meta?.name || ""}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              {pos ? (
+                <>
+                  <div className="qb-mono" style={{ color: pos.profit > 0 ? "var(--qb-up-strong)" : "var(--qb-down-strong)", fontSize: 14, fontWeight: 600 }}>
+                    {fmtMoney(pos.profit)}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>
+                    {pos.volume} lot @ {fmtPrice(pos.openPrice)}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--qb-text-muted)" }}>No position</div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 13: REPORTS PAGE (skeleton — full design in later session)
+// =====================================================================
+
+function ReportsPage({ prefs, theme, onNavigate }) {
+  const [tab, setTab] = useState("performance");
+
+  return (
+    <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
+      <PageHeader
+        title="Reports"
+        onBack={() => onNavigate("cockpit")}
+        tabs={[
+          { id: "performance", label: "Performance" },
+          { id: "recognition", label: "Recognition" },
+          { id: "activity", label: "Activity log" },
+        ]}
+        activeTab={tab}
+        onTabChange={setTab}
+      />
+      <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+        <div className="qb-glass" style={{ padding: 40, borderRadius: 8, textAlign: "center", color: "var(--qb-text-muted)" }}>
+          Reports populate once V12 trades and recognition data accumulate (session 4-5).
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 14: SETTINGS PAGE
+// =====================================================================
+
+function SettingsPage({ prefs, setPrefs, theme, setTheme, onNavigate }) {
+  const [tab, setTab] = useState("theme");
+
+  return (
+    <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
+      <PageHeader
+        title="Settings"
+        onBack={() => onNavigate("cockpit")}
+        tabs={[
+          { id: "theme",   label: "Theme" },
+          { id: "tools",   label: "Tools & Display" },
+          { id: "account", label: "Account" },
+        ]}
+        activeTab={tab}
+        onTabChange={setTab}
+      />
+      <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+        {tab === "theme" && <SettingsThemeTab theme={theme} setTheme={setTheme} />}
+        {tab === "tools" && <SettingsToolsTab prefs={prefs} setPrefs={setPrefs} />}
+        {tab === "account" && <SettingsAccountTab />}
+      </div>
+    </div>
+  );
+}
+
+function SettingsThemeTab({ theme, setTheme }) {
+  const colorEntries = [
+    ["bgBase",       "Background base"],
+    ["bgLayer",      "Background layer"],
+    ["accent",       "Accent (glow color)"],
+    ["upStrong",     "Up candle"],
+    ["downStrong",   "Down candle"],
+    ["textPrimary",  "Text primary"],
+    ["textMuted",    "Text muted"],
+  ];
+
+  const reset = () => setTheme(DEFAULT_THEME);
+
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Color theme</div>
+          <div style={{ fontSize: 11, color: "var(--qb-text-muted)", marginTop: 2 }}>
+            Defaults: Crystal Black + Cyan + TradingView green/red
+          </div>
+        </div>
+        <button
+          onClick={reset}
+          style={{
+            background: "transparent",
+            border: "1px solid var(--qb-border)",
+            borderRadius: 4,
+            padding: "6px 12px",
+            color: "var(--qb-text-muted)",
+            fontSize: 11,
+            cursor: "pointer",
+          }}
+        >
+          Reset to defaults
+        </button>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {colorEntries.map(([key, label]) => (
+          <ColorPickerRow
+            key={key}
+            label={label}
+            value={theme[key]}
+            onChange={(v) => setTheme({ ...theme, [key]: v })}
+          />
         ))}
       </div>
 
-      {/* Chart for active instrument */}
-      {activeSym && (
-        <AIWatchChart
-          key={activeSym + ":" + tf}
-          symbol={activeSym}
-          timeframe={tf}
-          refreshKey={refreshKey}
-        />
-      )}
-
-      <div style={{ marginTop: 14, fontSize: 11, color: "#64748b", lineHeight: 1.5 }}>
-        <strong style={{ color: "#94a3b8" }}>How to read this page:</strong> The chart shows recent candles for your selected instrument and timeframe. Overlay lines and zones come from three sources:
-        <ul style={{ marginTop: 6, marginBottom: 0 }}>
-          <li><strong>Setup detector</strong> — mechanical patterns (liquidity sweep, range break, session drive, news momentum, multi-level confluence). Each shows the trigger level + invalidation level.</li>
-          <li><strong>AI observations</strong> — qualitative notes the AI wrote in past calls. These persist across cron ticks and represent what the AI is actively studying.</li>
-          <li><strong>Open positions</strong> — entry, SL, and TP1-4 ladder for any live trade on this instrument.</li>
-        </ul>
+      <div style={{ marginTop: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Preview</div>
+        <ThemePreview theme={theme} />
       </div>
     </div>
   );
 }
 
-// ============================================================
-// TRADE VISUALIZER COMPONENT
-// ============================================================
-function TradeVisualizer({ pos, dec, tpState, fmtPrice }) {
-  // BROKER-CONFIRMED VALUES ONLY (V9.2 fix: no AI fallback)
-  // - SL comes from broker position (pos.stopLoss)
-  // - TPs come from: broker takeProfit (single) + Redis-stored ladder (tpState)
-  // - AI dec is used ONLY for the strategy label display, never for price levels
-  const dir = pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT";
-  const entry  = pos.openPrice;
-  const cur    = pos.currentPrice;
-  const sl     = pos.stopLoss;                 // broker only
-  const tp1    = tpState?.tp1;                 // Redis-stored ladder
-  const tp2    = tpState?.tp2;
-  const tp3    = tpState?.tp3;
-  const tp4    = tpState?.tp4;
+function ColorPickerRow({ label, value, onChange }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
 
-  // Not yet protected: broker doesn't have SL, or Redis ladder not written yet
-  if (!entry || !cur || !sl || !tp1) {
-    return (
-      <div className="trade-viz">
-        <div className="tv-head">
-          <div className="r g10">
-            <span className="tv-title">{normSym(pos.symbol)}</span>
-            <span className={`bdg bdg-${dir.toLowerCase()}`}>{dir}</span>
-            <span className="sub xs">{pos.volume}L</span>
-          </div>
-          <span className="tv-meta sub" style={{ color: "var(--red)" }}>
-            {!sl ? "BROKER HAS NO SL -- UNPROTECTED" : "Awaiting TP ladder..."}
+  return (
+    <div className="qb-glass" style={{ padding: 12, borderRadius: 6, display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ flex: 1, fontSize: 12 }}>{label}</div>
+      <input
+        type="color"
+        value={value.startsWith("#") ? value : "#000000"}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ width: 36, height: 28, border: "none", cursor: "pointer", background: "transparent" }}
+      />
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => onChange(draft)}
+        onKeyDown={(e) => e.key === "Enter" && onChange(draft)}
+        style={{
+          width: 110,
+          background: "var(--qb-bg-layer)",
+          border: "1px solid var(--qb-border)",
+          borderRadius: 4,
+          padding: "5px 8px",
+          fontFamily: "var(--qb-font-mono)",
+          fontSize: 11,
+          color: "var(--qb-text-primary)",
+        }}
+      />
+    </div>
+  );
+}
+
+function ThemePreview({ theme }) {
+  return (
+    <div style={{
+      padding: 16,
+      borderRadius: 6,
+      background: theme.bgBase,
+      border: "1px solid " + theme.border,
+      display: "flex",
+      gap: 12,
+    }}>
+      <div style={{
+        background: theme.upStrong, color: "white",
+        padding: "8px 14px", borderRadius: 4, fontSize: 12, fontWeight: 600,
+      }}>Up</div>
+      <div style={{
+        background: theme.downStrong, color: "white",
+        padding: "8px 14px", borderRadius: 4, fontSize: 12, fontWeight: 600,
+      }}>Down</div>
+      <div style={{
+        background: "transparent", color: theme.accent,
+        border: "1px solid " + theme.accent,
+        padding: "8px 14px", borderRadius: 4, fontSize: 12, fontWeight: 600,
+        boxShadow: "0 0 12px " + theme.accentSoft,
+      }}>Accent</div>
+      <div style={{
+        color: theme.textPrimary, padding: "8px 0", fontSize: 12,
+      }}>Sample text</div>
+      <div style={{
+        color: theme.textMuted, padding: "8px 0", fontSize: 12,
+      }}>Muted text</div>
+    </div>
+  );
+}
+
+function SettingsToolsTab({ prefs, setPrefs }) {
+  const updateTool = (toolId, idx, value) => {
+    setPrefs((p) => {
+      const cur = (p.toolsConfig?.[toolId]) || [false, false];
+      const next = [...cur];
+      next[idx] = value;
+      return { ...p, toolsConfig: { ...(p.toolsConfig || {}), [toolId]: next } };
+    });
+  };
+
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Tools & Display</div>
+        <div style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>
+          Two checkboxes per tool: <strong>Show</strong> on chart, <strong>Use</strong> in bot's analysis. Independent.
+        </div>
+      </div>
+
+      <div className="qb-glass" style={{ padding: 14, borderRadius: 6 }}>
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          fontSize: 10, color: "var(--qb-text-muted)", textTransform: "uppercase",
+          letterSpacing: 0.8, marginBottom: 10, paddingBottom: 8,
+          borderBottom: "1px solid var(--qb-border)",
+        }}>
+          <span>Tool</span>
+          <span style={{ display: "flex", gap: 32 }}>
+            <span>SHOW</span>
+            <span>USE</span>
           </span>
         </div>
-      </div>
-    );
-  }
-
-  // Build value range: SL on one side, TP4 on the other
-  const sign = dir === "LONG" ? 1 : -1;
-  const slVal  = sl;
-  const tp4Val = tp4 || tp3 || tp2 || tp1;
-  // Normalize: for LONG, low=SL high=TP4. For SHORT, low=TP4 high=SL.
-  const minVal = Math.min(slVal, tp4Val);
-  const maxVal = Math.max(slVal, tp4Val);
-  const range  = maxVal - minVal;
-  if (range <= 0) return null;
-
-  // Position helper: where on the track is this price (0-100%)
-  const posPct = (price) => {
-    const pct = ((price - minVal) / range) * 100;
-    return Math.max(-3, Math.min(103, pct));
-  };
-
-  // For LONG: SL is at left (0%), TP4 at right (100%)
-  // For SHORT: TP4 is at left (0%), SL at right (100%)
-  // Always display SL on the losing side, TPs on winning side
-  // For SHORT, flip so SL appears on right visually
-  const flip = dir === "SHORT";
-  const lp = (price) => flip ? 100 - posPct(price) : posPct(price);
-
-  const slPct    = lp(sl);
-  const entryPct = lp(entry);
-  const curPct   = lp(cur);
-  const tp1Pct   = lp(tp1);
-  const tp2Pct   = tp2 ? lp(tp2) : null;
-  const tp3Pct   = tp3 ? lp(tp3) : null;
-  const tp4Pct   = tp4 ? lp(tp4) : null;
-
-  const profit = (cur - entry) * sign;
-  const pnl = pos.profit || 0;
-  const pnlClr = pnlColor(pnl);
-
-  // Probability of each TP
-  const ageMs = pos.openTime ? (Date.now() - new Date(pos.openTime).getTime()) : 0;
-  const tps = [
-    { name: "TP1", val: tp1, pct: tp1Pct },
-    { name: "TP2", val: tp2, pct: tp2Pct },
-    { name: "TP3", val: tp3, pct: tp3Pct },
-    { name: "TP4", val: tp4, pct: tp4Pct },
-  ].filter((t) => t.val);
-
-  return (
-    <div className="trade-viz">
-      <div className="tv-head">
-        <div className="r g10">
-          <span className="tv-title">{normSym(pos.symbol)}</span>
-          <span className={`bdg bdg-${dir.toLowerCase()}`}>{dir}</span>
-          <span className="sub xs">{pos.volume}L</span>
-        </div>
-        <div className="tv-meta">
-          <span>Entry: <b style={{ color: "var(--text)" }}>{fmtPrice(entry)}</b></span>
-          <span>Live: <b style={{ color: "var(--blue2)" }}>{fmtPrice(cur)}</b></span>
-          <span style={{ fontWeight: 700, color: pnlClr, fontSize: 14 }}>{pnlStr(pnl)}</span>
-        </div>
-      </div>
-
-      <div
-        className="tv-track"
-        style={{
-          marginTop: 32,
-          marginBottom: 56,
-          "--sl-pct":    `${flip ? entryPct : slPct}%`,
-          "--entry-pct": `${entryPct}%`,
-        }}
-      >
-        {/* SL */}
-        <div className="tv-marker sl" style={{ left: `${slPct}%` }} />
-        <div className="tv-label sl" style={{ left: `${slPct}%` }}>SL</div>
-        <div className="tv-price-label" style={{ left: `${slPct}%` }}>{fmtPrice(sl)}</div>
-
-        {/* Entry */}
-        <div className="tv-marker entry" style={{ left: `${entryPct}%` }} />
-        <div className="tv-label entry" style={{ left: `${entryPct}%` }}>ENTRY</div>
-        <div className="tv-price-label" style={{ left: `${entryPct}%` }}>{fmtPrice(entry)}</div>
-
-        {/* TP1 */}
-        <div className="tv-marker tp1" style={{ left: `${tp1Pct}%` }} />
-        <div className="tv-label tp1" style={{ left: `${tp1Pct}%` }}>TP1</div>
-        <div className="tv-price-label" style={{ left: `${tp1Pct}%` }}>{fmtPrice(tp1)}</div>
-
-        {tp2Pct != null && <>
-          <div className="tv-marker tp2" style={{ left: `${tp2Pct}%` }} />
-          <div className="tv-label tp2" style={{ left: `${tp2Pct}%` }}>TP2</div>
-          <div className="tv-price-label" style={{ left: `${tp2Pct}%` }}>{fmtPrice(tp2)}</div>
-        </>}
-        {tp3Pct != null && <>
-          <div className="tv-marker tp3" style={{ left: `${tp3Pct}%` }} />
-          <div className="tv-label tp3" style={{ left: `${tp3Pct}%` }}>TP3</div>
-          <div className="tv-price-label" style={{ left: `${tp3Pct}%` }}>{fmtPrice(tp3)}</div>
-        </>}
-        {tp4Pct != null && <>
-          <div className="tv-marker tp4" style={{ left: `${tp4Pct}%` }} />
-          <div className="tv-label tp4" style={{ left: `${tp4Pct}%` }}>TP4</div>
-          <div className="tv-price-label" style={{ left: `${tp4Pct}%` }}>{fmtPrice(tp4)}</div>
-        </>}
-
-        {/* Live current price marker */}
-        <div className="tv-current tv-current-active" style={{ left: `${curPct}%` }}>
-          <div className="tv-current-label">{fmtPrice(cur)}</div>
-          <div className="tv-pnl-label" style={{ color: pnlClr }}>{pnlStr(pnl)}</div>
-        </div>
-      </div>
-
-      <div className="tv-probs">
-        {tps.map((t, i) => {
-          const prob = tpProbability(cur, entry, t.val, sl, dir, ageMs);
-          const reached = sign * (cur - t.val) >= 0;
-          const slHit = sign * (sl - cur) >= 0;
-          const status = reached ? "hit" : slHit ? "miss" : "live";
-          const statusLbl = reached ? "Reached" : slHit ? "SL hit" : "Live";
-          const barColor = reached ? "var(--green)" : prob >= 65 ? "var(--green2)" : prob >= 40 ? "var(--gold2)" : "var(--red2)";
+        {Object.keys(TACTIC_LABELS).map((toolId) => {
+          const cfg = prefs.toolsConfig?.[toolId] || [false, false];
           return (
-            <div key={i} className="tv-prob">
-              <div className="r" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                <span className="tv-prob-lbl">{t.name}</span>
-                <span className={`tv-prob-status ${status}`}>{statusLbl}</span>
-              </div>
-              <div className="tv-prob-bar-bg">
-                <div className="tv-prob-bar" style={{ width: `${prob}%`, background: barColor }} />
-              </div>
-              <div className="tv-prob-row">
-                <span className="tv-prob-pct" style={{ color: barColor }}>{prob}%</span>
-                <span className="xs mut tn">{fmtPrice(t.val)}</span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
-// SPARKLINE
-// ============================================================
-function Sparkline({ values, color = "#2563eb", height = 60 }) {
-  if (!values || values.length < 2) {
-    return <div className="spark" style={{ height, display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8", fontSize: 11 }}>No data</div>;
-  }
-  const min = Math.min(...values, 0);
-  const max = Math.max(...values, 0);
-  const range = max - min || 1;
-  const w = 300;
-  const h = height;
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * w;
-    const y = h - ((v - min) / range) * h;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  const last = values[values.length - 1];
-  const lineColor = last >= 0 ? "#15803d" : "#b91c1c";
-  // Zero line position
-  const zeroY = h - ((0 - min) / range) * h;
-  return (
-    <svg className="spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-      {min < 0 && max > 0 && <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="#cbd5e1" strokeDasharray="2 3" strokeWidth="1" />}
-      <polyline points={points} fill="none" stroke={lineColor} strokeWidth="2" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-// ============================================================
-// V9.7 -- STRATEGY TACTIC DICTIONARY
-// Decodes every abbreviated strategy name into plain language.
-// ============================================================
-const TACTIC_DICT = {
-  TREND_H4:        { name: "H4 Trend Following",       icon: "📈", color: "#6366f1", desc: "Aligns with the dominant 4-hour trend.",                   when: "Strong directional move on H4 chart",        ex: "Price > H4 EMA200, pullback to H1 support, enter long on bullish candle close." },
-  TREND_BREAKOUT:  { name: "Trend Breakout",            icon: "💥", color: "#ef4444", desc: "Catches momentum breakouts of consolidation.",              when: "Tight range followed by high-volume break",  ex: "M15 range break with expanding volume, enter in break direction." },
-  MR_ROUND:        { name: "Mean Reversion @ Round #",  icon: "🎯", color: "#10b981", desc: "Fades spikes into psychological round numbers.",            when: "Price spikes to round levels (1.0800, 2050)",ex: "Gold spikes to 2050, RSI overbought, short for retrace." },
-  MR_RANGE:        { name: "Mean Reversion in Range",   icon: "↔️", color: "#84cc16", desc: "Fades extremes within an established range.",                when: "Clear range bounds on H1 / M15",             ex: "Price hits range top, RSI > 70, short to range middle." },
-  MEAN_REV:        { name: "Mean Reversion (Generic)",  icon: "🔄", color: "#10b981", desc: "Reverts price toward the mean after extension.",            when: "Strong move with weakening momentum",        ex: "M15 RSI < 25 after sell-off, look for bullish divergence." },
-  ICT_KILLZONE:    { name: "ICT Kill Zone",             icon: "⚡", color: "#f59e0b", desc: "Trades during ICT high-volume time windows.",               when: "London 07-10 UTC or NY 13-16 UTC",           ex: "London open: wait for liquidity sweep, enter on reversal." },
-  ICT_SWEEP:       { name: "ICT Liquidity Sweep",       icon: "🌊", color: "#06b6d4", desc: "Trades reversal after the bot hunts retail stops.",         when: "Price sweeps a recent high/low then reverses",ex: "Sweep of M15 low, structure shift, enter long on retest." },
-  MOM_SESSION:     { name: "Session Momentum",          icon: "🚀", color: "#ec4899", desc: "Rides the dominant session direction after open.",          when: "Clear session-open momentum after consolidation", ex: "London open breaks Asian range, follow the breakout." },
-  MOM_S:           { name: "Session Momentum",          icon: "🚀", color: "#ec4899", desc: "Rides the dominant session direction after open.",          when: "Clear session-open momentum after consolidation", ex: "London open breaks Asian range, follow the breakout." },
-  PA_REJECTION:    { name: "Price Action Rejection",    icon: "🛡️", color: "#8b5cf6", desc: "Trades pin bars or engulfing patterns at S/R.",             when: "Strong rejection wick at key level",         ex: "Bullish pin bar at H4 support, enter long with SL below wick." },
-  PA_REJ:          { name: "Price Action Rejection",    icon: "🛡️", color: "#8b5cf6", desc: "Trades pin bars or engulfing patterns at S/R.",             when: "Strong rejection wick at key level",         ex: "Bullish pin bar at H4 support, enter long with SL below wick." },
-  PA_RE:           { name: "Price Action Rejection",    icon: "🛡️", color: "#8b5cf6", desc: "Trades pin bars or engulfing patterns at S/R.",             when: "Strong rejection wick at key level",         ex: "Bullish pin bar at H4 support, enter long with SL below wick." },
-  TREND:           { name: "Trend Continuation",        icon: "📊", color: "#3b82f6", desc: "Generic trend-following signal.",                            when: "Higher highs / higher lows on multi-TF",     ex: "Pullback to 21 EMA in uptrend, enter long." },
-  MOM:             { name: "Momentum",                  icon: "⚡", color: "#f97316", desc: "Pure momentum signal (MACD, RSI, etc.).",                   when: "MACD histogram expanding in trend direction",ex: "MACD bullish cross + price above 50 EMA, enter long." },
-  MR:              { name: "Mean Reversion",            icon: "🔄", color: "#10b981", desc: "Mean reversion signal (generic).",                          when: "Price stretched far from mean",              ex: "Bollinger %B > 1.0, fade for retrace." },
-  PA:              { name: "Price Action",              icon: "🕯️", color: "#a855f7", desc: "Pure candlestick / structure signal.",                      when: "Significant candlestick pattern at key level",ex: "Engulfing candle at trendline retest." },
-  MR_RO:           { name: "Mean Reversion @ Round #",  icon: "🎯", color: "#10b981", desc: "Fades spikes into psychological round numbers.",            when: "Price spikes to round levels",               ex: "Gold spikes to 2050, RSI overbought, short for retrace." },
-  MR_RA:           { name: "Mean Reversion in Range",   icon: "↔️", color: "#84cc16", desc: "Fades extremes within an established range.",                when: "Clear range bounds on H1 / M15",             ex: "Price hits range top, RSI > 70, short to range middle." },
-  MOMEN:           { name: "Momentum",                  icon: "⚡", color: "#f97316", desc: "Momentum signal.",                                          when: "MACD / RSI showing strong directional bias", ex: "MACD bullish cross, follow the move." },
-  TREND_:          { name: "Trend",                     icon: "📊", color: "#3b82f6", desc: "Trend signal.",                                             when: "Aligned multi-TF trend",                     ex: "All TFs in same direction, follow." },
-};
-// Lookup with fallback for unknown abbrevs
-const decodeTactic = (raw) => {
-  if (!raw) return { name: raw, icon: "❓", color: "#94a3b8", desc: "Unknown tactic", when: "—", ex: "—" };
-  const key = raw.trim().toUpperCase();
-  if (TACTIC_DICT[key]) return TACTIC_DICT[key];
-  // Try prefix match (e.g. "TREND_H" matches "TREND_H4")
-  for (const k of Object.keys(TACTIC_DICT)) {
-    if (k.startsWith(key) || key.startsWith(k)) return TACTIC_DICT[k];
-  }
-  return { name: raw, icon: "❓", color: "#94a3b8", desc: "Unknown tactic — possibly truncated label", when: "—", ex: "—" };
-};
-const splitStrategy = (strat) => (strat || "").split("+").map(s => s.trim()).filter(Boolean);
-
-// ============================================================
-// V9.7 -- STRATEGY DECODER COMPONENT
-// Click any strategy name to expand into plain-language tactics.
-// ============================================================
-function StrategyDecoder({ strategy, compact }) {
-  const tactics = splitStrategy(strategy);
-  if (!tactics.length) return null;
-  return (
-    <div className="strat-decoder">
-      <div className="r g6" style={{ flexWrap: "wrap" }}>
-        {tactics.map((t, i) => {
-          const td = decodeTactic(t);
-          return (
-            <div key={i} className="tac-chip" style={{ borderColor: td.color, background: `${td.color}10` }}>
-              <span style={{ fontSize: 14 }}>{td.icon}</span>
-              <span style={{ color: td.color, fontWeight: 700, fontSize: 11 }}>{td.name}</span>
-            </div>
-          );
-        })}
-      </div>
-      {!compact && (
-        <div className="tac-details mt8">
-          {tactics.map((t, i) => {
-            const td = decodeTactic(t);
-            return (
-              <div key={i} className="tac-card" style={{ borderLeftColor: td.color }}>
-                <div className="r g6 mb4" style={{ alignItems: "center" }}>
-                  <span style={{ fontSize: 16 }}>{td.icon}</span>
-                  <span style={{ fontWeight: 700, color: td.color }}>{td.name}</span>
+            <div
+              key={toolId}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "8px 0",
+                fontSize: 13,
+                borderBottom: "1px solid var(--qb-border)",
+              }}
+              title={TACTIC_DESCRIPTIONS[toolId]}
+            >
+              <div style={{ flex: 1 }}>
+                <div>{TACTIC_LABELS[toolId]}</div>
+                <div style={{ fontSize: 10, color: "var(--qb-text-muted)", marginTop: 2 }}>
+                  {TACTIC_DESCRIPTIONS[toolId]}
                 </div>
-                <div className="xs sub mb4">{td.desc}</div>
-                <div className="xs mut"><b>When:</b> {td.when}</div>
-                <div className="xs mut"><b>Example:</b> {td.ex}</div>
               </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================
-// V9.7 -- CHART COMPONENTS (inline SVG, no deps)
-// ============================================================
-
-// Donut / Pie chart with center label
-function DonutChart({ data, size = 140, label, sublabel }) {
-  const total = data.reduce((s, d) => s + (d.value || 0), 0);
-  if (!total) return <div className="dnt-empty" style={{ width: size, height: size }}>No data</div>;
-  const r = size / 2 - 8;
-  const cx = size / 2, cy = size / 2;
-  const stroke = 18;
-  let cumPct = 0;
-  const circumference = 2 * Math.PI * r;
-  return (
-    <div className="dnt-wrap" style={{ width: size, height: size }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#e2e8f0" strokeWidth={stroke} />
-        {data.map((d, i) => {
-          if (!d.value) return null;
-          const pct = d.value / total;
-          const dashLen = pct * circumference;
-          const offset = -cumPct * circumference;
-          cumPct += pct;
-          return (
-            <circle
-              key={i}
-              cx={cx} cy={cy} r={r}
-              fill="none"
-              stroke={d.color}
-              strokeWidth={stroke}
-              strokeDasharray={`${dashLen} ${circumference - dashLen}`}
-              strokeDashoffset={offset}
-              transform={`rotate(-90 ${cx} ${cy})`}
-              style={{ transition: "stroke-dasharray 600ms ease" }}
-            />
+              <div style={{ display: "flex", gap: 32 }}>
+                <input
+                  type="checkbox"
+                  checked={cfg[0]}
+                  onChange={(e) => updateTool(toolId, 0, e.target.checked)}
+                  style={{ accentColor: "var(--qb-accent)", cursor: "pointer", width: 16, height: 16 }}
+                />
+                <input
+                  type="checkbox"
+                  checked={cfg[1]}
+                  onChange={(e) => updateTool(toolId, 1, e.target.checked)}
+                  style={{ accentColor: "var(--qb-accent)", cursor: "pointer", width: 16, height: 16 }}
+                />
+              </div>
+            </div>
           );
         })}
-      </svg>
-      <div className="dnt-center">
-        <div className="dnt-label">{label}</div>
-        {sublabel && <div className="dnt-sub">{sublabel}</div>}
       </div>
     </div>
   );
 }
 
-// Vertical bar chart with hover labels
-function BarChart({ data, height = 160, valueFormat }) {
-  if (!data || !data.length) return <div className="bch-empty" style={{ height }}>No data</div>;
-  const max = Math.max(...data.map(d => Math.abs(d.value || 0)), 1);
-  const fmt = valueFormat || ((v) => v.toFixed(0));
-  return (
-    <div className="bch-wrap" style={{ height }}>
-      {data.map((d, i) => {
-        const pct = (Math.abs(d.value) / max) * 100;
-        const color = d.color || (d.value >= 0 ? "#22c55e" : "#ef4444");
-        return (
-          <div key={i} className="bch-col">
-            <div className="bch-val" style={{ color }}>{fmt(d.value)}</div>
-            <div className="bch-track">
-              <div className="bch-fill" style={{ height: `${pct}%`, background: color }} />
-            </div>
-            <div className="bch-lbl" title={d.label}>{(d.label || "").slice(0, 10)}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+function SettingsAccountTab() {
+  const [resolverStatus, setResolverStatus] = useState(null);
+  const [syncing, setSyncing] = useState(false);
 
-// Horizontal progress ring (used for crown progress, win rate)
-function ProgressRing({ value, max = 100, size = 90, color = "#2563eb", label, sublabel, thickness = 9 }) {
-  const r = size / 2 - thickness;
-  const cx = size / 2, cy = size / 2;
-  const circ = 2 * Math.PI * r;
-  const pct = Math.min(1, Math.max(0, (value || 0) / max));
-  const filled = pct * circ;
-  return (
-    <div className="prg-wrap" style={{ width: size, height: size }}>
-      <svg width={size} height={size}>
-        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#e2e8f0" strokeWidth={thickness} />
-        <circle
-          cx={cx} cy={cy} r={r}
-          fill="none"
-          stroke={color}
-          strokeWidth={thickness}
-          strokeDasharray={`${filled} ${circ}`}
-          strokeLinecap="round"
-          transform={`rotate(-90 ${cx} ${cy})`}
-          style={{ transition: "stroke-dasharray 600ms ease" }}
-        />
-      </svg>
-      <div className="prg-center">
-        <div className="prg-label" style={{ color }}>{label}</div>
-        {sublabel && <div className="prg-sub">{sublabel}</div>}
-      </div>
-    </div>
-  );
-}
-
-// Pyramid/triangle chart - tiered breakdown (e.g., confidence levels)
-function PyramidChart({ tiers }) {
-  if (!tiers || !tiers.length) return null;
-  const max = Math.max(...tiers.map(t => t.value), 1);
-  return (
-    <div className="pyr-wrap">
-      {tiers.map((t, i) => {
-        const pct = (t.value / max) * 100;
-        return (
-          <div key={i} className="pyr-row">
-            <div className="pyr-bar-shell">
-              <div className="pyr-bar" style={{ width: `${pct}%`, background: t.color }}>
-                <span className="pyr-val">{t.value}</span>
-              </div>
-            </div>
-            <div className="pyr-label" style={{ color: t.color }}>{t.label}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// Equity curve (cumulative P&L over time) -- bigger sparkline with gradient
-function EquityCurve({ values, height = 200 }) {
-  if (!values || values.length < 2) {
-    return <div className="eq-empty" style={{ height }}>Not enough data</div>;
-  }
-  const min = Math.min(...values, 0);
-  const max = Math.max(...values, 0);
-  const range = (max - min) || 1;
-  const w = 600;
-  const h = height;
-  const last = values[values.length - 1];
-  const lineColor = last >= 0 ? "#22c55e" : "#ef4444";
-  const fillColor = last >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)";
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * w;
-    const y = h - 10 - ((v - min) / range) * (h - 20);
-    return [x, y];
-  });
-  const linePath = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-  const fillPath = `${linePath} L${w},${h} L0,${h} Z`;
-  const zeroY = h - 10 - ((0 - min) / range) * (h - 20);
-  return (
-    <svg className="eq-svg" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height }}>
-      <defs>
-        <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={lineColor} stopOpacity="0.4" />
-          <stop offset="100%" stopColor={lineColor} stopOpacity="0.02" />
-        </linearGradient>
-      </defs>
-      {min < 0 && max > 0 && <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="#cbd5e1" strokeDasharray="3 4" strokeWidth="1" />}
-      <path d={fillPath} fill="url(#eqGrad)" />
-      <path d={linePath} fill="none" stroke={lineColor} strokeWidth="2.5" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-// Daily P&L bar chart (positive/negative)
-function DailyPnLBars({ days, height = 140 }) {
-  if (!days || !days.length) return <div className="bch-empty" style={{ height }}>No data</div>;
-  const max = Math.max(...days.map(d => Math.abs(d.pnl)), 1);
-  return (
-    <div className="bch-wrap" style={{ height }}>
-      {days.map((d, i) => {
-        const pct = (Math.abs(d.pnl) / max) * 100;
-        const color = d.pnl >= 0 ? "#22c55e" : "#ef4444";
-        return (
-          <div key={i} className="bch-col">
-            <div className="bch-val" style={{ color, fontSize: 9 }}>{d.pnl >= 0 ? "+" : ""}{Math.abs(d.pnl) > 999 ? `${(d.pnl/1000).toFixed(1)}k` : d.pnl.toFixed(0)}</div>
-            <div className="bch-track">
-              <div className="bch-fill" style={{ height: `${pct}%`, background: color }} />
-            </div>
-            <div className="bch-lbl">{d.label}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ============================================================
-// V9.7 -- SOUND EFFECTS (Web Audio API, no assets)
-// ============================================================
-let _audioCtx = null;
-const getAudioCtx = () => {
-  if (typeof window === "undefined") return null;
-  if (!_audioCtx) {
-    try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-    catch (_) { return null; }
-  }
-  return _audioCtx;
-};
-const playTone = (freq, duration = 0.18, type = "sine", vol = 0.15) => {
-  const ctx = getAudioCtx();
-  if (!ctx) return;
-  try {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = type;
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(vol, ctx.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
-    osc.connect(gain); gain.connect(ctx.destination);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + duration);
-  } catch (_) {}
-};
-const playSequence = (notes) => {
-  const ctx = getAudioCtx();
-  if (!ctx) return;
-  let t = 0;
-  notes.forEach(([freq, dur, vol = 0.15, type = "sine"]) => {
-    setTimeout(() => playTone(freq, dur, type, vol), t * 1000);
-    t += dur * 0.8;
-  });
-};
-const SFX = {
-  open:    () => playSequence([[660, 0.1], [880, 0.15]]),                            // pleasant chime
-  tp1:     () => playSequence([[880, 0.1], [1320, 0.15]]),                           // ascending pair
-  tp2:     () => playSequence([[880, 0.1], [1100, 0.1], [1320, 0.18]]),              // ascending triplet
-  tp3:     () => playSequence([[1100, 0.1], [1320, 0.1], [1760, 0.18]]),             // higher triplet
-  tp4:     () => playSequence([[1320, 0.12], [1760, 0.12], [2640, 0.25, 0.18]]),     // victory fanfare
-  sl:      () => playSequence([[440, 0.15, 0.18], [220, 0.25, 0.18, "sawtooth"]]),   // descending sad
-  retrace: () => playTone(523, 0.25, "triangle", 0.12),                              // single warning ping
-  alert:   () => playSequence([[880, 0.08], [880, 0.08]]),                           // double ping
-};
-
-// ============================================================
-// MAIN APP
-// ============================================================
-export default function App() {
-  const prefs = loadPrefs();
-
-  // V10 BUGFIX: Auto-clean any saved instruments that have broker suffixes (.s/.S/.pro/etc).
-  // V9 prefs may have stored "XAUUSD.S" which now causes price-fetch 404s.
-  const cleanInitialInstruments = (Array.isArray(prefs.instruments) ? prefs.instruments : [])
-    .map((s) => String(s).trim().toUpperCase().replace(/\.(S|PRO|RAW|M|ECN|STP|CENT)$/i, ""))
-    .filter((s, i, a) => s && a.indexOf(s) === i);  // unique non-empty
-
-  const [instruments, setInstruments] = useState(cleanInitialInstruments);
-  const [sessions,    setSessions]    = useState(Array.isArray(prefs.sessions)    ? prefs.sessions    : ["LONDON", "NEW YORK"]);
-  const [riskMode,    setRiskMode]    = useState(prefs.riskMode || "TEST");
-  const [soundEnabled, setSoundEnabled] = useState(prefs.soundEnabled !== false); // default ON
-
-  const [page,           setPage]           = useState("aiwatch");
-  const [prices,         setPrices]         = useState({});
-  const [openPositions,  setOpenPositions]  = useState([]);
-  const [closedTrades,   setClosedTrades]   = useState([]);
-  const [accountBalance, setAccountBalance] = useState(null);
-  const [aiDecisions,    setAiDecisions]    = useState({});
-  const [aiHistory,      setAiHistory]      = useState({}); // last 5 decisions per instrument
-  const [aiStatus,       setAiStatus]       = useState({});
-  const [learnedStats,   setLearnedStats]   = useState({});
-  const [crownLocks,     setCrownLocks]     = useState({});
-  const [blacklist,      setBlacklist]      = useState([]);
-  const [log,            setLog]            = useState([]);
-  const [sessionInfo,    setSessionInfo]    = useState(getSessionInfo());
-  const [newSymInput,    setNewSymInput]    = useState("");
-  const [nowStr,         setNowStr]         = useState("");
-  const [newsEvents,     setNewsEvents]     = useState([]);
-  const [tgStatus,       setTgStatus]       = useState(null);
-  const [tpLadders,      setTpLadders]      = useState({});
-  // V9.4: Strategy Lab filters
-  const [labSort,        setLabSort]        = useState("winRate"); // winRate | trades | pnl | expectancy
-  const [labFilter,      setLabFilter]      = useState("all");      // all | winners | losers | tested | crown | blacklist
-  const [labMinTrades,   setLabMinTrades]   = useState(0);          // min trades threshold
-  const [labSearch,      setLabSearch]      = useState("");         // search text
-  const [labInstFilter,  setLabInstFilter]  = useState("all");      // all | <instrument>
-  const [labExpanded,    setLabExpanded]    = useState({});         // { [strat]: true/false }
-
-  // V10 state — family-based lab, pair intel, memory, regimes
-  const [familyUniverse, setFamilyUniverse] = useState({});         // { sym: { TREND: {...}, REVERSION: {...} } }
-  const [v9Archive,      setV9Archive]      = useState([]);          // archived V9 raw tactics
-  const [pairIntel,      setPairIntel]      = useState([]);          // [{ sym, score, recommendation, ...}]
-  const [botMemory,      setBotMemory]      = useState(null);        // { short, mid, long }
-  // V11 Step 5: per-instrument observations + global pattern-learner output
-  const [v11Observations, setV11Observations] = useState({});       // { sym: [obs] }
-  const [v11Patterns,     setV11Patterns]     = useState(null);     // { tight, avoid, loose, totalTrades, ... }
-  const [regimes,        setRegimes]        = useState({});          // { sym: { regime, score, chaos } }
-  const [labView,        setLabView]        = useState("family");    // "family" | "archive"
-  // V10 backtest state
-  const [backtestSymbol, setBacktestSymbol] = useState("");
-  const [backtestData,   setBacktestData]   = useState({});          // { sym: [{ family, stats, start, end, ts }] }
-  const [backtestRunning, setBacktestRunning] = useState(false);
-  const [historicalStatus, setHistoricalStatus] = useState([]);
-
-  const lastAIRef    = useRef({});
-  const lastTradeRef = useRef({});
-  const pendingRef   = useRef({});
-  const prevPosRef   = useRef([]);
-  const logRef       = useRef(null);
-
-  useEffect(() => {
-    savePrefs({ instruments, sessions, riskMode, soundEnabled });
-    // V9.3: also persist to Redis so the server-side cron knows what to scan
-    fetch(API("trades?action=set-config"), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "set-config", instruments, sessions, riskMode }),
-    }).catch(() => {});
-  }, [instruments, sessions, riskMode, soundEnabled]);
-
-  useEffect(() => {
-    const tick = () => setNowStr(new Date().toUTCString().slice(17, 25));
-    tick();
-    const i = setInterval(tick, 1000);
-    return () => clearInterval(i);
+  const fetchStatus = useCallback(() => {
+    fetch(API("symbol-resolver?action=status"))
+      .then((r) => r.json())
+      .then((data) => setResolverStatus(data))
+      .catch((e) => setResolverStatus({ error: e.message }));
   }, []);
 
-  const addLog = useCallback((msg, type = "info") => {
-    setLog((prev) => [...prev.slice(-200), { msg, type, time: fmtTimeS(new Date()) }]);
-  }, []);
+  useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
-  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log]);
-
-  const fetchAccount = useCallback(async () => {
-    try { const r = await fetch(API("broker?action=account")); if (r.ok) { const d = await r.json(); if (d.balance != null) setAccountBalance(d.balance); } } catch (_) {}
-  }, []);
-  const fetchPositions = useCallback(async () => {
-    try { const r = await fetch(API("broker?action=positions")); if (r.ok) { const d = await r.json(); setOpenPositions(Array.isArray(d.positions) ? d.positions : []); } } catch (_) {}
-  }, []);
-  const fetchHistory = useCallback(async () => {
-    try { const r = await fetch(API("history")); if (r.ok) { const d = await r.json(); setClosedTrades(Array.isArray(d.trades) ? d.trades : (Array.isArray(d.deals) ? d.deals : [])); } } catch (_) {}
-  }, []);
-  const fetchPrice = useCallback(async (sym) => {
-    if (!sym) { console.warn("[fetchPrice] called with empty sym"); return; }
-    const url = API(`broker?action=price&symbol=${encodeURIComponent(sym)}`);
+  const sync = async () => {
+    setSyncing(true);
     try {
-      const r = await fetch(url);
-      if (!r.ok) {
-        console.warn(`[fetchPrice] ${sym} HTTP ${r.status} on ${url}`);
-        return;
-      }
-      const d = await r.json();
-      if (d && d.error) {
-        console.warn(`[fetchPrice] ${sym} backend error:`, d.error, "full response:", d);
-        return;
-      }
-      if (!d || d.price == null || !isFinite(d.price)) {
-        console.warn(`[fetchPrice] ${sym} bad payload (price=${d && d.price}). full response:`, d);
-        return;
-      }
-      // Success
-      setPrices((p) => {
-        const next = { ...p, [sym]: d.price };
-        if (typeof window !== "undefined") window.__lastFetchPrice = { sym, price: d.price, ts: Date.now() };
-        return next;
-      });
-    } catch (e) {
-      console.warn(`[fetchPrice] ${sym} threw on ${url}:`, e && e.message, e);
-    }
-  }, []);
-  const fetchLab = useCallback(async () => {
-    // V10: Fetch family stats + V9 archive
-    try {
-      const r = await fetch(API("trades?action=lab"));
-      if (r.ok) {
-        const d = await r.json();
-        setFamilyUniverse(d.universe || {});
-        const archiveArr = Array.isArray(d.archive) ? d.archive : [];
-        setV9Archive(archiveArr);
-        // V10 BUGFIX: Re-shape v9Archive (flat array of {symbol, strategy, wins, losses, ...})
-        // into the {strategy: {totalWins, totalLosses, totalPnl, total, instruments: {sym: {...}}}}
-        // shape the existing archive UI expects. Without this, the "Tactic Archive (V9)" tab
-        // stays empty even though the data is there.
-        const labShape = {};
-        for (const item of archiveArr) {
-          const k = item.strategy;
-          if (!labShape[k]) {
-            labShape[k] = {
-              totalWins: 0, totalLosses: 0, totalPnl: 0, total: 0, crowns: 0,
-              instruments: {},
-            };
-          }
-          labShape[k].totalWins   += item.wins   || 0;
-          labShape[k].totalLosses += item.losses || 0;
-          labShape[k].totalPnl    += item.totalPnl || 0;
-          labShape[k].total       += item.total  || 0;
-          labShape[k].instruments[item.symbol] = {
-            wins: item.wins, losses: item.losses, totalPnl: item.totalPnl,
-            total: item.total, winRate: item.winRate,
-            avgPnl: item.total > 0 ? Math.round((item.totalPnl / item.total) * 100) / 100 : 0,
-          };
-        }
-        setLearnedStats(labShape);
-        setCrownLocks(d.crownLocks || {});
-        setBlacklist(d.blacklist || []);
-      }
-    } catch (_) {}
-  }, []);
-
-  const fetchPairIntel = useCallback(async () => {
-    try {
-      const userInstr = (instruments || []).join(",");
-      const r = await fetch(API("pair-intel?action=universe&userInstruments=" + encodeURIComponent(userInstr)));
-      if (r.ok) { const d = await r.json(); setPairIntel(d.universe || []); }
-    } catch (_) {}
-  }, [instruments]);
-
-  const fetchMemory = useCallback(async () => {
-    try {
-      const r = await fetch(API("memory"));
-      if (r.ok) { const d = await r.json(); setBotMemory(d || null); }
-    } catch (_) {}
-  }, []);
-
-  // V11 STEP 5: fetch observations per instrument + pattern-learner output
-  const fetchV11Memory = useCallback(async () => {
-    try {
-      // Patterns (global, single fetch)
-      const pr = await fetch(API("pattern-learner"));
-      if (pr.ok) { const pd = await pr.json(); setV11Patterns(pd && pd.totalTrades !== undefined ? pd : null); }
-    } catch (_) {}
-    if (instruments.length === 0) { setV11Observations({}); return; }
-    const out = {};
-    for (const sym of instruments) {
-      try {
-        const r = await fetch(API("observation-memory?symbol=" + encodeURIComponent(sym)));
-        if (r.ok) { const d = await r.json(); out[sym] = d.observations || []; }
-      } catch (_) { out[sym] = []; }
-    }
-    setV11Observations(out);
-  }, [instruments]);
-
-  const fetchRegimes = useCallback(async () => {
-    if (!instruments.length) return;
-    const out = {};
-    for (const sym of instruments) {
-      try {
-        const r = await fetch(API("regime?symbol=" + sym));
-        if (r.ok) out[sym] = await r.json();
-      } catch (_) {}
-    }
-    setRegimes(out);
-  }, [instruments]);
-
-  // V10: Backtest helpers
-  const fetchBacktestSummary = useCallback(async (sym) => {
-    if (!sym) return;
-    try {
-      const r = await fetch(API("backtest?action=summary&symbol=" + sym));
-      if (r.ok) {
-        const d = await r.json();
-        setBacktestData(prev => ({ ...prev, [sym]: Array.isArray(d) ? d : [] }));
-      }
-    } catch (_) {}
-  }, []);
-
-  const fetchHistoricalStatus = useCallback(async () => {
-    try {
-      const r = await fetch(API("historical-fetch?action=status"));
-      if (r.ok) {
-        const d = await r.json();
-        setHistoricalStatus(Array.isArray(d) ? d : []);
-      }
-    } catch (_) {}
-  }, []);
-
-  const runBacktest = useCallback(async (sym, family) => {
-    if (!sym) return;
-    setBacktestRunning(true);
-    try {
-      const end = new Date().toISOString().slice(0, 10);
-      const start = new Date(Date.now() - 90 * 86400 * 1000).toISOString().slice(0, 10);
-      const body = { symbol: sym, family: family || "ALL", start, end, tf: "1h" };
-      addLog(`Backtest: ${sym} ${family || "ALL"} ${start}..${end}`, "info");
-      const r = await fetch(API("backtest"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
-      if (d.error) {
-        addLog(`Backtest error: ${d.error}`, "error");
+      const r = await fetch(API("symbol-resolver?action=sync"));
+      const data = await r.json();
+      if (data.ok) {
+        await fetchStatus();
       } else {
-        addLog(`Backtest complete for ${sym}`, "success");
-        await fetchBacktestSummary(sym);
+        alert("Sync failed: " + (data.error || "unknown error"));
       }
-    } catch (e) { addLog(`Backtest failed: ${e.message}`, "error"); }
-    finally { setBacktestRunning(false); }
-  }, [addLog, fetchBacktestSummary]);
-
-  const downloadHistorical = useCallback(async (sym) => {
-    if (!sym) return;
-    setBacktestRunning(true);
-    try {
-      const end = new Date().toISOString().slice(0, 10);
-      const start = new Date(Date.now() - 90 * 86400 * 1000).toISOString().slice(0, 10);
-      addLog(`Downloading historical: ${sym} 1h ${start}..${end}`, "info");
-      const r = await fetch(API(`historical-fetch?symbol=${sym}&tf=1h&start=${start}&end=${end}`));
-      const d = await r.json();
-      if (d.error) {
-        addLog(`Historical fetch error: ${d.error}`, "error");
-      } else {
-        addLog(`Downloaded ${d.downloaded || 0} candles, cached to ${d.cached || 0} dates`, "success");
-        await fetchHistoricalStatus();
-      }
-    } catch (e) { addLog(`Download failed: ${e.message}`, "error"); }
-    finally { setBacktestRunning(false); }
-  }, [addLog, fetchHistoricalStatus]);
-
-  const fetchNews = useCallback(async () => {
-    try { const r = await fetch(API("manage-trades?action=news&impact=high&days=7")); if (r.ok) { const d = await r.json(); setNewsEvents(Array.isArray(d.events) ? d.events : []); } } catch (_) {}
-  }, []);
-
-  const testTelegram = useCallback(async () => {
-    setTgStatus({ loading: true });
-    try {
-      const r = await fetch(API("manage-trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "telegram-test" }) });
-      const d = await r.json();
-      setTgStatus(d);
-      addLog(d.ok ? "Telegram test sent successfully" : `Telegram test failed: ${d.result?.reason || d.error || 'unknown'}`, d.ok ? "success" : "error");
     } catch (e) {
-      setTgStatus({ ok: false, error: e.message });
-      addLog(`Telegram test error: ${e.message}`, "error");
+      alert("Sync error: " + e.message);
     }
-  }, [addLog]);
-
-  const recordResult = useCallback(async (pos, fallbackDec, session) => {
-    const comment  = pos.comment || pos.tradeComment || "";
-    const strategy = (comment.startsWith("QB:") ? comment.slice(3).trim() : null) || fallbackDec?.strategy || null;
-    if (!strategy || strategy === "EXPLORING" || strategy === "UNKNOWN" || strategy.length < 3) { addLog(`Not recorded: ${pos.symbol} -- no strategy label`, "warn"); return; }
-    const inst = normSym(pos.symbol);
-    const pnl  = pos.profit || 0;
-    // V9.7: Sound feedback on close
-    if (soundEnabled) {
-      if (pnl > 0) SFX.tp4();         // big win -> victory
-      else if (pnl < 0) SFX.sl();     // loss -> sad descend
-    }
-    try {
-      await fetch(API("trades"), { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instrument: inst, direction: pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT", won: pnl > 0, pnl, strategy, session, confidence: fallbackDec?.confidence || 0, closeTime: new Date().toISOString(), openPrice: pos.openPrice || null, closePrice: pos.currentPrice || null, volume: pos.volume || 0.01, positionId: pos.id || pos.positionId || null }) });
-      fetchLab();
-      addLog(`Recorded [${strategy}] ${inst} ${pnl > 0 ? "WIN" : "LOSS"} ${pnlStr(pnl)}`, pnl > 0 ? "success" : "warn");
-    } catch (e) { addLog(`Record failed: ${e.message}`, "error"); }
-  }, [addLog, fetchLab, soundEnabled]);
-
-  useEffect(() => {
-    const prev = prevPosRef.current;
-    const cur  = openPositions;
-    prev.filter((p) => !cur.find((c) => (c.id || c.positionId) === (p.id || p.positionId))).forEach((closed) => { const sym = normSym(closed.symbol); recordResult(closed, aiDecisions[sym] || null, sessionInfo.session); });
-    prevPosRef.current = cur;
-
-    // V9.2: Backfill tpLadders for positions that exist on broker but have no local ladder
-    // (app reload, position opened outside session, etc). Use broker SL as tp1 reference so
-    // management can at least track retraces against real broker-stored values.
-    setTpLadders((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      // Backfill
-      cur.forEach((pos) => {
-        const posId = pos.id || pos.positionId;
-        if (!posId || next[posId]) return;
-        if (pos.stopLoss && pos.takeProfit && pos.openPrice) {
-          const sign = pos.type === "POSITION_TYPE_BUY" ? 1 : -1;
-          const tp1Dist = Math.abs(pos.takeProfit - pos.openPrice);
-          next[posId] = {
-            sl: pos.stopLoss,
-            tp1: pos.openPrice + sign * tp1Dist * 0.25,
-            tp2: pos.openPrice + sign * tp1Dist * 0.50,
-            tp3: pos.openPrice + sign * tp1Dist * 0.75,
-            tp4: pos.takeProfit,
-            fillPrice: pos.openPrice,
-            backfilled: true,
-          };
-          changed = true;
-        }
-      });
-      // Cleanup ladders for positions no longer open
-      const curIds = new Set(cur.map((p) => p.id || p.positionId).filter(Boolean));
-      Object.keys(next).forEach((posId) => {
-        if (!curIds.has(posId) && !curIds.has(Number(posId))) { delete next[posId]; changed = true; }
-      });
-      return changed ? next : prev;
-    });
-  }, [openPositions, aiDecisions, sessionInfo.session, recordResult]);
-
-  const runAIBrain = useCallback(async (sym) => {
-    if (pendingRef.current[sym]) return;
-    const now = Date.now();
-    if (now - (lastAIRef.current[sym] || 0) < 290000) return;
-    lastAIRef.current[sym] = now;
-    setAiStatus((p) => ({ ...p, [sym]: "thinking" }));
-    addLog(`Brain: ${sym} -- reading market...`, "info");
-    try {
-      // V10: Backend AI fetches its own multi-TF, regime, memory, family stats, backtest data.
-      // Frontend is OBSERVATIONAL ONLY -- no candle fetching here, no double-work.
-      // We just hit /api/ai with symbol + riskMode and display whatever the AI decided.
-      const r = await fetch(API("ai"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: sym, riskMode }) });
-      if (!r.ok) { addLog(`AI error ${sym}: HTTP ${r.status}`, "error"); setAiStatus((p) => ({ ...p, [sym]: "error" })); return; }
-      const dec = await r.json();
-      const decWithMeta = { ...dec, symbol: sym, price: prices[sym], time: new Date().toISOString() };
-      setAiDecisions((p) => ({ ...p, [sym]: decWithMeta }));
-      setAiHistory((p) => ({ ...p, [sym]: [decWithMeta, ...((p[sym] || []).slice(0, 4))] }));
-      setAiStatus((p) => ({ ...p, [sym]: (dec.decision||"wait").toLowerCase() }));
-      if (dec.newsBlocked) addLog(`${sym}: blocked by news -- ${dec.reason}`, "warn");
-      else addLog(`${sym}: ${dec.decision||"WAIT"} ${dec.confidence||0}% [${dec.family||dec.rawTactic||"?"}]`, dec.decision==="WAIT" ? "warn" : "signal");
-      // Frontend does NOT execute trades. Cron at /api/cron is the sole executor.
-    } catch (e) { setAiStatus((p) => ({ ...p, [sym]: "error" })); addLog(`Brain error ${sym}: ${e.message}`, "error"); }
-  }, [prices, riskMode, addLog]);
-
-  const manageTrades = useCallback(async () => {
-    if (!openPositions.length) return;
-    // V9.2: TP ladder comes from tpLadders (set at execute time, broker-truth aligned),
-    // NOT from aiDecisions (which is the AI plan, not the actual trade).
-    const positions = openPositions.map((pos) => {
-      const posId = pos.id || pos.positionId;
-      const ladder = tpLadders[posId];
-      if (!ladder || !ladder.tp1) return null;
-      return {
-        id: posId,
-        symbol: pos.symbol,
-        openPrice: pos.openPrice,
-        currentPrice: pos.currentPrice,
-        stopLoss: pos.stopLoss,
-        volume: pos.volume,
-        direction: pos.type === "POSITION_TYPE_BUY" ? "LONG" : "SHORT",
-        tp1: ladder.tp1,
-        tp2: ladder.tp2 || null,
-        tp3: ladder.tp3 || null,
-        tp4: ladder.tp4 || null,
-      };
-    }).filter(Boolean);
-    if (!positions.length) return;
-    try {
-      const r = await fetch(API("manage-trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ positions }) });
-      const d = await r.json();
-      (d.managed||[]).forEach((m) => {
-        (m.actions||[]).forEach((a) => {
-          if (a.type==="TP1") { addLog(`TP1 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp1(); }
-          if (a.type==="TP2") { addLog(`TP2 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp2(); }
-          if (a.type==="TP3") { addLog(`TP3 ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp3(); }
-          if (a.type==="TP4_FINAL") { addLog(`TP4 complete ${m.symbol} +$${(a.pnl||0).toFixed(2)}`, "success"); if (soundEnabled) SFX.tp4(); }
-          if (a.type==="RETRACE_CLOSE") { addLog(`Retrace close ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn"); if (soundEnabled) SFX.retrace(); }
-          if (a.type==="TP1_RETRACE_PROTECT") { addLog(`TP1 retrace protect ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn"); if (soundEnabled) SFX.retrace(); }
-          if (a.type==="TP1_FAILSAFE_CLOSE" || a.type==="TP2_FAILSAFE_CLOSE" || a.type==="TP3_FAILSAFE_CLOSE" || a.type==="HEAL_FAILSAFE_CLOSE" || a.type==="RETRACE_FAILSAFE_CLOSE") {
-            addLog(`Failsafe close ${m.symbol} $${(a.pnl||0).toFixed(2)}`, "warn"); if (soundEnabled) SFX.alert();
-          }
-        });
-      });
-    } catch (_) {}
-  }, [openPositions, tpLadders, addLog, soundEnabled]);
-
-  // V10 DEBUG: expose runtime state on window. Mount-only effect; uses refs to read current state
-  // so it doesn't re-run on every render and cause performance lag.
-  const debugStateRef = useRef({});
-  debugStateRef.current = { instruments, prices, openPositions, closedTrades, page, riskMode };
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      window.qbDebug = () => {
-        const s = debugStateRef.current;
-        return {
-          instruments: s.instruments,
-          prices: s.prices,
-          priceKeys: Object.keys(s.prices || {}),
-          openPositions: (s.openPositions || []).map(p => ({ symbol: p.symbol, type: p.type, profit: p.profit })),
-          closedTradesCount: (s.closedTrades || []).length,
-          latestClosedTime: (s.closedTrades || []).length > 0 ? (s.closedTrades[0].time || s.closedTrades[0].closeTime) : null,
-          page: s.page,
-          riskMode: s.riskMode,
-        };
-      };
-      window.qbForceFetchPrice = (sym) => {
-        console.log("[manual] fetching price for", sym);
-        fetchPrice(sym);
-      };
-    }
-  }, [fetchPrice]);
-
-  useEffect(() => {
-    fetchAccount(); fetchPositions(); fetchHistory(); fetchLab(); fetchNews();
-    fetchPairIntel(); fetchMemory(); fetchRegimes(); fetchV11Memory();
-    instruments.forEach((sym) => fetchPrice(sym));
-    const ii = [
-      setInterval(fetchAccount, 60000), setInterval(fetchPositions, 10000),
-      setInterval(fetchHistory, 60000), setInterval(fetchLab, 300000),
-      setInterval(fetchNews, 1800000),
-      setInterval(fetchPairIntel, 1800000),    // V11: pair intel refreshes once daily on backend; frontend rechecks cache every 30min
-      setInterval(fetchMemory, 60000),         // V10: refresh memory every 1min
-      setInterval(fetchV11Memory, 120000),     // V11: refresh observations + patterns every 2min
-      setInterval(fetchRegimes, 300000),       // V10: refresh regimes every 5min
-      setInterval(() => setSessionInfo(getSessionInfo()), 60000),
-    ];
-    instruments.forEach((sym) => { ii.push(setInterval(() => fetchPrice(sym), 15000)); });
-    return () => ii.forEach(clearInterval);
-  }, [fetchAccount, fetchPositions, fetchHistory, fetchLab, fetchNews, fetchPrice, fetchPairIntel, fetchMemory, fetchV11Memory, fetchRegimes, instruments]);
-
-  // V9.5: Fresh history fetch whenever user opens the Reports/History tab
-  useEffect(() => {
-    if (page === "reports") fetchHistory();
-    if (page === "backtest") fetchHistoricalStatus();
-  }, [page, fetchHistory, fetchHistoricalStatus]);
-
-  // V10: Frontend NO LONGER manages trades. Cron does it every minute server-side.
-  // This kills the dual-execution race condition. Frontend is observational.
-  // (Original useEffect commented out below for reference.)
-  // useEffect(() => {
-  //   if (!openPositions.length) return;
-  //   manageTrades();
-  //   const i = setInterval(manageTrades, 30000);
-  //   return () => clearInterval(i);
-  // }, [openPositions, manageTrades]);
-
-  // V10: Observational AI poll. Cron at /api/cron is the executor (every 1 min).
-  // Frontend just polls at 10-min interval to refresh the UI display of recent decisions.
-  useEffect(() => {
-    const run = () => {
-      if (!instruments.length) return;
-      const s = getSessionInfo();
-      if (!isSelectedSessionActive(sessions, s)) return;
-      instruments.forEach((sym) => {
-        if (!isTradeable(sym, s.utcH, s.isWeekend)) return;
-        if (prices[sym] == null) return;
-        runAIBrain(sym);
-      });
-    };
-    const t = setTimeout(run, 5000);
-    const i = setInterval(run, 600000);  // 10 min — observational only
-    return () => { clearTimeout(t); clearInterval(i); };
-  }, [instruments, sessions, prices, runAIBrain]);
-
-  // Computed
-  const todayTrades   = closedTrades.filter((t) => new Date(t.time||t.closeTime||"").toDateString() === new Date().toDateString());
-  const todayPnl      = todayTrades.reduce((s, t) => s + (t.profit||0), 0);
-  const totalWins     = closedTrades.filter((t) => (t.profit||0) > 0).length;
-  const winRate       = closedTrades.length ? ((totalWins / closedTrades.length) * 100).toFixed(1) : "0.0";
-  const sessionActive = isSelectedSessionActive(sessions, sessionInfo);
-
-  // Today equity curve (cumulative P&L over today's trades, sorted by time)
-  const todayEquity = (() => {
-    const sorted = [...todayTrades].sort((a, b) => new Date(a.time||a.closeTime||0) - new Date(b.time||b.closeTime||0));
-    let cum = 0;
-    return [0, ...sorted.map((t) => { cum += t.profit || 0; return cum; })];
-  })();
-
-  // Streak calc
-  const recentSorted = [...closedTrades].sort((a, b) => new Date(b.time||b.closeTime||0) - new Date(a.time||a.closeTime||0));
-  let streak = 0; let streakKind = null;
-  for (const t of recentSorted) {
-    const win = (t.profit||0) > 0;
-    if (streakKind === null) { streakKind = win; streak = 1; }
-    else if (streakKind === win) streak++;
-    else break;
-  }
-
-  // V10 BUGFIX: Strip broker-specific suffixes (.s/.S/.pro/.raw) from user input.
-  // Symbols stored in `instruments` should always be the base (e.g. XAUUSD, not XAUUSD.S).
-  // The broker-side resolveSymbol() will add the right suffix when querying the broker.
-  const cleanSymbol = (raw) => {
-    if (!raw) return "";
-    return String(raw).trim().toUpperCase().replace(/\.(S|PRO|RAW|M|ECN|STP|CENT)$/i, "");
+    setSyncing(false);
   };
-  const addInstrument = (rawSym) => {
-    const sym = cleanSymbol(rawSym || newSymInput);
-    if (!sym || instruments.includes(sym)) { setNewSymInput(""); return; }
-    setInstruments((prev) => [...prev, sym]); setNewSymInput(""); addLog(`Added: ${sym}`, "info");
-  };
-  const removeInstrument = (sym) => {
-    setInstruments((prev) => prev.filter((s) => s !== sym));
-    setAiDecisions((prev) => { const n={...prev}; delete n[sym]; return n; });
-    setAiStatus((prev)    => { const n={...prev}; delete n[sym]; return n; });
-    setPrices((prev)      => { const n={...prev}; delete n[sym]; return n; });
-    addLog(`Removed: ${sym}`, "warn");
-  };
-  const px = (sym) => { const p = prices[sym]; if (p==null) return "--"; return p>1000 ? p.toLocaleString("en",{maximumFractionDigits:2}) : p.toFixed(p>10?2:5); };
-  const fl = (v) => { if (v==null) return "--"; return v>1000 ? v.toFixed(2) : v>10 ? v.toFixed(2) : v.toFixed(5); };
-
-  // Use live prices to override pos.currentPrice for the visualizer
-  const enrichedPositions = openPositions.map((pos) => {
-    const sym = normSym(pos.symbol);
-    const live = prices[sym];
-    return live != null ? { ...pos, currentPrice: live } : pos;
-  });
 
   return (
-    <div className="app">
-      <style>{CSS}</style>
+    <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 }}>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Broker connection</div>
+        <div style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>
+          Quantum Bot uses MetaAPI to connect to your broker. Configure credentials via Vercel environment variables.
+        </div>
+      </div>
 
-      <aside className="sidebar">
-        <div className="sb-head">
-          <div className="sb-brand">
-            <div className="sb-logo">Q</div>
-            <div>
-              <div>Quantum Bot</div>
-              <div className="sb-sub">V10</div>
-            </div>
-          </div>
+      <div className="qb-glass" style={{ padding: 16, borderRadius: 6 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Symbol mapping</div>
+          <button
+            onClick={sync}
+            disabled={syncing}
+            style={{
+              background: "var(--qb-accent-soft)",
+              color: "var(--qb-accent)",
+              border: "1px solid var(--qb-accent)",
+              borderRadius: 4,
+              padding: "6px 12px",
+              fontSize: 11,
+              cursor: syncing ? "wait" : "pointer",
+              fontWeight: 600,
+              opacity: syncing ? 0.6 : 1,
+            }}
+          >
+            {syncing ? "Syncing..." : "Sync from broker"}
+          </button>
         </div>
 
-        <nav className="sb-nav">
-          {NAV.map((n) => (
-            <div key={n.id} className={`sb-item${page===n.id?" on":""}`} onClick={() => setPage(n.id)}>
-              <span className="sb-icon">{n.icon}</span>
-              {n.label}
-            </div>
-          ))}
-        </nav>
-
-        <div className="sb-div" />
-
-        <div className="sb-wl">
-          {instruments.length === 0 ? (
-            <div className="sb-wl-empty">No instruments &mdash; add in Settings</div>
-          ) : (
-            <>
-              <div className="sb-wl-hd">Watchlist</div>
-              {instruments.map((sym) => {
-                const dec = aiDecisions[sym]; const d = dec?.decision;
-                return (
-                  <div key={sym} className="sb-row">
-                    <div className="col" style={{ gap: 3 }}>
-                      <span className="sb-sym">{sym}</span>
-                      {d && d !== "WAIT" && <span className={`bdg bdg-${d==="LONG"?"long":"short"}`} style={{ fontSize: 8.5, padding: "1px 5px" }}>{d}</span>}
-                    </div>
-                    <span className="sb-px" style={{ color: prices[sym]!=null?"#fff":"#64748b" }}>{px(sym)}</span>
-                  </div>
-                );
-              })}
-            </>
-          )}
-        </div>
-
-        <div className="sb-foot">
-          <div className="sf-row"><span className="sf-lbl">Session</span><span className="sf-val" style={{ color: sessionInfo.session !== "ASIAN" ? "#a5b4fc" : "#94a3b8" }}>{sessionInfo.session}</span></div>
-          <div className="sf-row"><span className="sf-lbl">AI Gate</span><span className="sf-val" style={{ color: sessionActive?"#86efac":"#94a3b8" }}>{sessionActive?"Active":"Inactive"}</span></div>
-          <div className="sf-row"><span className="sf-lbl">Risk</span><span className="sf-val" style={{ color: riskMode==="AGGRESSIVE"?"#fca5a5":riskMode==="REGULAR"?"#fcd34d":"#cbd5e1" }}>{riskMode}</span></div>
-          <div className="sf-row"><span className="sf-lbl">UTC</span><span className="sf-val tn">{nowStr}</span></div>
-        </div>
-      </aside>
-
-      <div className="main">
-        <div className="topbar">
-          {[
-            ["Balance",   accountBalance!=null ? `$${accountBalance.toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2})}` : "--", null],
-            ["Open",      openPositions.length, null],
-            ["Today P&L", pnlStr(todayPnl), todayPnl>0?"#86efac":todayPnl<0?"#fca5a5":"#fff"],
-            ["Win Rate",  `${winRate}%`, parseFloat(winRate)>=55?"#86efac":parseFloat(winRate)>=45?"#fcd34d":"#fca5a5"],
-          ].map(([lbl,val,clr]) => (
-            <div key={lbl} className="tc">
-              <span className="tc-lbl">{lbl}</span>
-              <span className="tc-val" style={clr?{color:clr}:{}}>{val}</span>
-            </div>
-          ))}
-          <div className="tb-sep" />
-          <span className="tb-time">{nowStr} UTC &mdash; <span style={{ color: "#fff", fontWeight: 600 }}>{sessionInfo.session}</span></span>
-        </div>
-
-        <div className="content">
-
-          {/* ========== V11 STEP 4: AI WATCH ========== */}
-          {page === "aiwatch" && (
-            <AIWatchPage instruments={instruments} setPage={setPage} />
-          )}
-
-          {/* ========== LIVE ========== */}
-          {page === "live" && (
-            <div className="s14">
-              {instruments.length === 0 ? (
-                <div className="panel empty">
-                  <div className="empty-ico">&bull;</div>
-                  <div className="empty-title">No instruments selected</div>
-                  <p className="xs mut mt6" style={{ marginBottom: 18 }}>Add instruments in Settings to begin trading.</p>
-                  <button className="btn btn-p" onClick={() => setPage("settings")}>Open Settings</button>
+        {resolverStatus ? (
+          <div style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+            {resolverStatus.error ? (
+              <div style={{ color: "var(--qb-down-strong)" }}>
+                {resolverStatus.error}
+              </div>
+            ) : (
+              <>
+                <div>
+                  Mapped: <strong className="qb-mono">{resolverStatus.mappedCount || 0}</strong> assets
+                  {resolverStatus.meta?.unmappedCount > 0 && (
+                    <> · Unmapped broker symbols: <strong className="qb-mono">{resolverStatus.meta.unmappedCount}</strong></>
+                  )}
                 </div>
-              ) : (
-                <>
-                  {/* Live stats row */}
-                  <div className="stats-grid">
-                    <div className="stat-mini">
-                      <div className="stat-mini-lbl">Today Trades</div>
-                      <div className="stat-mini-val">{todayTrades.length}</div>
-                    </div>
-                    <div className="stat-mini">
-                      <div className="stat-mini-lbl">Streak</div>
-                      <div className="stat-mini-val" style={{ color: streakKind === true ? "var(--green)" : streakKind === false ? "var(--red)" : "var(--text3)" }}>
-                        {streak > 0 ? `${streak} ${streakKind ? "W" : "L"}` : "--"}
-                      </div>
-                    </div>
-                    <div className="stat-mini">
-                      <div className="stat-mini-lbl">Open Positions</div>
-                      <div className="stat-mini-val">{openPositions.length}</div>
-                    </div>
-                    <div className="stat-mini">
-                      <div className="stat-mini-lbl">Today Curve</div>
-                      <Sparkline values={todayEquity} height={28} />
-                    </div>
-                  </div>
-
-                  {/* V10: Regime indicators per active instrument */}
-                  {Object.keys(regimes).length > 0 && (
-                    <div className="panel">
-                      <div className="pt">Market Regimes</div>
-                      <div className="g3">
-                        {instruments.map((sym) => {
-                          const reg = regimes[sym];
-                          if (!reg) return null;
-                          const regColor = reg.regime === "TRENDING" ? "#3b82f6"
-                                         : reg.regime === "RANGING"  ? "#10b981"
-                                         : reg.regime === "VOLATILE" ? "#ef4444"
-                                         : reg.regime === "QUIET"    ? "#94a3b8"
-                                         : "#f59e0b";
-                          const isChaos = reg.chaos && reg.chaos.chaos;
-                          return (
-                            <div key={sym} className="panel" style={{ borderLeft: `4px solid ${regColor}`, padding: 10 }}>
-                              <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
-                                <div className="w7">{sym}</div>
-                                <div style={{ fontSize: 10, padding: "2px 8px", background: regColor + "15", color: regColor, borderRadius: 8, fontWeight: 700 }}>{reg.regime}</div>
-                              </div>
-                              {isChaos && (
-                                <div className="xs mt4" style={{ color: "var(--red)", fontWeight: 700 }}>⚠ CHAOS · {reg.chaos.ratio}x ATR</div>
-                              )}
-                              {reg.indicators && (
-                                <div className="xs mut mt4">ADX {(reg.indicators.h1Adx14 || 0).toFixed(0)} · BB {((reg.indicators.h1BBwidth || 0) * 100).toFixed(2)}%</div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* V10: Pair Intel quick view (top recommendations) */}
-                  {pairIntel.length > 0 && (
-                    <div className="panel">
-                      <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                        <div className="pt" style={{ marginBottom: 0 }}>Pair Intelligence · Top Picks</div>
-                        <button className="btn btn-sm" onClick={() => setPage("intel")}>See All</button>
-                      </div>
-                      <div className="g4c">
-                        {pairIntel.filter(p => p.recommendation === "FAVORED").slice(0, 4).map((p) => (
-                          <div key={p.sym} className="panel" style={{ padding: 10, borderLeft: "3px solid #15803d" }}>
-                            <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
-                              <div className="w7">{p.sym}</div>
-                              <div style={{ fontWeight: 800, color: "#15803d" }}>{p.score}</div>
-                            </div>
-                            <div className="xs sub mt4">{p.regime} · {p.bestFamily || "untested"}</div>
-                            {!p.inUserSet && (
-                              <button className="btn btn-sm btn-p mt6" style={{ width: "100%", fontSize: 10 }} onClick={() => addInstrument(p.sym)}>+ Add</button>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* V9.7: Today's P&L visual breakdown */}
-                  {todayTrades.length > 0 && (() => {
-                    const todayWins = todayTrades.filter(t => (t.profit || 0) > 0);
-                    const todayLosses = todayTrades.filter(t => (t.profit || 0) < 0);
-                    const winsPnl = todayWins.reduce((s, t) => s + (t.profit || 0), 0);
-                    const lossesPnl = Math.abs(todayLosses.reduce((s, t) => s + (t.profit || 0), 0));
-                    const wrToday = todayTrades.length > 0 ? (todayWins.length / todayTrades.length) * 100 : 0;
-                    const wrClr = wrToday >= 55 ? "#22c55e" : wrToday >= 45 ? "#f59e0b" : "#ef4444";
-                    return (
-                      <div className="chart-grid">
-                        <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                          <div className="chart-title">Today Win Rate</div>
-                          <ProgressRing value={wrToday} size={120} color={wrClr} label={`${wrToday.toFixed(0)}%`} sublabel={`${todayWins.length}W ${todayLosses.length}L`} thickness={10} />
-                        </div>
-                        <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                          <div className="chart-title">Wins vs Losses</div>
-                          <DonutChart
-                            data={[
-                              { value: winsPnl,   color: "#22c55e", label: "Wins" },
-                              { value: lossesPnl, color: "#ef4444", label: "Losses" },
-                            ]}
-                            size={120}
-                            label={pnlStr(todayPnl)}
-                            sublabel="net P&L"
-                          />
-                        </div>
-                        <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
-                          <div className="chart-title">Today Equity Curve</div>
-                          <EquityCurve values={todayEquity} height={140} />
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  {/* Active trades visualizer (if any) */}
-                  {enrichedPositions.length > 0 && enrichedPositions.map((pos, i) => {
-                    const sym = normSym(pos.symbol);
-                    const dec = aiDecisions[sym];
-                    const posId = pos.id || pos.positionId;
-                    const tpState = tpLadders[posId];
-                    return <TradeVisualizer key={posId || i} pos={pos} dec={dec} tpState={tpState} fmtPrice={fl} />;
-                  })}
-
-                  {/* Instrument cards */}
-                  <div className="inst-grid" style={{ gridTemplateColumns: `repeat(${Math.min(instruments.length,4)}, 1fr)` }}>
-                    {instruments.map((sym) => {
-                      const dec = aiDecisions[sym]; const status = aiStatus[sym]||"idle";
-                      const bar = status==="long"?"#15803d":status==="short"?"#b91c1c":status==="thinking"?"#b45309":"#cbd5e1";
-                      const tradeable = isTradeable(sym, sessionInfo.utcH, sessionInfo.isWeekend);
-                      const cc = (dec?.confidence||0)>=65?"#15803d":(dec?.confidence||0)>=50?"#b45309":"#b91c1c";
-                      return (
-                        <div key={sym} className="inst-card">
-                          <div className="inst-bar" style={{ background: bar }} />
-                          <div className="inst-head">
-                            <span className="inst-sym">{sym}</span>
-                            <span className={`bdg bdg-${status==="long"?"long":status==="short"?"short":"wait"}`}>
-                              {status==="thinking"?"Scanning":status==="error"?"Error":(status||"Idle").toUpperCase()}
-                            </span>
-                          </div>
-                          <div className={`inst-px${prices[sym]==null?" inst-px-empty":""}`}>{px(sym)}</div>
-                          {dec && dec.decision !== "WAIT" && (
-                            <div className="s10">
-                              <div className="r g8">
-                                <div className="cring" style={{ border: `2px solid ${cc}`, color: cc }}>{dec.confidence||0}%</div>
-                                <div className="col" style={{ gap: 3 }}>
-                                  <span className="xs sub">Vol <span className="w7" style={{ color:"var(--text)" }}>{dec.volume}L</span></span>
-                                  {dec.risk && <span className="xs" style={{ color: dec.risk==="HIGH"?"#b91c1c":dec.risk==="MEDIUM"?"#b45309":"#15803d" }}>{dec.risk} risk</span>}
-                                </div>
-                              </div>
-                              {dec.strategy && <div className="inst-strat">{dec.strategy}</div>}
-                              {dec.stopLoss && dec.takeProfit1 && (
-                                <div className="inst-tp">
-                                  <span style={{ color:"#b91c1c" }}>SL {fl(dec.stopLoss)}</span>
-                                  <span className="mut">/</span>
-                                  <span style={{ color:"#15803d" }}>TP1 {fl(dec.takeProfit1)}</span>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {dec && dec.decision === "WAIT" && dec.reason && (
-                            <div className="inst-why">{dec.reason.slice(0,90)}{dec.reason.length>90?"...":""}</div>
-                          )}
-                          {crownLocks[sym] && <div className="inst-crown">&#9733; Crown: {crownLocks[sym]}</div>}
-                          {!tradeable && <div className="inst-off">Outside trading hours</div>}
-                          {tradeable && !sessionActive && <div className="inst-off">Session not selected</div>}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* AI Reasoning per instrument */}
-                  {Object.keys(aiDecisions).length > 0 && (
-                    <div className="s12">
-                      <div className="pt" style={{ marginBottom: 4 }}>AI Analysis</div>
-                      {instruments.filter((sym) => aiDecisions[sym]).map((sym) => {
-                        const dec = aiDecisions[sym];
-                        if (!dec) return null;
-                        const isWait = dec.decision === "WAIT";
-                        const edge = dec.decision === "LONG" ? "var(--green)" : dec.decision === "SHORT" ? "var(--red)" : "var(--text3)";
-                        return (
-                          <div key={sym} className="ai-card" style={{ borderLeftColor: edge }}>
-                            <div className="ai-head">
-                              <div className="r g10" style={{ flexWrap: "wrap" }}>
-                                <span className="w7" style={{ fontSize: 13.5 }}>{sym}</span>
-                                <span className={`bdg bdg-${dec.decision === "LONG" ? "long" : dec.decision === "SHORT" ? "short" : "wait"}`}>{dec.decision || "WAIT"}</span>
-                                {dec.confidence != null && (
-                                  <span className="bdg bdg-blue">CONF {dec.confidence}%</span>
-                                )}
-                                {dec.risk && (
-                                  <span style={{ fontSize: 10, fontWeight: 700, color: dec.risk === "HIGH" ? "var(--red)" : dec.risk === "MEDIUM" ? "var(--gold)" : "var(--green)" }}>{dec.risk} RISK</span>
-                                )}
-                                {dec.newsBlocked && <span className="bdg bdg-purple">News block</span>}
-                              </div>
-                              <span className="xs mut tn">{fmtTimeS(dec.time)}</span>
-                            </div>
-                            <div className="ai-body s10">
-                              {dec.strategy && <div><div className="ai-strat">{dec.strategy}</div></div>}
-                              {dec.reason && <div className={`ai-reason${isWait ? " ai-reason-wait" : ""}`}>{dec.reason}</div>}
-                              {(aiHistory[sym] || []).length > 1 && (
-                                <div className="mt4">
-                                  <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Recent decisions</div>
-                                  {(aiHistory[sym] || []).slice(0, 5).map((h, i) => (
-                                    <div key={i} className="r g8 xs" style={{ padding: "4px 0", borderTop: i ? "1px solid var(--border)" : "none" }}>
-                                      <span className="mut tn" style={{ minWidth: 50 }}>{fmtTime(h.time)}</span>
-                                      <span className={`bdg bdg-${h.decision === "LONG" ? "long" : h.decision === "SHORT" ? "short" : "wait"}`} style={{ fontSize: 8.5 }}>{h.decision || "WAIT"}</span>
-                                      <span className="sub">{h.confidence || 0}%</span>
-                                      <span className="mut" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.strategy || h.reason?.slice(0, 50) || "--"}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Open positions table */}
-                  <div className="panel">
-                    <div className="r g8 mb14" style={{ justifyContent:"space-between" }}>
-                      <div className="pt pt0">Open Positions</div>
-                      <span className="bdg bdg-blue">{openPositions.length}</span>
-                    </div>
-                    {openPositions.length === 0 ? (
-                      <div style={{ padding:"16px 0", textAlign:"center", color:"var(--text3)", fontSize:12 }}>No open positions</div>
-                    ) : (
-                      <table className="ptbl">
-                        <thead><tr>{["Instrument","Dir","Vol","Open","Current","P&L"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
-                        <tbody>
-                          {openPositions.map((pos, i) => {
-                            const pnl = pos.profit||0; const dir = pos.type==="POSITION_TYPE_BUY"?"LONG":"SHORT"; const pdp = (pos.openPrice||0)>100?2:5;
-                            return (
-                              <tr key={i}>
-                                <td style={{ fontWeight:700, color:"var(--gold)", fontSize:13 }}>{normSym(pos.symbol)}</td>
-                                <td><span className={`bdg bdg-${dir.toLowerCase()}`}>{dir}</span></td>
-                                <td className="sub xs">{pos.volume}L</td>
-                                <td className="mut xs tn">{(pos.openPrice||0).toFixed(pdp)}</td>
-                                <td className="sub xs tn">{(pos.currentPrice||0).toFixed(pdp)}</td>
-                                <td style={{ fontWeight:700, color:pnlColor(pnl), fontSize:13 }} className="tn">{pnlStr(pnl)}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-
-                  {/* System log */}
-                  <div className="panel">
-                    <div className="r g8 mb14" style={{ justifyContent:"space-between" }}>
-                      <div className="pt pt0">System Log</div>
-                      <button className="btn btn-g btn-sm" onClick={() => setLog([])}>Clear</button>
-                    </div>
-                    <div ref={logRef} className="log-wrap">
-                      {log.length === 0
-                        ? <div className="xs mut" style={{ padding:"12px 0" }}>Waiting for activity...</div>
-                        : log.slice().reverse().map((l, i) => (
-                          <div key={i} className={`log-ln log-${l.type}`}>
-                            <span className="log-ts">{l.time}</span>
-                            <span className="log-m">{l.msg}</span>
-                          </div>
-                        ))
-                      }
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* ========== ACTIVE TRADES — REMOVED IN V11 ========== */}
-          {/* Will be re-added as part of the live "AI watching" visualization (V11 Step 4). */}
-
-          {/* ========== NEWS ========== */}
-          {page === "news" && (() => {
-            const now = Date.now();
-            const hi  = newsEvents.filter((e) => e.impact === "High");
-            const med = newsEvents.filter((e) => e.impact === "Medium");
-            const nextHi = hi.filter((e) => !e.isPast).slice(0, 1)[0];
-
-            // Events affecting user's instruments within next 2 hours
-            const affecting = hi.filter((e) => {
-              if (e.isPast) return false;
-              if (e.minutesFromNow > 120) return false;
-              return newsAffects(e.country, instruments).length > 0;
-            });
-
-            // Group by day
-            const byDay = {};
-            newsEvents.forEach((e) => {
-              const d = new Date(e.ts);
-              const key = d.toUTCString().slice(0, 16);
-              if (!byDay[key]) byDay[key] = [];
-              byDay[key].push(e);
-            });
-
-            return (
-              <div className="s14">
-                {/* Summary cards */}
-                <div className="g4c">
-                  <div className="panel">
-                    <div className="pt">High Impact Today</div>
-                    <div style={{ fontSize: 24, fontWeight: 700, color: "var(--red)" }}>{hi.filter((e) => !e.isPast && e.minutesFromNow < 24 * 60).length}</div>
-                  </div>
-                  <div className="panel">
-                    <div className="pt">Medium Impact Today</div>
-                    <div style={{ fontSize: 24, fontWeight: 700, color: "var(--gold)" }}>{med.filter((e) => !e.isPast && e.minutesFromNow < 24 * 60).length}</div>
-                  </div>
-                  <div className="panel">
-                    <div className="pt">Next High-Impact</div>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", lineHeight: 1.3 }}>
-                      {nextHi ? `${nextHi.country} in ${nextHi.minutesFromNow} min` : "None upcoming"}
-                    </div>
-                    {nextHi && <div className="xs mut mt4">{nextHi.title}</div>}
-                  </div>
-                  <div className="panel">
-                    <div className="pt">Your Instruments Affected</div>
-                    <div style={{ fontSize: 24, fontWeight: 700, color: affecting.length ? "var(--red)" : "var(--green)" }}>{affecting.length}</div>
-                    <div className="xs mut mt4">in next 2 hours</div>
-                  </div>
-                </div>
-
-                {/* AI blocking preview */}
-                {affecting.length > 0 && (
-                  <div className="panel" style={{ borderLeft: "4px solid var(--red)" }}>
-                    <div className="pt">AI Trade Blocks (next 2 hours)</div>
-                    <p className="xs sub mt4 mb12">The AI will refuse to trade these instruments within +/- 15 min of the listed events:</p>
-                    {affecting.map((e, i) => {
-                      const blocked = newsAffects(e.country, instruments);
-                      return (
-                        <div key={i} className="srow">
-                          <span className="bdg bdg-red" style={{ marginRight: 8 }}>HIGH</span>
-                          <span className="w7 sm" style={{ color: "var(--text)" }}>{e.country}</span>
-                          <span className="sm sub" style={{ flex: 1, marginLeft: 8 }}>{e.title}</span>
-                          <span className="xs mut tn">in {e.minutesFromNow} min</span>
-                          <span className="ml">
-                            {blocked.map((sym) => (
-                              <span key={sym} className="bdg bdg-purple" style={{ marginLeft: 4 }}>{sym}</span>
-                            ))}
-                          </span>
-                        </div>
-                      );
-                    })}
+                {resolverStatus.meta?.syncedAt && (
+                  <div style={{ color: "var(--qb-text-muted)" }}>
+                    Last sync: {fmtRelTime(resolverStatus.meta.syncedAt)} ago
                   </div>
                 )}
-
-                {/* Full calendar */}
-                <div className="panel">
-                  <div className="r g8 mb14" style={{ justifyContent: "space-between" }}>
-                    <div className="pt pt0">Economic Calendar (ForexFactory)</div>
-                    <button className="btn btn-g btn-sm" onClick={fetchNews}>Refresh</button>
-                  </div>
-                  {newsEvents.length === 0 ? (
-                    <div style={{ padding: "16px 0", textAlign: "center", color: "var(--text3)", fontSize: 12 }}>Loading events...</div>
-                  ) : (
-                    Object.entries(byDay).map(([day, evs]) => (
-                      <div key={day} style={{ marginBottom: 16 }}>
-                        <div className="sm w7 sub mb8" style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>{day}</div>
-                        {evs.map((e, i) => {
-                          const affected = newsAffects(e.country, instruments);
-                          const impactClr = e.impact === "High" ? "#b91c1c" : e.impact === "Medium" ? "#b45309" : "#94a3b8";
-                          const pastClr = e.isPast ? "var(--text3)" : "var(--text)";
-                          return (
-                            <div key={i} className="r g10" style={{ padding: "7px 0", borderBottom: "1px solid var(--border)", opacity: e.isPast ? 0.5 : 1 }}>
-                              <span className="tn sm tn" style={{ minWidth: 62, color: pastClr, fontWeight: 600 }}>{fmtTime(e.date)}</span>
-                              <span style={{ width: 8, height: 8, borderRadius: 2, background: impactClr, flexShrink: 0 }} />
-                              <span className="w7 sm" style={{ minWidth: 40, color: pastClr }}>{e.country}</span>
-                              <span className="sm" style={{ flex: 1, color: pastClr }}>{e.title}</span>
-                              {e.forecast && <span className="xs mut tn">F: {e.forecast}</span>}
-                              {e.previous && <span className="xs mut tn">P: {e.previous}</span>}
-                              {!e.isPast && affected.length > 0 && (
-                                <span>
-                                  {affected.map((sym) => (
-                                    <span key={sym} className="bdg bdg-purple" style={{ marginLeft: 4, fontSize: 8.5 }}>{sym}</span>
-                                  ))}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                <div className="panel" style={{ background: "#f8fafc" }}>
-                  <div className="xs sub">
-                    <b>How it works:</b> This calendar is fetched live from ForexFactory (faireconomy.media). The AI automatically blocks new trades on any instrument whose currency has a HIGH-impact event within +/- 15 minutes. Medium and low impact events are shown for reference but do not block trading.
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* ========== REPORTS ========== */}
-          {page === "reports" && (() => {
-            const trades = [...closedTrades].sort((a,b) => new Date(b.time||b.closeTime||0)-new Date(a.time||a.closeTime||0));
-            const netPnl = trades.reduce((s,t) => s+(t.profit||0), 0);
-            const w = trades.filter((t) => (t.profit||0)>0).length;
-            const wr = trades.length ? ((w/trades.length)*100).toFixed(1) : "0.0";
-            const avgPnl = trades.length ? netPnl/trades.length : 0;
-            const instMap = {}; trades.forEach((t) => { const k=normSym(t.symbol)||"UNKNOWN"; if (!instMap[k]) instMap[k]={t:0,w:0,pnl:0}; instMap[k].t++; instMap[k].pnl+=t.profit||0; if ((t.profit||0)>0) instMap[k].w++; });
-            const sessMap = {}; trades.forEach((t) => { const s=getSessionLabel(t.time||t.closeTime); if (!sessMap[s]) sessMap[s]={t:0,w:0,pnl:0}; sessMap[s].t++; sessMap[s].pnl+=t.profit||0; if ((t.profit||0)>0) sessMap[s].w++; });
-            // V10: Compute "data freshness" status -- shows clearly if MetaAPI history is lagging.
-            const latestTradeTime = trades.length > 0 ? new Date(trades[0].time || trades[0].closeTime) : null;
-            const hoursSinceLatest = latestTradeTime ? (Date.now() - latestTradeTime.getTime()) / 3600000 : null;
-            const dataIsStale = hoursSinceLatest !== null && hoursSinceLatest > 36;  // >1.5 days = stale
-            const openCount = openPositions.length;
-            return (
-              <div className="s14">
-                {/* V10: Data freshness banner */}
-                {dataIsStale && (
-                  <div className="panel" style={{ borderLeft: "4px solid #f59e0b", padding: 12, background: "#fffbeb" }}>
-                    <div style={{ fontWeight: 700, color: "#92400e" }}>⚠ MetaAPI history may be lagging</div>
-                    <div className="xs sub mt4">
-                      Latest closed deal in MetaAPI: <strong>{latestTradeTime.toLocaleString()}</strong> ({hoursSinceLatest.toFixed(0)}h ago).
-                      {openCount > 0 && <> You currently have <strong>{openCount} position(s) still open</strong> — they will appear here only after they close.</>}
-                      {openCount === 0 && <> If you've had recent trades close, MetaAPI's deal history sync may be stalled. Check Vercel logs of /api/history for details.</>}
-                    </div>
-                  </div>
-                )}
-                {/* V10: Currently-open positions panel — these aren't in deal history yet */}
-                {openCount > 0 && (
-                  <div className="panel" style={{ borderLeft: "4px solid #3b82f6", padding: 12 }}>
-                    <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
-                      <div className="w7">In-progress positions ({openCount})</div>
-                      <div className="xs mut">Not yet in deal history — will appear after close</div>
-                    </div>
-                    <div className="g3 mt8">
-                      {openPositions.map((p) => (
-                        <div key={p.id || p.positionId} style={{ padding: 8, background: "#f8fafc", borderRadius: 6 }}>
-                          <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
-                            <span className="w7">{p.symbol}</span>
-                            <span style={{ color: p.direction === "LONG" ? "var(--green)" : "var(--red)", fontWeight: 700, fontSize: 11 }}>
-                              {p.direction || p.type}
-                            </span>
-                          </div>
-                          <div className="xs mut">@ {p.openPrice}</div>
-                          <div className="xs" style={{ color: (p.profit || 0) >= 0 ? "var(--green)" : "var(--red)", fontWeight: 700 }}>
-                            {pnlStr(p.profit || 0)}
-                          </div>
+                {resolverStatus.currentMap && Object.keys(resolverStatus.currentMap).length > 0 && (
+                  <details style={{ marginTop: 8 }}>
+                    <summary style={{ cursor: "pointer", color: "var(--qb-text-muted)", fontSize: 11 }}>
+                      View map ({Object.keys(resolverStatus.currentMap).length} entries)
+                    </summary>
+                    <div style={{ marginTop: 6, padding: 8, background: "var(--qb-bg-layer)", borderRadius: 4 }}>
+                      {Object.entries(resolverStatus.currentMap).map(([asset, sym]) => (
+                        <div key={asset} className="qb-mono" style={{ fontSize: 11, padding: "2px 0" }}>
+                          {asset.padEnd(12)} → {sym}
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
-                <div className="g4c">
-                  {[
-                    ["Total Trades", trades.length, "var(--blue)"],
-                    ["Net P&L", pnlStr(netPnl), pnlColor(netPnl)],
-                    ["Win Rate", `${wr}%`, parseFloat(wr)>=55?"var(--green)":parseFloat(wr)>=45?"var(--gold)":"var(--red)"],
-                    ["Avg / Trade", pnlStr(avgPnl), pnlColor(avgPnl)],
-                  ].map(([lbl,val,clr]) => (
-                    <div key={lbl} className="panel"><div className="pt">{lbl}</div><div style={{ fontSize:24,fontWeight:700,color:clr,letterSpacing:"-0.5px" }}>{val}</div></div>
-                  ))}
-                </div>
-
-                {/* V9.7: Visual reports dashboard */}
-                {trades.length > 0 && (() => {
-                  // Equity curve from oldest to newest
-                  const oldestFirst = [...trades].reverse();
-                  const equity = []; let cum = 0;
-                  oldestFirst.forEach(t => { cum += (t.profit || 0); equity.push(cum); });
-
-                  // Daily P&L grouping
-                  const dailyMap = {};
-                  oldestFirst.forEach(t => {
-                    const d = (t.time || t.closeTime || "").slice(0, 10);
-                    if (!d) return;
-                    if (!dailyMap[d]) dailyMap[d] = 0;
-                    dailyMap[d] += (t.profit || 0);
-                  });
-                  const dailyArr = Object.entries(dailyMap)
-                    .sort((a, b) => a[0].localeCompare(b[0]))
-                    .slice(-14) // last 14 days
-                    .map(([date, pnl]) => ({ label: date.slice(5), pnl }));
-
-                  // Win/Loss donut data
-                  const wins = trades.filter(t => (t.profit || 0) > 0);
-                  const losses = trades.filter(t => (t.profit || 0) < 0);
-                  const winsAmt = wins.reduce((s, t) => s + (t.profit || 0), 0);
-                  const lossesAmt = Math.abs(losses.reduce((s, t) => s + (t.profit || 0), 0));
-
-                  // Session breakdown for bar chart
-                  const sessBars = Object.entries(sessMap).map(([sess, s]) => ({
-                    label: sess, value: s.pnl, color: s.pnl >= 0 ? "#22c55e" : "#ef4444",
-                  })).filter(s => s.value !== 0);
-
-                  return (
-                    <>
-                      <div className="panel" style={{ padding: 16 }}>
-                        <div className="pt">Equity Curve · {trades.length} trades</div>
-                        <EquityCurve values={equity} height={220} />
-                      </div>
-
-                      <div className="chart-grid">
-                        <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                          <div className="chart-title">Win / Loss Split</div>
-                          <DonutChart
-                            data={[
-                              { value: winsAmt,   color: "#22c55e", label: "Wins" },
-                              { value: lossesAmt, color: "#ef4444", label: "Losses" },
-                            ]}
-                            size={140}
-                            label={pnlStr(netPnl)}
-                            sublabel={`${wins.length}W ${losses.length}L`}
-                          />
-                        </div>
-
-                        <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
-                          <div className="chart-title">Daily P&amp;L (last 14 days)</div>
-                          <DailyPnLBars days={dailyArr} height={150} />
-                        </div>
-
-                        {sessBars.length > 0 && (
-                          <div className="chart-card" style={{ minWidth: 0 }}>
-                            <div className="chart-title">By Session</div>
-                            <BarChart data={sessBars} height={150} valueFormat={(v) => v >= 0 ? `+$${v.toFixed(0)}` : `-$${Math.abs(v).toFixed(0)}`} />
-                          </div>
-                        )}
-                      </div>
-                    </>
-                  );
-                })()}
-
-                <div className="g2">
-                  <div className="panel">
-                    <div className="pt">By Instrument</div>
-                    {Object.keys(instMap).length===0 && <div className="xs mut">No data yet</div>}
-                    {Object.entries(instMap).map(([sym,s]) => (
-                      <div key={sym} className="srow">
-                        <span className="w7" style={{ width:80,fontSize:12.5,color:"var(--gold)" }}>{sym}</span>
-                        <span className="xs sub">{s.t}t</span>
-                        <span className="xs" style={{ color:"var(--green)" }}>{s.w}W</span>
-                        <span className="xs mut">{s.t-s.w}L</span>
-                        <span className="ml w7 tn" style={{ fontSize:12.5,color:pnlColor(s.pnl) }}>{pnlStr(s.pnl)}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="panel">
-                    <div className="pt">By Session</div>
-                    {Object.keys(sessMap).length===0 && <div className="xs mut">No data yet</div>}
-                    {Object.entries(sessMap).sort((a,b) => b[1].t-a[1].t).map(([sess,s]) => (
-                      <div key={sess} className="srow">
-                        <span className="w7" style={{ width:80,fontSize:12.5,color:SESSION_COLORS[sess]||"var(--text2)" }}>{sess}</span>
-                        <span className="xs sub">{s.t}t</span>
-                        <span className="xs" style={{ color:"var(--green)" }}>{s.w}W</span>
-                        <span className="xs mut">{s.t-s.w}L</span>
-                        <span className="ml w7 tn" style={{ fontSize:12.5,color:pnlColor(s.pnl) }}>{pnlStr(s.pnl)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="panel">
-                  <div className="pt">Trade History ({trades.length})</div>
-                  {trades.length===0
-                    ? <div style={{ padding:"20px 0",textAlign:"center",color:"var(--text3)",fontSize:12 }}>No closed trades yet</div>
-                    : (
-                      <div style={{ maxHeight:480,overflowY:"auto" }}>
-                        <table className="ptbl" style={{ width:"100%" }}>
-                          <thead><tr>{["Date","Time","Symbol","Dir","Vol","Price","P&L"].map((h) => <th key={h}>{h}</th>)}</tr></thead>
-                          <tbody>
-                            {trades.slice(0,200).map((t, i) => {
-                              const pnl=t.profit||0; const dir=(t.type==="DEAL_TYPE_BUY"||t.type==="BUY")?"BUY":(t.type==="DEAL_TYPE_SELL"||t.type==="SELL")?"SELL":(t.type||""); const pPrice = t.closePrice||t.price||0; const pdp=pPrice>100?2:5;
-                              return (
-                                <tr key={i}>
-                                  <td className="mut xs">{fmtDate(t.time||t.closeTime)}</td>
-                                  <td className="mut xs tn">{fmtTime(t.time||t.closeTime)}</td>
-                                  <td style={{ fontWeight:700,color:"var(--gold)",fontSize:12 }}>{normSym(t.symbol)}</td>
-                                  <td style={{ fontSize:11,color:dir==="BUY"?"var(--green)":"var(--red)",fontWeight:600 }}>{dir}</td>
-                                  <td className="sub xs">{(t.volume||0).toFixed(2)}L</td>
-                                  <td className="mut xs tn">{pPrice.toFixed(pdp)}</td>
-                                  <td style={{ fontWeight:700,color:pnlColor(pnl),fontSize:12 }} className="tn">{pnlStr(pnl)}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    )
-                  }
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* ========== STRATEGY LAB (V9.4 -- clean filterable) ========== */}
-          {page === "lab" && (() => {
-            // V10: Compute family stats from familyUniverse for V10 Family view
-            const familySymbols = Object.keys(familyUniverse || {});
-            const familyAggregate = {};
-            const FAMILY_KEYS = ["TREND", "REVERSION", "STRUCTURE", "BREAKOUT", "RANGE", "NEWS"];
-            const FAMILY_COLOR = { TREND:"#3b82f6", REVERSION:"#10b981", STRUCTURE:"#f59e0b", BREAKOUT:"#ef4444", RANGE:"#84cc16", NEWS:"#a855f7" };
-            const FAMILY_ICON  = { TREND:"📈", REVERSION:"🔄", STRUCTURE:"⚡", BREAKOUT:"💥", RANGE:"↔️", NEWS:"📰" };
-            for (const fam of FAMILY_KEYS) familyAggregate[fam] = { wins: 0, losses: 0, totalPnl: 0, total: 0, perSym: {} };
-            for (const sym of familySymbols) {
-              const symFams = familyUniverse[sym] || {};
-              for (const fam of FAMILY_KEYS) {
-                const s = symFams[fam];
-                if (!s || s.total === 0) continue;
-                familyAggregate[fam].wins += s.wins;
-                familyAggregate[fam].losses += s.losses;
-                familyAggregate[fam].totalPnl += s.totalPnl || 0;
-                familyAggregate[fam].total += s.total;
-                familyAggregate[fam].perSym[sym] = s;
-              }
-            }
-
-            const labData = learnedStats || {};
-            const allEntries = Object.entries(labData);
-            const labInst = [...new Set(allEntries.flatMap(([, d]) => Object.keys(d.instruments || {})))].sort();
-
-            // Compute derived metrics for ranking
-            const enriched = allEntries.map(([strat, d]) => {
-              const total = d.total || 0;
-              const wins  = d.totalWins || 0;
-              const losses = d.totalLosses || 0;
-              const wr = total > 0 ? (wins / total) * 100 : null;
-              const pnl = d.totalPnl || 0;
-              const expectancy = total > 0 ? pnl / total : 0;
-              const bl = (blacklist || []).includes(strat);
-              const crowns = d.crowns || 0;
-              return { strat, d, total, wins, losses, wr, pnl, expectancy, bl, crowns };
-            });
-
-            return (
-              <div className="s14">
-                {/* V10: Tab switcher */}
-                <div className="r g6">
-                  <button className={`btn btn-sm${labView === "family" ? " btn-p" : ""}`} onClick={() => setLabView("family")}>📊 Family View (V10)</button>
-                  <button className={`btn btn-sm${labView === "archive" ? " btn-p" : ""}`} onClick={() => setLabView("archive")}>📦 Tactic Archive (V9)</button>
-                  <button className="btn btn-sm" style={{ marginLeft: "auto" }} onClick={async () => {
-                    if (!confirm("Migrate V9 raw tactic data into V10 family records? Idempotent — safe to run multiple times.")) return;
-                    const r = await fetch(API("trades"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "migrate-v9" }) });
-                    const d = await r.json();
-                    alert("Migration: " + (d.migrated || 0) + " migrated, " + (d.skipped || 0) + " skipped (already migrated). Total V9: " + (d.totalV9Records || 0));
-                    fetchLab();
-                  }}>↻ Migrate V9 → V10</button>
-                </div>
-
-                {labView === "family" && (
-                  <>
-                    {/* V10 Family Lab dashboard */}
-                    <div className="panel">
-                      <div className="pt">Tactic Families · Bayesian Beta-distributions</div>
-                      <div className="xs sub mb8">Each family's win rate is shown as a probability distribution. Wider band = less data = more uncertainty. Tighter band = high confidence.</div>
-                      <div className="g3">
-                        {FAMILY_KEYS.map((fam) => {
-                          const a = familyAggregate[fam];
-                          const total = a.total;
-                          const fmColor = FAMILY_COLOR[fam];
-                          const wins = a.wins, losses = a.losses;
-                          // Beta mean + 95% CI
-                          const aA = wins + 1, aB = losses + 1;
-                          const mean = aA / (aA + aB);
-                          const variance = (aA * aB) / ((aA + aB) * (aA + aB) * (aA + aB + 1));
-                          const std = Math.sqrt(variance);
-                          const lo = Math.max(0, mean - 1.96 * std) * 100;
-                          const hi = Math.min(1, mean + 1.96 * std) * 100;
-                          const meanPct = mean * 100;
-                          const expect = total > 0 ? a.totalPnl / total : 0;
-                          return (
-                            <div key={fam} className="panel" style={{ borderLeft: `4px solid ${fmColor}`, padding: 14 }}>
-                              <div className="r" style={{ alignItems: "center", gap: 8 }}>
-                                <span style={{ fontSize: 20 }}>{FAMILY_ICON[fam]}</span>
-                                <div style={{ fontWeight: 700, fontSize: 14, color: fmColor }}>{fam}</div>
-                                <div className="xs mut" style={{ marginLeft: "auto" }}>{total} trades</div>
-                              </div>
-                              <div style={{ marginTop: 10, fontSize: 26, fontWeight: 800, color: fmColor }}>
-                                {meanPct.toFixed(0)}<span style={{ fontSize: 14, fontWeight: 600 }}>%</span>
-                                <span className="xs mut" style={{ marginLeft: 6, fontWeight: 500 }}>WR</span>
-                              </div>
-                              {/* Visual CI band */}
-                              <div style={{ background: "#e2e8f0", height: 8, borderRadius: 4, position: "relative", marginTop: 8 }}>
-                                <div style={{ position: "absolute", left: lo + "%", width: (hi - lo) + "%", height: "100%", background: fmColor + "60", borderRadius: 4 }} />
-                                <div style={{ position: "absolute", left: meanPct + "%", width: 2, height: "100%", background: fmColor }} />
-                              </div>
-                              <div className="xs mut" style={{ marginTop: 4 }}>95% CI: {lo.toFixed(0)}% – {hi.toFixed(0)}%</div>
-                              <div className="r mt8 xs" style={{ justifyContent: "space-between" }}>
-                                <span><span style={{ color: "var(--green)", fontWeight: 700 }}>{wins}</span>W / <span style={{ color: "var(--red)", fontWeight: 700 }}>{losses}</span>L</span>
-                                <span style={{ color: a.totalPnl >= 0 ? "var(--green)" : "var(--red)", fontWeight: 700 }}>${a.totalPnl.toFixed(0)}</span>
-                              </div>
-                              <div className="xs mut">Avg/trade: ${expect.toFixed(2)}</div>
-                              {/* Per-symbol breakdown */}
-                              {Object.keys(a.perSym).length > 0 && (
-                                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-                                  <div className="xs mut mb4">Per symbol:</div>
-                                  {Object.entries(a.perSym).map(([s, st]) => (
-                                    <div key={s} className="xs" style={{ display: "flex", justifyContent: "space-between" }}>
-                                      <span>{s}</span>
-                                      <span style={{ color: st.winRate >= 55 ? "var(--green)" : st.winRate >= 45 ? "var(--gold)" : "var(--red)" }}>{st.winRate}% ({st.total})</span>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                              {total === 0 && (
-                                <div className="xs mut mt8" style={{ fontStyle: "italic" }}>No trades yet on this family.</div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Per-symbol family matrix */}
-                    {familySymbols.length > 0 && (
-                      <div className="panel">
-                        <div className="pt">Per-Symbol Family Matrix</div>
-                        <div style={{ overflowX: "auto" }}>
-                          <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
-                            <thead>
-                              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                                <th style={{ textAlign: "left", padding: 6 }}>Symbol</th>
-                                {FAMILY_KEYS.map(f => <th key={f} style={{ textAlign: "center", padding: 6, color: FAMILY_COLOR[f] }}>{FAMILY_ICON[f]} {f.slice(0, 4)}</th>)}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {familySymbols.map(sym => {
-                                const symFams = familyUniverse[sym] || {};
-                                return (
-                                  <tr key={sym} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                                    <td style={{ padding: 6, fontWeight: 700 }}>{sym}</td>
-                                    {FAMILY_KEYS.map(f => {
-                                      const s = symFams[f];
-                                      if (!s || s.total === 0) return <td key={f} style={{ textAlign: "center", padding: 6, color: "var(--text3)" }}>—</td>;
-                                      const wrColor = s.winRate >= 55 ? "var(--green)" : s.winRate >= 45 ? "var(--gold)" : "var(--red)";
-                                      return (
-                                        <td key={f} style={{ textAlign: "center", padding: 6 }}>
-                                          <div style={{ color: wrColor, fontWeight: 700 }}>{s.winRate}%</div>
-                                          <div className="xs mut">{s.total}t</div>
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-                    {familySymbols.length === 0 && (
-                      <div className="panel empty">
-                        <div className="empty-title">No family data yet</div>
-                        <p className="xs mut mt6">Click "Migrate V9 → V10" above to import 3 weeks of testing data into the new family system.</p>
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {labView === "archive" && (() => {
-
-            // V9.4: Per-instrument overview (crowns / bans / top strat / coverage)
-            const instOverview = {};
-            for (const inst of labInst) {
-              const strats = allEntries.filter(([, d]) => d.instruments && d.instruments[inst]);
-              let crowned = 0, bannedC = 0, inconcC = 0, topPnl = -Infinity, topStrat = null, worstPnl = Infinity, worstStrat = null;
-              let sessionBest = {};
-              for (const [stratName, d] of strats) {
-                const di = d.instruments[inst];
-                if (di.crown) crowned++;
-                if (di.banned) bannedC++;
-                if (di.inconclusive) inconcC++;
-                if (di.totalPnl != null && di.totalPnl > topPnl)  { topPnl = di.totalPnl; topStrat = stratName; }
-                if (di.totalPnl != null && di.totalPnl < worstPnl){ worstPnl = di.totalPnl; worstStrat = stratName; }
-                if (di.sessionStats) {
-                  for (const [sess, ss] of Object.entries(di.sessionStats)) {
-                    if (!sessionBest[sess] || ss.expectancy > sessionBest[sess].expectancy) {
-                      sessionBest[sess] = { strat: stratName, expectancy: ss.expectancy, wr: ss.wr, total: ss.total };
-                    }
-                  }
-                }
-              }
-              instOverview[inst] = {
-                total: strats.length, crowned, banned: bannedC, inconclusive: inconcC,
-                topStrat, topPnl: topPnl === -Infinity ? 0 : topPnl,
-                worstStrat, worstPnl: worstPnl === Infinity ? 0 : worstPnl,
-                sessionBest,
-              };
-            }
-
-            // Find "best combination so far" (highest instruments-succeeded-with count)
-            let bestGlobal = null;
-            for (const { strat, d } of enriched) {
-              if (!d.instruments) continue;
-              const wonOn = Object.values(d.instruments).filter(x => x.crown).length;
-              if (!bestGlobal || wonOn > bestGlobal.wonOn) bestGlobal = { strat, wonOn };
-            }
-
-            // Apply filters
-            let filtered = enriched.filter((e) => {
-              if (labSearch && !e.strat.toLowerCase().includes(labSearch.toLowerCase())) return false;
-              if (labMinTrades > 0 && e.total < labMinTrades) return false;
-              if (labInstFilter !== "all") {
-                if (!e.d.instruments || !e.d.instruments[labInstFilter]) return false;
-              }
-              if (labFilter === "winners")    return !(e.wr == null || e.wr < 55);
-              if (labFilter === "losers")     return !(e.wr == null || e.wr >= 45);
-              if (labFilter === "tested")     return e.total >= 10;
-              if (labFilter === "crown")      return e.crowns >= 1;
-              if (labFilter === "blacklist")  return e.bl;
-              return true;
-            });
-
-            // Apply sort
-            filtered.sort((a, b) => {
-              if (labSort === "winRate")    return (b.wr || 0) - (a.wr || 0);
-              if (labSort === "trades")     return b.total - a.total;
-              if (labSort === "pnl")        return b.pnl - a.pnl;
-              if (labSort === "expectancy") return b.expectancy - a.expectancy;
-              return 0;
-            });
-
-            const totals = enriched.reduce((acc, e) => {
-              acc.t += e.total; acc.w += e.wins; acc.l += e.losses; acc.pnl += e.pnl;
-              return acc;
-            }, { t: 0, w: 0, l: 0, pnl: 0 });
-            const topCount = filtered.length;
-
-            return (
-              <>
-                {/* ---- V9.4 Instrument Overview Top Bar ---- */}
-                {labInst.length > 0 && (
-                  <div className="panel" style={{ padding: 14, marginBottom: 4 }}>
-                    <div className="pt" style={{ marginBottom: 10 }}>Instrument Overview</div>
-                    <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(200px, 1fr))`, gap: 10 }}>
-                      {labInst.map((inst) => {
-                        const o = instOverview[inst];
-                        const bestSessE = Object.entries(o.sessionBest).sort((a, b) => b[1].expectancy - a[1].expectancy)[0];
-                        return (
-                          <div key={inst} style={{ padding: 10, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg2)" }}>
-                            <div className="r g6" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                              <span className="w7" style={{ fontSize: 14 }}>{inst}</span>
-                              <span className="xs mut">{o.total} combos</span>
-                            </div>
-                            <div className="r g8 xs" style={{ flexWrap: "wrap", marginBottom: 6 }}>
-                              <span style={{ color: "var(--gold)" }}>👑 {o.crowned}</span>
-                              <span style={{ color: "var(--red)" }}>🚫 {o.banned}</span>
-                              <span style={{ color: "var(--mut)" }}>⋯ {o.inconclusive}</span>
-                            </div>
-                            {o.topStrat && (
-                              <div className="xs" style={{ marginTop: 4 }}>
-                                <span className="mut">Best: </span>
-                                <span className="w7" style={{ color: "var(--green)" }}>{o.topStrat.slice(0, 18)}</span>
-                                <span className="mut"> {pnlStr(o.topPnl)}</span>
-                              </div>
-                            )}
-                            {o.worstStrat && o.worstPnl < 0 && (
-                              <div className="xs" style={{ marginTop: 2 }}>
-                                <span className="mut">Worst: </span>
-                                <span className="w7" style={{ color: "var(--red)" }}>{o.worstStrat.slice(0, 18)}</span>
-                                <span className="mut"> {pnlStr(o.worstPnl)}</span>
-                              </div>
-                            )}
-                            {bestSessE && (
-                              <div className="xs mut" style={{ marginTop: 4 }}>
-                                Best session: <span className="w7" style={{ color: "var(--blue)" }}>{bestSessE[0]}</span>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {bestGlobal && bestGlobal.wonOn > 0 && (
-                      <div className="mt12 xs sub" style={{ textAlign: "center" }}>
-                        ⭐ <span className="w7">Best overall:</span> <span style={{ color: "var(--gold)" }}>{bestGlobal.strat}</span> — crowned on <span className="w7">{bestGlobal.wonOn}</span> instrument{bestGlobal.wonOn > 1 ? "s" : ""}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* ---- V9.7 Visual Dashboard ---- */}
-                {enriched.length > 0 && (() => {
-                  // Win rate distribution buckets
-                  const wrBuckets = [
-                    { label: "Crowned 65%+",  value: enriched.filter(e => e.wr != null && e.wr >= 65).length, color: "#15803d" },
-                    { label: "Solid 50-65%",  value: enriched.filter(e => e.wr != null && e.wr >= 50 && e.wr < 65).length, color: "#22c55e" },
-                    { label: "Mid 35-50%",    value: enriched.filter(e => e.wr != null && e.wr >= 35 && e.wr < 50).length, color: "#f59e0b" },
-                    { label: "Weak < 35%",    value: enriched.filter(e => e.wr != null && e.wr < 35).length, color: "#ef4444" },
-                    { label: "Untested",      value: enriched.filter(e => e.wr == null || e.total < 3).length, color: "#94a3b8" },
-                  ].filter(b => b.value > 0);
-
-                  // Top 6 strategies by P&L
-                  const topPnl = [...enriched]
-                    .filter(e => e.total >= 3)
-                    .sort((a, b) => b.pnl - a.pnl)
-                    .slice(0, 6)
-                    .map(e => ({ label: e.strat.split("+")[0].slice(0,8), value: e.pnl, color: e.pnl >= 0 ? "#22c55e" : "#ef4444" }));
-
-                  // Bottom 6 (worst losers)
-                  const worstPnl = [...enriched]
-                    .filter(e => e.total >= 3 && e.pnl < 0)
-                    .sort((a, b) => a.pnl - b.pnl)
-                    .slice(0, 6)
-                    .map(e => ({ label: e.strat.split("+")[0].slice(0,8), value: e.pnl, color: "#ef4444" }));
-
-                  // Confidence pyramid -- count of trades by trade outcome tier
-                  const totalWins = enriched.reduce((s, e) => s + e.wins, 0);
-                  const totalLosses = enriched.reduce((s, e) => s + e.losses, 0);
-                  const totalCrowned = enriched.filter(e => e.crowns >= 1).length;
-                  const totalBlacklisted = enriched.filter(e => e.bl).length;
-                  const tiers = [
-                    { label: "Crowned 👑",   value: totalCrowned,    color: "#f59e0b" },
-                    { label: "Wins",         value: totalWins,       color: "#22c55e" },
-                    { label: "Losses",       value: totalLosses,     color: "#ef4444" },
-                    { label: "Blacklisted",  value: totalBlacklisted,color: "#7c3aed" },
-                  ].filter(t => t.value > 0);
-
-                  // Overall WR donut
-                  const overallWR = totals.t > 0 ? (totals.w / totals.t) * 100 : 0;
-                  const wrColor = overallWR >= 55 ? "#22c55e" : overallWR >= 45 ? "#f59e0b" : "#ef4444";
-
-                  return (
-                    <div className="chart-grid">
-                      <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                        <div className="chart-title">Overall Win Rate</div>
-                        <ProgressRing value={overallWR} size={140} color={wrColor} label={`${overallWR.toFixed(0)}%`} sublabel={`${totals.w}W / ${totals.l}L`} thickness={12} />
-                      </div>
-
-                      <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                        <div className="chart-title">Strategy Quality</div>
-                        <DonutChart
-                          data={wrBuckets}
-                          size={140}
-                          label={enriched.length}
-                          sublabel="strategies"
-                        />
-                        <div className="mt8" style={{ width: "100%", display: "flex", flexDirection: "column", gap: 3 }}>
-                          {wrBuckets.map((b, i) => (
-                            <div key={i} className="r g6 xs" style={{ alignItems: "center" }}>
-                              <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color, display: "inline-block" }} />
-                              <span style={{ flex: 1, color: "#475569", fontSize: 10 }}>{b.label}</span>
-                              <span className="w7" style={{ fontSize: 10 }}>{b.value}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
-                        <div className="chart-title">Top Strategies (Net P&amp;L)</div>
-                        <BarChart data={topPnl} height={180} valueFormat={(v) => v >= 0 ? `+$${v.toFixed(0)}` : `-$${Math.abs(v).toFixed(0)}`} />
-                      </div>
-
-                      <div className="chart-card" style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                        <div className="chart-title">Lab Pyramid</div>
-                        <PyramidChart tiers={tiers} />
-                      </div>
-
-                      {worstPnl.length > 0 && (
-                        <div className="chart-card" style={{ gridColumn: "span 2", minWidth: 0 }}>
-                          <div className="chart-title">Worst Losers</div>
-                          <BarChart data={worstPnl} height={140} valueFormat={(v) => `-$${Math.abs(v).toFixed(0)}`} />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                {/* ---- Summary row ---- */}
-                <div className="g4c">
-                  {[
-                    ["Strategies Total",  enriched.length, "var(--blue)"],
-                    ["Showing",           topCount, "var(--text)"],
-                    ["Overall Win Rate",  totals.t ? `${Math.round(totals.w / totals.t * 100)}%` : "--", totals.t && totals.w / totals.t >= 0.55 ? "var(--green)" : totals.t && totals.w / totals.t >= 0.45 ? "var(--gold)" : "var(--red)"],
-                    ["Net P&L",           pnlStr(totals.pnl), pnlColor(totals.pnl)],
-                  ].map(([lbl, val, clr]) => (
-                    <div key={lbl} className="panel">
-                      <div className="pt">{lbl}</div>
-                      <div style={{ fontSize: 24, fontWeight: 700, color: clr, letterSpacing: "-0.5px" }}>{val}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* ---- Filter bar ---- */}
-                <div className="panel" style={{ padding: 14 }}>
-                  <div className="r g8" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                    <input
-                      className="inp"
-                      placeholder="Search strategy name..."
-                      value={labSearch}
-                      onChange={(e) => setLabSearch(e.target.value)}
-                      style={{ flex: "1 1 200px", minWidth: 0 }}
-                    />
-                    <select className="inp" value={labFilter} onChange={(e) => setLabFilter(e.target.value)} style={{ flex: "0 0 auto" }}>
-                      <option value="all">All strategies</option>
-                      <option value="winners">Winners (≥55% WR)</option>
-                      <option value="losers">Losers (&lt;45% WR)</option>
-                      <option value="tested">Well-tested (≥10 trades)</option>
-                      <option value="crown">Crowned</option>
-                      <option value="blacklist">Blacklisted</option>
-                    </select>
-                    <select className="inp" value={labSort} onChange={(e) => setLabSort(e.target.value)} style={{ flex: "0 0 auto" }}>
-                      <option value="winRate">Sort: Win Rate</option>
-                      <option value="trades">Sort: # Trades</option>
-                      <option value="pnl">Sort: Total P&L</option>
-                      <option value="expectancy">Sort: Expectancy</option>
-                    </select>
-                    <select className="inp" value={labInstFilter} onChange={(e) => setLabInstFilter(e.target.value)} style={{ flex: "0 0 auto" }}>
-                      <option value="all">All instruments</option>
-                      {labInst.map((i) => <option key={i} value={i}>{i}</option>)}
-                    </select>
-                    <div className="r g4" style={{ alignItems: "center", flex: "0 0 auto" }}>
-                      <span className="xs mut">Min trades:</span>
-                      <input
-                        className="inp"
-                        type="number" min="0" max="999"
-                        value={labMinTrades}
-                        onChange={(e) => setLabMinTrades(parseInt(e.target.value) || 0)}
-                        style={{ width: 60, padding: "6px 8px" }}
-                      />
-                    </div>
-                    {(labSearch || labFilter !== "all" || labMinTrades > 0 || labInstFilter !== "all") && (
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => { setLabSearch(""); setLabFilter("all"); setLabMinTrades(0); setLabInstFilter("all"); }}
-                      >Clear</button>
-                    )}
-                  </div>
-                </div>
-
-                {/* ---- Strategy list ---- */}
-                {filtered.length === 0 ? (
-                  <div className="panel empty">
-                    <div className="empty-ico">&#9651;</div>
-                    <div className="empty-title">
-                      {enriched.length === 0 ? "Strategy Lab is Empty" : "No strategies match filters"}
-                    </div>
-                    <p className="xs mut mt6">
-                      {enriched.length === 0
-                        ? "Trade results populate this automatically. Data persists forever."
-                        : "Adjust filters above to see more results."}
-                    </p>
-                  </div>
-                ) : (
-                  <div style={{ display: "grid", gap: 10 }}>
-                    {filtered.map(({ strat, d, total, wins, losses, wr, pnl, expectancy, bl, crowns }, idx) => {
-                      const expanded = !!labExpanded[strat];
-                      const wc = wr != null ? (wr >= 65 ? "var(--green)" : wr >= 50 ? "var(--gold)" : "var(--red)") : "var(--text3)";
-                      const leftColor = bl ? "var(--purple)" : crowns >= 3 ? "var(--gold)" : crowns >= 2 ? "var(--blue)" : crowns >= 1 ? "var(--green)" : "var(--border2)";
-                      const tpd = d.aggTpDistribution || {};
-                      const totalTp = (tpd.tp1Only || 0) + (tpd.tp2Reached || 0) + (tpd.tp3Reached || 0) + (tpd.tp4Reached || 0) + (tpd.slHit || 0);
-                      return (
-                        <div
-                          key={strat}
-                          className="lc"
-                          style={{ borderLeftColor: leftColor, opacity: bl ? 0.65 : 1, padding: "12px 14px", cursor: "pointer" }}
-                          onClick={() => setLabExpanded((p) => ({ ...p, [strat]: !p[strat] }))}
-                        >
-                          {/* Compact row */}
-                          <div className="r" style={{ alignItems: "center", gap: 12 }}>
-                            <div style={{ minWidth: 32, textAlign: "center" }}>
-                              <div style={{ fontSize: 18, fontWeight: 700, color: "var(--mut)" }}>#{idx + 1}</div>
-                            </div>
-
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div className="r g6" style={{ flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
-                                {crowns >= 1 && <span style={{ color: "var(--gold)", fontSize: 12 }}>{"★".repeat(Math.min(crowns, 3))}</span>}
-                                <span className="w7" style={{ fontSize: 14, wordBreak: "break-word" }}>{strat}</span>
-                                {bl && <span className="bdg bdg-purple" style={{ fontSize: 9 }}>BLACKLIST</span>}
-                                {d.isLocked && <span className="bdg bdg-gold" style={{ fontSize: 9 }}>LOCKED</span>}
-                              </div>
-                              <div className="r g10 xs sub" style={{ flexWrap: "wrap" }}>
-                                <span>{total} trades</span>
-                                <span style={{ color: "var(--green)" }}>{wins}W</span>
-                                <span style={{ color: "var(--red)" }}>{losses}L</span>
-                                <span className="w7 tn" style={{ color: pnlColor(pnl) }}>{pnlStr(pnl)}</span>
-                                <span className="xs mut">E: ${expectancy.toFixed(2)}</span>
-                              </div>
-                            </div>
-
-                            <div style={{
-                              width: 54, height: 54, borderRadius: "50%", flexShrink: 0,
-                              border: `3px solid ${wc}`, display: "flex", alignItems: "center", justifyContent: "center",
-                            }}>
-                              <span style={{ fontSize: 13, fontWeight: 800, color: wc }}>{wr != null ? `${Math.round(wr)}%` : "--"}</span>
-                            </div>
-
-                            <div style={{ color: "var(--mut)", fontSize: 16, flexShrink: 0 }}>{expanded ? "▾" : "▸"}</div>
-                          </div>
-
-                          {/* Expanded: TP distribution + per-instrument */}
-                          {expanded && (
-                            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
-                              {/* V9.7: Strategy Decoder */}
-                              <div style={{ marginBottom: 14 }}>
-                                <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Strategy Decoder</div>
-                                <StrategyDecoder strategy={strat} />
-                              </div>
-
-                              {totalTp > 0 && (
-                                <div style={{ marginBottom: 14 }}>
-                                  <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Outcome Distribution</div>
-                                  <div className="tpd-bar">
-                                    {[
-                                      ["tp4Reached", "#15803d", "TP4"],
-                                      ["tp3Reached", "#22c55e", "TP3"],
-                                      ["tp2Reached", "#84cc16", "TP2"],
-                                      ["tp1Only",    "#b45309", "TP1"],
-                                      ["slHit",      "#b91c1c", "SL"],
-                                    ].map(([k, c, l]) => {
-                                      const v = tpd[k] || 0;
-                                      if (v === 0) return null;
-                                      const pct = (v / totalTp) * 100;
-                                      return <div key={k} className="tpd-seg" style={{ width: `${pct}%`, background: c }} title={`${l}: ${v} (${pct.toFixed(0)}%)`} />;
-                                    })}
-                                  </div>
-                                  <div className="r g12 mt8 xs sub" style={{ flexWrap: "wrap" }}>
-                                    {tpd.tp4Reached > 0 && <span><span style={{ color: "#15803d" }}>■</span> TP4 {tpd.tp4Reached} ({Math.round(tpd.tp4Reached / totalTp * 100)}%)</span>}
-                                    {tpd.tp3Reached > 0 && <span><span style={{ color: "#22c55e" }}>■</span> TP3 {tpd.tp3Reached} ({Math.round(tpd.tp3Reached / totalTp * 100)}%)</span>}
-                                    {tpd.tp2Reached > 0 && <span><span style={{ color: "#84cc16" }}>■</span> TP2 {tpd.tp2Reached} ({Math.round(tpd.tp2Reached / totalTp * 100)}%)</span>}
-                                    {tpd.tp1Only    > 0 && <span><span style={{ color: "#b45309" }}>■</span> TP1 only {tpd.tp1Only} ({Math.round(tpd.tp1Only / totalTp * 100)}%)</span>}
-                                    {tpd.slHit      > 0 && <span><span style={{ color: "#b91c1c" }}>■</span> SL {tpd.slHit} ({Math.round(tpd.slHit / totalTp * 100)}%)</span>}
-                                  </div>
-                                </div>
-                              )}
-
-                              {d.failureNote && (
-                                <div className="fail-note" style={{ marginBottom: 12 }}>
-                                  <b>Why it fails:</b> {d.failureNote}
-                                </div>
-                              )}
-
-                              {labInst.length > 0 && (
-                                <div>
-                                  <div className="xs mut w7 mb8" style={{ letterSpacing: 0.06, textTransform: "uppercase" }}>Per-Instrument Performance</div>
-                                  <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(130px, 1fr))`, gap: 8 }}>
-                                    {labInst.map((inst) => {
-                                      const di = (d.instruments || {})[inst];
-                                      const ic = di && di.crown ? "var(--green)" : di && di.banned ? "var(--red)" : "var(--border2)";
-                                      return (
-                                        <div key={inst} className="lic" style={{ borderColor: ic, opacity: di ? 1 : 0.35, padding: 8 }}>
-                                          <div className="r g4" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                                            <span className="xs w7 sub">{inst}</span>
-                                            <div className="r g4">
-                                              {di && di.crown  && <span className="bdg bdg-gold" style={{ fontSize: 8, padding: "1px 5px" }}>★</span>}
-                                              {di && di.banned && <span className="bdg bdg-red"  style={{ fontSize: 8, padding: "1px 5px" }}>BAN</span>}
-                                            </div>
-                                          </div>
-                                          {di ? (
-                                            <>
-                                              <div className="r g6 xs" style={{ marginBottom: 4 }}>
-                                                <span style={{ color: "var(--green)" }}>{di.wins}W</span>
-                                                <span style={{ color: "var(--red)" }}>{di.losses}L</span>
-                                                <span className="mut">{di.total}T</span>
-                                              </div>
-                                              {di.winRate != null && (
-                                                <>
-                                                  <div className="wrb"><div className="wrf" style={{ width: `${di.winRate}%`, background: di.winRate >= 65 ? "var(--green)" : di.winRate >= 50 ? "var(--gold)" : "var(--red)" }} /></div>
-                                                  <div className="mt4 xs mut">{di.winRate}% · {di.avgPnl != null ? `${di.avgPnl >= 0 ? "+" : ""}$${di.avgPnl}` : ""}</div>
-                                                </>
-                                              )}
-                                            </>
-                                          ) : (
-                                            <div className="xs mut">Not tested</div>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+                  </details>
                 )}
               </>
-            );
-          })()}
-              </div>
-            );
-          })()}
-
-          {/* ========== BACKTEST (V10) ========== */}
-          {page === "backtest" && (
-            <div className="s14">
-              <div className="panel">
-                <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 16, fontWeight: 800 }}>Backtest Engine · Out-of-Sample Validation</div>
-                    <div className="xs sub mt4">Runs each family against historical candles. Compares vs live performance to detect overfit.</div>
-                  </div>
-                  <button className="btn btn-sm" onClick={fetchHistoricalStatus}>↻ Refresh Status</button>
-                </div>
-
-                {/* Step 1: Download historical */}
-                <div className="panel" style={{ padding: 12, marginTop: 10, background: "#f8fafc" }}>
-                  <div className="w7 mb6">Step 1: Download historical data</div>
-                  <div className="xs sub mb8">Requires <code>TWELVE_DATA_KEY</code> env var. Get free key at twelvedata.com (800 calls/day).</div>
-                  <div className="r g6" style={{ flexWrap: "wrap", marginBottom: 10 }}>
-                    {instruments.map((sym) => (
-                      <button
-                        key={sym}
-                        className="btn btn-sm"
-                        onClick={() => downloadHistorical(sym)}
-                        disabled={backtestRunning}
-                      >
-                        ⬇ {sym}
-                      </button>
-                    ))}
-                  </div>
-                  {historicalStatus.length > 0 && (
-                    <div className="mt8">
-                      <div className="xs w7 mb4">Cached data:</div>
-                      <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
-                        <thead>
-                          <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                            <th style={{ textAlign: "left", padding: 4 }}>Symbol</th>
-                            <th style={{ textAlign: "left", padding: 4 }}>TF</th>
-                            <th style={{ textAlign: "left", padding: 4 }}>Range</th>
-                            <th style={{ textAlign: "right", padding: 4 }}>Days</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {historicalStatus.map((h, i) => (
-                            <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                              <td className="w7" style={{ padding: 4 }}>{h.symbol}</td>
-                              <td style={{ padding: 4 }}>{h.tf}</td>
-                              <td style={{ padding: 4 }}>{h.firstDate} → {h.lastDate}</td>
-                              <td style={{ padding: 4, textAlign: "right" }}>{h.count}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-
-                {/* Step 2: Run backtest */}
-                <div className="panel" style={{ padding: 12, marginTop: 10, background: "#fffbeb" }}>
-                  <div className="w7 mb6">Step 2: Run backtest</div>
-                  <div className="xs sub mb8">Runs all 6 families against the cached historical data. Results stored for 30 days and used by AI to detect overfit families.</div>
-                  <div className="r g6" style={{ flexWrap: "wrap" }}>
-                    {instruments.map((sym) => (
-                      <button
-                        key={sym}
-                        className="btn btn-sm btn-p"
-                        onClick={() => runBacktest(sym, "ALL")}
-                        disabled={backtestRunning}
-                      >
-                        🧪 Run {sym} (all 6)
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Step 3: View results */}
-                <div className="panel" style={{ padding: 12, marginTop: 10 }}>
-                  <div className="w7 mb6">Step 3: View results</div>
-                  <div className="r g6 mb8">
-                    {instruments.map((sym) => (
-                      <button
-                        key={sym}
-                        className={`btn btn-sm${backtestSymbol === sym ? " btn-p" : ""}`}
-                        onClick={() => { setBacktestSymbol(sym); fetchBacktestSummary(sym); }}
-                      >
-                        {sym}
-                      </button>
-                    ))}
-                  </div>
-
-                  {backtestSymbol && backtestData[backtestSymbol] && backtestData[backtestSymbol].length > 0 ? (
-                    <div className="g3">
-                      {backtestData[backtestSymbol].map((bt, i) => {
-                        const fam = bt.family;
-                        const FAMILY_COLOR = { TREND:"#3b82f6", REVERSION:"#10b981", STRUCTURE:"#f59e0b", BREAKOUT:"#ef4444", RANGE:"#84cc16", NEWS:"#a855f7" };
-                        const fmColor = FAMILY_COLOR[fam] || "#94a3b8";
-                        const stats = bt.stats || {};
-                        const wrColor = stats.winRate >= 55 ? "#15803d" : stats.winRate >= 45 ? "#f59e0b" : "#dc2626";
-                        // Compare vs live family stats
-                        const liveStat = (familyUniverse[backtestSymbol] || {})[fam];
-                        const liveWR = liveStat ? liveStat.winRate : null;
-                        const divergence = liveWR != null && stats.winRate != null ? Math.abs(liveWR - stats.winRate) : null;
-                        return (
-                          <div key={i} className="panel" style={{ borderLeft: `4px solid ${fmColor}`, padding: 14 }}>
-                            <div className="r" style={{ alignItems: "center", justifyContent: "space-between" }}>
-                              <div className="w7" style={{ color: fmColor }}>{fam}</div>
-                              <div className="xs mut">{stats.total} trades</div>
-                            </div>
-                            <div style={{ marginTop: 8, fontSize: 22, fontWeight: 800, color: wrColor }}>
-                              {stats.winRate}<span style={{ fontSize: 12, fontWeight: 600 }}>%</span>
-                              <span className="xs mut" style={{ marginLeft: 6, fontWeight: 500 }}>backtest WR</span>
-                            </div>
-                            <div className="xs mt4">
-                              Profit Factor: <span className="w7" style={{ color: stats.profitFactor >= 1.5 ? "var(--green)" : stats.profitFactor >= 1.0 ? "var(--gold)" : "var(--red)" }}>{stats.profitFactor}</span>
-                            </div>
-                            <div className="xs mt2">Expectancy: {stats.expectancyR}R</div>
-                            <div className="xs mt2">Max Drawdown: {stats.maxDrawdownR}R</div>
-                            <div className="xs mt2 mut">Final equity: {stats.finalEquity}R</div>
-                            {liveWR != null && (
-                              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-                                <div className="xs mut">Live: {liveWR}% WR (n={liveStat.total})</div>
-                                {divergence > 15 && (
-                                  <div className="xs w7" style={{ color: "var(--red)", marginTop: 2 }}>⚠ Overfit warning · diverges {divergence.toFixed(0)}pp</div>
-                                )}
-                                {divergence != null && divergence <= 15 && stats.total >= 10 && (
-                                  <div className="xs w7" style={{ color: "var(--green)", marginTop: 2 }}>✓ Live aligned with backtest</div>
-                                )}
-                              </div>
-                            )}
-                            <div className="xs mut mt4" style={{ fontSize: 9 }}>{bt.start} → {bt.end} · {bt.candleCount} candles</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="xs mut" style={{ padding: 20, textAlign: "center" }}>
-                      {backtestSymbol ? `No backtest results for ${backtestSymbol} yet. Run a backtest above.` : "Pick a symbol above to view results."}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ========== PAIR INTEL (V10) ========== */}
-          {page === "intel" && (
-            <div className="s14">
-              <div className="panel">
-                <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 16, fontWeight: 800 }}>Pair Intelligence Engine</div>
-                    <div className="xs sub mt4">Bot-recommended pairs based on regime, family performance, session match, and chaos detection. Updated every 10 min.</div>
-                  </div>
-                  <button className="btn btn-sm" onClick={fetchPairIntel}>↻ Refresh</button>
-                </div>
-
-                {pairIntel.length === 0 ? (
-                  <div className="xs mut" style={{ padding: 20, textAlign: "center" }}>Loading pair intelligence... (first scan can take 30-60s)</div>
-                ) : (
-                  <div className="g3">
-                    {pairIntel.map((p) => {
-                      const isUserPair = p.inUserSet;
-                      const recColor = p.recommendation === "FAVORED" ? "#15803d"
-                                    : p.recommendation === "NEUTRAL"  ? "#3b82f6"
-                                    : p.recommendation === "CAUTION"  ? "#f59e0b"
-                                    : "#dc2626";
-                      const scoreColor = p.score >= 70 ? "#15803d" : p.score >= 50 ? "#3b82f6" : p.score >= 30 ? "#f59e0b" : "#dc2626";
-                      return (
-                        <div key={p.sym} className="panel" style={{ borderLeft: `4px solid ${recColor}`, padding: 14, position: "relative" }}>
-                          {isUserPair && (
-                            <div style={{ position: "absolute", top: 8, right: 8, fontSize: 9, padding: "2px 7px", background: "#dbeafe", color: "#1e40af", borderRadius: 9, fontWeight: 700 }}>ACTIVE</div>
-                          )}
-                          <div className="r" style={{ alignItems: "center", gap: 8, marginBottom: 4 }}>
-                            <div style={{ fontSize: 17, fontWeight: 800 }}>{p.sym}</div>
-                            <div style={{ fontSize: 22, fontWeight: 800, color: scoreColor, marginLeft: "auto" }}>{p.score}</div>
-                          </div>
-                          <div className="xs w7" style={{ color: recColor, marginBottom: 6 }}>{p.recommendation}</div>
-                          <div className="r g6" style={{ flexWrap: "wrap", marginBottom: 8 }}>
-                            {(p.badges || []).map((b, i) => (
-                              <span key={i} style={{ fontSize: 9, padding: "2px 6px", background: b.color + "15", color: b.color, borderRadius: 8, fontWeight: 700 }}>{b.label}</span>
-                            ))}
-                            {p.cluster && <span style={{ fontSize: 9, padding: "2px 6px", background: "#f1f5f9", color: "#475569", borderRadius: 8, fontWeight: 600 }}>{p.cluster}</span>}
-                          </div>
-                          {p.bestFamily && p.totalTrades > 0 && (
-                            <div className="xs mut">Best family: <span className="w7" style={{ color: "var(--text2)" }}>{p.bestFamily}</span> ({p.bestWR}% WR, {p.totalTrades} trades)</div>
-                          )}
-                          {(p.reasons || []).slice(0, 3).map((rs, i) => (
-                            <div key={i} className="xs mut" style={{ marginTop: 2 }}>• {rs}</div>
-                          ))}
-                          {!isUserPair && p.score >= 60 && (
-                            <button
-                              className="btn btn-sm btn-p mt8"
-                              style={{ width: "100%" }}
-                              onClick={() => addInstrument(p.sym)}
-                            >+ Add to Active Pairs</button>
-                          )}
-                          {isUserPair && p.score < 30 && (
-                            <button
-                              className="btn btn-sm mt8"
-                              style={{ width: "100%", color: "var(--red)", borderColor: "var(--red)" }}
-                              onClick={() => removeInstrument(p.sym)}
-                            >− Remove (low score)</button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ========== BOT MEMORY (V10) ========== */}
-          {page === "memory" && (
-            <div className="s14">
-              <div className="panel">
-                <div className="r" style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 16, fontWeight: 800 }}>Bot Memory · 3-Layer System</div>
-                    <div className="xs sub mt4">What the AI remembers across calls. Continuous identity, not reborn each time.</div>
-                  </div>
-                  <button className="btn btn-sm" onClick={fetchMemory}>↻ Refresh</button>
-                </div>
-
-                {!botMemory ? (
-                  <div className="xs mut" style={{ padding: 20, textAlign: "center" }}>Loading memory...</div>
-                ) : (
-                  <>
-                    {/* Short-term layer */}
-                    <div className="panel" style={{ borderLeft: "4px solid #ef4444", padding: 14, marginTop: 12 }}>
-                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 18 }}>⚡</span>
-                        <div style={{ fontWeight: 700 }}>Short-term (24h TTL)</div>
-                      </div>
-                      <div className="xs sub mt4">Last 20 decisions, current open positions, today&apos;s anomalies</div>
-                      <div className="mt8 xs">
-                        <div className="w7 mb4">Recent Decisions ({(botMemory.short?.decisions || []).length}):</div>
-                        {(botMemory.short?.decisions || []).slice(-8).reverse().map((d, i) => (
-                          <div key={i} style={{ padding: "4px 8px", marginBottom: 3, background: "#f8fafc", borderRadius: 4, fontSize: 11 }}>
-                            <span className="w7">{d.sym}</span> · {d.decision} · {d.family} · {d.conf}% · {d.regime}
-                            {d.outcome && (
-                              <span style={{ color: d.outcome.won ? "var(--green)" : "var(--red)", marginLeft: 6 }}>
-                                → {d.outcome.won ? "WIN" : "LOSS"} ${d.outcome.pnl.toFixed(2)}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                        {Object.keys(botMemory.short?.positions || {}).length > 0 && (
-                          <>
-                            <div className="w7 mt8 mb4">Currently Open:</div>
-                            {Object.entries(botMemory.short.positions).map(([s, p]) => (
-                              <div key={s} style={{ padding: "4px 8px", marginBottom: 3, background: "#fef3c7", borderRadius: 4, fontSize: 11 }}>
-                                <span className="w7">{s}</span> · {p.family} · {p.regime} · {p.conf}%
-                              </div>
-                            ))}
-                          </>
-                        )}
-                        {(botMemory.short?.anomalies || []).length > 0 && (
-                          <>
-                            <div className="w7 mt8 mb4">Recent Anomalies:</div>
-                            {botMemory.short.anomalies.slice(-5).reverse().map((a, i) => (
-                              <div key={i} style={{ padding: "4px 8px", marginBottom: 3, background: "#fef2f2", borderRadius: 4, fontSize: 11 }}>
-                                <span className="w7">{a.type}</span>{a.sym ? ` · ${a.sym}` : ""} · {a.detail}
-                              </div>
-                            ))}
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Mid-term layer */}
-                    <div className="panel" style={{ borderLeft: "4px solid #f59e0b", padding: 14, marginTop: 12 }}>
-                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 18 }}>📅</span>
-                        <div style={{ fontWeight: 700 }}>Mid-term (7-day rolling)</div>
-                      </div>
-                      <div className="xs sub mt4">Recent insights from end-of-day reflections, per-instrument rolling stats</div>
-                      <div className="mt8 xs">
-                        {(botMemory.mid?.recentInsights || []).length === 0 ? (
-                          <div className="mut">No insights yet. Will populate after first daily reflection (21:00 UTC).</div>
-                        ) : (
-                          (botMemory.mid.recentInsights || []).slice(-5).reverse().map((i, idx) => (
-                            <div key={idx} style={{ padding: "6px 10px", marginBottom: 4, background: "#fffbeb", borderRadius: 4, fontSize: 11 }}>
-                              💡 {i.insight}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Long-term layer */}
-                    <div className="panel" style={{ borderLeft: "4px solid #15803d", padding: 14, marginTop: 12 }}>
-                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 18 }}>🧠</span>
-                        <div style={{ fontWeight: 700 }}>Long-term (permanent)</div>
-                      </div>
-                      <div className="xs sub mt4">Lifetime family priors per symbol + curated lessons (never expire)</div>
-                      <div className="mt8 xs">
-                        {(botMemory.long?.lessons || []).length > 0 && (
-                          <>
-                            <div className="w7 mb4">Lessons Learned ({(botMemory.long.lessons || []).length}):</div>
-                            {(botMemory.long.lessons || []).slice(-5).reverse().map((l, i) => (
-                              <div key={i} style={{ padding: "6px 10px", marginBottom: 4, background: "#f0fdf4", borderRadius: 4, fontSize: 11 }}>
-                                ✓ {l.lesson}
-                              </div>
-                            ))}
-                          </>
-                        )}
-                        {Object.keys(botMemory.long?.priors || {}).length > 0 && (
-                          <>
-                            <div className="w7 mt8 mb4">Lifetime Family Priors:</div>
-                            {Object.entries(botMemory.long.priors).slice(0, 12).map(([key, p]) => {
-                              const total = (p.wins || 0) + (p.losses || 0);
-                              const wr = total > 0 ? Math.round((p.wins / total) * 100) : 0;
-                              return (
-                                <div key={key} style={{ padding: "4px 8px", marginBottom: 3, background: "#f8fafc", borderRadius: 4, fontSize: 11 }}>
-                                  <span className="w7">{key}</span>: {p.wins}W/{p.losses}L ({wr}% WR, ${(p.totalPnl || 0).toFixed(0)})
-                                </div>
-                              );
-                            })}
-                          </>
-                        )}
-                        {(botMemory.long?.lessons || []).length === 0 && Object.keys(botMemory.long?.priors || {}).length === 0 && (
-                          <div className="mut">Empty. Will fill as bot learns.</div>
-                        )}
-                      </div>
-                    </div>
-                    {/* V11 STEP 5 — Observations layer */}
-                    <div className="panel" style={{ borderLeft: "4px solid #3b82f6", padding: 14, marginTop: 12 }}>
-                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 18 }}>👁</span>
-                        <div style={{ fontWeight: 700 }}>V11 · Observations (per instrument, 24h TTL)</div>
-                      </div>
-                      <div className="xs sub mt4">Qualitative notes the AI writes to itself across cron ticks. Each observation tracks a level the AI is studying.</div>
-                      <div className="mt8 xs">
-                        {Object.keys(v11Observations).length === 0 || Object.values(v11Observations).every(o => !o || o.length === 0) ? (
-                          <div className="mut">No active observations. The AI writes these as it studies the chart.</div>
-                        ) : (
-                          Object.entries(v11Observations).map(([sym, obs]) => (
-                            obs.length === 0 ? null : (
-                              <div key={sym} style={{ marginBottom: 10 }}>
-                                <div className="w7 mb4">{sym} ({obs.length}):</div>
-                                {obs.map((o, i) => {
-                                  const ageMin = Math.floor((Date.now() - o.createdAt) / 60000);
-                                  const dirCol = o.direction === "LONG" ? "#3b82f6" : o.direction === "SHORT" ? "#a855f7" : "#94a3b8";
-                                  return (
-                                    <div key={i} style={{ padding: "6px 10px", marginBottom: 4, background: "#f8fafc", borderRadius: 4, fontSize: 11, borderLeft: `3px solid ${dirCol}` }}>
-                                      <div style={{ display: "flex", justifyContent: "space-between" }}>
-                                        <span className="w7">[{o.id}]</span>
-                                        <span className="mut">{ageMin}m old · {o.direction}</span>
-                                      </div>
-                                      <div style={{ marginTop: 3 }}>{o.text}</div>
-                                      {o.watchLevel != null && <div className="xs mut mt4">watch: {o.watchLevel}{o.invalidatesAt != null ? ` · invalidates: ${o.invalidatesAt}` : ""}</div>}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    {/* V11 STEP 5 — Pattern Learner panel */}
-                    <div className="panel" style={{ borderLeft: "4px solid #a855f7", padding: 14, marginTop: 12 }}>
-                      <div className="r" style={{ alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 18 }}>📊</span>
-                        <div style={{ fontWeight: 700 }}>V11 · Pattern Learner (refreshed end-of-day)</div>
-                      </div>
-                      <div className="xs sub mt4">Tight + loose patterns mined from your closed trades. Refreshes once per day after the reflection cron.</div>
-                      <div className="mt8 xs">
-                        {!v11Patterns || !v11Patterns.totalTrades ? (
-                          <div className="mut">No pattern data yet. Need closed trades. Patterns refresh after 21:00 UTC daily reflection cron.</div>
-                        ) : (
-                          <>
-                            <div className="w7 mb4">{v11Patterns.totalTrades} closed trades over {v11Patterns.daysBack}d · WR {v11Patterns.overallWR}%</div>
-                            {(v11Patterns.tight || []).length > 0 && (
-                              <>
-                                <div className="w7 mt8 mb4" style={{ color: "#15803d" }}>✓ PRIORITIZE ({v11Patterns.tight.length}):</div>
-                                {v11Patterns.tight.slice(0, 5).map((p, i) => {
-                                  const compact = p.signature.split('/').slice(1).join('/');
-                                  return (
-                                    <div key={i} style={{ padding: "5px 8px", marginBottom: 3, background: "#f0fdf4", borderRadius: 4, fontSize: 11 }}>
-                                      <span className="w7">{p.signature.split('/')[0]}</span> · {compact} · <span style={{ color: "#15803d" }}>{p.wins}/{p.n} ({p.wr}% WR, expR {p.expectancyR})</span>
-                                    </div>
-                                  );
-                                })}
-                              </>
-                            )}
-                            {(v11Patterns.avoid || []).length > 0 && (
-                              <>
-                                <div className="w7 mt8 mb4" style={{ color: "#b91c1c" }}>✗ AVOID ({v11Patterns.avoid.length}):</div>
-                                {v11Patterns.avoid.slice(0, 5).map((p, i) => {
-                                  const compact = p.signature.split('/').slice(1).join('/');
-                                  return (
-                                    <div key={i} style={{ padding: "5px 8px", marginBottom: 3, background: "#fef2f2", borderRadius: 4, fontSize: 11 }}>
-                                      <span className="w7">{p.signature.split('/')[0]}</span> · {compact} · <span style={{ color: "#b91c1c" }}>{p.wins}/{p.n} ({p.wr}% WR, expR {p.expectancyR})</span>
-                                    </div>
-                                  );
-                                })}
-                              </>
-                            )}
-                            {(v11Patterns.loose || []).length > 0 && (
-                              <>
-                                <div className="w7 mt8 mb4">Single-dim trends:</div>
-                                {v11Patterns.loose.slice(0, 6).map((p, i) => (
-                                  <div key={i} style={{ padding: "5px 8px", marginBottom: 3, background: "#f8fafc", borderRadius: 4, fontSize: 11 }}>
-                                    <span className="w7">{p.symbol}</span> · {p.dimension}: {p.recommendation}
-                                  </div>
-                                ))}
-                              </>
-                            )}
-                            {(v11Patterns.tight || []).length === 0 && (v11Patterns.avoid || []).length === 0 && (v11Patterns.loose || []).length === 0 && (
-                              <div className="mut">Patterns not statistically meaningful yet. Need ≥6 trades per signature for tight, ≥10 per symbol for loose.</div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ========== SETTINGS ========== */}
-          {page === "settings" && (
-            <div className="set-col">
-              <div className="panel">
-                <div className="pt">Instruments to Trade</div>
-                <div className="r g8">
-                  <input className="inp" placeholder="Symbol, e.g. XAUUSD or EURUSD (any broker suffix)" value={newSymInput} onChange={(e) => setNewSymInput(e.target.value.toUpperCase())} onKeyDown={(e) => e.key==="Enter" && addInstrument()} style={{ flex:1 }} />
-                  <button className="btn btn-p btn-sm" onClick={() => addInstrument()}>Add</button>
-                </div>
-                <div className="qrow">
-                  {QUICK_SYMBOLS.map((s) => (
-                    <button key={s} className={`qbtn${instruments.includes(s)?" on":""}`} onClick={() => instruments.includes(s) ? removeInstrument(s) : addInstrument(s)}>{s}</button>
-                  ))}
-                </div>
-                {instruments.length === 0
-                  ? <div className="mt10 xs mut">No instruments selected. Type a symbol or click a suggestion.</div>
-                  : (
-                    <div className="stags">
-                      {instruments.map((sym) => (
-                        <div key={sym} className="stag">
-                          <span className="stag-n">{sym}</span>
-                          {prices[sym]!=null && <span className="stag-p">{px(sym)}</span>}
-                          <button className="stag-rm" onClick={() => removeInstrument(sym)} title="Remove">&times;</button>
-                        </div>
-                      ))}
-                    </div>
-                  )
-                }
-                <div className="mt12 xs mut">
-                  Symbol resolution is automatic. Type the bare symbol (e.g. EURUSD) and the broker layer auto-detects the working suffix (.s, .pro, etc.) and remembers it. PU Prime uses .s suffix.
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="pt">Active Sessions</div>
-                <div className="segs">
-                  {["LONDON","OVERLAP","NEW YORK"].map((s) => (
-                    <button key={s} className={`seg${sessions.includes(s)?" on":""}`} onClick={() => setSessions((prev) => prev.includes(s) ? prev.filter((x) => x!==s) : [...prev,s])}>{s}</button>
-                  ))}
-                </div>
-                <div className="mt8 xs mut">AI runs only during selected sessions. Gold/Forex: 08:00&ndash;21:00 UTC. Crypto: 07:00&ndash;23:00 UTC. No weekends. No trades during high-impact news (ForexFactory).</div>
-                <div className="mt8" style={{ display:"flex", gap:6, alignItems:"center", fontSize:11 }}>
-                  <span style={{ width:8,height:8,borderRadius:"50%",background:sessionActive?"var(--green)":"var(--text3)",display:"inline-block",flexShrink:0 }} />
-                  <span style={{ color:sessionActive?"var(--green)":"var(--text3)", fontWeight:600 }}>{sessionActive?"Session active":"Session inactive"}</span>
-                  <span className="mut">({sessionInfo.session})</span>
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="pt">Risk Mode</div>
-                <div className="segs">
-                  {["TEST","REGULAR","AGGRESSIVE"].map((m) => (
-                    <button key={m} className={`seg${riskMode===m?" on":""}${m==="AGGRESSIVE"?" agg":""}`} onClick={() => setRiskMode(m)}>{m}</button>
-                  ))}
-                </div>
-                <div className="mt8 xs mut">
-                  {riskMode==="TEST" ? "0.5% risk per trade, max 0.05L" : riskMode==="REGULAR" ? "1% risk per trade, max 0.20L" : "2% risk per trade, max 0.50L \u2014 use with caution"}
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="pt">Sound Effects</div>
-                <div className="r g8" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                  <button
-                    className={`snd-toggle ${soundEnabled ? "on" : "off"}`}
-                    style={{ fontSize: 13, padding: "8px 16px" }}
-                    onClick={() => { setSoundEnabled((s) => !s); if (!soundEnabled) SFX.alert(); }}
-                  >
-                    {soundEnabled ? "🔊 Sound ON" : "🔇 Sound OFF"}
-                  </button>
-                  {soundEnabled && (
-                    <div className="r g6" style={{ flexWrap: "wrap" }}>
-                      <button className="btn btn-sm" onClick={() => SFX.open()}>Test Open</button>
-                      <button className="btn btn-sm" onClick={() => SFX.tp1()}>TP1</button>
-                      <button className="btn btn-sm" onClick={() => SFX.tp2()}>TP2</button>
-                      <button className="btn btn-sm" onClick={() => SFX.tp3()}>TP3</button>
-                      <button className="btn btn-sm" onClick={() => SFX.tp4()}>TP4</button>
-                      <button className="btn btn-sm" onClick={() => SFX.sl()}>SL</button>
-                      <button className="btn btn-sm" onClick={() => SFX.retrace()}>Retrace</button>
-                    </div>
-                  )}
-                </div>
-                <div className="mt8 xs mut">
-                  Plays distinct tones for trade open, TP hits, SL, and retrace protection. Click any test button above to preview.
-                </div>
-              </div>
-
-              {Object.keys(crownLocks).length > 0 && (
-                <div className="panel">
-                  <div className="pt">Crown Locks</div>
-                  <div className="stags">
-                    {Object.entries(crownLocks).map(([inst,strat]) => (
-                      <div key={inst} style={{ background:"#fef3c7", border:"1px solid #fde68a", borderRadius:6, padding:"6px 12px", fontSize:11.5, display:"flex", alignItems:"center", gap:6 }}>
-                        <span style={{ color:"var(--gold)",fontWeight:700 }}>&#9733;</span>
-                        <span className="w6">{inst}:</span>
-                        <span style={{ color:"var(--text2)",fontSize:11 }}>{strat}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="panel">
-                <div className="pt">Configuration</div>
-                {[
-                  ["Instruments",    instruments.join(", ")||"none"],
-                  ["Sessions",       sessions.join(", ")||"none"],
-                  ["Risk Mode",      riskMode],
-                  ["Data Namespace", "v9:* (persistent, no TTL)"],
-                  ["News Source",    "ForexFactory (high-impact, +/-15 min block)"],
-                ].map(([k,v]) => (
-                  <div key={k} className="kv">
-                    <span className="kv-k">{k}</span>
-                    <span className="kv-v">{v}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="panel">
-                <div className="pt">Diagnostics</div>
-                <p className="xs mut" style={{ marginBottom: 14 }}>Send a test message to verify Telegram is receiving notifications. If this fails, check TELEGRAM_TOKEN and TELEGRAM_CHAT_ID in Vercel.</p>
-                <div className="r g8">
-                  <button className="btn btn-p btn-sm" onClick={testTelegram} disabled={tgStatus?.loading}>
-                    {tgStatus?.loading ? "Sending..." : "Test Telegram"}
-                  </button>
-                  {tgStatus && !tgStatus.loading && (
-                    <span className="sm" style={{ color: tgStatus.ok ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
-                      {tgStatus.ok ? "OK -- check your Telegram" : `Failed: ${tgStatus.error || (tgStatus.tgResponse && tgStatus.tgResponse.description) || 'unknown'}`}
-                    </span>
-                  )}
-                </div>
-                {tgStatus && !tgStatus.loading && !tgStatus.ok && (
-                  <div className="xs mut mt8">
-                    Token: {tgStatus.tokenMask || "MISSING"} &middot; Chat: {tgStatus.chatMask || "MISSING"}
-                  </div>
-                )}
-              </div>
-
-              <div className="panel">
-                <div className="pt">Reset Preferences</div>
-                <p className="xs mut" style={{ marginBottom:14 }}>Removes saved instruments, sessions, and risk mode from this browser. Strategy Lab data on the server is not affected.</p>
-                <button className="btn btn-d btn-sm" onClick={() => { localStorage.removeItem(PREFS_KEY); setInstruments([]); setSessions(["LONDON","NEW YORK"]); setRiskMode("TEST"); setAiDecisions({}); setAiHistory({}); setAiStatus({}); setPrices({}); addLog("Preferences cleared.", "warn"); }}>
-                  Clear Preferences
-                </button>
-              </div>
-            </div>
-          )}
-
-        </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>Loading...</div>
+        )}
       </div>
 
-      {/* V11 — Mobile bottom navigation. Hidden on desktop via CSS. */}
-      <nav className="mobile-nav">
-        <div className="mobile-nav-inner">
-          {NAV.map((n) => (
+      <div className="qb-glass" style={{ padding: 16, borderRadius: 6 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Bot version</div>
+        <div className="qb-mono" style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>
+          Quantum Bot V12 (Session 2 — Cockpit shell)
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =====================================================================
+// SECTION 15: PAGE HEADER (shared by Portfolio, Reports, Settings)
+// =====================================================================
+
+function PageHeader({ title, onBack, tabs, activeTab, onTabChange }) {
+  return (
+    <div
+      className="qb-glass"
+      style={{
+        height: 48,
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        padding: "0 16px",
+        borderBottom: "1px solid var(--qb-border)",
+      }}
+    >
+      <button
+        onClick={onBack}
+        style={{
+          background: "transparent",
+          border: "1px solid var(--qb-border)",
+          borderRadius: 4,
+          padding: "5px 10px",
+          color: "var(--qb-text-muted)",
+          fontSize: 11,
+          cursor: "pointer",
+        }}
+      >
+        ← Cockpit
+      </button>
+      <div style={{ fontSize: 14, fontWeight: 600 }}>{title}</div>
+      {tabs && (
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          {tabs.map((t) => (
             <button
-              key={n.id}
-              className={`mn-btn${page === n.id ? " on" : ""}`}
-              onClick={() => setPage(n.id)}
-              aria-label={n.label}
+              key={t.id}
+              onClick={() => onTabChange(t.id)}
+              style={{
+                background: activeTab === t.id ? "var(--qb-accent-soft)" : "transparent",
+                border: `1px solid ${activeTab === t.id ? "var(--qb-accent)" : "var(--qb-border)"}`,
+                borderRadius: 4,
+                padding: "5px 14px",
+                color: activeTab === t.id ? "var(--qb-accent)" : "var(--qb-text-muted)",
+                fontSize: 11,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
             >
-              <span className="mn-icon">{n.icon}</span>
-              <span className="mn-label">{n.label.split(" ")[0]}</span>
+              {t.label}
             </button>
           ))}
         </div>
-      </nav>
+      )}
     </div>
   );
 }

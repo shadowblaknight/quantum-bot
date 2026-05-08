@@ -1,43 +1,50 @@
 {
-  "buildCommand": "react-scripts build",
-  "outputDirectory": "build",
-  "framework": "create-react-app",
+  "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
   "crons": [
     {
       "path": "/api/cron",
       "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/reflect",
-      "schedule": "0 21 * * *"
-    },
-    {
-      "path": "/api/pair-intel?action=refresh",
-      "schedule": "30 21 * * *"
-    },
-    {
-      "path": "/api/cron?action=weekly-backtest",
-      "schedule": "0 22 * * 0"
     }
   ],
   "functions": {
-    "api/ai.js":               { "maxDuration": 60 },
-    "api/cron.js":             { "maxDuration": 60 },
-    "api/manage-trades.js":    { "maxDuration": 60 },
-    "api/execute.js":          { "maxDuration": 30 },
-    "api/broker.js":           { "maxDuration": 30 },
-    "api/regime.js":           { "maxDuration": 30 },
-    "api/pair-intel.js":       { "maxDuration": 60 },
-    "api/reflect.js":          { "maxDuration": 60 },
-    "api/trades.js":           { "maxDuration": 30 },
-    "api/memory.js":           { "maxDuration": 15 },
-    "api/history.js":          { "maxDuration": 30 },
-    "api/historical-fetch.js": { "maxDuration": 60 },
-    "api/backtest.js":         { "maxDuration": 60 },
-    "api/setup-detector.js":   { "maxDuration": 30 },
-    "api/observation-memory.js": { "maxDuration": 15 },
-    "api/pattern-learner.js":  { "maxDuration": 30 },
-    "api/ai-watch.js":         { "maxDuration": 30 },
-    "api/level-finder.js":     { "maxDuration": 20 }
+    "api/cron.js": {
+      "maxDuration": 60
+    },
+    "api/watcher.js": {
+      "maxDuration": 60
+    },
+    "api/execute.js": {
+      "maxDuration": 30
+    },
+    "api/manage-trades.js": {
+      "maxDuration": 30
+    },
+    "api/coherence-checker.js": {
+      "maxDuration": 30
+    },
+    "api/tactics-run.js": {
+      "maxDuration": 30
+    },
+    "api/symbol-resolver.js": {
+      "maxDuration": 30
+    },
+    "api/broker.js": {
+      "maxDuration": 15
+    },
+    "api/state.js": {
+      "maxDuration": 10
+    },
+    "api/news-context.js": {
+      "maxDuration": 15
+    },
+    "api/recognition-memory.js": {
+      "maxDuration": 15
+    },
+    "api/sizing-engine.js": {
+      "maxDuration": 5
+    }
   }
 }
