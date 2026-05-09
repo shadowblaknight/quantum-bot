@@ -1,50 +1,70 @@
 {
   "version": 2,
+  "functions": {
+    "api/cron.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/watcher.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/execute.js": {
+      "memory": 1024,
+      "maxDuration": 30
+    },
+    "api/manage-trades.js": {
+      "memory": 1024,
+      "maxDuration": 30
+    },
+    "api/coherence-checker.js": {
+      "memory": 1024,
+      "maxDuration": 30
+    },
+    "api/state.js": {
+      "memory": 512,
+      "maxDuration": 10
+    },
+    "api/broker.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/candle-source.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/news-context.js": {
+      "memory": 512,
+      "maxDuration": 15
+    },
+    "api/recognition-memory.js": {
+      "memory": 512,
+      "maxDuration": 15
+    },
+    "api/sizing-engine.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/symbol-resolver.js": {
+      "memory": 256,
+      "maxDuration": 10
+    }
+  },
   "crons": [
     {
       "path": "/api/cron",
       "schedule": "* * * * *"
     }
   ],
-  "functions": {
-    "api/cron.js": {
-      "maxDuration": 60
-    },
-    "api/watcher.js": {
-      "maxDuration": 60
-    },
-    "api/execute.js": {
-      "maxDuration": 30
-    },
-    "api/manage-trades.js": {
-      "maxDuration": 30
-    },
-    "api/coherence-checker.js": {
-      "maxDuration": 30
-    },
-    "api/tactics-run.js": {
-      "maxDuration": 30
-    },
-    "api/symbol-resolver.js": {
-      "maxDuration": 30
-    },
-    "api/broker.js": {
-      "maxDuration": 15
-    },
-    "api/state.js": {
-      "maxDuration": 10
-    },
-    "api/news-context.js": {
-      "maxDuration": 15
-    },
-    "api/candle-source.js": {
-      "maxDuration": 15
-    },
-    "api/recognition-memory.js": {
-      "maxDuration": 15
-    },
-    "api/sizing-engine.js": {
-      "maxDuration": 5
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Credentials", "value": "true" },
+        { "key": "Access-Control-Allow-Origin",      "value": "*" },
+        { "key": "Access-Control-Allow-Methods",     "value": "GET,POST,OPTIONS" },
+        { "key": "Access-Control-Allow-Headers",     "value": "Content-Type, Authorization" }
+      ]
     }
-  }
+  ]
 }
