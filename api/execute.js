@@ -33,6 +33,8 @@ const { getAssetById } = require('./asset-registry');
 const { resolveSymbol } = require('./symbol-resolver');
 const { fetchAccount, fetchPositions } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
+const { checkKillZone, killZoneDisplayName } = require('./kill-zones');
+const { notifyTradePlaced } = require('./telegram');
 
 // ===== Safety: trading enabled flag =====
 function isTradingEnabled() {
@@ -143,6 +145,18 @@ async function tryPlace(pending, brokerSymbol) {
     return action;
   }
 
+  // SOFT KILL ZONE GATE — limit orders are only placed inside a kill zone.
+  // The setup itself was created by the watcher (which runs 24/7); this
+  // guard prevents the order from being filled outside of high-liquidity
+  // institutional windows. Pending setups carried into a KZ will be
+  // executed when the gate opens.
+  const kz = checkKillZone();
+  if (!kz.inKillZone) {
+    action.skipped = 'outside-kill-zone';
+    action.killZoneStatus = kz;
+    return action;
+  }
+
   // Validate setup
   const { setup, sizing, plannedEntry, slPrice, tpLevels } = pending;
   if (!setup || !plannedEntry || !slPrice || !sizing?.recommendedLot) {
@@ -172,11 +186,28 @@ async function tryPlace(pending, brokerSymbol) {
       status: 'placed',
       brokerOrderId: placement.orderId,
       placedAt: Date.now(),
+      placedKillZone: kz.name,
     });
     await pushCommentary(pending.asset, 'order-placed',
-      `Limit order placed: ${setup.direction} ${sizing.recommendedLot} lot @ ${plannedEntry.toFixed(plannedEntry > 100 ? 2 : 5)}, SL ${slPrice.toFixed(slPrice > 100 ? 2 : 5)}`);
+      `Limit order placed in ${killZoneDisplayName(kz.name)}: ${setup.direction} ${sizing.recommendedLot} lot @ ${plannedEntry.toFixed(plannedEntry > 100 ? 2 : 5)}, SL ${slPrice.toFixed(slPrice > 100 ? 2 : 5)}`);
+
+    // Telegram: trade placed
+    try {
+      await notifyTradePlaced({
+        asset: pending.asset,
+        direction: setup.direction,
+        lot: sizing.recommendedLot,
+        entry: plannedEntry,
+        sl: slPrice,
+        tpLevels: tpLevels || [],
+        riskDollars: sizing.baseRisk,
+        brokerOrderId: placement.orderId,
+      });
+    } catch (_) {}
+
     action.placed = true;
     action.brokerOrderId = placement.orderId;
+    action.killZone = kz.name;
   } else {
     await updatePendingSetup(pending.asset, pending.id, {
       status: 'place-failed',
@@ -205,7 +236,7 @@ async function runExecuteTick() {
   }
 
   const r = getRedis();
-  let watchlist = ['gold', 'btc', 'eurusd'];
+  let watchlist = ['gold', 'eurusd'];
   if (r) {
     try {
       const raw = await r.get('v12:watchlist').catch(() => null);
@@ -223,13 +254,16 @@ async function runExecuteTick() {
     watchlist.map((asset) => processAsset(asset, positions))
   );
 
+  const kz = checkKillZone();
   return {
     ts: Date.now(),
     tradingEnabled: true,
+    killZone: kz,
     watchlist,
     openPositions: positions.length,
     results,
     placedCount: results.reduce((sum, r) => sum + (r.actions || []).filter((a) => a.placed).length, 0),
+    skippedKZCount: results.reduce((sum, r) => sum + (r.actions || []).filter((a) => a.skipped === 'outside-kill-zone').length, 0),
   };
 }
 

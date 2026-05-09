@@ -603,9 +603,9 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
         style={{
           position: "absolute",
           top: 44,
-          left: sideBarOpen ? 280 : 8,
+          left: sideBarOpen ? 280 : 18,
           right: 8,
-          bottom: bottomBarOpen ? 76 : 16,
+          bottom: bottomBarOpen ? 100 : 16,
           transition: "left 250ms, bottom 250ms",
         }}
       >
@@ -631,6 +631,7 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
         onToggle={() => setBottomBarOpen((v) => !v)}
         commentary={assetState?.commentary || []}
         assetId={selectedAsset}
+        assetState={assetState}
       />
 
       {/* MODALS / POPOVERS */}
@@ -1093,25 +1094,41 @@ function CockpitSideBar({
 
   return (
     <>
-      {/* Edge strip (always visible, click to toggle) */}
+      {/* Edge strip — wider (16px) so it's actually clickable; glows on hover */}
       <div
         onClick={onToggle}
         style={{
           position: "absolute",
           top: 44,
           left: 0,
-          width: 6,
+          width: 16,
           bottom: 76,
-          background: "var(--qb-border)",
+          background: open ? "var(--qb-accent-soft)" : "var(--qb-border)",
           cursor: "pointer",
           zIndex: 5,
           borderRight: open ? "1px solid var(--qb-accent)" : "none",
           transition: "border-color 200ms, background 200ms",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
         }}
         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--qb-accent-soft)")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "var(--qb-border)")}
+        onMouseLeave={(e) => (e.currentTarget.style.background = open ? "var(--qb-accent-soft)" : "var(--qb-border)")}
         title={open ? "Collapse sidebar" : "Open sidebar"}
-      />
+      >
+        {/* Visual indicator chevron */}
+        <div
+          style={{
+            color: "var(--qb-accent)",
+            fontSize: 10,
+            opacity: 0.7,
+            userSelect: "none",
+            pointerEvents: "none",
+          }}
+        >
+          {open ? "◂" : "▸"}
+        </div>
+      </div>
 
       {/* Side bar content */}
       {open && (
@@ -1120,8 +1137,8 @@ function CockpitSideBar({
           style={{
             position: "absolute",
             top: 44,
-            left: 6,
-            width: 274,
+            left: 16,
+            width: 264,
             bottom: 76,
             zIndex: 6,
             padding: 10,
@@ -1131,26 +1148,53 @@ function CockpitSideBar({
             gap: 12,
           }}
         >
-          {/* Header */}
+          {/* Header with explicit close button */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase", letterSpacing: 0.8 }}>
               Watchlist
             </div>
-            <button
-              onClick={onAddInstrument}
-              style={{
-                background: "var(--qb-accent-soft)",
-                border: "none",
-                borderRadius: 3,
-                color: "var(--qb-accent)",
-                fontSize: 11,
-                padding: "3px 8px",
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
-              + Add
-            </button>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <button
+                onClick={onAddInstrument}
+                style={{
+                  background: "var(--qb-accent-soft)",
+                  border: "none",
+                  borderRadius: 3,
+                  color: "var(--qb-accent)",
+                  fontSize: 11,
+                  padding: "3px 8px",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                + Add
+              </button>
+              {/* CLOSE BUTTON — explicit, large, easy to hit */}
+              <button
+                onClick={onToggle}
+                style={{
+                  background: "transparent",
+                  border: "1px solid var(--qb-border)",
+                  borderRadius: 3,
+                  color: "var(--qb-text-muted)",
+                  fontSize: 14,
+                  padding: "1px 8px",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = "var(--qb-text-primary)";
+                  e.currentTarget.style.borderColor = "var(--qb-accent)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = "var(--qb-text-muted)";
+                  e.currentTarget.style.borderColor = "var(--qb-border)";
+                }}
+                title="Close sidebar"
+              >
+                ×
+              </button>
+            </div>
           </div>
 
           {/* Instrument list */}
@@ -1223,53 +1267,6 @@ function CockpitSideBar({
                 </div>
               );
             })}
-          </div>
-
-          {/* Active tactics for selected instrument */}
-          <div style={{ marginTop: 8 }}>
-            <div style={{ fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 6 }}>
-              Active tactics on {selectedAsset.toUpperCase()}
-            </div>
-            {assetState?.state?.opinions?.length > 0 ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                {assetState.state.opinions.slice(0, 12).map((op, i) => {
-                  const dirColor = op.direction === "LONG" ? "var(--qb-up-strong)"
-                    : op.direction === "SHORT" ? "var(--qb-down-strong)"
-                    : "var(--qb-text-muted)";
-                  return (
-                    <div
-                      key={i}
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        padding: "4px 8px",
-                        fontSize: 10,
-                        background: "rgba(255,255,255,0.02)",
-                        borderRadius: 3,
-                        borderLeft: `2px solid ${dirColor}`,
-                      }}
-                      title={op.description}
-                    >
-                      <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-primary)" }}>
-                        {op.timeframe} {TACTIC_LABELS[op.tactic] || op.tactic}
-                      </span>
-                      <span style={{ color: dirColor, fontSize: 9, fontWeight: 600 }}>
-                        {op.direction !== "NEUTRAL" ? op.direction : "lvl"}
-                      </span>
-                    </div>
-                  );
-                })}
-                {assetState.state.opinions.length > 12 && (
-                  <div style={{ fontSize: 9, color: "var(--qb-text-dim)", textAlign: "center", marginTop: 4 }}>
-                    + {assetState.state.opinions.length - 12} more
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div style={{ fontSize: 10, color: "var(--qb-text-dim)", padding: "8px 0", fontStyle: "italic" }}>
-                {assetState ? "No opinions detected right now" : "Loading..."}
-              </div>
-            )}
           </div>
 
           {/* Settings shortcut */}
@@ -1698,8 +1695,12 @@ function TacticAnnotationOverlay({ chartRef, seriesRef, containerRef, chartData,
     const pending = assetState?.pending?.find?.(
       (p) => p.status === "pending" || p.status === "placed" || p.status === "filled"
     );
+    // V12.3: setup has contributingEvents (event objects). If present, return those.
+    if (pending?.setup?.contributingEvents && Array.isArray(pending.setup.contributingEvents)) {
+      return pending.setup.contributingEvents;
+    }
+    // V12.2 fallback: filter live opinions to those matching contributing tactics
     if (pending?.setup?.contributingTactics && assetState?.state?.opinions) {
-      // Filter live opinions to those matching contributing tactics
       const contributingSet = new Set(pending.setup.contributingTactics);
       return assetState.state.opinions.filter((op) =>
         contributingSet.has(op.tactic) && op.direction === pending.setup.direction
@@ -2331,7 +2332,16 @@ function ToolsPopover({ theme, prefs, setPrefs, onClose }) {
 // SECTION 9.9: COCKPIT — BOTTOM BAR
 // =====================================================================
 
-function CockpitBottomBar({ theme, open, onToggle, commentary, assetId }) {
+function CockpitBottomBar({ theme, open, onToggle, commentary, assetId, assetState }) {
+  // V12.3: state has events (typed) instead of opinions (tactic-keyed)
+  const events = assetState?.state?.events || [];
+  // Show recent meaningful events: sweep/displacement/mss/bos/fvg/ob/breaker/asian-range/ote/trend
+  const interestingEvents = events
+    .filter((e) => e.type !== 'session-level' && e.type !== 'trend')
+    .slice(-12)
+    .reverse();
+  const recent = (commentary || []).slice(-6); // last 6 commentary lines
+
   return (
     <>
       {/* Edge strip */}
@@ -2342,16 +2352,23 @@ function CockpitBottomBar({ theme, open, onToggle, commentary, assetId }) {
           bottom: 0,
           left: 0,
           right: 0,
-          height: 8,
-          background: "var(--qb-border)",
+          height: 12,
+          background: open ? "var(--qb-accent-soft)" : "var(--qb-border)",
           cursor: "pointer",
           zIndex: 5,
           transition: "background 200ms",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
         }}
         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--qb-accent-soft)")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "var(--qb-border)")}
-        title={open ? "Collapse" : "Expand"}
-      />
+        onMouseLeave={(e) => (e.currentTarget.style.background = open ? "var(--qb-accent-soft)" : "var(--qb-border)")}
+        title={open ? "Collapse activity feed" : "Expand activity feed"}
+      >
+        <div style={{ color: "var(--qb-accent)", fontSize: 10, opacity: 0.7, userSelect: "none", pointerEvents: "none" }}>
+          {open ? "▾" : "▴"}
+        </div>
+      </div>
 
       {/* Content */}
       {open && (
@@ -2359,43 +2376,152 @@ function CockpitBottomBar({ theme, open, onToggle, commentary, assetId }) {
           className="qb-glass"
           style={{
             position: "absolute",
-            bottom: 8,
+            bottom: 12,
             left: 8,
             right: 8,
-            height: 60,
+            height: 86,
             zIndex: 6,
             padding: "8px 14px",
             display: "flex",
-            flexDirection: "column",
-            gap: 4,
-            justifyContent: "center",
+            gap: 14,
             overflow: "hidden",
             borderTop: "1px solid var(--qb-border)",
           }}
         >
-          {commentary.length === 0 ? (
-            <div style={{ fontSize: 11, color: "var(--qb-text-dim)", fontStyle: "italic" }}>
-              Bot is watching {assetId.toUpperCase()}... commentary will appear here once the engine is live (session 3-4).
+          {/* LEFT: Commentary feed */}
+          <div style={{
+            flex: "1 1 0%",
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            overflow: "hidden",
+          }}>
+            <div style={{
+              fontSize: 9,
+              color: "var(--qb-text-muted)",
+              textTransform: "uppercase",
+              letterSpacing: 0.8,
+              marginBottom: 2,
+            }}>
+              Activity
             </div>
-          ) : (
-            commentary.slice(-3).map((c, i) => (
-              <div
-                key={i}
-                style={{
-                  fontSize: 12,
-                  color: "var(--qb-text-primary)",
-                  display: "flex",
-                  gap: 12,
-                  opacity: 1 - (commentary.slice(-3).length - 1 - i) * 0.25,
-                }}
-              >
-                <span className="qb-mono" style={{ color: "var(--qb-text-muted)", minWidth: 50 }}>
-                  {fmtTimeS(c.ts)}
-                </span>
-                <span>{c.text}</span>
+            {recent.length === 0 ? (
+              <div style={{ fontSize: 11, color: "var(--qb-text-dim)", fontStyle: "italic" }}>
+                Watching {assetId.toUpperCase()}. Activity will appear when bot detects setups, fills, TP/SL hits.
               </div>
-            ))
-          )}
+            ) : (
+              <div style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                overflowY: "auto",
+              }}>
+                {recent.slice().reverse().map((c, i) => (
+                  <div
+                    key={`${c.ts}-${i}`}
+                    style={{
+                      fontSize: 11,
+                      color: "var(--qb-text-primary)",
+                      display: "flex",
+                      gap: 10,
+                      opacity: 1 - i * 0.12,
+                    }}
+                  >
+                    <span className="qb-mono" style={{ color: "var(--qb-text-muted)", minWidth: 48, fontSize: 10 }}>
+                      {fmtTimeS(c.ts)}
+                    </span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {c.text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* DIVIDER */}
+          <div style={{ width: 1, background: "var(--qb-border)" }} />
+
+          {/* RIGHT: Recent events */}
+          <div style={{
+            flex: "0 0 280px",
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            overflow: "hidden",
+          }}>
+            <div style={{
+              fontSize: 9,
+              color: "var(--qb-text-muted)",
+              textTransform: "uppercase",
+              letterSpacing: 0.8,
+              marginBottom: 2,
+            }}>
+              Recent events on {assetId.toUpperCase()}
+            </div>
+            {interestingEvents.length > 0 ? (
+              <div style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 3,
+                overflow: "hidden",
+              }}>
+                {interestingEvents.slice(0, 10).map((ev, i) => {
+                  const dirColor = ev.direction === "LONG" ? "var(--qb-up-strong)"
+                    : ev.direction === "SHORT" ? "var(--qb-down-strong)"
+                    : "var(--qb-text-muted)";
+                  const dirChar = ev.direction === "LONG" ? "↑" : ev.direction === "SHORT" ? "↓" : "·";
+                  // Pretty event labels
+                  const eventLabel = {
+                    'sweep': 'Sweep',
+                    'displacement': 'Displ',
+                    'mss': 'MSS',
+                    'bos': 'BOS',
+                    'fvg-created': 'FVG',
+                    'ob-created': 'OB',
+                    'breaker-created': 'Breaker',
+                    'asian-range-formed': 'Asian',
+                    'ote-zone-entered': 'OTE',
+                  }[ev.type] || ev.type;
+                  return (
+                    <div
+                      key={ev.id || i}
+                      style={{
+                        display: "flex",
+                        gap: 4,
+                        alignItems: "center",
+                        padding: "2px 6px",
+                        fontSize: 9,
+                        background: "rgba(255,255,255,0.03)",
+                        borderRadius: 3,
+                        borderLeft: `2px solid ${dirColor}`,
+                      }}
+                      title={`${ev.type} on ${ev.timeframe} @ ${ev.price?.toFixed?.(5) || '?'}`}
+                    >
+                      <span style={{ color: dirColor, fontWeight: 700, fontSize: 10 }}>{dirChar}</span>
+                      <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-primary)" }}>
+                        {ev.timeframe}
+                      </span>
+                      <span style={{ fontSize: 9, color: "var(--qb-text-muted)" }}>
+                        {eventLabel}
+                      </span>
+                    </div>
+                  );
+                })}
+                {interestingEvents.length > 10 && (
+                  <div style={{ fontSize: 9, color: "var(--qb-text-dim)", padding: "2px 4px" }}>
+                    +{interestingEvents.length - 10}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: "var(--qb-text-dim)", fontStyle: "italic" }}>
+                {assetState ? "No events detected now" : "Loading..."}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </>

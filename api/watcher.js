@@ -26,13 +26,14 @@
 
 const { getRedis, safeParse, getCurrentSession, applyCors } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
-const { runForAsset } = require('./tactics-run');
+const { runForAsset: runEventsForAsset } = require('./events-run');
 const { checkCoherence } = require('./coherence-checker');
 const { findSimilarTrades, getSizeMultiplier } = require('./recognition-memory');
 const { getNewsContext, getNewsFeature } = require('./news-context');
 const { suggestLot } = require('./sizing-engine');
 const { fetchAccount, fetchPrice, fetchCandles, fetchPositions } = require('./broker');
 const { atr } = require('./_lib');
+const { notifySetupBrewing } = require('./telegram');
 
 // ===== Redis keys (per-asset state) =====
 const STATE_KEY = (asset) => `v12:watcher:${asset}:state`;
@@ -234,52 +235,55 @@ async function processAsset(asset, account, openPositions) {
     // 1. Ensure structural context exists (cheap if cached)
     const structural = await ensureStructuralContext(asset);
 
-    // 2. Run all detectors
-    const tacticsResult = await runForAsset({ asset });
-    if (!tacticsResult || !tacticsResult.opinions) {
-      return { asset, error: 'no opinions', processingMs: Date.now() - t0 };
+    // 2. Run all event detectors (V12.3 event-based flow)
+    const evResult = await runEventsForAsset({ asset });
+    if (!evResult || !Array.isArray(evResult.events)) {
+      return { asset, error: 'no events', processingMs: Date.now() - t0 };
     }
 
-    // 3. Get current price + ATR
+    // 3. Get current price + reference ATR (H1)
     const priceResult = await fetchPrice(asset);
     const currentPrice = priceResult?.price;
     if (!currentPrice) {
       return { asset, error: 'price unavailable', processingMs: Date.now() - t0 };
     }
-    const candlesH1 = await fetchCandles(asset, '1h', 50);
-    const atrValue = atr(candlesH1.candles || [], 14);
-    if (!atrValue) {
+    const h1ATR = evResult.atrByTF?.['1h'];
+    if (!h1ATR) {
       return { asset, error: 'ATR unavailable', processingMs: Date.now() - t0 };
     }
 
     // 4. Clear expired/invalidated pending setups
-    const pendingSetups = await clearExpiredAndInvalidated(asset, currentPrice, atrValue);
+    const pendingSetups = await clearExpiredAndInvalidated(asset, currentPrice, h1ATR);
     const activePending = pendingSetups.filter((p) => p.status === 'pending');
 
     // 5. Check for open position on this asset
     const myPosition = openPositions.find((p) => p.assetId === asset);
 
-    // 6. Run coherence checker
-    const cohResult = checkCoherence(tacticsResult.opinions, currentPrice, atrValue);
+    // 6. Run coherence checker (V12.3 template matcher)
+    const cohResult = checkCoherence({
+      events: evResult.events,
+      currentPrice,
+      atrByTF: evResult.atrByTF || {},
+    });
 
     // 7. Decision logic
     let intent = null;
 
     if (myPosition) {
-      // Position open — bot just watches, doesn't propose new entries
       intent = { type: 'HOLD_POSITION', position: myPosition };
     } else if (activePending.length > 0) {
-      // Already have a pending setup — don't queue another
       intent = { type: 'AWAITING_FILL', pending: activePending };
     } else if (cohResult.decision === 'TRADE') {
-      // Fresh setup — consult recognition + propose new pending entry
+      // Fresh template-matched setup — propose new pending entry
       const newsFeature = await getNewsFeature(asset).catch(() => ({}));
+
+      // For recognition memory, use the template name + bias direction
       const recognition = await findSimilarTrades({
         asset,
         direction: cohResult.setup.direction,
         mode: cohResult.setup.mode,
         session,
-        contributingTactics: cohResult.setup.contributingTactics,
+        contributingTactics: [cohResult.setup.templateName], // template name as the "tactic"
         timeframesInPlay: cohResult.setup.timeframesInPlay,
         newsFeature,
       });
@@ -300,6 +304,8 @@ async function processAsset(asset, account, openPositions) {
         id: `setup_${asset}_${Date.now()}`,
         asset,
         setup: cohResult.setup,
+        templateName: cohResult.setup.templateName,
+        narrative: cohResult.setup.narrative,
         recognition: recognition.summary,
         sizing: {
           baseLot: sizing.suggestedLot,
@@ -308,7 +314,7 @@ async function processAsset(asset, account, openPositions) {
         },
         plannedEntry: cohResult.setup.entry,
         slPrice: cohResult.setup.sl,
-        tpLevels: cohResult.setup.targets,
+        tpLevels: cohResult.setup.tps,
         newsFeature,
         createdAt: Date.now(),
         expiresAt: Date.now() + expiry,
@@ -319,10 +325,14 @@ async function processAsset(asset, account, openPositions) {
 
       intent = { type: 'NEW_PENDING', pendingSetup };
 
-      // Commentary
+      // Commentary — use template name + narrative
       await pushCommentary(asset, 'setup',
-        `${cohResult.setup.direction} ${cohResult.setup.mode} setup forming — ${cohResult.setup.contributingTactics.join(' + ')}`,
+        `${cohResult.setup.templateName.toUpperCase()}: ${cohResult.setup.direction} ${cohResult.setup.mode}`,
         pendingSetup.id);
+      // Push first 2 lines of narrative as additional commentary
+      for (const line of (cohResult.setup.narrative || []).slice(0, 2)) {
+        await pushCommentary(asset, 'narrative', line, pendingSetup.id + '-' + Math.random());
+      }
       if (recognition.summary.matchCount >= 4) {
         await pushCommentary(asset, 'recognition',
           `Configuration matches ${recognition.summary.matchCount} past trades: ${recognition.summary.wins}W/${recognition.summary.losses}L (${recognition.summary.confidence})`,
@@ -332,7 +342,21 @@ async function processAsset(asset, account, openPositions) {
           'New configuration — no matching past trades, taking exploratory size',
           pendingSetup.id + '-rec');
       }
-    } else if (cohResult.decision === 'WAIT' && cohResult.opinionCount > 0) {
+
+      // Telegram: setup brewing
+      try {
+        await notifySetupBrewing({
+          asset,
+          direction: cohResult.setup.direction,
+          mode: cohResult.setup.mode,
+          entry: cohResult.setup.entry,
+          sl: cohResult.setup.sl,
+          atrValue: h1ATR,
+          contributingTactics: [cohResult.setup.templateName],
+          biasTactics: cohResult.setup.timeframesInPlay,
+        });
+      } catch (_) {}
+    } else if (cohResult.decision === 'WAIT' && evResult.events.length > 0) {
       intent = { type: 'WATCHING', reason: cohResult.reasoning };
 
       // Throttled "watching" commentary
@@ -342,7 +366,7 @@ async function processAsset(asset, account, openPositions) {
         const lastWatching = parseInt(lastRaw, 10) || 0;
         if (Date.now() - lastWatching > WATCHING_THROTTLE_MS) {
           await pushCommentary(asset, 'watching',
-            `${cohResult.opinionCount} observations on ${asset.toUpperCase()} — ${cohResult.reasoning}`);
+            `${evResult.events.length} events on ${asset.toUpperCase()} — no template match yet`);
           await r.set(`v12:watcher:${asset}:lastWatchingCommentaryAt`, String(Date.now()), { ex: 86400 }).catch(() => {});
         }
       }
@@ -357,9 +381,10 @@ async function processAsset(asset, account, openPositions) {
       ts: t0,
       session,
       currentPrice,
-      atr: atrValue,
-      opinions: tacticsResult.opinions,
-      opinionCount: tacticsResult.opinions.length,
+      atr: h1ATR,
+      atrByTF: evResult.atrByTF,
+      events: evResult.events,
+      eventCount: evResult.events.length,
       coherence: cohResult,
       intent,
       pendingSetups: await getPendingSetups(asset),
@@ -388,8 +413,8 @@ async function processAsset(asset, account, openPositions) {
 async function runWatcherTick() {
   const r = getRedis();
 
-  // Watchlist
-  let watchlist = ['gold', 'btc', 'eurusd'];
+  // Watchlist — 2 assets default (V12.1: dropped BTC for proper LTF coverage on free TwelveData tier)
+  let watchlist = ['gold', 'eurusd'];
   if (r) {
     try {
       const raw = await r.get(WATCHLIST_KEY).catch(() => null);

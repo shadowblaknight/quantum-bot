@@ -28,6 +28,7 @@ const { resolveSymbol, resolveAsset } = require('./symbol-resolver');
 const { fetchPositions, fetchCandles } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
+const { notifyTPHit, notifySLHit, notifyTradeClosed } = require('./telegram');
 
 // ===== Position management state =====
 const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
@@ -36,6 +37,24 @@ const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
 // ===== Trading enabled gate =====
 function isTradingEnabled() {
   return process.env.QB_TRADING_ENABLED === 'true';
+}
+
+// =================================================================
+// $ ESTIMATION FROM PRICE DISTANCE
+// =================================================================
+// Used for telegram TP-hit notifications where we don't yet have
+// a closed deal in MetaAPI history. Uses asset-registry pipSize +
+// dollarPerPipPerLot for accurate-enough estimate.
+//
+// For final close summary (notifyTradeClosed), we use the EXACT P&L
+// from MetaAPI history-deals — this estimate is only used for
+// in-flight partial-close notifications.
+
+function estimateDollarsFromDistance(assetId, distance, lot) {
+  const meta = getAssetById(assetId);
+  if (!meta || !meta.pipSize || !meta.dollarPerPipPerLot) return null;
+  const pips = Math.abs(distance) / meta.pipSize;
+  return pips * meta.dollarPerPipPerLot * lot;
 }
 
 // ===== MetaAPI: modify position SL/TP =====
@@ -233,13 +252,21 @@ async function managePosition(position) {
         await pushCommentary(asset, 'tp-hit',
           `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed ${lotToClose} lot`);
 
+        // Estimate $ secured on this leg + cumulative
+        const dollarsThisLeg = estimateDollarsFromDistance(asset, Math.abs(tpPrice - state.entry), lotToClose);
+        const cumulativeDollars = (state.partialCloses || []).reduce((sum, pc) => {
+          const dist = Math.abs(pc.atPrice - state.entry);
+          const d = estimateDollarsFromDistance(asset, dist, pc.lotClosed) || 0;
+          return sum + d;
+        }, 0);
+
         // Move SL based on TP that hit:
         //   TP1 hit → SL to entry (BE)
         //   TP2 hit → SL to TP1
         //   TP3 hit → SL to TP2
         //   TP4 hit → all closed, no SL move needed
+        let newSL = null;
         if (!closingFinalTP) {
-          let newSL = null;
           if (i === 0) newSL = state.entry;                  // BE
           else if (i === 1) newSL = tpLevels[0].price;       // SL to TP1
           else if (i === 2) newSL = tpLevels[1].price;       // SL to TP2
@@ -257,6 +284,23 @@ async function managePosition(position) {
               actions.push({ action: 'sl-move', error: modifyResult.error });
             }
           }
+        }
+
+        // Telegram: TP hit (only for TP1-TP3 — TP4 emits as part of "trade closed")
+        if (!closingFinalTP) {
+          try {
+            await notifyTPHit({
+              asset,
+              direction,
+              tpName,
+              tpPrice,
+              lotClosed: lotToClose,
+              dollarsSecured: dollarsThisLeg,
+              cumulativeDollars,
+              slMovedTo: newSL,
+              dedupeKey: `tphit:${position.id}:${tpName}`,
+            });
+          } catch (_) {}
         }
       } else {
         actions.push({ action: 'partial-close', tpName, error: closeResult.error });
@@ -389,6 +433,41 @@ async function detectAndProcessClosed(currentOpenIds) {
     const outcome = totalPnL > 0.5 ? '✓ WIN' : totalPnL < -0.5 ? '✗ LOSS' : '— BE';
     await pushCommentary(state.asset, 'trade-closed',
       `${outcome} — ${state.direction} closed: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
+
+    // Telegram: trade closed
+    // Determine if this was a clean SL hit (no TPs hit) vs partial-then-SL vs full TP sweep.
+    // tpsHit array tells us tier. SL hit when 0 TPs hit AND outcome is loss.
+    try {
+      const tpsHit = state.tpsHit || [];
+      const isCleanSLHit = tpsHit.length === 0 && totalPnL < -0.5;
+
+      if (isCleanSLHit) {
+        // Just an SL hit — no partials secured
+        // Find the SL price: it's the matchedPending.slPrice (original SL)
+        // unless trail moved it; check state.slMoves for last move
+        const lastSL = state.slMoves && state.slMoves.length > 0
+          ? state.slMoves[state.slMoves.length - 1].newSL
+          : matchedPending.slPrice;
+        await notifySLHit({
+          asset: state.asset,
+          direction: state.direction,
+          slPrice: lastSL,
+          dollarsLost: totalPnL,
+          positionId,
+        });
+      } else {
+        // Trade closed with at least one TP, or BE, or trail
+        await notifyTradeClosed({
+          asset: state.asset,
+          direction: state.direction,
+          totalPnL,
+          tpsHit,
+          positionId,
+          openedAt: state.createdAt,
+          closedAt: Date.now(),
+        });
+      }
+    } catch (_) {}
   }
 
   return recordings;
