@@ -102,8 +102,9 @@ async function ensureStructuralContext(asset) {
     return cached;
   }
 
-  // Build fresh
-  const trendStructure = require('./tactics/trend-structure');
+  // Build fresh structural context using V12.3 swing utility
+  // (replaces deprecated tactics/trend-structure dependency)
+  const { detectSwings, recentSwings, determineTrend } = require('./events/_swings');
   const tfs = ['1d', '1w', '1mn'];
   const trends = {};
   const levels = {};
@@ -112,15 +113,25 @@ async function ensureStructuralContext(asset) {
     try {
       const r1 = await fetchCandles(asset, tf, 60);
       if (r1.candles && r1.candles.length > 10) {
-        const swings = trendStructure.findSwings(r1.candles);
-        const classification = trendStructure.classifyTrend(swings);
+        const swings = detectSwings(r1.candles, 2);
+        const trendDir = determineTrend(swings); // 'UP' | 'DOWN' | 'RANGE'
+
+        // Build evidence string in the same shape the cockpit expects
+        const lastHighs = recentSwings(swings, 'high', 2);
+        const lastLows = recentSwings(swings, 'low', 2);
+        let evidence = `swings: ${swings.length}`;
+        if (trendDir === 'UP' && lastHighs.length >= 2 && lastLows.length >= 2) {
+          evidence = `HH(${lastHighs[1].price.toFixed(2)}) + HL(${lastLows[1].price.toFixed(2)})`;
+        } else if (trendDir === 'DOWN' && lastHighs.length >= 2 && lastLows.length >= 2) {
+          evidence = `LH(${lastHighs[1].price.toFixed(2)}) + LL(${lastLows[1].price.toFixed(2)})`;
+        }
+
         trends[tf] = {
-          direction: classification.trend,
-          confidence: classification.confidence,
-          evidence: classification.evidence,
+          direction: trendDir === 'UP' ? 'UP' : trendDir === 'DOWN' ? 'DOWN' : 'RANGE',
+          confidence: trendDir === 'RANGE' ? 0.3 : 0.8,
+          evidence,
         };
 
-        // Highest high, lowest low across the full window
         const highs = r1.candles.map((c) => c.high);
         const lows = r1.candles.map((c) => c.low);
         levels[tf] = {
