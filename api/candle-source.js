@@ -221,9 +221,27 @@ async function fetchFromTwelveData(asset, tf, limit) {
 
     // TwelveData returns values in DESCENDING order (newest first).
     // V12 detectors expect ASCENDING order (oldest first).
+    //
+    // TIMESTAMP FIX:
+    // TwelveData's `v.datetime` looks like "2026-05-13 11:00:00" with no timezone.
+    // `new Date("2026-05-13 11:00:00")` is parsed as LOCAL time of the server, which
+    // can shift the timestamp by several hours depending on Vercel's region.
+    // We force UTC interpretation by appending 'Z'.
+    function parseAsUTC(dateStr) {
+      if (!dateStr) return Date.now();
+      // If already has Z or +/-HH:MM, parse as-is
+      if (/[Zz]$|[+-]\d{2}:?\d{2}$/.test(dateStr)) {
+        return new Date(dateStr).getTime();
+      }
+      // Replace space with T and append Z to force UTC
+      const isoLike = dateStr.replace(' ', 'T') + 'Z';
+      const ms = new Date(isoLike).getTime();
+      return Number.isFinite(ms) ? ms : Date.now();
+    }
+
     const candles = data.values
       .map((v) => ({
-        time:   new Date(v.datetime).toISOString(),
+        time:   new Date(parseAsUTC(v.datetime)).toISOString(),
         open:   parseFloat(v.open),
         high:   parseFloat(v.high),
         low:    parseFloat(v.low),

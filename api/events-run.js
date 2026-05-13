@@ -80,6 +80,38 @@ async function runForAsset({ asset }) {
     }
   }));
 
+  // TIMESTAMP SAFETY NET:
+  // Some data sources (TwelveData with ambiguous datetime strings, etc.) return
+  // candles whose timestamps are off by hours. Templates rely on `event.ts` being
+  // close to wall-clock time for filters like "sweep in last 8 hours."
+  //
+  // We re-anchor each TF's candle timestamps so the MOST RECENT candle aligns
+  // to wall-clock now, and preceding bars step backward by tfMs. This preserves
+  // the bot's internal timeline regardless of source quirks.
+  const TF_MS = { '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
+  const wallNow = Date.now();
+  for (const tf of timeframes) {
+    const candles = candlesByTF[tf];
+    if (!candles || candles.length === 0) continue;
+    const tfMs = TF_MS[tf];
+    if (!tfMs) continue;
+
+    // Check the most recent candle's timestamp delta from wall-clock.
+    // If it's more than 2 bars off in either direction, re-anchor the whole series.
+    const last = candles[candles.length - 1];
+    const lastTs = new Date(last.time).getTime();
+    const skewMs = Math.abs(wallNow - lastTs);
+    if (skewMs > 2 * tfMs) {
+      // Re-anchor: walk backward from now, one bar per slot
+      const reAnchored = candles.map((c, i) => {
+        const slotsFromEnd = (candles.length - 1) - i;
+        const anchoredMs = wallNow - slotsFromEnd * tfMs;
+        return { ...c, time: new Date(anchoredMs).toISOString() };
+      });
+      candlesByTF[tf] = reAnchored;
+    }
+  }
+
   const allEvents = [];
 
   // Run detectors for each TF
