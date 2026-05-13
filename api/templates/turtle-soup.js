@@ -24,10 +24,10 @@ function match({ events, currentPrice, atrByTF }) {
   const pdh = sessionLevels.find((e) => e.evidence?.kind === 'PDH');
   const pdl = sessionLevels.find((e) => e.evidence?.kind === 'PDL');
 
-  // Find sweeps in last 4 hours on H1, or sweeps of PDH/PDL on M15/H1
-  const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000;
+  // Find sweeps in last 8 hours on H1, or sweeps of PDH/PDL on M15/H1
+  const eightHoursAgo = Date.now() - 8 * 60 * 60 * 1000;
   const recentSweeps = findAllRecent(events, 'sweep', 50)
-    .filter((s) => s.ts >= fourHoursAgo);
+    .filter((s) => s.ts >= eightHoursAgo);
 
   let htfSweep = null;
   let reversalDirection = null;
@@ -61,20 +61,27 @@ function match({ events, currentPrice, atrByTF }) {
 
   if (!htfSweep) return null;
 
-  // Step 2: displacement on M5/M15 in reversal direction AFTER the sweep
+  // Step 2: displacement on same-TF-as-sweep, M15, or M5 in reversal direction AFTER (or at) the sweep
+  // (ICT: when HTF sweeps liquidity, HTF displacement in same candle IS the confirmation)
+  const allowedDispTFs = htfSweep.timeframe === '1h' ? ['1h', '15m', '5m']
+    : htfSweep.timeframe === '15m' ? ['15m', '5m']
+    : ['5m'];
   const displacements = findAllRecent(events, 'displacement', 30)
-    .filter((d) => d.ts > htfSweep.ts)
+    .filter((d) => d.ts >= htfSweep.ts)
     .filter((d) => d.direction === reversalDirection)
-    .filter((d) => d.timeframe === '5m' || d.timeframe === '15m');
+    .filter((d) => allowedDispTFs.includes(d.timeframe));
 
   if (displacements.length === 0) return null;
   const validDisplacement = displacements[0];
 
-  // Step 3: MSS on M5/M15 in reversal direction AFTER displacement
+  // Step 3: MSS on same TF as displacement (or lower) in reversal direction AFTER displacement
+  const allowedMSSTFs = validDisplacement.timeframe === '1h' ? ['1h', '15m', '5m']
+    : validDisplacement.timeframe === '15m' ? ['15m', '5m']
+    : ['5m'];
   const mssEvents = findAllRecent(events, 'mss', 30)
     .filter((m) => m.ts >= validDisplacement.ts)
     .filter((m) => m.direction === reversalDirection)
-    .filter((m) => m.timeframe === '5m' || m.timeframe === '15m');
+    .filter((m) => allowedMSSTFs.includes(m.timeframe));
 
   if (mssEvents.length === 0) return null;
   const validMSS = mssEvents[0];
@@ -82,11 +89,11 @@ function match({ events, currentPrice, atrByTF }) {
   // Step 4: find FVG or OB from displacement
   const fvgs = findAllRecent(events, 'fvg-created', 30)
     .filter((f) => f.direction === reversalDirection)
-    .filter((f) => Math.abs(f.ts - validDisplacement.ts) <= 30 * 60 * 1000);
+    .filter((f) => Math.abs(f.ts - validDisplacement.ts) <= 90 * 60 * 1000);
 
   const obs = findAllRecent(events, 'ob-created', 30)
     .filter((o) => o.direction === reversalDirection)
-    .filter((o) => Math.abs(o.ts - validDisplacement.ts) <= 30 * 60 * 1000)
+    .filter((o) => Math.abs(o.ts - validDisplacement.ts) <= 90 * 60 * 1000)
     .filter((o) => !o.evidence?.tested);
 
   let entryZone = null;

@@ -76,7 +76,7 @@ function match({ events, currentPrice, atrByTF }) {
 
   // Step 4: displacement in reversal direction AFTER the sweep
   const displacements = findAllRecent(events, 'displacement', 30)
-    .filter((d) => d.ts > validSweep.ts)
+    .filter((d) => d.ts >= validSweep.ts)
     .filter((d) => d.direction === reversalDirection)
     .filter((d) => d.timeframe === '5m' || d.timeframe === '15m');
 
@@ -96,11 +96,11 @@ function match({ events, currentPrice, atrByTF }) {
   // FVG match: same direction, ts close to displacement ts, on the same TF
   const fvgs = findAllRecent(events, 'fvg-created', 30)
     .filter((f) => f.direction === reversalDirection)
-    .filter((f) => Math.abs(f.ts - validDisplacement.ts) <= 30 * 60 * 1000); // within 30 min
+    .filter((f) => Math.abs(f.ts - validDisplacement.ts) <= 90 * 60 * 1000); // within 90 min (HTF candles span 30-60 min)
 
   const obs = findAllRecent(events, 'ob-created', 30)
     .filter((o) => o.direction === reversalDirection)
-    .filter((o) => Math.abs(o.ts - validDisplacement.ts) <= 30 * 60 * 1000)
+    .filter((o) => Math.abs(o.ts - validDisplacement.ts) <= 90 * 60 * 1000)
     .filter((o) => !o.evidence?.tested); // prefer untested OBs
 
   // Prefer FVG (CE entry), fall back to OB

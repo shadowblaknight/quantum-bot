@@ -11,33 +11,30 @@
 // RANGE = mixed / no clear pattern
 
 const { makeEvent } = require('./_event');
-const { detectSwings, recentSwings } = require('./_swings');
+const { detectSwings, recentSwings, determineTrend } = require('./_swings');
 
 function detect({ candles, atr, timeframe }) {
   const events = [];
   if (!candles || candles.length < 30) return events;
 
   const swings = detectSwings(candles, 2);
-  if (swings.length < 4) return events;
+  if (swings.length < 3) return events;
 
-  const lastHighs = recentSwings(swings, 'high', 2);
-  const lastLows = recentSwings(swings, 'low', 2);
-  if (lastHighs.length < 2 || lastLows.length < 2) return events;
-
-  const higherHighs = lastHighs[1].price > lastHighs[0].price;
-  const higherLows = lastLows[1].price > lastLows[0].price;
-  const lowerHighs = lastHighs[1].price < lastHighs[0].price;
-  const lowerLows = lastLows[1].price < lastLows[0].price;
+  // New logic: most recent swing extreme dominates
+  const trend = determineTrend(swings);
 
   let direction = 'NEUTRAL';
-  let trend = 'RANGE';
-  if (higherHighs && higherLows) { direction = 'LONG'; trend = 'UP'; }
-  else if (lowerHighs && lowerLows) { direction = 'SHORT'; trend = 'DOWN'; }
+  if (trend === 'UP') direction = 'LONG';
+  else if (trend === 'DOWN') direction = 'SHORT';
+
+  // Build evidence: show what most-recent swings look like
+  const lastHighs = recentSwings(swings, 'high', 2);
+  const lastLows = recentSwings(swings, 'low', 2);
 
   const lastCandle = candles[candles.length - 1];
   events.push(makeEvent({
     type: 'trend',
-    ts: lastCandle.time,
+    ts: new Date(lastCandle.time).getTime(),
     timeframe,
     price: lastCandle.close,
     direction,

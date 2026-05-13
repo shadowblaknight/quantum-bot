@@ -30,10 +30,11 @@ function detect({ candles, atr, timeframe }) {
   if (!candles || candles.length < 24 || !atr || atr <= 0) return events;
   if (timeframe !== '1h') return events; // 1h is the canonical TF for session levels
 
-  const now = candles[candles.length - 1].time;
-  const today = new Date(now);
+  // Candle .time is an ISO string — convert to ms for arithmetic
+  const nowMs = new Date(candles[candles.length - 1].time).getTime();
+  const today = new Date(nowMs);
   const todayUTCDate = today.toISOString().slice(0, 10);
-  const yesterday = new Date(now - 86400 * 1000);
+  const yesterday = new Date(nowMs - 86400 * 1000);
   const yesterdayUTCDate = yesterday.toISOString().slice(0, 10);
 
   // PDH / PDL — yesterday's high and low (UTC day boundary)
@@ -43,9 +44,10 @@ function detect({ candles, atr, timeframe }) {
   if (yesterdayCandles.length > 0) {
     const pdh = Math.max(...yesterdayCandles.map((c) => c.high));
     const pdl = Math.min(...yesterdayCandles.map((c) => c.low));
+    const lastTime = new Date(yesterdayCandles[yesterdayCandles.length - 1].time).getTime();
     events.push(makeEvent({
       type: 'session-level',
-      ts: yesterdayCandles[yesterdayCandles.length - 1].time,
+      ts: lastTime,
       timeframe,
       price: pdh,
       direction: 'NEUTRAL',
@@ -53,7 +55,7 @@ function detect({ candles, atr, timeframe }) {
     }));
     events.push(makeEvent({
       type: 'session-level',
-      ts: yesterdayCandles[yesterdayCandles.length - 1].time,
+      ts: lastTime,
       timeframe,
       price: pdl,
       direction: 'NEUTRAL',
@@ -75,9 +77,10 @@ function detect({ candles, atr, timeframe }) {
   if (asianCandles.length > 0) {
     const ah = Math.max(...asianCandles.map((c) => c.high));
     const al = Math.min(...asianCandles.map((c) => c.low));
+    const lastTime = new Date(asianCandles[asianCandles.length - 1].time).getTime();
     events.push(makeEvent({
       type: 'session-level',
-      ts: asianCandles[asianCandles.length - 1].time,
+      ts: lastTime,
       timeframe,
       price: ah,
       direction: 'NEUTRAL',
@@ -85,7 +88,7 @@ function detect({ candles, atr, timeframe }) {
     }));
     events.push(makeEvent({
       type: 'session-level',
-      ts: asianCandles[asianCandles.length - 1].time,
+      ts: lastTime,
       timeframe,
       price: al,
       direction: 'NEUTRAL',
@@ -102,9 +105,10 @@ function detect({ candles, atr, timeframe }) {
   if (londonCandles.length > 0) {
     const lh = Math.max(...londonCandles.map((c) => c.high));
     const ll = Math.min(...londonCandles.map((c) => c.low));
+    const lastTime = new Date(londonCandles[londonCandles.length - 1].time).getTime();
     events.push(makeEvent({
       type: 'session-level',
-      ts: londonCandles[londonCandles.length - 1].time,
+      ts: lastTime,
       timeframe,
       price: lh,
       direction: 'NEUTRAL',
@@ -112,7 +116,7 @@ function detect({ candles, atr, timeframe }) {
     }));
     events.push(makeEvent({
       type: 'session-level',
-      ts: londonCandles[londonCandles.length - 1].time,
+      ts: lastTime,
       timeframe,
       price: ll,
       direction: 'NEUTRAL',

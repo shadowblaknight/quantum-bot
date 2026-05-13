@@ -46,15 +46,27 @@ function makeEvent({
   refers = null,
   evidence = null,
 }) {
+  // CRITICAL: ts is always a number (ms timestamp).
+  // Candles from the data source store time as ISO strings, but events
+  // need numeric ts for arithmetic comparisons in templates
+  // (e.g. "is this sweep within 4 hours?" — needs ts - Date.now()).
+  let normalizedTs = ts;
+  if (typeof ts === 'string') {
+    normalizedTs = new Date(ts).getTime();
+  }
+  if (!Number.isFinite(normalizedTs)) {
+    normalizedTs = Date.now();
+  }
+
   return {
     type,
-    ts,
+    ts: normalizedTs,
     timeframe,
     price,
     direction,
     zone,
     refers,
-    id: `${type}_${timeframe}_${ts}_${Math.random().toString(36).slice(2, 6)}`,
+    id: `${type}_${timeframe}_${normalizedTs}_${Math.random().toString(36).slice(2, 6)}`,
     evidence,
   };
 }

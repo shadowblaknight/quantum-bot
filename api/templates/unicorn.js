@@ -47,7 +47,7 @@ function match({ events, currentPrice, atrByTF }) {
       .filter((f) => f.direction === bias)
       .filter((f) => f.timeframe === '5m' || f.timeframe === '15m')
       .filter((f) => (f.evidence?.fillPercent ?? 1) < 0.5)
-      .filter((f) => Math.abs(f.ts - breaker.ts) <= 30 * 60 * 1000);
+      .filter((f) => Math.abs(f.ts - breaker.ts) <= 90 * 60 * 1000);
 
     for (const fvg of fvgs) {
       const overlap = zoneOverlap(breaker.zone, fvg.zone);

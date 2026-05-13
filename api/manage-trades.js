@@ -173,14 +173,16 @@ async function managePosition(position) {
   const direction = isLong ? 'LONG' : 'SHORT';
 
   // Find pending setup that matches this position (by entry price + direction + asset)
+  // We accept both 'placed' (just placed) and 'filled' (already managed once) — the
+  // pending needs to be matchable across the entire trade lifecycle.
   const pendingList = await getPendingSetups(asset);
   const matchedPending = pendingList.find((p) =>
-    p.status === 'placed' &&
+    (p.status === 'placed' || p.status === 'filled') &&
     Math.abs(p.plannedEntry - position.openPrice) < 0.01 * position.openPrice &&
     p.setup.direction === direction
   );
 
-  // Mark as filled if just discovered
+  // Mark as filled if just discovered (first time manage sees this position)
   if (matchedPending && matchedPending.status === 'placed') {
     await updatePendingSetup(asset, matchedPending.id, {
       status: 'filled',

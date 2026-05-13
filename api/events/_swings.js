@@ -41,20 +41,39 @@ function recentSwings(swings, type, n = 5) {
 }
 
 // Determine if the swing structure shows an uptrend or downtrend
-// Simple HH+HL = UP, LH+LL = DOWN, mixed = RANGE
+// Strategy: look at the MOST RECENT swing extreme (high or low) and ask
+// "is it higher or lower than the previous same-type swing?"
+// - Most recent swing was a HIGHER HIGH → UP bias
+// - Most recent swing was a LOWER LOW  → DOWN bias
+// - Most recent swing was a LOWER HIGH → DOWN bias (rejection at lower level)
+// - Most recent swing was a HIGHER LOW → UP bias (support holding higher)
+// This matches how ICT pros read structure — the FRESH break dominates,
+// not the slow consensus of multiple swings.
 function determineTrend(swings) {
-  const highs = recentSwings(swings, 'high', 2);
-  const lows = recentSwings(swings, 'low', 2);
-  if (highs.length < 2 || lows.length < 2) return 'RANGE';
+  if (!swings || swings.length < 3) return 'RANGE';
 
-  const higherHighs = highs[1].price > highs[0].price;
-  const higherLows  = lows[1].price  > lows[0].price;
-  const lowerHighs  = highs[1].price < highs[0].price;
-  const lowerLows   = lows[1].price  < lows[0].price;
+  // Sort swings by index (chronological) — they should already be sorted
+  const sorted = [...swings].sort((a, b) => a.index - b.index);
+  const lastSwing = sorted[sorted.length - 1];
+  if (!lastSwing) return 'RANGE';
 
-  if (higherHighs && higherLows) return 'UP';
-  if (lowerHighs && lowerLows)   return 'DOWN';
-  return 'RANGE';
+  // Find the previous swing of the SAME type as the last swing
+  let prevSameType = null;
+  for (let i = sorted.length - 2; i >= 0; i--) {
+    if (sorted[i].type === lastSwing.type) {
+      prevSameType = sorted[i];
+      break;
+    }
+  }
+  if (!prevSameType) return 'RANGE';
+
+  // Compare
+  if (lastSwing.type === 'high') {
+    return lastSwing.price > prevSameType.price ? 'UP' : 'DOWN';
+  } else {
+    // last swing is a low
+    return lastSwing.price < prevSameType.price ? 'DOWN' : 'UP';
+  }
 }
 
 module.exports = {

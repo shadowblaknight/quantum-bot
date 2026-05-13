@@ -171,6 +171,10 @@ async function tryPlace(pending, brokerSymbol) {
   const tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[0].price : null;
 
   // Place
+  // Use templateName + mode for the comment (V12.3 shape).
+  // Backward-compat: fall back to contributingTactics if present (V12.2 shape).
+  const commentLabel = setup.templateName
+    || (Array.isArray(setup.contributingTactics) ? setup.contributingTactics.join('+') : 'setup');
   const placement = await placeLimitOrder(
     brokerSymbol,
     setup.direction,
@@ -178,7 +182,7 @@ async function tryPlace(pending, brokerSymbol) {
     plannedEntry,
     slPrice,
     tpPrice,
-    `QB-V12-${setup.mode}-${setup.contributingTactics.join('+')}`.slice(0, 64),
+    `QB-V12-${setup.mode || 'DAY'}-${commentLabel}`.slice(0, 64),
   );
 
   if (placement.ok) {
