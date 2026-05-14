@@ -113,7 +113,8 @@ async function fetchPositions() {
     const resp = await fetch(url, { headers: metaapiHeaders() });
     if (!resp.ok) {
       const txt = await resp.text().catch(() => '');
-      return { error: `positions ${resp.status}: ${txt.slice(0, 200)}`, positions: [] };
+      console.warn(`[broker] fetchPositions ${resp.status}: ${txt.slice(0, 200)}`);
+      return null; // SIGNAL: broker error, NOT a confirmed empty positions list
     }
     const positions = await resp.json();
     // Annotate each with assetId if we can resolve it
@@ -123,7 +124,8 @@ async function fetchPositions() {
     }));
     return annotated;
   } catch (e) {
-    return { error: e.message, positions: [] };
+    console.warn(`[broker] fetchPositions exception: ${e.message}`);
+    return null; // SIGNAL: broker error
   }
 }
 

@@ -57,6 +57,20 @@ function estimateDollarsFromDistance(assetId, distance, lot) {
   return pips * meta.dollarPerPipPerLot * lot;
 }
 
+// Sign-aware variant: returns POSITIVE when tpPrice is in the profit direction
+// from entry, NEGATIVE when it's against. Critical for notification accuracy —
+// without this, a position closed at a loss would report a fake positive
+// "secured" amount because |distance| × multiplier is always positive.
+function signedDollarsForLeg(assetId, entryPrice, exitPrice, direction, lot) {
+  const meta = getAssetById(assetId);
+  if (!meta || !meta.pipSize || !meta.dollarPerPipPerLot) return null;
+  const isLong = direction === 'LONG';
+  // For LONG: profit when exit > entry; for SHORT: profit when exit < entry.
+  const signedDistance = isLong ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
+  const signedPips = signedDistance / meta.pipSize;
+  return signedPips * meta.dollarPerPipPerLot * lot;
+}
+
 // ===== MetaAPI: modify position SL/TP =====
 async function modifyPosition(positionId, slPrice, tpPrice) {
   const token = process.env.METAAPI_TOKEN;
@@ -172,15 +186,50 @@ async function managePosition(position) {
   const isLong = position.type === 'POSITION_TYPE_BUY' || position.direction === 'LONG';
   const direction = isLong ? 'LONG' : 'SHORT';
 
-  // Find pending setup that matches this position (by entry price + direction + asset)
-  // We accept both 'placed' (just placed) and 'filled' (already managed once) — the
-  // pending needs to be matchable across the entire trade lifecycle.
+  // Find pending setup that matches this position.
+  //
+  // CRITICAL: matching must be precise. A previous bug used a 1% tolerance
+  // (46 pts for gold!) which would match COMPLETELY DIFFERENT setups whose
+  // TP levels pointed the wrong direction — causing the bot to report SL
+  // hits as "TP hits" with sign-inverted dollar amounts.
+  //
+  // Strategy:
+  //   1. Prefer matching by positionId (set when first managed) — exact match
+  //   2. Fallback to strict price + direction + TP-direction-sanity check
   const pendingList = await getPendingSetups(asset);
-  const matchedPending = pendingList.find((p) =>
-    (p.status === 'placed' || p.status === 'filled') &&
-    Math.abs(p.plannedEntry - position.openPrice) < 0.01 * position.openPrice &&
-    p.setup.direction === direction
+
+  // Pass 1: exact positionId match (managed before)
+  let matchedPending = pendingList.find((p) =>
+    p.positionId && p.positionId === position.id &&
+    (p.status === 'placed' || p.status === 'filled')
   );
+
+  // Pass 2: strict first-fill match
+  if (!matchedPending) {
+    // Tighter tolerance: for gold, 2 points; for fx-like, 0.05% of price
+    const isGold = position.openPrice > 100;
+    const priceTolerance = isGold ? 2.0 : position.openPrice * 0.0005;
+
+    matchedPending = pendingList.find((p) => {
+      if (p.status !== 'placed' && p.status !== 'filled') return false;
+      if (p.setup.direction !== direction) return false;
+      if (Math.abs(p.plannedEntry - position.openPrice) > priceTolerance) return false;
+
+      // Sanity check: TPs must point the correct direction relative to entry.
+      // For SHORT: all TP prices should be BELOW entry.
+      // For LONG: all TP prices should be ABOVE entry.
+      // If they don't, this pending is from a different context — reject the match.
+      const entry = position.openPrice;
+      const tps = p.tpLevels || [];
+      if (tps.length === 0) return false;
+      const tpsCorrectSide = tps.every((tp) =>
+        isLong ? tp.price > entry : tp.price < entry
+      );
+      if (!tpsCorrectSide) return false;
+
+      return true;
+    });
+  }
 
   // Mark as filled if just discovered (first time manage sees this position)
   if (matchedPending && matchedPending.status === 'placed') {
@@ -234,6 +283,16 @@ async function managePosition(position) {
     if (state.tpsHit.includes(tpName)) continue;
 
     const tpPrice = tpLevels[i].price;
+
+    // SAFETY: TP must be on the profit side of entry. If it isn't, the
+    // matched pending setup is bogus (probably a stale one with TPs from a
+    // different context). Skip detection to avoid reporting SL hits as wins.
+    const tpOnProfitSide = isLong ? tpPrice > state.entry : tpPrice < state.entry;
+    if (!tpOnProfitSide) {
+      actions.push({ action: 'tp-skipped', tpName, reason: 'tp-on-loss-side', tpPrice, entry: state.entry });
+      continue;
+    }
+
     const hit = isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice;
 
     if (hit) {
@@ -254,11 +313,13 @@ async function managePosition(position) {
         await pushCommentary(asset, 'tp-hit',
           `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed ${lotToClose} lot`);
 
-        // Estimate $ secured on this leg + cumulative
-        const dollarsThisLeg = estimateDollarsFromDistance(asset, Math.abs(tpPrice - state.entry), lotToClose);
+        // Estimate $ for this leg + cumulative using SIGN-AWARE calculation.
+        // If tpPrice happens to be on the wrong side of entry (e.g. due to a
+        // stale-pending matching bug), the result will be NEGATIVE and the
+        // notification will show the truth, not a fake gain.
+        const dollarsThisLeg = signedDollarsForLeg(asset, state.entry, tpPrice, direction, lotToClose);
         const cumulativeDollars = (state.partialCloses || []).reduce((sum, pc) => {
-          const dist = Math.abs(pc.atPrice - state.entry);
-          const d = estimateDollarsFromDistance(asset, dist, pc.lotClosed) || 0;
+          const d = signedDollarsForLeg(asset, state.entry, pc.atPrice, direction, pc.lotClosed) || 0;
           return sum + d;
         }, 0);
 
@@ -484,8 +545,19 @@ async function runManageTick() {
     return { ts: Date.now(), tradingEnabled: false };
   }
 
-  const positionsResult = await fetchPositions().catch(() => []);
-  const positions = Array.isArray(positionsResult) ? positionsResult : [];
+  // CRITICAL: If broker fetch fails, we MUST NOT proceed. Otherwise
+  // detectAndProcessClosed will see "no open positions" and mark every
+  // previously-tracked position as just-closed, corrupting the track
+  // record and firing fake Telegram notifications.
+  const positions = await fetchPositions();
+  if (positions === null) {
+    console.warn('[manage-trades] broker positions fetch failed — skipping tick to preserve state');
+    return {
+      ts: Date.now(),
+      tradingEnabled: true,
+      skipped: 'broker-positions-unavailable',
+    };
+  }
   const v12Positions = positions.filter((p) => p.comment && p.comment.startsWith('QB-V12-'));
 
   // 1. Manage each open V12 position

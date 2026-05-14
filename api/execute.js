@@ -93,6 +93,24 @@ async function placeLimitOrder(brokerSymbol, direction, lot, entryPrice, slPrice
       return { ok: false, error: `MetaAPI ${resp.status}: ${txt.slice(0, 300)}` };
     }
     const data = await resp.json();
+
+    // CRITICAL: MetaAPI returns HTTP 200 EVEN WHEN the broker rejects the order
+    // (insufficient margin, stops too close, invalid lot size, etc). We MUST
+    // check the numericCode to confirm the order was actually accepted by MT5.
+    // 10009 = TRADE_RETCODE_DONE (success)
+    // 10016 = TRADE_RETCODE_INVALID_STOPS (SL/TP too close to market)
+    // 10019 = TRADE_RETCODE_NO_MONEY (insufficient funds)
+    // Full list: https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes
+    const okCode = data.numericCode === 10009 || data.numericCode === undefined;
+    // numericCode undefined → assume legacy/sandbox response; trust orderId presence
+    const hasOrderId = !!(data.orderId || data.id);
+    if (!okCode || (!hasOrderId && data.numericCode !== undefined)) {
+      return {
+        ok: false,
+        error: `broker rejected order: ${data.stringCode || 'code ' + data.numericCode}: ${data.message || ''}`.slice(0, 300),
+        response: data,
+      };
+    }
     return { ok: true, orderId: data.orderId || data.id || null, response: data };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -163,6 +181,110 @@ async function tryPlace(pending, brokerSymbol) {
     action.error = 'invalid pending setup';
     return action;
   }
+
+  // ── PRE-FLIGHT BROKER COMPATIBILITY CHECKS ─────────────────────
+  // Without these, the broker silently rejects the order (returns 200 +
+  // INVALID_STOPS or NO_MONEY) and the user sees a phantom "Order Placed"
+  // notification with no actual order in MT5.
+  //
+  // ASSET-AWARE: rules are derived from the asset registry, NOT from
+  // brittle price-magnitude heuristics. Works correctly for forex majors,
+  // JPY pairs, metals (gold/silver/platinum), crypto, indices, commodities.
+  const asset = getAssetById(pending.asset);
+  if (!asset) {
+    action.error = 'unknown asset: ' + pending.asset;
+    action.skipped = 'unknown-asset';
+    return action;
+  }
+
+  const slDistance = Math.abs(slPrice - plannedEntry);
+
+  // CHECK 1: SL distance must clear broker's minimum stop level.
+  // Floor = max(2 pips, 25% of typical H1 ATR). This is asset-aware:
+  //   EURUSD: max(0.0002, 0.0002)  = 2 pips
+  //   USDJPY: max(0.02,   0.02)    = 2 pips
+  //   Gold:   max(0.02,   1.00)    = 1.00  (gold needs ~100x more than FX in price units)
+  //   BTC:    max(2.0,    50.0)    = $50
+  //   NAS100: max(0.02,   25.0)    = 25 points
+  const minByPip = (asset.pipSize || 0.0001) * 2;
+  const minByATR = (asset.typicalH1ATR || 0) * 0.25;
+  const minSLDistance = Math.max(minByPip, minByATR);
+
+  if (slDistance < minSLDistance) {
+    const slPips = slDistance / (asset.pipSize || 0.0001);
+    action.error = `SL distance ${slDistance.toFixed(asset.pipSize < 0.01 ? 5 : 2)} (~${slPips.toFixed(1)} pips) below minimum ${minSLDistance.toFixed(asset.pipSize < 0.01 ? 5 : 2)} for ${asset.name}`;
+    action.skipped = 'sl-too-tight';
+    await updatePendingSetup(pending.asset, pending.id, {
+      status: 'rejected-validation',
+      placeError: action.error,
+      lastAttemptAt: Date.now(),
+    });
+    await pushCommentary(pending.asset, 'order-rejected',
+      `❌ Rejected before sending: ${action.error}`);
+    return action;
+  }
+
+  // CHECK 2: Lot size sanity cap, by category. Without this, a tiny SL
+  // distance produces a massive lot (your case: 0.8 pip SL → 9.71 lots
+  // EURUSD on an $8k account).
+  // These are conservative bounds for a small account ($1k–$50k); when
+  // multi-tenant ships, user accounts can override.
+  const lotCapsByCategory = {
+    forex:     5.0,   // up to 5 lots on FX pairs
+    metal:     1.0,   // gold/silver/platinum
+    crypto:    1.0,   // BTC/ETH/SOL/XRP
+    index:     2.0,   // NAS100, US30, etc
+    commodity: 5.0,   // oil, natgas
+  };
+  const maxLotByAsset = lotCapsByCategory[asset.category] || 1.0;
+  if (sizing.recommendedLot > maxLotByAsset) {
+    action.error = `lot ${sizing.recommendedLot} exceeds max ${maxLotByAsset} for ${asset.category} (tight SL produces oversized position)`;
+    action.skipped = 'lot-too-large';
+    await updatePendingSetup(pending.asset, pending.id, {
+      status: 'rejected-validation',
+      placeError: action.error,
+      lastAttemptAt: Date.now(),
+    });
+    await pushCommentary(pending.asset, 'order-rejected',
+      `❌ Rejected: lot ${sizing.recommendedLot} > max ${maxLotByAsset} for ${asset.name}. Likely tight-SL artifact.`);
+    return action;
+  }
+
+  // CHECK 3: All TPs must be on the profit side of entry
+  if (tpLevels && tpLevels.length > 0) {
+    const isLong = setup.direction === 'LONG';
+    const badTPs = tpLevels.filter((tp) => isLong ? tp.price <= plannedEntry : tp.price >= plannedEntry);
+    if (badTPs.length > 0) {
+      action.error = `${badTPs.length} TP level(s) on wrong side of entry — corrupted setup`;
+      action.skipped = 'bad-tp-direction';
+      await updatePendingSetup(pending.asset, pending.id, {
+        status: 'rejected-validation',
+        placeError: action.error,
+        lastAttemptAt: Date.now(),
+      });
+      await pushCommentary(pending.asset, 'order-rejected',
+        `❌ Rejected: ${action.error}`);
+      return action;
+    }
+  }
+
+  // CHECK 4: SL must be on the correct side of entry (LONG: SL < entry, SHORT: SL > entry).
+  // A flipped SL is a corrupted setup that would otherwise place a no-stop order.
+  const isLong = setup.direction === 'LONG';
+  const slOnWrongSide = isLong ? slPrice >= plannedEntry : slPrice <= plannedEntry;
+  if (slOnWrongSide) {
+    action.error = `SL on wrong side of entry for ${setup.direction} (entry=${plannedEntry}, SL=${slPrice}) — corrupted setup`;
+    action.skipped = 'bad-sl-direction';
+    await updatePendingSetup(pending.asset, pending.id, {
+      status: 'rejected-validation',
+      placeError: action.error,
+      lastAttemptAt: Date.now(),
+    });
+    await pushCommentary(pending.asset, 'order-rejected',
+      `❌ Rejected: ${action.error}`);
+    return action;
+  }
+  // ───────────────────────────────────────────────────────────────
 
   // Pick first TP level for the broker's TP field
   // (V11 used multi-TP ladder — manage-trades.js handles partial closes)
@@ -251,8 +373,20 @@ async function runExecuteTick() {
     } catch (_) {}
   }
 
-  const positionsResult = await fetchPositions().catch(() => []);
-  const positions = Array.isArray(positionsResult) ? positionsResult : [];
+  // CRITICAL: If we can't get positions from the broker, we MUST NOT place
+  // new orders. Otherwise we might double-up on an asset that already has
+  // an open position (the broker just timed out). fetchPositions returns
+  // null on broker failure; empty array means "confirmed: no positions".
+  const positions = await fetchPositions();
+  if (positions === null) {
+    console.warn('[execute] broker positions fetch failed — skipping tick to avoid duplicate orders');
+    return {
+      ts: Date.now(),
+      tradingEnabled: true,
+      skipped: 'broker-positions-unavailable',
+      watchlist,
+    };
+  }
 
   const results = await Promise.all(
     watchlist.map((asset) => processAsset(asset, positions))
@@ -282,5 +416,7 @@ module.exports = async (req, res) => {
 };
 
 module.exports.runExecuteTick = runExecuteTick;
+module.exports.processAsset = processAsset;
+module.exports.tryPlace = tryPlace;
 module.exports.placeLimitOrder = placeLimitOrder;
 module.exports.isTradingEnabled = isTradingEnabled;

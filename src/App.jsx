@@ -442,6 +442,15 @@ export default function App() {
           onNavigate={setPage}
         />
       )}
+      {page === "grid" && (
+        <GridPage
+          prefs={prefs}
+          theme={theme}
+          account={account}
+          positions={positions}
+          onNavigate={setPage}
+        />
+      )}
       {page === "portfolio" && (
         <PortfolioPage
           prefs={prefs}
@@ -830,6 +839,7 @@ function LogoMenu({ theme, onNavigate, onClose }) {
 
   const items = [
     { id: "cockpit",   label: "Cockpit",   icon: "▣" },
+    { id: "grid",      label: "Grid",      icon: "⊞" },
     { id: "portfolio", label: "Portfolio", icon: "▤" },
     { id: "reports",   label: "Reports",   icon: "▦" },
     { id: "settings",  label: "Settings",  icon: "⚙" },
@@ -2814,6 +2824,193 @@ function NumberRow({ label, value, prefix, suffix, onChange }) {
         {suffix && <span style={{ color: "var(--qb-text-muted)", fontSize: 11 }}>{suffix}</span>}
       </div>
     </label>
+  );
+}
+
+// =====================================================================
+// SECTION 11.5: GRID PAGE — multi-instrument plain cockpit
+// =====================================================================
+// Reads /api/cockpit-grid (Redis-only, no broker/TwelveData calls), polls
+// every 5s. Each row shows one watchlist asset's full state: status, price,
+// ATR, last setup, P&L. Built for testing-phase visibility across instruments.
+
+function GridPage({ prefs, theme, account, positions, onNavigate }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [draftAssets, setDraftAssets] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("cockpit-grid")).then((x) => x.json());
+        if (alive) {
+          if (r.error) setError(r.error);
+          else { setData(r); setError(null); }
+        }
+      } catch (e) {
+        if (alive) setError(e.message);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const saveWatchlist = async () => {
+    const assets = draftAssets.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (assets.length === 0) return alert("Empty watchlist");
+    try {
+      const r = await fetch(API("watchlist"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assets }),
+      }).then((x) => x.json());
+      if (r.error) alert(r.error);
+      else setEditing(false);
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  const c = {
+    bg: "#0a0a0a",
+    panel: "#141414",
+    border: "#262626",
+    text: "#e8e8e8",
+    muted: "#888",
+    accent: "#4fc3f7",
+    green: "#26a69a",
+    red: "#ef5350",
+    yellow: "#ffb74d",
+  };
+
+  return (
+    <div style={{ width: "100%", height: "100%", background: c.bg, color: c.text, display: "flex", flexDirection: "column", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
+      <PageHeader
+        title="Grid"
+        subtitle={data ? `${data.summary.total} instruments · ${data.killZoneDisplay}` : "loading…"}
+        onNavigate={onNavigate}
+        theme={theme}
+      />
+
+      <div style={{ padding: "12px 20px", borderBottom: `1px solid ${c.border}`, display: "flex", gap: 16, alignItems: "center", fontSize: 12 }}>
+        <div>Balance: <strong>${account?.balance?.toFixed(2) || "—"}</strong></div>
+        <div>Equity: <strong>${account?.equity?.toFixed(2) || "—"}</strong></div>
+        <div>Open: <strong>{positions.length}</strong></div>
+        <div style={{ marginLeft: "auto" }}>
+          {!editing ? (
+            <button
+              onClick={() => { setDraftAssets((data?.watchlist || []).join(", ")); setEditing(true); }}
+              style={{ background: c.panel, color: c.text, border: `1px solid ${c.border}`, padding: "4px 10px", cursor: "pointer", fontSize: 11 }}
+            >Edit watchlist</button>
+          ) : (
+            <span style={{ display: "flex", gap: 6 }}>
+              <input
+                value={draftAssets}
+                onChange={(e) => setDraftAssets(e.target.value)}
+                placeholder="gold, eurusd, gbpusd, usdjpy, btc, nas100"
+                style={{ background: c.bg, color: c.text, border: `1px solid ${c.accent}`, padding: "4px 8px", width: 380, fontSize: 11, fontFamily: "inherit" }}
+              />
+              <button onClick={saveWatchlist} style={{ background: c.green, color: "#000", border: "none", padding: "4px 10px", cursor: "pointer", fontSize: 11 }}>Save</button>
+              <button onClick={() => setEditing(false)} style={{ background: c.panel, color: c.text, border: `1px solid ${c.border}`, padding: "4px 10px", cursor: "pointer", fontSize: 11 }}>Cancel</button>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ padding: 12, background: "#3a0000", color: c.red, fontSize: 12 }}>Error: {error}</div>
+      )}
+
+      <div style={{ flex: 1, overflow: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead style={{ position: "sticky", top: 0, background: c.panel, zIndex: 2 }}>
+            <tr style={{ borderBottom: `1px solid ${c.border}` }}>
+              {["Asset", "Status", "Price", "ATR(H1)", "Last template", "Dir", "Entry", "SL", "TP1", "P&L", "Recog", "Updated"].map((h) => (
+                <th key={h} style={{ padding: "10px 12px", textAlign: "left", fontWeight: 500, color: c.muted, fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.assets || []).map((a) => (
+              <GridRow key={a.id} a={a} c={c} />
+            ))}
+          </tbody>
+        </table>
+        {data && data.assets.length === 0 && (
+          <div style={{ padding: 30, textAlign: "center", color: c.muted, fontSize: 12 }}>
+            Watchlist empty. Click "Edit watchlist" to add instruments.
+          </div>
+        )}
+      </div>
+
+      <div style={{ padding: "8px 20px", borderTop: `1px solid ${c.border}`, fontSize: 10, color: c.muted, display: "flex", justifyContent: "space-between" }}>
+        <span>Live · polls every 5s · zero TwelveData usage</span>
+        <span>{data ? new Date(data.ts).toLocaleTimeString() : "—"}</span>
+      </div>
+    </div>
+  );
+}
+
+function GridRow({ a, c }) {
+  const dirColor = a.lastSetup?.direction === "LONG" ? c.green : a.lastSetup?.direction === "SHORT" ? c.red : c.muted;
+
+  const statusBadge = (s) => {
+    const map = {
+      "in-trade":      { bg: "#1a3a1a", fg: c.green,  label: "● IN TRADE" },
+      "awaiting-fill": { bg: "#3a2e1a", fg: c.yellow, label: "○ AWAITING" },
+      "pending":       { bg: "#1a2a3a", fg: c.accent, label: "○ PENDING" },
+      "watching":      { bg: c.panel,    fg: c.muted,  label: "· watching" },
+      "paused":        { bg: "#3a1a1a", fg: c.red,    label: "‖ paused" },
+    };
+    const m = map[s] || map["watching"];
+    return (
+      <span style={{ background: m.bg, color: m.fg, padding: "2px 8px", borderRadius: 3, fontSize: 10, letterSpacing: 0.5 }}>{m.label}</span>
+    );
+  };
+
+  const fmtPrice = (p) => {
+    if (p == null) return "—";
+    if (a.category === "forex") return p.toFixed(5);
+    if (a.category === "crypto" && p > 1000) return p.toFixed(2);
+    return p.toFixed(2);
+  };
+  const fmtPnL = (p) => {
+    if (p == null) return "—";
+    const color = p >= 0 ? c.green : c.red;
+    return <span style={{ color }}>{p >= 0 ? "+" : ""}{p.toFixed(2)}</span>;
+  };
+  const fmtTime = (ts) => {
+    if (!ts) return "—";
+    const sec = Math.round((Date.now() - ts) / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.round(sec/60)}m ago`;
+    return `${Math.round(sec/3600)}h ago`;
+  };
+
+  return (
+    <tr style={{ borderBottom: `1px solid ${c.border}` }}>
+      <td style={{ padding: "8px 12px", fontWeight: 500 }}>
+        {a.name}<span style={{ color: c.muted, fontSize: 10, marginLeft: 6 }}>{a.id}</span>
+      </td>
+      <td style={{ padding: "8px 12px" }}>{statusBadge(a.status)}</td>
+      <td style={{ padding: "8px 12px" }}>{fmtPrice(a.currentPrice)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted }}>{a.atrH1 ? a.atrH1.toFixed(a.category === "forex" ? 5 : 2) : "—"}</td>
+      <td style={{ padding: "8px 12px", color: a.lastSetup ? c.text : c.muted }}>
+        {a.lastSetup?.template || "—"}
+      </td>
+      <td style={{ padding: "8px 12px", color: dirColor, fontWeight: 500 }}>{a.lastSetup?.direction || "—"}</td>
+      <td style={{ padding: "8px 12px" }}>{fmtPrice(a.lastSetup?.entry)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted }}>{fmtPrice(a.lastSetup?.sl)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted }}>{fmtPrice(a.lastSetup?.tp1)}</td>
+      <td style={{ padding: "8px 12px" }}>{fmtPnL(a.lastSetup?.pnl)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted, fontSize: 11 }}>
+        {a.recognition ? `${(a.recognition.winRate * 100).toFixed(0)}% (${a.recognition.matchCount})` : "—"}
+      </td>
+      <td style={{ padding: "8px 12px", color: c.muted, fontSize: 11 }}>{fmtTime(a.lastTickAt)}</td>
+    </tr>
   );
 }
 

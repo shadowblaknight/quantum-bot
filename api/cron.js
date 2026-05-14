@@ -102,20 +102,41 @@ async function runFullCronTick() {
 
   const kzUpdate = await updateKillZoneState(watchlist).catch((e) => ({ error: String(e) }));
 
-  // Steps 2-4: parallel watcher / execute / manage
-  const [watcherResult, executeResult, manageResult] = await Promise.allSettled([
-    runWatcherTick(),
-    runExecuteTick(),
-    runManageTick(),
-  ]);
+  // Steps 2-4: SEQUENTIAL watcher → execute → manage.
+  // Parallelizing them causes races:
+  //   - Watcher's clearExpiredAndInvalidated cancels pendings while
+  //     execute is mid-flight placing them → broker order placed but
+  //     pending already marked cancelled (or vice versa).
+  //   - Watcher writes new pendings after execute already read the list →
+  //     new pending sits idle for 1 minute unnecessarily.
+  //   - manage-trades reads positions while watcher fetches them →
+  //     duplicate broker API calls.
+  // Sequential ordering ensures each step sees the latest state and there's
+  // a single source of truth at each phase.
+  let watcherResult, executeResult, manageResult;
+  try {
+    watcherResult = await runWatcherTick();
+  } catch (e) {
+    watcherResult = { error: String(e) };
+  }
+  try {
+    executeResult = await runExecuteTick();
+  } catch (e) {
+    executeResult = { error: String(e) };
+  }
+  try {
+    manageResult = await runManageTick();
+  } catch (e) {
+    manageResult = { error: String(e) };
+  }
 
   return {
     ts: t0,
     durationMs: Date.now() - t0,
     killZone: kzUpdate,
-    watcher: watcherResult.status === 'fulfilled' ? watcherResult.value : { error: String(watcherResult.reason) },
-    execute: executeResult.status === 'fulfilled' ? executeResult.value : { error: String(executeResult.reason) },
-    manage:  manageResult.status === 'fulfilled' ? manageResult.value  : { error: String(manageResult.reason) },
+    watcher: watcherResult,
+    execute: executeResult,
+    manage:  manageResult,
   };
 }
 

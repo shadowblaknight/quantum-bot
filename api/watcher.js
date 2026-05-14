@@ -43,10 +43,13 @@ const PENDING_KEY = (asset) => `v12:watcher:${asset}:pending`;
 const WATCHLIST_KEY = 'v12:watchlist';
 
 // ===== Setup expiration by mode (in ms) =====
+// Tight expiries: ICT entry zones go stale fast. If price doesn't retrace
+// within ~90 min, the setup's context has usually changed (different KZ,
+// fresh swings, news, etc.) and a fresh detection should win.
 const SETUP_EXPIRY_MS = {
-  SCALP: 30 * 60 * 1000,        // 30 min
-  DAY:   4 * 60 * 60 * 1000,    // 4 hours
-  SWING: 8 * 60 * 60 * 1000,    // 8 hours
+  SCALP: 20 * 60 * 1000,        // 20 min
+  DAY:   90 * 60 * 1000,        // 90 min  (was 4h — too long for ICT entries)
+  SWING: 4 * 60 * 60 * 1000,    // 4 hours
 };
 
 // ===== Commentary hygiene =====
@@ -189,8 +192,38 @@ async function setPendingSetups(asset, setups) {
 
 async function addPendingSetup(asset, pendingSetup) {
   const existing = await getPendingSetups(asset);
+
+  // DEDUPLICATION GUARD
+  // A given root pattern (e.g. an H1 sweep of 4704.44) keeps generating new
+  // pending setups every minute as new FVGs appear in the entry zone. Without
+  // dedup, dozens of duplicate orders accumulate at the broker — and if price
+  // does retrace, they ALL fill at once, exploding your size.
+  //
+  // Rule: skip if an ACTIVE pending exists (status=pending/placed/filled) with
+  //   - same templateName
+  //   - same direction
+  //   - entry within 0.5 ATR of the candidate
+  // This catches both exact duplicates and "almost same setup, slightly
+  // different FVG" cases.
+  const tpriceAtr = pendingSetup.plannedEntry > 100 ? 1.5 : 0.0008; // gold vs eurusd-ish
+  const activeStatuses = new Set(['pending', 'placed', 'filled']);
+  const dup = existing.find((p) =>
+    activeStatuses.has(p.status) &&
+    p.templateName === pendingSetup.templateName &&
+    p.setup?.direction === pendingSetup.setup?.direction &&
+    Math.abs(p.plannedEntry - pendingSetup.plannedEntry) < tpriceAtr
+  );
+  if (dup) {
+    await pushCommentary(asset, 'setup-dedup',
+      `Skipped duplicate ${pendingSetup.templateName} ${pendingSetup.setup.direction} @ ${pendingSetup.plannedEntry.toFixed(2)} (matches existing ${dup.id})`,
+      'dedup-' + pendingSetup.templateName + '-' + pendingSetup.setup.direction
+    );
+    return { skipped: 'duplicate', existingId: dup.id };
+  }
+
   existing.push(pendingSetup);
   await setPendingSetups(asset, existing);
+  return { added: true, id: pendingSetup.id };
 }
 
 async function updatePendingSetup(asset, id, updates) {
@@ -202,31 +235,153 @@ async function updatePendingSetup(asset, id, updates) {
   return true;
 }
 
-async function clearExpiredAndInvalidated(asset, currentPrice, atrValue) {
+// ===== Cancel a pending order at the broker =====
+// If the bot decides a setup is no longer valid AFTER the limit order is at
+// MT5 (status='placed'), we have to actually cancel it on the broker — not
+// just mark our internal state. Otherwise it sits there waiting to fill at
+// the wrong time.
+async function cancelBrokerOrder(brokerOrderId) {
+  const token = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  const region = process.env.METAAPI_REGION || 'london';
+  if (!token || !accountId || !brokerOrderId) {
+    return { ok: false, error: 'missing credentials or orderId' };
+  }
+  const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/trade`;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'auth-token': token, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ actionType: 'ORDER_CANCEL', orderId: String(brokerOrderId) }),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return { ok: false, error: `MetaAPI ${resp.status}: ${txt.slice(0, 200)}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// ===== Mark a pending setup invalidated + cancel at broker if needed =====
+async function invalidateAndCancel(asset, p, reason) {
+  // If we already pushed the order to the broker, cancel it there.
+  if (p.status === 'placed' && p.brokerOrderId) {
+    const result = await cancelBrokerOrder(p.brokerOrderId);
+    if (result.ok) {
+      await pushCommentary(asset, 'setup-invalidated',
+        `🚫 Cancelled at broker: ${p.templateName} ${p.setup.direction} @ ${p.plannedEntry.toFixed(p.plannedEntry > 100 ? 2 : 5)} — ${reason}`);
+    } else {
+      // Could not cancel — log but still mark internally so we don't try forever.
+      await pushCommentary(asset, 'setup-cancel-failed',
+        `⚠️ Cancel failed for ${p.templateName} #${p.brokerOrderId}: ${result.error} — ${reason}`);
+    }
+  } else {
+    await pushCommentary(asset, 'setup-invalidated',
+      `Setup invalidated: ${p.templateName} ${p.setup.direction} — ${reason}`);
+  }
+  return { ...p, status: 'invalidated', closedAt: Date.now(), invalidationReason: reason };
+}
+
+async function clearExpiredAndInvalidated(asset, currentPrice, atrValue, freshEvents) {
   const existing = await getPendingSetups(asset);
   const now = Date.now();
   const remaining = [];
 
+  // Pull current HTF trend from fresh events for the bias-flip check
+  const h1Trend = freshEvents?.find((e) => e.type === 'trend' && e.timeframe === '1h')?.direction;
+  const h4Trend = freshEvents?.find((e) => e.type === 'trend' && e.timeframe === '4h')?.direction;
+
+  // Are we currently in any kill zone? (used for stale-context check)
+  let inKZ = true;
+  let kzName = null;
+  try {
+    const { checkKillZone } = require('./kill-zones');
+    const kz = checkKillZone();
+    inKZ = !!kz.inKillZone;
+    kzName = kz.name;
+  } catch (_) {}
+
   for (const p of existing) {
-    if (p.status !== 'pending') {
+    // Skip already-settled setups
+    if (p.status !== 'pending' && p.status !== 'placed') {
       remaining.push(p);
       continue;
     }
-    // Expired by time?
+
+    // ── 1. Time expired ──────────────────────────────────────────
     if (now > p.expiresAt) {
-      await pushCommentary(asset, 'setup-expired', `Setup expired without fill: ${p.setup.direction} @ ${p.plannedEntry.toFixed(p.plannedEntry > 100 ? 2 : 5)}`);
-      remaining.push({ ...p, status: 'expired', closedAt: now });
+      const updated = await invalidateAndCancel(asset, p, `expired after ${Math.round((now - p.createdAt)/60000)} min`);
+      remaining.push({ ...updated, status: 'expired' });
       continue;
     }
-    // Invalidated by price moving past invalidation level?
-    const invalidated = p.setup.direction === 'LONG'
+
+    // ── 2. Price crossed SL before fill (original behavior) ──────
+    const slBreached = p.setup.direction === 'LONG'
       ? currentPrice < p.slPrice
       : currentPrice > p.slPrice;
-    if (invalidated) {
-      await pushCommentary(asset, 'setup-invalidated', `Setup invalidated: price moved past SL before fill`);
-      remaining.push({ ...p, status: 'invalidated', closedAt: now });
+    if (slBreached) {
+      const updated = await invalidateAndCancel(asset, p, 'price moved past SL before fill');
+      remaining.push(updated);
       continue;
     }
+
+    // ── 3. Price ran 1.5+ ATR past entry IN setup direction ──────
+    // For SHORT @ 4700 expecting retrace: if price drops to 4679 (1.5 ATR
+    // below entry) without filling, the momentum is gone. Retracement is
+    // statistically unlikely now. Kill it.
+    const atrDist = atrValue * 1.5;
+    const ranAway = p.setup.direction === 'LONG'
+      ? currentPrice > p.plannedEntry + atrDist  // LONG limit waiting; price ran up past us
+      : currentPrice < p.plannedEntry - atrDist;  // SHORT limit waiting; price ran down past us
+    if (ranAway) {
+      const distAtr = Math.abs(currentPrice - p.plannedEntry) / atrValue;
+      const updated = await invalidateAndCancel(asset, p,
+        `price ran ${distAtr.toFixed(1)} ATR past entry without retrace`);
+      remaining.push(updated);
+      continue;
+    }
+
+    // ── 4. HTF bias flipped against setup direction ──────────────
+    // If H1 or 4h trend has now reversed, the underlying thesis is dead.
+    // We only check this if the trend data is fresh (in this same tick).
+    if (h1Trend && h1Trend !== 'NEUTRAL' && h1Trend !== p.setup.direction) {
+      const updated = await invalidateAndCancel(asset, p,
+        `H1 trend flipped to ${h1Trend}, setup was ${p.setup.direction}`);
+      remaining.push(updated);
+      continue;
+    }
+    if (h4Trend && h4Trend !== 'NEUTRAL' && h4Trend !== p.setup.direction) {
+      const updated = await invalidateAndCancel(asset, p,
+        `H4 trend flipped to ${h4Trend}, setup was ${p.setup.direction}`);
+      remaining.push(updated);
+      continue;
+    }
+
+    // ── 5. Stale + out of zone ───────────────────────────────────
+    // Setup is more than 60 min old AND price is more than 1 ATR away from
+    // the entry zone. The context has likely moved on.
+    const ageMin = (now - p.createdAt) / 60000;
+    const distFromEntry = Math.abs(currentPrice - p.plannedEntry);
+    if (ageMin > 60 && distFromEntry > atrValue) {
+      const updated = await invalidateAndCancel(asset, p,
+        `stale: ${Math.round(ageMin)} min old, price ${(distFromEntry/atrValue).toFixed(1)} ATR from entry`);
+      remaining.push(updated);
+      continue;
+    }
+
+    // ── 6. Kill zone closed + price not near entry ───────────────
+    // If we're OFF_HOURS and price is more than 0.5 ATR from entry, kill it.
+    // Don't carry stale entries across to a fresh trading window.
+    if (!inKZ && distFromEntry > atrValue * 0.5) {
+      const updated = await invalidateAndCancel(asset, p,
+        `kill zone closed (${kzName}) and price ${(distFromEntry/atrValue).toFixed(1)} ATR away`);
+      remaining.push(updated);
+      continue;
+    }
+
+    // Setup is still valid — keep it
     remaining.push(p);
   }
 
@@ -263,9 +418,9 @@ async function processAsset(asset, account, openPositions) {
       return { asset, error: 'ATR unavailable', processingMs: Date.now() - t0 };
     }
 
-    // 4. Clear expired/invalidated pending setups
-    const pendingSetups = await clearExpiredAndInvalidated(asset, currentPrice, h1ATR);
-    const activePending = pendingSetups.filter((p) => p.status === 'pending');
+    // 4. Clear expired/invalidated pending setups (smart auto-cancel)
+    const pendingSetups = await clearExpiredAndInvalidated(asset, currentPrice, h1ATR, evResult.events);
+    const activePending = pendingSetups.filter((p) => p.status === 'pending' || p.status === 'placed');
 
     // 5. Check for open position on this asset
     const myPosition = openPositions.find((p) => p.assetId === asset);
@@ -439,9 +594,12 @@ async function runWatcherTick() {
   // Account + positions (one fetch, used for all assets)
   const [account, positionsResult] = await Promise.all([
     fetchAccount().catch(() => null),
-    fetchPositions().catch(() => []),
+    fetchPositions().catch(() => null),
   ]);
+  // null means broker fetch failed — fall back to empty for safety
+  // (watcher continues but execute will skip)
   const positions = Array.isArray(positionsResult) ? positionsResult : [];
+  const positionsAvailable = positionsResult !== null;
 
   // Process each asset
   const results = await Promise.all(
@@ -483,5 +641,8 @@ module.exports.runWatcherTick = runWatcherTick;
 module.exports.processAsset = processAsset;
 module.exports.pushCommentary = pushCommentary;
 module.exports.getPendingSetups = getPendingSetups;
+module.exports.addPendingSetup = addPendingSetup;
 module.exports.updatePendingSetup = updatePendingSetup;
+module.exports.clearExpiredAndInvalidated = clearExpiredAndInvalidated;
+module.exports.cancelBrokerOrder = cancelBrokerOrder;
 module.exports.SETUP_EXPIRY_MS = SETUP_EXPIRY_MS;
