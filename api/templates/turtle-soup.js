@@ -127,7 +127,7 @@ function match({ events, currentPrice, atrByTF }) {
 
   // TPs: opposing PDH/PDL, then HTF FVG magnets
   const htfFVGs = events.filter(
-    (e) => e.type === 'fvg-created' && (e.timeframe === '1h' || e.timeframe === '4h')
+    (e) => e.type === 'fvg-created' && e.timeframe === '1h'
   );
   const tps = buildTPs(reversalDirection, entry, sl, sessionLevels, htfFVGs);
   if (tps.length === 0) return null;

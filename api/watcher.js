@@ -289,9 +289,9 @@ async function clearExpiredAndInvalidated(asset, currentPrice, atrValue, freshEv
   const now = Date.now();
   const remaining = [];
 
-  // Pull current HTF trend from fresh events for the bias-flip check
+  // Pull current bias TF trend from fresh events for the bias-flip check
+  // V12.4: H1 is now the sole bias TF (TFlab ICT day-trading research)
   const h1Trend = freshEvents?.find((e) => e.type === 'trend' && e.timeframe === '1h')?.direction;
-  const h4Trend = freshEvents?.find((e) => e.type === 'trend' && e.timeframe === '4h')?.direction;
 
   // Are we currently in any kill zone? (used for stale-context check)
   let inKZ = true;
@@ -349,12 +349,6 @@ async function clearExpiredAndInvalidated(asset, currentPrice, atrValue, freshEv
     if (h1Trend && h1Trend !== 'NEUTRAL' && h1Trend !== p.setup.direction) {
       const updated = await invalidateAndCancel(asset, p,
         `H1 trend flipped to ${h1Trend}, setup was ${p.setup.direction}`);
-      remaining.push(updated);
-      continue;
-    }
-    if (h4Trend && h4Trend !== 'NEUTRAL' && h4Trend !== p.setup.direction) {
-      const updated = await invalidateAndCancel(asset, p,
-        `H4 trend flipped to ${h4Trend}, setup was ${p.setup.direction}`);
       remaining.push(updated);
       continue;
     }

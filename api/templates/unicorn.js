@@ -27,11 +27,9 @@ function zoneOverlap(a, b) {
 }
 
 function match({ events, currentPrice, atrByTF }) {
-  // Step 1: bias from H1+H4
+  // Step 1: bias from H1 (ICT day-trading: H1 = directional bias)
   const h1Trend = events.find((e) => e.type === 'trend' && e.timeframe === '1h');
-  const h4Trend = events.find((e) => e.type === 'trend' && e.timeframe === '4h');
-  let bias = h4Trend?.direction || 'NEUTRAL';
-  if (bias === 'NEUTRAL') bias = h1Trend?.direction || 'NEUTRAL';
+  const bias = h1Trend?.direction || 'NEUTRAL';
   if (bias === 'NEUTRAL') return null;
 
   // Step 2-4: find a Breaker Block in bias direction on M5/M15, recently formed
@@ -82,7 +80,7 @@ function match({ events, currentPrice, atrByTF }) {
       // TPs
       const sessionLevels = events.filter((e) => e.type === 'session-level');
       const htfFVGs = events.filter(
-        (e) => e.type === 'fvg-created' && (e.timeframe === '1h' || e.timeframe === '4h')
+        (e) => e.type === 'fvg-created' && e.timeframe === '1h'
       );
       const tps = buildTPs(bias, entry, sl, sessionLevels, htfFVGs);
       if (tps.length === 0) continue;
@@ -98,15 +96,15 @@ function match({ events, currentPrice, atrByTF }) {
         slDistanceATR: slDistATR,
         tps,
         narrative: [
-          `Bias: ${bias.toLowerCase()} (${h4Trend ? 'H4' : 'H1'} trend).`,
+          `Bias: ${bias.toLowerCase()} (H1 trend).`,
           `Breaker Block on ${breaker.timeframe}: ${breaker.zone.lower.toFixed(5)}–${breaker.zone.upper.toFixed(5)}.`,
           `FVG on ${fvg.timeframe} overlaps the Breaker.`,
           `Unicorn Zone: ${overlap.lower.toFixed(5)}–${overlap.upper.toFixed(5)}.`,
           `Entry at zone center: ${entry.toFixed(5)}, SL beyond swept extreme at ${sl.toFixed(5)}.`,
           `Unicorn: highest-precision ICT entry — Breaker + FVG confluence.`,
         ],
-        contributingEvents: [breaker, fvg, h4Trend || h1Trend].filter(Boolean),
-        timeframesInPlay: [...new Set([breaker.timeframe, fvg.timeframe, h4Trend ? '4h' : '1h'])],
+        contributingEvents: [breaker, fvg, h1Trend].filter(Boolean),
+        timeframesInPlay: [...new Set([breaker.timeframe, fvg.timeframe, '1h'])],
         formedAt: Math.max(breaker.ts, fvg.ts),
       };
     }

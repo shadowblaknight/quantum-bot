@@ -41,12 +41,9 @@ function match({ events, currentPrice, atrByTF }) {
   const sbWindow = inSilverBulletWindow();
   if (!sbWindow) return null;
 
-  // Determine bias from H4 trend (with H1 corroboration if H4 unclear)
-  const h4Trend = events.find((e) => e.type === 'trend' && e.timeframe === '4h');
+  // Determine bias from H1 trend (TFlab ICT day-trading: H1 = daily directional bias)
   const h1Trend = events.find((e) => e.type === 'trend' && e.timeframe === '1h');
-
-  let bias = h4Trend?.direction || 'NEUTRAL';
-  if (bias === 'NEUTRAL') bias = h1Trend?.direction || 'NEUTRAL';
+  const bias = h1Trend?.direction || 'NEUTRAL';
   if (bias === 'NEUTRAL') return null;
 
   // Find an unfilled M5 FVG in bias direction from last ~4 hours
@@ -82,19 +79,40 @@ function match({ events, currentPrice, atrByTF }) {
   const entry = fvg.evidence.ce;
   const fvgZone = fvg.zone;
 
-  // SL: beyond the FVG outer edge + 0.15 ATR
+  // ────────────────────────────────────────────────────────────────
+  // QUALITY FILTER #1: Reject tiny FVGs at template level.
+  // The FVG must be meaningful relative to H1 ATR (the timeframe that
+  // governs trade noise). Sub-0.15 × H1 ATR gaps produce tradeable-looking
+  // setups that get wicked by normal market noise.
+  // ────────────────────────────────────────────────────────────────
+  const h1ATR = atrByTF['1h'] || (m5ATR * 3);
+  const gapSize = fvgZone.upper - fvgZone.lower;
+  const gapSizeH1ATR = h1ATR > 0 ? gapSize / h1ATR : 0;
+  if (gapSizeH1ATR < 0.15) return null;
+
+  // SL: beyond the FVG outer edge.
+  // Buffer is max(0.3 × m5ATR, 0.10 × h1ATR) — meaningful on both timeframes.
+  const buffer = Math.max(m5ATR * 0.30, h1ATR * 0.10);
   const sl = bias === 'LONG'
-    ? fvgZone.lower - m5ATR * 0.15
-    : fvgZone.upper + m5ATR * 0.15;
+    ? fvgZone.lower - buffer
+    : fvgZone.upper + buffer;
 
   const slDist = Math.abs(entry - sl);
   const slDistATR = m5ATR > 0 ? slDist / m5ATR : 0;
-  if (slDistATR > 3.0 || slDistATR < 0.3) return null;
+  const slDistH1ATR = h1ATR > 0 ? slDist / h1ATR : 0;
 
-  // TPs: session liquidity in bias direction
+  // ────────────────────────────────────────────────────────────────
+  // QUALITY FILTER #2: Reject too-tight SLs.
+  // Minimum 0.4 × H1 ATR keeps us above typical wick noise.
+  // Maximum 3.0 × m5 ATR keeps us from absurdly wide stops.
+  // ────────────────────────────────────────────────────────────────
+  if (slDistH1ATR < 0.30) return null;
+  if (slDistATR > 3.0) return null;
+
+  // TPs: session liquidity + H1 FVGs as magnets
   const sessionLevels = events.filter((e) => e.type === 'session-level');
   const htfFVGs = events.filter(
-    (e) => e.type === 'fvg-created' && (e.timeframe === '1h' || e.timeframe === '4h')
+    (e) => e.type === 'fvg-created' && e.timeframe === '1h'
   );
   const tps = buildTPs(bias, entry, sl, sessionLevels, htfFVGs);
   if (tps.length === 0) return null;
@@ -115,14 +133,14 @@ function match({ events, currentPrice, atrByTF }) {
     tps,
     narrative: [
       `${windowName} window active.`,
-      `Bias: ${bias} (H4/H1 trend confirms).`,
+      `Bias: ${bias} (H1 trend).`,
       `Unfilled M5 FVG identified: ${fvgZone.lower.toFixed(5)}–${fvgZone.upper.toFixed(5)}.`,
       `Fill: ${(fvg.evidence.fillPercent * 100).toFixed(0)}%, age: ${fvg.evidence.barsAgo} bars.`,
       `Entry at CE: ${entry.toFixed(5)}, SL beyond FVG at ${sl.toFixed(5)}.`,
       `Silver Bullet: ${bias.toLowerCase()} continuation.`,
     ],
-    contributingEvents: [fvg, h4Trend || h1Trend].filter(Boolean),
-    timeframesInPlay: ['5m', h4Trend ? '4h' : '1h'],
+    contributingEvents: [fvg, h1Trend].filter(Boolean),
+    timeframesInPlay: ['5m', '1h'],
     formedAt: Date.now(),
   };
 }

@@ -31,12 +31,14 @@ const asianRangeDetector = require('./events/asian-range');
 const sessionLevelsDetector = require('./events/session-levels');
 
 // Detector × timeframe matrix
+// V12.4: ICT day-trading stack is H1 → M15 → M5 (research-backed via TFlab/ChartSnipe).
+// 1d/H4 dropped from setup logic — too many TFs creates "hard gates from
+// non-alignment" (road2fundedtrading). 1d still fetched separately by the
+// structural builder for display context only (not for matching).
 const DETECTOR_MATRIX = {
   '5m':  ['sweep', 'displacement', 'mss', 'fvg', 'ob', 'breaker', 'ote', 'trend'],
   '15m': ['sweep', 'displacement', 'mss', 'bos', 'fvg', 'ob', 'breaker', 'ote', 'trend', 'asian-range'],
   '1h':  ['sweep', 'displacement', 'mss', 'bos', 'fvg', 'ob', 'ote', 'trend', 'session-levels'],
-  '4h':  ['mss', 'bos', 'fvg', 'ob', 'trend'],
-  '1d':  ['trend'],
 };
 
 // Number of candles to fetch per timeframe
@@ -44,8 +46,6 @@ const CANDLES_NEEDED = {
   '5m': 200,
   '15m': 200,
   '1h': 200,
-  '4h': 100,
-  '1d': 60,
 };
 
 const DETECTOR_FNS = {
@@ -88,7 +88,7 @@ async function runForAsset({ asset }) {
   // We re-anchor each TF's candle timestamps so the MOST RECENT candle aligns
   // to wall-clock now, and preceding bars step backward by tfMs. This preserves
   // the bot's internal timeline regardless of source quirks.
-  const TF_MS = { '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
+  const TF_MS = { '5m': 300000, '15m': 900000, '1h': 3600000 };
   const wallNow = Date.now();
   for (const tf of timeframes) {
     const candles = candlesByTF[tf];

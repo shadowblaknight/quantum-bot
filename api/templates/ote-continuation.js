@@ -18,14 +18,10 @@ const { buildTPs } = require('./_template');
 const { findMostRecent, findAllRecent } = require('../events/_event');
 
 function match({ events, currentPrice, atrByTF }) {
-  // Step 1: H1 trend must be clear
+  // Step 1: H1 trend must be clear (ICT day-trading bias TF)
   const h1Trend = events.find((e) => e.type === 'trend' && e.timeframe === '1h');
   if (!h1Trend || h1Trend.direction === 'NEUTRAL') return null;
   const bias = h1Trend.direction;
-
-  // Optional H4 corroboration — strict check: if H4 trend exists and disagrees, reject
-  const h4Trend = events.find((e) => e.type === 'trend' && e.timeframe === '4h');
-  if (h4Trend && h4Trend.direction !== 'NEUTRAL' && h4Trend.direction !== bias) return null;
 
   // Step 2: ote-zone-entered event on H1 in bias direction
   const oteZones = findAllRecent(events, 'ote-zone-entered', 5)
@@ -111,7 +107,7 @@ function match({ events, currentPrice, atrByTF }) {
   ];
 
   const htfFVGs = events.filter(
-    (e) => e.type === 'fvg-created' && (e.timeframe === '1h' || e.timeframe === '4h')
+    (e) => e.type === 'fvg-created' && e.timeframe === '1h'
   );
 
   const tps = buildTPs(bias, entry, sl, [...sessionLevels, ...extensionLevels], htfFVGs);
@@ -129,14 +125,13 @@ function match({ events, currentPrice, atrByTF }) {
     tps,
     narrative: [
       `H1 trend: ${bias.toLowerCase()} (${h1Trend.evidence.trend}).`,
-      h4Trend ? `H4 corroborates ${h4Trend.evidence.trend.toLowerCase()}.` : `H4 unclear, using H1 alone.`,
       `Impulse identified: ${ote.evidence.impulseFrom.toFixed(5)} → ${ote.evidence.impulseTo.toFixed(5)} (${ote.evidence.impulseRangeATR.toFixed(1)} ATR).`,
       `Price in OTE zone: ${ote.zone.lower.toFixed(5)}–${ote.zone.upper.toFixed(5)}, sweet spot ${ote.evidence.sweetSpot.toFixed(5)}.`,
       `Entry: ${entrySource} at ${entry.toFixed(5)}.`,
       `OTE Continuation: ${bias.toLowerCase()} pullback in established trend.`,
     ],
     contributingEvents: [h1Trend, ote, ...obsInZone.slice(0, 1), ...fvgsInZone.slice(0, 1)].filter(Boolean),
-    timeframesInPlay: ['1h', h4Trend ? '4h' : null, '15m'].filter(Boolean),
+    timeframesInPlay: ['1h', '15m'],
     formedAt: ote.ts,
   };
 }
