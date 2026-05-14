@@ -14,7 +14,7 @@
 // SL beyond the impulse origin (the 100% retracement = the swing extreme).
 // TP at -0.27 fib extension first, then -0.62 / opposing range extreme.
 
-const { buildTPs } = require('./_template');
+const { buildTPs, structuralBuffer } = require('./_template');
 const { findMostRecent, findAllRecent } = require('../events/_event');
 
 function match({ events, currentPrice, atrByTF }) {
@@ -64,12 +64,15 @@ function match({ events, currentPrice, atrByTF }) {
     entrySource = `${fvg.timeframe} FVG inside OTE (CE)`;
   }
 
-  // SL beyond the impulse origin (the 100% retracement)
+  // V12.4: SL beyond impulse origin (the 100% retracement = structural anchor).
+  // Buffer uses standard formula: max(0.5×m5ATR, 0.15×h1ATR).
   const h1ATR = atrByTF['1h'] || 0;
+  const m5ATR = atrByTF['5m'] || 0;
+  const buffer = structuralBuffer(m5ATR, h1ATR);
   const slBeyond = ote.evidence.slBeyond; // = impulseFrom price
   const sl = bias === 'LONG'
-    ? slBeyond - h1ATR * 0.15
-    : slBeyond + h1ATR * 0.15;
+    ? slBeyond - buffer
+    : slBeyond + buffer;
 
   const slDist = Math.abs(entry - sl);
   const slDistATR = h1ATR > 0 ? slDist / h1ATR : 0;

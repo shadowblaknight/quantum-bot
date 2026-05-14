@@ -20,7 +20,7 @@
 //
 // (Daily bias is informational — Judas Swing IS the bias-discovery moment.)
 
-const { buildTPs } = require('./_template');
+const { buildTPs, structuralBuffer } = require('./_template');
 const { findMostRecent, findAllRecent } = require('../events/_event');
 const { checkKillZone } = require('../kill-zones');
 
@@ -122,16 +122,21 @@ function match({ events, currentPrice, atrByTF }) {
   // Compute entry as the CE (50% midpoint) of the zone
   const entry = (entryZone.upper + entryZone.lower) / 2;
 
-  // SL goes BEYOND the swept extreme
-  const ltfATR = atrByTF['5m'] || atrByTF['15m'] || 0;
+  // V12.4: SL beyond the swept extreme (structural anchor).
+  // Buffer uses standard formula: max(0.5×m5ATR, 0.15×h1ATR).
+  const m5ATR = atrByTF['5m'] || 0;
+  const h1ATR = atrByTF['1h'] || 0;
+  const ltfATR = m5ATR || atrByTF['15m'] || 0;
+  const buffer = structuralBuffer(m5ATR, h1ATR);
+
   const sweepWick = reversalDirection === 'SHORT'
     ? validSweep.evidence?.wickHigh
     : validSweep.evidence?.wickLow;
   if (sweepWick == null) return null;
 
   const sl = reversalDirection === 'SHORT'
-    ? sweepWick + ltfATR * 0.15
-    : sweepWick - ltfATR * 0.15;
+    ? sweepWick + buffer
+    : sweepWick - buffer;
 
   const slDist = Math.abs(entry - sl);
   const slDistATR = ltfATR > 0 ? slDist / ltfATR : 0;

@@ -15,7 +15,7 @@
 // Trade: enter at overlap edge or 50% of overlap. SL beyond the swept wick.
 // TP at next opposing liquidity, minimum 1:2.
 
-const { buildTPs } = require('./_template');
+const { buildTPs, structuralBuffer } = require('./_template');
 const { findMostRecent, findAllRecent } = require('../events/_event');
 
 // Compute overlap of two zones [aL, aU] and [bL, bU]
@@ -57,13 +57,19 @@ function match({ events, currentPrice, atrByTF }) {
 
       const entry = (overlap.upper + overlap.lower) / 2;
 
-      // SL beyond the breaker's swept extreme
+      // V12.4: SL beyond breaker's swept extreme (structural anchor).
+      // Buffer uses standard formula: max(0.5×m5ATR, 0.15×h1ATR) — wider than
+      // m5 wick noise AND meaningful at H1 scale.
       const sweptLevel = breaker.evidence?.sweptLevel;
       if (sweptLevel == null) continue;
 
+      const h1ATR = atrByTF['1h'] || 0;
+      const m5ATR = atrByTF['5m'] || 0;
+      const buffer = structuralBuffer(m5ATR, h1ATR);
+
       const sl = bias === 'LONG'
-        ? sweptLevel - ltfATR * 0.15
-        : sweptLevel + ltfATR * 0.15;
+        ? sweptLevel - buffer
+        : sweptLevel + buffer;
 
       const slDist = Math.abs(entry - sl);
       const slDistATR = slDist / ltfATR;

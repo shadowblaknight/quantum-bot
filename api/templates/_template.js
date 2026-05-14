@@ -31,6 +31,89 @@ function slBeyond(direction, swingExtreme, atrValue, multiplier = 0.15) {
   return swingExtreme + atrValue * multiplier;
 }
 
+// V12.4: Standard structural-SL buffer.
+// Real ICT principle (per IOFED docs): "Stop too tight. The stop must sit
+// beyond the MSS swing — not at the IOFED itself. Stops parked at the IOFED
+// get stopped out on the second test."
+//
+// Buffer must clear M5 wick noise AND be meaningful at H1 scale:
+//   max(0.5 × m5ATR, 0.15 × h1ATR)
+//
+// For EURUSD (m5ATR≈0.0002, h1ATR≈0.0009) → ~1.35 pips
+// For gold   (m5ATR≈1.5,    h1ATR≈5)      → ~0.75 pts
+// For NAS100 (m5ATR≈15,     h1ATR≈60)     → ~9 pts
+function structuralBuffer(m5ATR, h1ATR) {
+  const m5 = m5ATR || 0;
+  const h1 = h1ATR || 0;
+  return Math.max(m5 * 0.5, h1 * 0.15);
+}
+
+// V12.4: Find a structural SL anchor for a setup that doesn't have one built in.
+// Used primarily by Silver Bullet which historically anchored to LTF FVG edge.
+//
+// Real ICT: SL goes beyond the SWEPT EXTREME (the liquidity that was grabbed
+// before the displacement). We search recent M15/H1 sweep events whose wick
+// extends in the SL direction past the entry by at least `minDistance`.
+//
+// Returns: { sl, anchorPrice, anchorEvent } or null if no structural anchor exists.
+// When null, the template should REJECT the setup — no structural anchor means
+// it's not a real ICT entry, just a random FVG.
+function findStructuralSL({ events, bias, entry, m5ATR, h1ATR, lookbackHours = 6, minDistance = null }) {
+  if (!events || !bias || entry == null || !h1ATR) return null;
+
+  const since = Date.now() - lookbackHours * 60 * 60 * 1000;
+  // Minimum distance from entry to anchor — prevents anchor being too close.
+  // Default: max(0.5 × h1ATR, 2 × m5ATR) — generous enough to clear pip-minimum
+  // SL distance on most brokers.
+  const minDist = minDistance != null
+    ? minDistance
+    : Math.max(0.5 * h1ATR, 2 * (m5ATR || 0));
+
+  // Candidate sweep events on M15 or H1 (the structural timeframes)
+  const candidates = events
+    .filter((e) => e.type === 'sweep')
+    .filter((e) => e.ts >= since)
+    .filter((e) => e.timeframe === '15m' || e.timeframe === '1h');
+
+  if (candidates.length === 0) return null;
+
+  const buffer = structuralBuffer(m5ATR, h1ATR);
+
+  if (bias === 'SHORT') {
+    // Want a sweep that grabbed buyside liquidity ABOVE entry
+    const above = candidates
+      .map((e) => ({ event: e, price: e.evidence?.wickHigh }))
+      .filter((c) => c.price != null && c.price > entry + minDist);
+    if (above.length === 0) return null;
+    // Nearest swept high (smallest above entry — closest to price)
+    above.sort((a, b) => a.price - b.price);
+    const nearest = above[0];
+    return {
+      sl: nearest.price + buffer,
+      anchorPrice: nearest.price,
+      anchorEvent: nearest.event,
+    };
+  }
+
+  if (bias === 'LONG') {
+    // Want a sweep that grabbed sellside liquidity BELOW entry
+    const below = candidates
+      .map((e) => ({ event: e, price: e.evidence?.wickLow }))
+      .filter((c) => c.price != null && c.price < entry - minDist);
+    if (below.length === 0) return null;
+    // Nearest swept low (largest below entry — closest to price)
+    below.sort((a, b) => b.price - a.price);
+    const nearest = below[0];
+    return {
+      sl: nearest.price - buffer,
+      anchorPrice: nearest.price,
+      anchorEvent: nearest.event,
+    };
+  }
+
+  return null;
+}
+
 // Helper: build R-multiple targets
 function rMultipleTargets(direction, entry, sl, multipliers = [1, 2, 3, 4]) {
   const slDist = Math.abs(entry - sl);
@@ -111,4 +194,6 @@ module.exports = {
   slBeyond,
   rMultipleTargets,
   buildTPs,
+  structuralBuffer,
+  findStructuralSL,
 };

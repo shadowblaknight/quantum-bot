@@ -20,7 +20,7 @@
 // Difference from Judas: Silver Bullet is CONTINUATION not reversal.
 // Difference from OTE: Silver Bullet is TIME-SPECIFIC.
 
-const { buildTPs } = require('./_template');
+const { buildTPs, findStructuralSL } = require('./_template');
 const { findMostRecent, findAllRecent } = require('../events/_event');
 
 function inSilverBulletWindow() {
@@ -90,24 +90,39 @@ function match({ events, currentPrice, atrByTF }) {
   const gapSizeH1ATR = h1ATR > 0 ? gapSize / h1ATR : 0;
   if (gapSizeH1ATR < 0.15) return null;
 
-  // SL: beyond the FVG outer edge.
-  // Buffer is max(0.3 × m5ATR, 0.10 × h1ATR) — meaningful on both timeframes.
-  const buffer = Math.max(m5ATR * 0.30, h1ATR * 0.10);
-  const sl = bias === 'LONG'
-    ? fvgZone.lower - buffer
-    : fvgZone.upper + buffer;
+  // V12.4 STRUCTURAL SL (ICT IOFED-compliant)
+  // ────────────────────────────────────────────────────────────────
+  // Real Silver Bullet requires a liquidity sweep BEFORE the FVG forms.
+  // SL goes beyond that swept extreme, NOT beyond the FVG candle.
+  //
+  // Per ICT docs: "Stop too tight. The stop must sit beyond the MSS swing
+  // — not at the IOFED itself. Stops parked at the IOFED get stopped out
+  // on the second test."
+  //
+  // If no recent sweep exists, this isn't a real Silver Bullet — reject.
+  // ────────────────────────────────────────────────────────────────
+  const structural = findStructuralSL({
+    events,
+    bias,
+    entry,
+    m5ATR,
+    h1ATR,
+    lookbackHours: 6,
+  });
+  if (!structural) return null;
+  const sl = structural.sl;
 
   const slDist = Math.abs(entry - sl);
   const slDistATR = m5ATR > 0 ? slDist / m5ATR : 0;
   const slDistH1ATR = h1ATR > 0 ? slDist / h1ATR : 0;
 
   // ────────────────────────────────────────────────────────────────
-  // QUALITY FILTER #2: Reject too-tight SLs.
-  // Minimum 0.4 × H1 ATR keeps us above typical wick noise.
-  // Maximum 3.0 × m5 ATR keeps us from absurdly wide stops.
+  // QUALITY FILTER #2: Sanity bounds on structural SL distance.
+  // Lower bound rarely hits now (structural anchor enforces minimum),
+  // upper bound prevents anchoring to ancient swings.
   // ────────────────────────────────────────────────────────────────
   if (slDistH1ATR < 0.30) return null;
-  if (slDistATR > 3.0) return null;
+  if (slDistH1ATR > 3.0) return null;
 
   // TPs: session liquidity + H1 FVGs as magnets
   const sessionLevels = events.filter((e) => e.type === 'session-level');
@@ -136,10 +151,10 @@ function match({ events, currentPrice, atrByTF }) {
       `Bias: ${bias} (H1 trend).`,
       `Unfilled M5 FVG identified: ${fvgZone.lower.toFixed(5)}–${fvgZone.upper.toFixed(5)}.`,
       `Fill: ${(fvg.evidence.fillPercent * 100).toFixed(0)}%, age: ${fvg.evidence.barsAgo} bars.`,
-      `Entry at CE: ${entry.toFixed(5)}, SL beyond FVG at ${sl.toFixed(5)}.`,
-      `Silver Bullet: ${bias.toLowerCase()} continuation.`,
+      `Entry at CE: ${entry.toFixed(5)}, structural SL beyond ${structural.anchorEvent.timeframe} swept extreme ${structural.anchorPrice.toFixed(5)} → ${sl.toFixed(5)}.`,
+      `Silver Bullet: ${bias.toLowerCase()} continuation after liquidity sweep.`,
     ],
-    contributingEvents: [fvg, h1Trend].filter(Boolean),
+    contributingEvents: [fvg, h1Trend, structural.anchorEvent].filter(Boolean),
     timeframesInPlay: ['5m', '1h'],
     formedAt: Date.now(),
   };
