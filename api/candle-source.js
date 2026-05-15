@@ -1,39 +1,45 @@
 /* eslint-disable */
-// V12 — api/candle-source.js
+// V12.4 — api/candle-source.js
 //
-// CANDLE DATA LAYER — independent of broker.
-// 
-// Why separate from broker.js: not all MetaAPI accounts have Market Data
-// add-on enabled. Trading actions (account info, positions, order placement)
-// stay on MetaAPI. Candle data comes from free sources, scales to paid tiers
-// as user count grows.
+// CANDLE DATA LAYER — MetaAPI broker-direct.
 //
-// PROVIDER ROUTING:
-//   Crypto assets (btc, eth, sol, xrp) → Binance public API (free, unlimited)
-//   Everything else (forex, metals, indices, oil) → TwelveData (free 800/day,
-//     paid tiers $29-229/mo for SaaS scale)
+// V12.4 PIVOT (from V12.3 TwelveData-based):
+// We previously used TwelveData (free 800/day, with NAS100/S&P500 gaps) and
+// Binance (crypto only, geo-restricted). Both required separate symbol-mapping
+// tables that drifted from the broker's actual symbols.
+//
+// Now: MetaAPI is the sole provider. Reasons:
+//   1. Single source of truth — same data the bot trades on
+//   2. No quota — we already pay the broker via spread
+//   3. No symbol-mapping drift — symbol-resolver auto-syncs broker symbols
+//   4. NAS100, indices, exotic pairs all work if the broker offers them
+//   5. Real-time freshness — no 5-min TwelveData staleness
+//
+// Endpoint:
+//   GET https://mt-market-data-client-api-v1.{region}.agiliumtrade.ai
+//       /users/current/accounts/{accountId}
+//       /historical-market-data/symbols/{brokerSymbol}/timeframes/{tf}/candles
+//       ?startTime={ISO}&limit={N}
+//   Headers: auth-token: {METAAPI_TOKEN}
 //
 // CACHING:
-//   Each TF has a TTL matched to its candle period:
-//     M1 → 1 min, M5 → 5 min, M15 → 15 min, H1 → 1 hour, H4 → 4 hours,
-//     D1 → 24 hours, W1 → 7 days, MN1 → 30 days
-//   Multiple cron ticks within the TTL window use cached data — keeps API
-//   usage well under free-tier limits.
+//   Each TF has a TTL matched to its candle period. Multiple cron ticks
+//   within the TTL use cached data — drastically reduces MetaAPI load.
 //
 // QUALITY:
-//   Each candle batch is validated (correct shape, sane values, sorted by
-//   time, no NaN, no duplicates). Invalid data is rejected and logged.
-//   Detectors only ever see clean candles.
+//   Each candle batch validated (correct shape, sane values, sorted by time,
+//   no NaN, no duplicates). Invalid data rejected and logged.
 //
 // SAFETY:
+//   - Auto-bootstrap symbol map if empty (one sync, then cached)
 //   - Network/API failures handled with try/catch
-//   - Per-provider failures fall through to next provider where applicable
-//   - Empty results return { candles: [], source: null } not throw
-//   - Rate limit errors logged with x-ratelimit-* headers when present
+//   - Empty results return { candles: [], source: null }, never throw
+//   - On miss, falls back to stale cache if available
 // ----------------------------------------------------------------------------
 
 const { getRedis, safeParse } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
+const { resolveSymbol, syncBrokerSymbols } = require('./symbol-resolver');
 
 // =================================================================
 // CACHE TTL PER TIMEFRAME
@@ -42,217 +48,150 @@ const { getAssetById } = require('./asset-registry');
 // Cache to one period's worth of time to balance freshness with API load.
 
 const TF_CACHE_TTL_SEC = {
-  '1m':  60,            // 1 min
-  '5m':  60 * 5,        // 5 min
-  '15m': 60 * 15,       // 15 min
-  '30m': 60 * 30,       // 30 min
-  '1h':  60 * 60,       // 1 hour
-  '4h':  60 * 60 * 4,   // 4 hours
-  '1d':  60 * 60 * 24,  // 24 hours
+  '1m':  60,
+  '5m':  60 * 5,
+  '15m': 60 * 15,
+  '30m': 60 * 30,
+  '1h':  60 * 60,
+  '4h':  60 * 60 * 4,
+  '1d':  60 * 60 * 24,
   '1w':  60 * 60 * 24 * 7,
   '1mn': 60 * 60 * 24 * 30,
 };
 
-const CACHE_KEY = (asset, tf) => `v12:candles:${asset}:${tf}`;
+// Milliseconds per timeframe — used to compute startTime for `limit` candles
+const TF_MS = {
+  '1m':  60 * 1000,
+  '5m':  5 * 60 * 1000,
+  '15m': 15 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+  '1h':  60 * 60 * 1000,
+  '4h':  4 * 60 * 60 * 1000,
+  '1d':  24 * 60 * 60 * 1000,
+  '1w':  7 * 24 * 60 * 60 * 1000,
+  '1mn': 30 * 24 * 60 * 60 * 1000,
+};
+
+function CACHE_KEY(asset, tf) { return `v12:candles:${asset}:${tf}`; }
 
 // =================================================================
 // PROVIDER ROUTING
 // =================================================================
-// Determines which provider serves which asset.
+// V12.4: MetaAPI for everything. Single source.
 
 function pickProvider(asset) {
   const meta = getAssetById(asset);
   if (!meta) return null;
-  // All assets use TwelveData. (Binance available as fallback if needed —
-  // geo-restricted on some Vercel regions, so we use TwelveData for crypto too.)
-  return 'twelvedata';
+  return 'metaapi';
 }
 
 // =================================================================
-// PROVIDER 1: BINANCE (CRYPTO)
+// METAAPI HISTORICAL CANDLES
 // =================================================================
-// Public API, no auth needed, real-time, unlimited free.
-// Endpoint: GET https://api.binance.com/api/v3/klines
-//   ?symbol=BTCUSDT&interval=1h&limit=200
-// Returns: [[openTime, open, high, low, close, volume, closeTime, ...], ...]
+// MetaAPI is the bot's broker connection. We reuse the auth token, account
+// ID, and region that already work for order placement. Symbol mapping is
+// delegated to symbol-resolver (auto-syncs broker symbols, handles `.s` /
+// `ft.s` priority for PU Prime, persists in Redis).
+//
+// IMPORTANT: market-data API is on a DIFFERENT subdomain from the trading
+// API. trading = `mt-client-api-v1`, market-data = `mt-market-data-client-api-v1`.
 
-const BINANCE_SYMBOL = {
-  btc: 'BTCUSDT',
-  eth: 'ETHUSDT',
-  sol: 'SOLUSDT',
-  xrp: 'XRPUSDT',
-};
+const METAAPI_REGION = process.env.METAAPI_REGION || 'london';
 
-const BINANCE_INTERVAL = {
-  '1m':  '1m',
-  '5m':  '5m',
-  '15m': '15m',
-  '30m': '30m',
-  '1h':  '1h',
-  '4h':  '4h',
-  '1d':  '1d',
-  '1w':  '1w',
-  '1mn': '1M',
-};
+function metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, limit) {
+  return `https://mt-market-data-client-api-v1.${METAAPI_REGION}.agiliumtrade.ai`
+    + `/users/current/accounts/${accountId}`
+    + `/historical-market-data/symbols/${encodeURIComponent(brokerSymbol)}`
+    + `/timeframes/${tf}/candles`
+    + `?startTime=${encodeURIComponent(startTimeIso)}&limit=${limit}`;
+}
 
-async function fetchFromBinance(asset, tf, limit) {
-  const symbol = BINANCE_SYMBOL[asset];
-  const interval = BINANCE_INTERVAL[tf];
-  if (!symbol || !interval) {
-    return { ok: false, error: `Binance: unsupported asset/tf (${asset}/${tf})` };
+async function fetchFromMetaAPI(asset, tf, limit) {
+  const token = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  if (!token || !accountId) {
+    return { ok: false, error: 'MetaAPI: METAAPI_TOKEN or METAAPI_ACCOUNT_ID missing' };
+  }
+  if (!TF_MS[tf]) {
+    return { ok: false, error: `MetaAPI: unsupported TF ${tf}` };
   }
 
-  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${Math.min(limit, 1000)}`;
+  // 1. Resolve broker symbol from the auto-synced map
+  let brokerSymbol = await resolveSymbol(asset);
+
+  // 2. Auto-bootstrap: if map is empty (fresh deploy), sync now
+  if (!brokerSymbol) {
+    try {
+      const syncResult = await syncBrokerSymbols();
+      if (!syncResult || !syncResult.ok) {
+        return {
+          ok: false,
+          error: `MetaAPI symbol sync failed: ${syncResult?.error || 'unknown'}`,
+        };
+      }
+      brokerSymbol = await resolveSymbol(asset);
+    } catch (e) {
+      return { ok: false, error: 'MetaAPI symbol sync threw: ' + e.message };
+    }
+  }
+  if (!brokerSymbol) {
+    return { ok: false, error: `Asset ${asset} not available on broker (no symbol after sync)` };
+  }
+
+  // 3. Calculate startTime to fetch `limit` candles.
+  //    Multiply by safety factor for weekends/holidays/gaps:
+  //      forex: ~1.7× (weekend gap of 2 days)
+  //      higher TFs (1d/1w/1mn): 2× (covers Sundays + holidays)
+  const cap = Math.min(limit, 1000);
+  const lookbackFactor = (tf === '1d' || tf === '1w' || tf === '1mn') ? 2.0 : 1.7;
+  const startMs = Date.now() - cap * TF_MS[tf] * lookbackFactor;
+  const startTimeIso = new Date(startMs).toISOString();
+
+  const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, cap);
 
   try {
-    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    const resp = await fetch(url, {
+      headers: {
+        'auth-token': token,
+        'Accept': 'application/json',
+      },
+    });
+
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      return { ok: false, error: `Binance ${resp.status}: ${text.slice(0, 200)}` };
+      // 404 typically means symbol unknown OR account not provisioned
+      // 401 means token wrong
+      // 429 means rate limited
+      return {
+        ok: false,
+        error: `MetaAPI ${resp.status}: ${text.slice(0, 200)}`,
+        status: resp.status,
+      };
     }
+
     const data = await resp.json();
     if (!Array.isArray(data)) {
-      return { ok: false, error: 'Binance: malformed response' };
+      return { ok: false, error: 'MetaAPI: malformed response (not an array)' };
+    }
+    if (data.length === 0) {
+      return { ok: false, error: 'MetaAPI: empty candle array (market closed or no data)' };
     }
 
-    // Convert Binance kline format to V12 candle format
-    const candles = data.map((k) => ({
-      time:   new Date(k[0]).toISOString(),     // openTime → ISO string
-      open:   parseFloat(k[1]),
-      high:   parseFloat(k[2]),
-      low:    parseFloat(k[3]),
-      close:  parseFloat(k[4]),
-      volume: parseFloat(k[5]),
+    // Convert MetaAPI candle → V12 candle format.
+    // MetaAPI returns candles in chronological (ascending) order already.
+    // tickVolume preferred over volume for forex (real volume often 0 on MT5).
+    const candles = data.map((c) => ({
+      time: c.time,
+      open: parseFloat(c.open),
+      high: parseFloat(c.high),
+      low: parseFloat(c.low),
+      close: parseFloat(c.close),
+      volume: parseFloat(c.tickVolume != null ? c.tickVolume : (c.volume || 0)),
     }));
 
-    return { ok: true, candles, source: 'binance' };
+    return { ok: true, candles, source: `metaapi(${brokerSymbol})` };
   } catch (e) {
-    return { ok: false, error: 'Binance: ' + e.message };
-  }
-}
-
-// =================================================================
-// PROVIDER 2: TWELVEDATA (FOREX, METALS, INDICES, OIL)
-// =================================================================
-// Free tier: 800 requests/day, 8/min. Plenty for solo use.
-// Endpoint: GET https://api.twelvedata.com/time_series
-//   ?symbol=EUR/USD&interval=1h&outputsize=200&apikey=KEY
-//
-// Symbol format: SLASH-separated (EUR/USD, XAU/USD, BTC/USD, NDX, SPX)
-
-const TWELVEDATA_SYMBOL = {
-  // Forex pairs — slash format
-  eurusd: 'EUR/USD',
-  gbpusd: 'GBP/USD',
-  usdjpy: 'USD/JPY',
-  usdchf: 'USD/CHF',
-  audusd: 'AUD/USD',
-  nzdusd: 'NZD/USD',
-  usdcad: 'USD/CAD',
-  eurjpy: 'EUR/JPY',
-  gbpjpy: 'GBP/JPY',
-  eurgbp: 'EUR/GBP',
-  audjpy: 'AUD/JPY',
-  // Metals
-  gold:     'XAU/USD',
-  silver:   'XAG/USD',
-  platinum: 'XPT/USD',
-  // Crypto — TwelveData uses slash format
-  btc: 'BTC/USD',
-  eth: 'ETH/USD',
-  sol: 'SOL/USD',
-  xrp: 'XRP/USD',
-  // Indices — TwelveData uses tickers
-  nas100: 'NDX',          // Nasdaq 100
-  us30:   'DJI',          // Dow Jones
-  us500:  'SPX',          // S&P 500
-  ger40:  'DAX',          // German DAX
-  uk100:  'FTSE',         // FTSE 100
-  jp225:  'N225',         // Nikkei 225
-  // Commodities
-  oil_wti:   'CL=F',      // WTI futures (TwelveData)
-  oil_brent: 'BZ=F',      // Brent futures
-  natgas:    'NG=F',
-};
-
-const TWELVEDATA_INTERVAL = {
-  '1m':  '1min',
-  '5m':  '5min',
-  '15m': '15min',
-  '30m': '30min',
-  '1h':  '1h',
-  '4h':  '4h',
-  '1d':  '1day',
-  '1w':  '1week',
-  '1mn': '1month',
-};
-
-async function fetchFromTwelveData(asset, tf, limit) {
-  const symbol = TWELVEDATA_SYMBOL[asset];
-  const interval = TWELVEDATA_INTERVAL[tf];
-  if (!symbol || !interval) {
-    return { ok: false, error: `TwelveData: unsupported asset/tf (${asset}/${tf})` };
-  }
-
-  const apiKey = process.env.TWELVEDATA_API_KEY;
-  if (!apiKey) {
-    return { ok: false, error: 'TwelveData: TWELVEDATA_API_KEY not configured' };
-  }
-
-  const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${Math.min(limit, 5000)}&apikey=${apiKey}`;
-
-  try {
-    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
-      return { ok: false, error: `TwelveData ${resp.status}: ${text.slice(0, 200)}` };
-    }
-
-    const data = await resp.json();
-
-    // TwelveData error format: { code, message, status: 'error' }
-    if (data.status === 'error' || data.code) {
-      return { ok: false, error: `TwelveData: ${data.message || data.code}` };
-    }
-
-    if (!data.values || !Array.isArray(data.values)) {
-      return { ok: false, error: 'TwelveData: missing values array' };
-    }
-
-    // TwelveData returns values in DESCENDING order (newest first).
-    // V12 detectors expect ASCENDING order (oldest first).
-    //
-    // TIMESTAMP FIX:
-    // TwelveData's `v.datetime` looks like "2026-05-13 11:00:00" with no timezone.
-    // `new Date("2026-05-13 11:00:00")` is parsed as LOCAL time of the server, which
-    // can shift the timestamp by several hours depending on Vercel's region.
-    // We force UTC interpretation by appending 'Z'.
-    function parseAsUTC(dateStr) {
-      if (!dateStr) return Date.now();
-      // If already has Z or +/-HH:MM, parse as-is
-      if (/[Zz]$|[+-]\d{2}:?\d{2}$/.test(dateStr)) {
-        return new Date(dateStr).getTime();
-      }
-      // Replace space with T and append Z to force UTC
-      const isoLike = dateStr.replace(' ', 'T') + 'Z';
-      const ms = new Date(isoLike).getTime();
-      return Number.isFinite(ms) ? ms : Date.now();
-    }
-
-    const candles = data.values
-      .map((v) => ({
-        time:   new Date(parseAsUTC(v.datetime)).toISOString(),
-        open:   parseFloat(v.open),
-        high:   parseFloat(v.high),
-        low:    parseFloat(v.low),
-        close:  parseFloat(v.close),
-        volume: v.volume != null ? parseFloat(v.volume) : 0,
-      }))
-      .reverse();
-
-    return { ok: true, candles, source: 'twelvedata' };
-  } catch (e) {
-    return { ok: false, error: 'TwelveData: ' + e.message };
+    return { ok: false, error: 'MetaAPI: ' + e.message };
   }
 }
 
@@ -279,7 +218,6 @@ function validateCandles(candles) {
     }
     if (c.high < c.low) return { ok: false, error: `candle ${i} high<low` };
     if (c.open <= 0 || c.close <= 0) return { ok: false, error: `candle ${i} non-positive price` };
-    // Sanity check: high should encompass open and close
     if (c.high < c.open || c.high < c.close) return { ok: false, error: `candle ${i} high<open or high<close` };
     if (c.low > c.open || c.low > c.close) return { ok: false, error: `candle ${i} low>open or low>close` };
   }
@@ -290,15 +228,15 @@ function validateCandles(candles) {
 // =================================================================
 // MAIN: FETCH CANDLES FOR ASSET+TF
 // =================================================================
-// Public API used by watcher / tactics-run.
+// Public API used by watcher / events-run.
 //
 // Flow:
-//   1. Try Redis cache (returns immediately if cached and fresh)
-//   2. Pick provider based on asset class
-//   3. Fetch from provider
-//   4. Validate the response
-//   5. Persist to cache with TF-specific TTL
-//   6. Return
+//   1. Try Redis cache (immediate return if fresh)
+//   2. Fetch from MetaAPI
+//   3. Validate the response
+//   4. Persist to cache with TF-specific TTL
+//   5. Return
+//   On failure: fall back to stale cache if exists, else empty array.
 
 async function fetchCandles(asset, tf, limit = 200) {
   const r = getRedis();
@@ -312,9 +250,8 @@ async function fetchCandles(asset, tf, limit = 200) {
       if (cached && cached.candles && cached.fetchedAt) {
         const ttl = (TF_CACHE_TTL_SEC[tf] || 300) * 1000;
         if (Date.now() - cached.fetchedAt < ttl) {
-          // Cache hit and fresh
           return {
-            candles: cached.candles.slice(-limit),  // respect requested limit
+            candles: cached.candles.slice(-limit),
             source: cached.source + '-cached',
           };
         }
@@ -330,10 +267,8 @@ async function fetchCandles(asset, tf, limit = 200) {
 
   // 3. Fetch
   let result;
-  if (provider === 'binance') {
-    result = await fetchFromBinance(asset, tf, limit);
-  } else if (provider === 'twelvedata') {
-    result = await fetchFromTwelveData(asset, tf, limit);
+  if (provider === 'metaapi') {
+    result = await fetchFromMetaAPI(asset, tf, limit);
   } else {
     return { candles: [], source: null, error: `Unknown provider: ${provider}` };
   }
@@ -415,3 +350,4 @@ module.exports = async (req, res) => {
 module.exports.fetchCandles = fetchCandles;
 module.exports.pickProvider = pickProvider;
 module.exports.validateCandles = validateCandles;
+module.exports.fetchFromMetaAPI = fetchFromMetaAPI;

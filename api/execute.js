@@ -207,7 +207,7 @@ async function tryPlace(pending, brokerSymbol) {
   //   BTC:    max(2.0,    50.0)    = $50
   //   NAS100: max(0.02,   25.0)    = 25 points
   const minByPip = (asset.pipSize || 0.0001) * 2;
-  const minByATR = (asset.typicalH1ATR || 0) * 0.25;
+  const minByATR = (asset.typicalH1ATR || 0) * 0.50;
   const minSLDistance = Math.max(minByPip, minByATR);
 
   if (slDistance < minSLDistance) {

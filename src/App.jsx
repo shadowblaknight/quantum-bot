@@ -18,7 +18,7 @@
 // =====================================================================
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { createChart, CrosshairMode, ColorType } from "lightweight-charts";
+// V12.4: lightweight-charts removed — cockpit is no longer chart-based.
 
 // =====================================================================
 // SECTION 1: CONSTANTS, ENDPOINTS, STORAGE KEYS
@@ -159,7 +159,6 @@ const DEFAULT_PREFS = {
     rsi:               [false, false],
   },
   sideBarOpen:      false,
-  bottomBarOpen:    true,
   tutorialMode:     true,    // verbose tooltips for new users
 };
 
@@ -482,44 +481,38 @@ export default function App() {
 
 function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate }) {
   const [sideBarOpen, setSideBarOpen] = useState(prefs.sideBarOpen);
-  const [bottomBarOpen, setBottomBarOpen] = useState(prefs.bottomBarOpen);
   const [logoMenuOpen, setLogoMenuOpen] = useState(false);
   const [assetModalOpen, setAssetModalOpen] = useState(false);
   const [pausePopoverOpen, setPausePopoverOpen] = useState(false);
-  const [toolsPopoverOpen, setToolsPopoverOpen] = useState(false);
 
   const selectedAsset = prefs.selectedAsset || "gold";
   const selectedAssetMeta = getAssetById(selectedAsset);
   const isPaused = prefs.pauseOnAsset?.[selectedAsset] || false;
 
-  // Live price / candles for the selected asset + TF
+  // V12.4: chart removed. We still poll candles as a fallback price source
+  // (assetState.currentPrice is the primary source via the watcher tick).
   const [chartData, setChartData] = useState(null);
-  const [chartLoading, setChartLoading] = useState(false);
+  // V12.4: live quotes for the cockpit price tape (sparkline)
+  const [quotes, setQuotes] = useState(null);
 
   // Position on the selected asset (if any)
   const myPosition = positions.find((p) => p.assetId === selectedAsset) || null;
 
-  // Fetch chart data for the selected asset/TF
+  // Fetch fallback price from broker candles
   useEffect(() => {
     let alive = true;
-    setChartLoading(true);
     (async () => {
       try {
         const r = await fetch(
-          API(`broker?action=candles&asset=${selectedAsset}&tf=${prefs.selectedTF}&n=200`)
+          API(`broker?action=candles&asset=${selectedAsset}&tf=${prefs.selectedTF}&n=20`)
         ).then((r) => r.json());
-        if (alive) {
-          setChartData(r);
-          setChartLoading(false);
-        }
-      } catch (e) {
-        if (alive) setChartLoading(false);
-      }
+        if (alive) setChartData(r);
+      } catch (_) {}
     })();
     const id = setInterval(async () => {
       try {
         const r = await fetch(
-          API(`broker?action=candles&asset=${selectedAsset}&tf=${prefs.selectedTF}&n=200`)
+          API(`broker?action=candles&asset=${selectedAsset}&tf=${prefs.selectedTF}&n=20`)
         ).then((r) => r.json());
         if (alive) setChartData(r);
       } catch (_) {}
@@ -527,10 +520,26 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
     return () => { alive = false; clearInterval(id); };
   }, [selectedAsset, prefs.selectedTF]);
 
-  // Persist sidebar/bottom-bar state to prefs
+  // V12.4: poll live quotes (M1 closes for sparkline) every 10s
   useEffect(() => {
-    setPrefs((p) => ({ ...p, sideBarOpen, bottomBarOpen }));
-  }, [sideBarOpen, bottomBarOpen]);
+    let alive = true;
+    setQuotes(null); // clear when asset changes
+    const tick = async () => {
+      try {
+        const r = await fetch(API(`quotes?asset=${selectedAsset}&limit=30`))
+          .then((r) => r.json());
+        if (alive && r && !r.error) setQuotes(r);
+      } catch (_) {}
+    };
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => { alive = false; clearInterval(id); };
+  }, [selectedAsset]);
+
+  // Persist sidebar state to prefs
+  useEffect(() => {
+    setPrefs((p) => ({ ...p, sideBarOpen }));
+  }, [sideBarOpen]);
 
   // Live state from V12 backend (watcher's mental model) — polled
   const [assetState, setAssetState] = useState(null);
@@ -607,41 +616,27 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
         assetState={assetState}
       />
 
-      {/* CHART */}
+      {/* INSTRUMENT PANEL (V12.4: replaces chart) */}
       <div
         style={{
           position: "absolute",
           top: 44,
           left: sideBarOpen ? 280 : 18,
           right: 8,
-          bottom: bottomBarOpen ? 100 : 16,
-          transition: "left 250ms, bottom 250ms",
+          bottom: 16,
+          transition: "left 250ms",
         }}
       >
-        <CockpitChart
+        <CockpitInstrumentPanel
           theme={theme}
           prefs={prefs}
-          setPrefs={setPrefs}
           assetId={selectedAsset}
-          chartData={chartData}
-          chartLoading={chartLoading}
-          myPosition={myPosition}
           assetState={assetState}
-          onToolsClick={() => setToolsPopoverOpen((v) => !v)}
-          toolsPopoverOpen={toolsPopoverOpen}
-          onCloseToolsPopover={() => setToolsPopoverOpen(false)}
+          myPosition={myPosition}
+          chartData={chartData}
+          quotes={quotes}
         />
       </div>
-
-      {/* BOTTOM BAR */}
-      <CockpitBottomBar
-        theme={theme}
-        open={bottomBarOpen}
-        onToggle={() => setBottomBarOpen((v) => !v)}
-        commentary={assetState?.commentary || []}
-        assetId={selectedAsset}
-        assetState={assetState}
-      />
 
       {/* MODALS / POPOVERS */}
       {assetModalOpen && (
@@ -1312,300 +1307,6 @@ function CockpitSideBar({
 // SECTION 9.7: COCKPIT — CHART
 // =====================================================================
 
-function CockpitChart({
-  theme, prefs, setPrefs, assetId, chartData, chartLoading, myPosition, assetState,
-  onToolsClick, toolsPopoverOpen, onCloseToolsPopover,
-}) {
-  const containerRef = useRef(null);
-  const chartRef = useRef(null);
-  const seriesRef = useRef(null);
-  const priceLinesRef = useRef([]);
-
-  // Build chart on mount, destroy on unmount
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight,
-      layout: {
-        background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#7a7a85",
-      },
-      grid: {
-        vertLines: { color: "rgba(255,255,255,0.04)" },
-        horzLines: { color: "rgba(255,255,255,0.04)" },
-      },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: "rgba(255,255,255,0.08)",
-      },
-      rightPriceScale: {
-        borderColor: "rgba(255,255,255,0.08)",
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: "rgba(0,217,255,0.3)", width: 1, style: 3, labelBackgroundColor: "#00d9ff" },
-        horzLine: { color: "rgba(0,217,255,0.3)", width: 1, style: 3, labelBackgroundColor: "#00d9ff" },
-      },
-    });
-
-    const series = chart.addCandlestickSeries({
-      upColor: "#00e676",
-      downColor: "#ff3b5c",
-      borderVisible: false,
-      wickUpColor: "#00e676",
-      wickDownColor: "#ff3b5c",
-    });
-
-    chartRef.current = chart;
-    seriesRef.current = series;
-
-    // Resize handler
-    const ro = new ResizeObserver(() => {
-      if (chartRef.current && containerRef.current) {
-        chartRef.current.applyOptions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        });
-      }
-    });
-    ro.observe(containerRef.current);
-
-    return () => {
-      ro.disconnect();
-      try { chart.remove(); } catch (_) {}
-      chartRef.current = null;
-      seriesRef.current = null;
-      priceLinesRef.current = [];
-    };
-  }, []);
-
-  // Update candles when chartData changes
-  useEffect(() => {
-    if (!seriesRef.current || !chartData?.candles) return;
-
-    const candlesRaw = chartData.candles
-      .map((c) => ({
-        time: Math.floor(new Date(c.time).getTime() / 1000),
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }))
-      .filter((c) => c.time && isFinite(c.open) && isFinite(c.close));
-
-    if (candlesRaw.length === 0) return;
-    candlesRaw.sort((a, b) => a.time - b.time);
-    const dedup = [];
-    let lastT = -1;
-    for (const c of candlesRaw) {
-      if (c.time !== lastT) { dedup.push(c); lastT = c.time; }
-    }
-
-    seriesRef.current.setData(dedup);
-
-    // Clear existing price lines
-    for (const pl of priceLinesRef.current) {
-      try { seriesRef.current.removePriceLine(pl); } catch (_) {}
-    }
-    priceLinesRef.current = [];
-
-    // Add position lines if we have an open position OR a pending setup
-    if (seriesRef.current) {
-      const pending = assetState?.pending;
-      if (myPosition || (pending && pending.length > 0)) {
-        addPositionLines(seriesRef.current, myPosition, priceLinesRef.current, pending, assetState);
-      }
-    }
-  }, [chartData, myPosition, assetState]);
-
-  return (
-    <div
-      style={{
-        position: "relative",
-        width: "100%",
-        height: "100%",
-        background: "var(--qb-bg-base)",
-        border: "1px solid var(--qb-border)",
-        borderRadius: 6,
-        overflow: "hidden",
-      }}
-    >
-      {/* Chart canvas */}
-      <div
-        ref={containerRef}
-        style={{ position: "absolute", inset: 0 }}
-      />
-
-      {/* Tactic annotations overlay — only renders when bot is acting on a setup */}
-      <TacticAnnotationOverlay
-        chartRef={chartRef}
-        seriesRef={seriesRef}
-        containerRef={containerRef}
-        chartData={chartData}
-        assetState={assetState}
-        myPosition={myPosition}
-        prefs={prefs}
-      />
-
-      {/* Top-left controls: TF selector + tools toggle */}
-      <div
-        style={{
-          position: "absolute",
-          top: 8,
-          left: 8,
-          display: "flex",
-          gap: 4,
-          alignItems: "center",
-          zIndex: 5,
-        }}
-      >
-        <TFSelector selectedTF={prefs.selectedTF} onChange={(tf) => setPrefs((p) => ({ ...p, selectedTF: tf }))} />
-        <ToolsButton onClick={onToolsClick} active={toolsPopoverOpen} />
-      </div>
-
-      {/* Tools popover */}
-      {toolsPopoverOpen && (
-        <ToolsPopover
-          theme={theme}
-          prefs={prefs}
-          setPrefs={setPrefs}
-          onClose={onCloseToolsPopover}
-        />
-      )}
-
-      {/* Loading state */}
-      {chartLoading && !chartData && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--qb-text-muted)",
-            fontSize: 12,
-            background: "rgba(10,11,15,0.8)",
-          }}
-        >
-          Loading chart...
-        </div>
-      )}
-
-      {/* Empty / error state */}
-      {!chartLoading && (!chartData?.candles || chartData.candles.length === 0) && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-            color: "var(--qb-text-muted)",
-            fontSize: 12,
-            background: "rgba(10,11,15,0.8)",
-          }}
-        >
-          <div style={{ fontSize: 14, color: "var(--qb-text-primary)" }}>
-            {assetId.toUpperCase()} not available
-          </div>
-          <div style={{ maxWidth: 320, textAlign: "center" }}>
-            {chartData?.error || "Run /api/symbol-resolver?action=sync to map this asset to your broker"}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function addPositionLines(series, position, container, pending, assetState) {
-  if (!series) return;
-  const isLong = position
-    ? (position.type === "POSITION_TYPE_BUY") || (position.direction === "LONG")
-    : pending?.[0]?.setup?.direction === "LONG";
-
-  // Find the live pending setup if any
-  const activePending = pending?.find?.((p) => p.status === "pending" || p.status === "placed" || p.status === "filled");
-
-  const entry = position?.openPrice || position?.entry || activePending?.actualEntry || activePending?.plannedEntry;
-  const sl = position?.stopLoss || activePending?.slPrice;
-  const tpLevels = activePending?.tpLevels || [];
-  const lot = position?.volume || activePending?.sizing?.recommendedLot || 0.01;
-  const asset = activePending?.asset || assetState?.asset;
-
-  // Get the asset metadata for $/pip math
-  const assetMeta = ASSET_CATALOG.find((a) => a.id === asset);
-  const dollarPerPip = assetMeta ? getPipDollar(asset) : 1;
-  const pipSize = assetMeta ? getPipSize(asset) : 0.0001;
-
-  function dollarFor(price) {
-    if (!entry || !price || !pipSize || !dollarPerPip || !lot) return null;
-    const pips = Math.abs(price - entry) / pipSize;
-    return pips * dollarPerPip * lot;
-  }
-
-  if (entry) {
-    const line = series.createPriceLine({
-      price: entry,
-      color: "#fbbf24",
-      lineWidth: 2,
-      lineStyle: 0,
-      axisLabelVisible: true,
-      title: `ENTRY ${isLong ? "LONG" : "SHORT"} ${lot}`,
-    });
-    container.push(line);
-  }
-  if (sl) {
-    const slDollars = dollarFor(sl);
-    const slLabel = slDollars != null ? `SL -$${slDollars.toFixed(0)}` : `SL`;
-    const line = series.createPriceLine({
-      price: sl,
-      color: "#dc2626",
-      lineWidth: 1,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title: slLabel,
-    });
-    container.push(line);
-  }
-
-  // Draw all TPs from pending if available
-  if (tpLevels.length > 0) {
-    for (let i = 0; i < tpLevels.length && i < 4; i++) {
-      const tp = tpLevels[i];
-      const tpDollars = dollarFor(tp.price);
-      const tpLabel = tpDollars != null
-        ? `TP${i + 1} +$${tpDollars.toFixed(0)} (${tp.rMultiple.toFixed(1)}R)`
-        : `TP${i + 1} ${tp.rMultiple.toFixed(1)}R`;
-      const line = series.createPriceLine({
-        price: tp.price,
-        color: "#22c55e",
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-        title: tpLabel,
-      });
-      container.push(line);
-    }
-  } else if (position?.takeProfit) {
-    // Fallback: just the broker's single TP
-    const tpDollars = dollarFor(position.takeProfit);
-    const line = series.createPriceLine({
-      price: position.takeProfit,
-      color: "#22c55e",
-      lineWidth: 1,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title: tpDollars != null ? `TP +$${tpDollars.toFixed(0)}` : `TP`,
-    });
-    container.push(line);
-  }
-}
-
 // Pip dollar value per lot (mirrors backend asset-registry)
 function getPipDollar(assetId) {
   const map = {
@@ -1653,693 +1354,765 @@ function getPipSize(assetId) {
 //   - Unfilled Imbalance: wider shaded gap zone
 //   - Fakeout: failed-breakout marker
 //   - Round Numbers: thin horizontal lines
+// SECTION 9.8b: COCKPIT — INSTRUMENT PANEL (V12.4)
 // =====================================================================
+// Replaces the chart. A professional flight-deck instrument panel showing:
+//  - Current price + direction badge
+//  - Quick status (intent, bias, coherence)
+//  - Active setup (template, entry/SL/TPs, narrative)
+//  - Detected tools (event timeline)
+//  - Commentary feed
+// User views actual price charts in MT5; this surfaces what only QB can see.
 
-function TacticAnnotationOverlay({ chartRef, seriesRef, containerRef, chartData, assetState, myPosition, prefs }) {
-  const overlayRef = useRef(null);
-  const [tick, setTick] = useState(0);
-  const [hoveredAnnotation, setHoveredAnnotation] = useState(null);
+function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition, chartData, quotes }) {
+  const meta = getAssetById(assetId);
+  const state = assetState?.state;
+  const pending = (assetState?.pending || []).filter(
+    (p) => p.status === "pending" || p.status === "placed"
+  );
+  const commentary = assetState?.commentary || [];
+  const events = state?.events || [];
+  const intent = state?.intent || (assetState ? "AWAITING" : "—");
+  const coherence = state?.coherence;
 
-  // Subscribe to chart's coordinate changes (zoom, pan, resize) to redraw
-  useEffect(() => {
-    if (!chartRef.current) return;
-    const chart = chartRef.current;
+  // Current price preference: quotes (freshest) > state.currentPrice > chartData last close
+  const currentPrice =
+    quotes?.price ??
+    state?.currentPrice ??
+    (chartData?.candles?.length
+      ? chartData.candles[chartData.candles.length - 1].close
+      : null);
 
-    const handler = () => setTick((t) => t + 1);
+  // Direction inferred from active pending setup OR coherence intent
+  const activeSetup = pending[0] || null;
+  const bias = activeSetup?.direction || coherence?.bias || "NEUTRAL";
+  const biasColor =
+    bias === "LONG"
+      ? "var(--qb-up-strong)"
+      : bias === "SHORT"
+      ? "var(--qb-down-strong)"
+      : "var(--qb-text-muted)";
 
-    // lightweight-charts API: subscribe to visible time range changes
-    try {
-      chart.timeScale().subscribeVisibleTimeRangeChange(handler);
-      chart.timeScale().subscribeVisibleLogicalRangeChange?.(handler);
-    } catch (_) {}
+  // Sparkline direction follows actual price movement, not bias intent
+  const sparkColor =
+    quotes && quotes.change != null
+      ? quotes.change >= 0
+        ? "var(--qb-up-strong)"
+        : "var(--qb-down-strong)"
+      : "var(--qb-text-muted)";
 
-    // Resize observer on container
-    let ro = null;
-    if (containerRef.current && typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(handler);
-      ro.observe(containerRef.current);
-    }
+  // Determine status badge
+  const status = myPosition
+    ? "IN TRADE"
+    : activeSetup
+    ? activeSetup.status === "placed"
+      ? "ORDER LIVE"
+      : "SETUP PENDING"
+    : intent === "WATCH"
+    ? "WATCHING"
+    : intent === "AWAITING"
+    ? "AWAITING"
+    : intent;
 
-    return () => {
-      try { chart.timeScale().unsubscribeVisibleTimeRangeChange(handler); } catch (_) {}
-      try { chart.timeScale().unsubscribeVisibleLogicalRangeChange?.(handler); } catch (_) {}
-      if (ro) ro.disconnect();
-    };
-  }, [chartRef.current, containerRef.current]);
+  // Format a price for the asset's pipSize precision
+  const fmt = (n) => {
+    if (n == null || !isFinite(n)) return "—";
+    if (!meta) return n.toFixed(2);
+    const decimals =
+      meta.pipSize >= 1 ? 2 : meta.pipSize >= 0.01 ? 2 : meta.pipSize >= 0.0001 ? 5 : 4;
+    return n.toFixed(decimals);
+  };
 
-  // Determine if bot is currently acting (the visibility rule)
-  const isActing = useMemo(() => {
-    if (myPosition) return true;
-    const pending = assetState?.pending || [];
-    if (pending.some((p) => p.status === "pending" || p.status === "placed" || p.status === "filled")) return true;
-    if (assetState?.state?.coherence?.decision === "TRADE") return true;
-    return false;
-  }, [assetState, myPosition]);
-
-  // Get the contributing opinions to draw
-  // Source priority:
-  //   1. Active pending setup's opinions (most accurate — frozen at setup time)
-  //   2. Current state's coherence.opinionsUsed (live)
-  const contributingOpinions = useMemo(() => {
-    if (!isActing) return [];
-    const pending = assetState?.pending?.find?.(
-      (p) => p.status === "pending" || p.status === "placed" || p.status === "filled"
-    );
-    // V12.3: setup has contributingEvents (event objects). If present, return those.
-    if (pending?.setup?.contributingEvents && Array.isArray(pending.setup.contributingEvents)) {
-      return pending.setup.contributingEvents;
-    }
-    // V12.2 fallback: filter live opinions to those matching contributing tactics
-    if (pending?.setup?.contributingTactics && assetState?.state?.opinions) {
-      const contributingSet = new Set(pending.setup.contributingTactics);
-      return assetState.state.opinions.filter((op) =>
-        contributingSet.has(op.tactic) && op.direction === pending.setup.direction
-      );
-    }
-    return assetState?.state?.coherence?.opinionsUsed || [];
-  }, [assetState, isActing]);
-
-  // Also pull NEUTRAL session-level opinions to show (they're TP target context)
-  const neutralOpinions = useMemo(() => {
-    if (!isActing) return [];
-    return (assetState?.state?.coherence?.neutralsUsed || []).slice(0, 6);
-  }, [assetState, isActing]);
-
-  // Build renderable annotations
-  const annotations = useMemo(() => {
-    if (!isActing || !chartData?.candles?.length) return [];
-    if (!seriesRef.current || !chartRef.current) return [];
-
-    const showFlags = prefs?.toolsConfig || {};
-    const isShownOnChart = (tacticId) => {
-      const cfg = showFlags[tacticId];
-      // Default: show if not explicitly disabled
-      return !cfg || cfg[0] !== false;
-    };
-
-    const out = [];
-
-    // Render each contributing opinion
-    for (const op of contributingOpinions) {
-      if (!isShownOnChart(op.tactic)) continue;
-
-      const a = renderOpinion(op, chartData.candles, chartRef.current, seriesRef.current);
-      if (a) out.push(a);
-    }
-
-    // Render neutrals (session levels, round numbers) — only if shown
-    for (const op of neutralOpinions) {
-      if (!isShownOnChart(op.tactic)) continue;
-      const a = renderOpinion(op, chartData.candles, chartRef.current, seriesRef.current);
-      if (a) out.push(a);
-    }
-
-    return out;
-  }, [contributingOpinions, neutralOpinions, chartData, tick, prefs, isActing]);
-
-  if (!isActing) return null;
+  // Recent interesting events for the timeline
+  const interestingEvents = events
+    .filter((e) => ["sweep", "mss", "bos", "fvg-created", "ob-created", "breaker-created", "displacement", "ote-zone-entered"].includes(e.type))
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .slice(0, 14);
 
   return (
     <div
-      ref={overlayRef}
+      className="qb-glass"
       style={{
-        position: "absolute",
-        inset: 0,
-        pointerEvents: "none", // chart still reacts to mouse
-        zIndex: 3,
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
         overflow: "hidden",
       }}
     >
-      {annotations.map((a, i) => (
-        <AnnotationShape
-          key={a.key || i}
-          annotation={a}
-          onHover={setHoveredAnnotation}
-        />
-      ))}
-      {hoveredAnnotation && (
-        <AnnotationTooltip annotation={hoveredAnnotation} />
-      )}
-    </div>
-  );
-}
-
-// Render a single opinion to overlay coordinates.
-// Returns annotation object or null if can't be rendered (e.g. zone outside visible range).
-function renderOpinion(op, candles, chart, series) {
-  try {
-    const lastCandle = candles[candles.length - 1];
-    const lastTime = Math.floor(new Date(lastCandle.time).getTime() / 1000);
-    const formedTime = Math.floor(op.formedAt / 1000);
-
-    const dirColor = op.direction === "LONG" ? "rgba(0,230,118," : op.direction === "SHORT" ? "rgba(255,59,92," : "rgba(167,139,250,";
-
-    // Order Block & Unfilled Imbalance: rectangles spanning from formation to current
-    if ((op.tactic === "orderBlock" || op.tactic === "unfilledImbalance") && op.zone) {
-      const xStart = chart.timeScale().timeToCoordinate(formedTime);
-      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
-      const yUpper = series.priceToCoordinate(op.zone.upper);
-      const yLower = series.priceToCoordinate(op.zone.lower);
-      if (xStart == null || xEnd == null || yUpper == null || yLower == null) return null;
-
-      return {
-        type: "rect",
-        key: `${op.tactic}-${formedTime}`,
-        opinion: op,
-        rect: {
-          left: Math.min(xStart, xEnd),
-          top: Math.min(yUpper, yLower),
-          width: Math.abs(xEnd - xStart),
-          height: Math.abs(yUpper - yLower),
-        },
-        fill: dirColor + "0.10)",
-        border: dirColor + "0.35)",
-        label: tacticLabel(op),
-      };
-    }
-
-    // FVG: rectangle, fill opacity reflects fill %
-    if (op.tactic === "fvg" && op.zone) {
-      const xStart = chart.timeScale().timeToCoordinate(formedTime);
-      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
-      const yUpper = series.priceToCoordinate(op.zone.upper);
-      const yLower = series.priceToCoordinate(op.zone.lower);
-      if (xStart == null || xEnd == null || yUpper == null || yLower == null) return null;
-
-      const fillPercent = parseFloat(op.evidence?.fillPercent || "0");
-      const opacity = (1 - fillPercent) * 0.18 + 0.04;
-
-      return {
-        type: "rect",
-        key: `fvg-${formedTime}`,
-        opinion: op,
-        rect: {
-          left: Math.min(xStart, xEnd),
-          top: Math.min(yUpper, yLower),
-          width: Math.abs(xEnd - xStart),
-          height: Math.abs(yUpper - yLower),
-        },
-        fill: dirColor + opacity.toFixed(2) + ")",
-        border: dirColor + "0.30)",
-        label: tacticLabel(op) + " " + Math.round(fillPercent * 100) + "% filled",
-      };
-    }
-
-    // BOS: horizontal line at broken level
-    if (op.tactic === "bos") {
-      const xStart = chart.timeScale().timeToCoordinate(formedTime);
-      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
-      const y = series.priceToCoordinate(op.level);
-      if (xStart == null || xEnd == null || y == null) return null;
-
-      return {
-        type: "line",
-        key: `bos-${formedTime}`,
-        opinion: op,
-        line: {
-          x1: Math.min(xStart, xEnd),
-          x2: Math.max(xStart, xEnd),
-          y1: y,
-          y2: y,
-        },
-        color: dirColor + "0.7)",
-        dashed: false,
-        thickness: 2,
-        label: "BOS " + (op.direction === "LONG" ? "↑" : "↓"),
-      };
-    }
-
-    // Liquidity Sweep: marker at the sweep candle (small starburst)
-    if (op.tactic === "liquiditySweep") {
-      const x = chart.timeScale().timeToCoordinate(formedTime);
-      const y = series.priceToCoordinate(op.level);
-      if (x == null || y == null) return null;
-
-      return {
-        type: "marker",
-        key: `sweep-${formedTime}`,
-        opinion: op,
-        x, y,
-        symbol: "✦",
-        color: dirColor + "0.9)",
-        size: 14,
-        label: "Sweep " + (op.direction === "LONG" ? "↑" : "↓"),
-      };
-    }
-
-    // Session Levels & Round Numbers: dotted horizontal line
-    if (op.tactic === "sessionLevel" || op.tactic === "roundNumber") {
-      const lastIdx = candles.length - 1;
-      const startTime = Math.floor(new Date(candles[Math.max(0, lastIdx - 100)].time).getTime() / 1000);
-      const xStart = chart.timeScale().timeToCoordinate(startTime);
-      const xEnd = chart.timeScale().timeToCoordinate(lastTime);
-      const y = series.priceToCoordinate(op.level);
-      if (xStart == null || xEnd == null || y == null) return null;
-
-      const sessionType = op.evidence?.type || "";
-      let color = "rgba(148,163,184,0.5)"; // default slate
-      if (sessionType.startsWith("ASIAN")) color = "rgba(167,139,250,0.6)";
-      else if (sessionType.startsWith("LONDON")) color = "rgba(34,211,238,0.6)";
-      else if (sessionType.includes("PDH") || sessionType.includes("PDL")) color = "rgba(251,146,60,0.6)";
-      else if (sessionType === "weeklyOpen") color = "rgba(245,158,11,0.6)";
-      else if (op.tactic === "roundNumber") color = "rgba(100,116,139,0.4)";
-
-      return {
-        type: "line",
-        key: `level-${op.tactic}-${op.level}`,
-        opinion: op,
-        line: {
-          x1: Math.min(xStart, xEnd),
-          x2: Math.max(xStart, xEnd),
-          y1: y,
-          y2: y,
-        },
-        color,
-        dashed: true,
-        thickness: 1,
-        label: levelShortLabel(op),
-      };
-    }
-
-    // Trend Structure: marker at last swing
-    if (op.tactic === "trendStructure") {
-      // Don't render — it's chart-wide context, not a specific point
-      return null;
-    }
-
-    // Fakeout: marker at the failed breakout candle
-    if (op.tactic === "fakeout") {
-      const x = chart.timeScale().timeToCoordinate(formedTime);
-      const y = series.priceToCoordinate(op.level);
-      if (x == null || y == null) return null;
-
-      return {
-        type: "marker",
-        key: `fakeout-${formedTime}`,
-        opinion: op,
-        x, y,
-        symbol: op.direction === "LONG" ? "↗↘" : "↘↗",
-        color: dirColor + "0.9)",
-        size: 12,
-        label: "Fakeout",
-      };
-    }
-
-    return null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function tacticLabel(op) {
-  const tfPart = op.timeframe.toUpperCase();
-  switch (op.tactic) {
-    case "orderBlock":        return `${tfPart} OB ${op.direction === "LONG" ? "↑" : "↓"}`;
-    case "fvg":               return `${tfPart} FVG ${op.direction === "LONG" ? "↑" : "↓"}`;
-    case "bos":               return `${tfPart} BOS ${op.direction === "LONG" ? "↑" : "↓"}`;
-    case "liquiditySweep":    return `${tfPart} Sweep`;
-    case "unfilledImbalance": return `${tfPart} Gap ${op.direction === "LONG" ? "↑" : "↓"}`;
-    case "fakeout":           return `${tfPart} Fakeout`;
-    default:                  return tfPart + " " + op.tactic;
-  }
-}
-
-function levelShortLabel(op) {
-  const t = op.evidence?.type || "";
-  if (t === "ASIAN_HIGH") return "Asia H";
-  if (t === "ASIAN_LOW") return "Asia L";
-  if (t === "LONDON_HIGH") return "London H";
-  if (t === "LONDON_LOW") return "London L";
-  if (t === "PDH") return "PDH";
-  if (t === "PDL") return "PDL";
-  if (t === "weeklyOpen") return "Wk Open";
-  if (op.tactic === "roundNumber") return op.level.toFixed(op.level > 100 ? 0 : 2);
-  return t;
-}
-
-function AnnotationShape({ annotation, onHover }) {
-  if (annotation.type === "rect") {
-    return (
+      {/* ── HEADER: ASSET + PRICE + SPARKLINE + DIRECTION ─────────────────── */}
       <div
         style={{
-          position: "absolute",
-          left: annotation.rect.left,
-          top: annotation.rect.top,
-          width: annotation.rect.width,
-          height: annotation.rect.height,
-          background: annotation.fill,
-          border: `1px dashed ${annotation.border}`,
-          borderRadius: 2,
-          pointerEvents: "auto",
-          cursor: "help",
-          transition: "opacity 200ms",
+          padding: "14px 20px 12px",
+          borderBottom: "1px solid var(--qb-border)",
+          display: "flex",
+          alignItems: "flex-end",
+          gap: 20,
         }}
-        onMouseEnter={() => onHover(annotation)}
-        onMouseLeave={() => onHover(null)}
       >
-        <div
-          style={{
-            position: "absolute",
-            top: 2,
-            left: 4,
-            fontSize: 9,
-            fontFamily: "var(--qb-font-mono)",
-            color: annotation.border,
-            fontWeight: 600,
-            pointerEvents: "none",
-            textShadow: "0 1px 2px rgba(0,0,0,0.8)",
-          }}
-        >
-          {annotation.label}
-        </div>
-      </div>
-    );
-  }
-
-  if (annotation.type === "line") {
-    const { x1, x2, y } = annotation.line;
-    const yPos = annotation.line.y1;
-    return (
-      <>
-        <div
-          style={{
-            position: "absolute",
-            left: x1,
-            top: yPos - 1,
-            width: x2 - x1,
-            height: 2,
-            background: annotation.dashed
-              ? `repeating-linear-gradient(to right, ${annotation.color} 0 4px, transparent 4px 8px)`
-              : annotation.color,
-            pointerEvents: "auto",
-            cursor: "help",
-          }}
-          onMouseEnter={() => onHover(annotation)}
-          onMouseLeave={() => onHover(null)}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: x2 + 4,
-            top: yPos - 7,
-            fontSize: 9,
-            fontFamily: "var(--qb-font-mono)",
-            color: annotation.color,
-            fontWeight: 600,
-            pointerEvents: "none",
-            whiteSpace: "nowrap",
-            textShadow: "0 1px 2px rgba(0,0,0,0.8)",
-          }}
-        >
-          {annotation.label}
-        </div>
-      </>
-    );
-  }
-
-  if (annotation.type === "marker") {
-    return (
-      <div
-        style={{
-          position: "absolute",
-          left: annotation.x - annotation.size / 2,
-          top: annotation.y - annotation.size / 2,
-          width: annotation.size,
-          height: annotation.size,
-          color: annotation.color,
-          fontSize: annotation.size,
-          textAlign: "center",
-          lineHeight: 1,
-          pointerEvents: "auto",
-          cursor: "help",
-          textShadow: "0 1px 3px rgba(0,0,0,0.9)",
-        }}
-        onMouseEnter={() => onHover(annotation)}
-        onMouseLeave={() => onHover(null)}
-      >
-        {annotation.symbol}
-      </div>
-    );
-  }
-
-  return null;
-}
-
-function AnnotationTooltip({ annotation }) {
-  const op = annotation.opinion;
-  if (!op) return null;
-
-  const explanation = TACTIC_DESCRIPTIONS[op.tactic] || "Detected pattern";
-  const reasoning = buildReasoning(op);
-
-  // Position tooltip near top-right of annotation, with bounds checking
-  let left = 0, top = 0;
-  if (annotation.type === "rect") {
-    left = annotation.rect.left + annotation.rect.width + 8;
-    top = annotation.rect.top;
-  } else if (annotation.type === "line") {
-    left = annotation.line.x2 + 8;
-    top = annotation.line.y1 - 30;
-  } else if (annotation.type === "marker") {
-    left = annotation.x + annotation.size + 4;
-    top = annotation.y - 30;
-  }
-
-  // Estimate viewport width (we're inside the chart container, so use parent's width if known)
-  // Conservative: clamp to 1200 max horizontal, with 320px tooltip buffer
-  const maxLeft = typeof window !== "undefined" ? window.innerWidth - 320 : 1200;
-  if (left > maxLeft) {
-    // Flip to left side of annotation
-    if (annotation.type === "rect") left = annotation.rect.left - 308;
-    else if (annotation.type === "line") left = annotation.line.x1 - 308;
-    else if (annotation.type === "marker") left = annotation.x - 308;
-  }
-  left = Math.max(8, left);
-  top = Math.max(8, top);
-
-  return (
-    <div
-      className="qb-glass"
-      style={{
-        position: "absolute",
-        left,
-        top,
-        maxWidth: 300,
-        padding: "8px 10px",
-        borderRadius: 4,
-        fontSize: 11,
-        color: "var(--qb-text-primary)",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
-        pointerEvents: "none",
-        zIndex: 10,
-      }}
-    >
-      <div style={{ fontWeight: 700, marginBottom: 3, fontSize: 12 }}>
-        {tacticLabel(op)}
-      </div>
-      <div style={{ color: "var(--qb-text-muted)", marginBottom: 6, lineHeight: 1.4 }}>
-        {explanation}
-      </div>
-      {reasoning && (
-        <div style={{
-          fontSize: 10,
-          color: "var(--qb-accent)",
-          paddingTop: 6,
-          borderTop: "1px solid var(--qb-border)",
-          fontFamily: "var(--qb-font-mono)",
-          lineHeight: 1.5,
-        }}>
-          {reasoning}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Build the bot's specific reasoning for THIS opinion (the educational part)
-function buildReasoning(op) {
-  const ev = op.evidence || {};
-  const lines = [];
-
-  if (op.tactic === "orderBlock") {
-    if (ev.impulseATR) lines.push(`Impulse: ${ev.impulseATR} ATR after the OB candle`);
-    if (ev.bodyRatio) lines.push(`Body ratio: ${ev.bodyRatio}`);
-    if (ev.bosConfirmed) lines.push(`Confirmed by BOS`);
-    if (ev.barsAgo != null) lines.push(`Untested for ${ev.barsAgo} bars`);
-  } else if (op.tactic === "fvg") {
-    if (ev.gapSizeATR) lines.push(`Gap size: ${ev.gapSizeATR} ATR`);
-    if (ev.fillPercent) lines.push(`${Math.round(parseFloat(ev.fillPercent) * 100)}% filled`);
-  } else if (op.tactic === "bos") {
-    if (ev.brokenLevel) lines.push(`Broke ${ev.brokenLevel.toFixed(ev.brokenLevel > 100 ? 2 : 5)}`);
-    if (ev.displacementATR) lines.push(`Displacement: ${ev.displacementATR} ATR`);
-  } else if (op.tactic === "liquiditySweep") {
-    if (ev.rejectionRatio) lines.push(`Rejection: ${ev.rejectionRatio}`);
-    if (ev.reversalATR) lines.push(`Reversal: ${ev.reversalATR} ATR`);
-    if (ev.sweptLevelType) lines.push(`Swept: ${ev.sweptLevelType}`);
-  } else if (op.tactic === "unfilledImbalance") {
-    if (ev.gapSizeATR) lines.push(`Gap: ${ev.gapSizeATR} ATR`);
-    if (ev.isWeekendGap) lines.push(`Weekend gap`);
-  } else if (op.tactic === "fakeout") {
-    if (ev.confirmations) lines.push(`${ev.confirmations} confirming bars`);
-  } else if (op.tactic === "sessionLevel") {
-    if (ev.type) lines.push(ev.type);
-  } else if (op.tactic === "roundNumber") {
-    if (ev.distanceATR) lines.push(`${ev.distanceATR} ATR ${ev.type === "roundAbove" ? "above" : "below"}`);
-  }
-
-  return lines.join(" · ");
-}
-
-function TFSelector({ selectedTF, onChange }) {
-  const tfs = [
-    { id: "1m", label: "1m" },
-    { id: "5m", label: "5m" },
-    { id: "15m", label: "15m" },
-    { id: "1h", label: "1h" },
-    { id: "4h", label: "4h" },
-    { id: "1d", label: "1d" },
-    { id: "1w", label: "1w" },
-  ];
-  return (
-    <div className="qb-glass" style={{ display: "flex", borderRadius: 4, padding: 2, gap: 1 }}>
-      {tfs.map((tf) => (
-        <button
-          key={tf.id}
-          onClick={() => onChange(tf.id)}
-          style={{
-            background: selectedTF === tf.id ? "var(--qb-accent-soft)" : "transparent",
-            border: "none",
-            color: selectedTF === tf.id ? "var(--qb-accent)" : "var(--qb-text-muted)",
-            padding: "4px 8px",
-            fontSize: 11,
-            fontWeight: 600,
-            cursor: "pointer",
-            borderRadius: 3,
-            fontFamily: "var(--qb-font-mono)",
-          }}
-        >
-          {tf.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function ToolsButton({ onClick, active }) {
-  return (
-    <button
-      onClick={onClick}
-      className="qb-glass"
-      style={{
-        background: active ? "var(--qb-accent-soft)" : undefined,
-        color: active ? "var(--qb-accent)" : "var(--qb-text-muted)",
-        border: "none",
-        padding: "5px 8px",
-        borderRadius: 4,
-        fontSize: 11,
-        cursor: "pointer",
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-      }}
-      title="Tools — show/hide chart annotations"
-    >
-      🛠
-    </button>
-  );
-}
-
-// =====================================================================
-// SECTION 9.8: COCKPIT — TOOLS POPOVER
-// =====================================================================
-
-function ToolsPopover({ theme, prefs, setPrefs, onClose }) {
-  useEffect(() => {
-    const handler = (e) => {
-      if (!e.target.closest(".qb-tools-popover")) onClose();
-    };
-    setTimeout(() => document.addEventListener("click", handler), 0);
-    return () => document.removeEventListener("click", handler);
-  }, []);
-
-  const updateToolConfig = (toolId, idx, value) => {
-    setPrefs((p) => {
-      const cur = (p.toolsConfig?.[toolId]) || [false, false];
-      const next = [...cur];
-      next[idx] = value;
-      return { ...p, toolsConfig: { ...(p.toolsConfig || {}), [toolId]: next } };
-    });
-  };
-
-  // Group: Show/Use checkboxes
-  return (
-    <div
-      className="qb-glass qb-tools-popover"
-      style={{
-        position: "absolute",
-        top: 36,
-        left: 116,
-        width: 280,
-        borderRadius: 6,
-        padding: 12,
-        zIndex: 50,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-      }}
-    >
-      <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase",
-        letterSpacing: 0.8, marginBottom: 8,
-      }}>
-        <span>Tools</span>
-        <span style={{ display: "flex", gap: 16, fontSize: 9 }}>
-          <span title="Drawn on chart">SHOW</span>
-          <span title="Bot considers">USE</span>
-        </span>
-      </div>
-
-      <div style={{ maxHeight: 360, overflowY: "auto" }}>
-        {Object.keys(TACTIC_LABELS).map((toolId) => {
-          const cfg = prefs.toolsConfig?.[toolId] || [false, false];
-          return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 13, color: "var(--qb-text-muted)", letterSpacing: 1, textTransform: "uppercase" }}>
+              {meta?.id || assetId}
+            </span>
+            <span style={{ fontSize: 10, color: "var(--qb-text-faint)" }}>
+              {meta?.displayName}
+            </span>
+          </div>
+          <div
+            className="qb-mono"
+            style={{
+              fontSize: 36,
+              fontWeight: 200,
+              lineHeight: 1,
+              color: "var(--qb-text-primary)",
+              letterSpacing: -0.5,
+            }}
+          >
+            {fmt(currentPrice)}
+          </div>
+          {quotes && quotes.change != null && (
             <div
-              key={toolId}
+              className="qb-mono"
               style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "5px 4px",
-                fontSize: 12,
+                fontSize: 11,
+                color: sparkColor,
+                marginTop: 2,
               }}
-              title={TACTIC_DESCRIPTIONS[toolId]}
             >
-              <span style={{ flex: 1, color: "var(--qb-text-primary)" }}>
-                {TACTIC_LABELS[toolId]}
+              {quotes.change >= 0 ? "▲" : "▼"} {Math.abs(quotes.change).toFixed(2)}%
+              <span style={{ color: "var(--qb-text-faint)", marginLeft: 6 }}>
+                · last {quotes.candleCount || 0}m
               </span>
-              <div style={{ display: "flex", gap: 16 }}>
-                <input
-                  type="checkbox"
-                  checked={cfg[0]}
-                  onChange={(e) => updateToolConfig(toolId, 0, e.target.checked)}
-                  style={{ accentColor: "var(--qb-accent)", cursor: "pointer" }}
-                />
-                <input
-                  type="checkbox"
-                  checked={cfg[1]}
-                  onChange={(e) => updateToolConfig(toolId, 1, e.target.checked)}
-                  style={{ accentColor: "var(--qb-accent)", cursor: "pointer" }}
-                />
-              </div>
             </div>
-          );
-        })}
+          )}
+        </div>
+
+        {/* SPARKLINE */}
+        <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center" }}>
+          <PriceSparkline
+            history={quotes?.history || []}
+            color={sparkColor}
+            width={240}
+            height={56}
+          />
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+          <span
+            style={{
+              fontSize: 11,
+              color: biasColor,
+              fontFamily: "var(--qb-font-mono)",
+              letterSpacing: 1,
+              padding: "3px 10px",
+              border: `1px solid ${biasColor}`,
+              borderRadius: 3,
+            }}
+          >
+            {bias}
+          </span>
+          <span
+            style={{
+              fontSize: 10,
+              color: "var(--qb-text-muted)",
+              letterSpacing: 0.8,
+              textTransform: "uppercase",
+            }}
+          >
+            {status}
+          </span>
+        </div>
       </div>
+
+      {/* ── QUICK STATUS: 3-COLUMN INSTRUMENT READOUT ─────────────────────── */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr",
+          gap: 0,
+          borderBottom: "1px solid var(--qb-border)",
+        }}
+      >
+        <ReadoutCell
+          label="Bias TF"
+          value={state?.atrByTF?.["1h"] ? "H1 trend" : "—"}
+          sub={
+            events.find((e) => e.type === "trend" && e.timeframe === "1h")?.direction ||
+            "neutral"
+          }
+        />
+        <ReadoutCell
+          label="Coherence"
+          value={coherence?.intent || (activeSetup ? "MATCH" : "NO MATCH")}
+          sub={coherence?.advice?.slice(0, 28) || `${events.length} events`}
+        />
+        <ReadoutCell
+          label="Killzone"
+          value={state?.session?.killZone || assetState?.session?.killZone || "—"}
+          sub={state?.session?.window?.toLowerCase() || ""}
+        />
+      </div>
+
+      {/* ── ACTIVE SETUP PANEL ─────────────────────────────────────────────── */}
+      {activeSetup && (
+        <div
+          style={{
+            padding: "12px 20px",
+            borderBottom: "1px solid var(--qb-border)",
+            background: "var(--qb-bg-glass)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <span
+              style={{
+                fontSize: 11,
+                color: "var(--qb-accent)",
+                letterSpacing: 1,
+                textTransform: "uppercase",
+                fontFamily: "var(--qb-font-mono)",
+              }}
+            >
+              ⚡ {activeSetup.setup?.templateName || activeSetup.templateName || "setup"}
+            </span>
+            <span style={{ fontSize: 10, color: biasColor }}>
+              {activeSetup.setup?.direction || activeSetup.direction}
+            </span>
+            <span
+              style={{
+                marginLeft: "auto",
+                fontSize: 9,
+                color: "var(--qb-text-muted)",
+                fontFamily: "var(--qb-font-mono)",
+                letterSpacing: 0.5,
+              }}
+            >
+              {activeSetup.status?.toUpperCase()}
+            </span>
+          </div>
+
+          <SetupPrices setup={activeSetup.setup || activeSetup} fmt={fmt} />
+
+          {(activeSetup.setup?.narrative || activeSetup.narrative)?.length > 0 && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: "8px 10px",
+                background: "var(--qb-bg-base)",
+                border: "1px solid var(--qb-border)",
+                borderRadius: 3,
+                fontSize: 11,
+                color: "var(--qb-text-muted)",
+                fontFamily: "var(--qb-font-mono)",
+                lineHeight: 1.5,
+              }}
+            >
+              {(activeSetup.setup?.narrative || activeSetup.narrative).map((line, i) => (
+                <div key={i}>· {line}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── DETECTED TOOLS TIMELINE ────────────────────────────────────────── */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div
+          style={{
+            padding: "10px 20px 6px",
+            fontSize: 10,
+            color: "var(--qb-text-faint)",
+            letterSpacing: 1,
+            textTransform: "uppercase",
+            fontFamily: "var(--qb-font-mono)",
+          }}
+        >
+          Detected tools · {interestingEvents.length}
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 20px 12px" }}>
+          {interestingEvents.length === 0 && (
+            <div style={{ padding: 12, fontSize: 11, color: "var(--qb-text-faint)", textAlign: "center" }}>
+              No structural tools detected yet — waiting for events.
+            </div>
+          )}
+          {interestingEvents.map((e, i) => (
+            <EventRow key={i} event={e} fmt={fmt} />
+          ))}
+        </div>
+      </div>
+
+      {/* ── COMMENTARY FEED (replaces BottomBar) ───────────────────────────── */}
+      {commentary.length > 0 && (
+        <div
+          style={{
+            borderTop: "1px solid var(--qb-border)",
+            padding: "8px 20px 10px",
+            maxHeight: 110,
+            overflowY: "auto",
+            background: "var(--qb-bg-base)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 10,
+              color: "var(--qb-text-faint)",
+              letterSpacing: 1,
+              textTransform: "uppercase",
+              fontFamily: "var(--qb-font-mono)",
+              marginBottom: 4,
+            }}
+          >
+            Commentary
+          </div>
+          {commentary.slice(0, 8).map((c, i) => (
+            <div
+              key={i}
+              style={{
+                fontSize: 10,
+                color: "var(--qb-text-muted)",
+                fontFamily: "var(--qb-font-mono)",
+                lineHeight: 1.6,
+                display: "flex",
+                gap: 8,
+              }}
+            >
+              <span style={{ color: "var(--qb-text-faint)" }}>
+                {c.ts ? new Date(c.ts).toLocaleTimeString().slice(0, 5) : "--:--"}
+              </span>
+              <span>{c.msg || c.message || c.text || JSON.stringify(c).slice(0, 60)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Small reusable cell for the 3-column status row
+function ReadoutCell({ label, value, sub }) {
+  return (
+    <div
+      style={{
+        padding: "10px 16px",
+        borderRight: "1px solid var(--qb-border)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 9,
+          color: "var(--qb-text-faint)",
+          letterSpacing: 1,
+          textTransform: "uppercase",
+          fontFamily: "var(--qb-font-mono)",
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontSize: 13,
+          color: "var(--qb-text-primary)",
+          fontFamily: "var(--qb-font-mono)",
+        }}
+      >
+        {value || "—"}
+      </div>
+      {sub && (
+        <div
+          style={{
+            fontSize: 10,
+            color: "var(--qb-text-muted)",
+            fontFamily: "var(--qb-font-mono)",
+          }}
+        >
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Setup price row (entry/SL/TPs) formatted in a clean horizontal grid
+function SetupPrices({ setup, fmt }) {
+  if (!setup) return null;
+  const tps = setup.tps || [];
+  const slDist = Math.abs((setup.entry || 0) - (setup.sl || 0));
+  const tp1 = tps[0];
+  const rr = tp1 && slDist > 0 ? Math.abs(tp1.price - setup.entry) / slDist : null;
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(4, 1fr)",
+        gap: 8,
+        fontFamily: "var(--qb-font-mono)",
+        fontSize: 11,
+      }}
+    >
+      <PriceCell label="Entry" value={fmt(setup.entry)} color="var(--qb-text-primary)" />
+      <PriceCell label="SL" value={fmt(setup.sl)} color="var(--qb-down-strong)" />
+      <PriceCell label="TP1" value={tp1 ? fmt(tp1.price) : "—"} color="var(--qb-up-strong)" />
+      <PriceCell label="R:R" value={rr ? rr.toFixed(2) : "—"} color="var(--qb-accent)" />
+    </div>
+  );
+}
+
+function PriceCell({ label, value, color }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", letterSpacing: 0.6, textTransform: "uppercase" }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 13, color, fontWeight: 500 }}>{value}</span>
+    </div>
+  );
+}
+
+// Pure-SVG price tape. Last value gets a glowing dot. Subtle area fill below.
+// No charting library — small enough to be a single function.
+function PriceSparkline({ history, color, width = 200, height = 40 }) {
+  if (!history || history.length < 2) {
+    return (
+      <div
+        style={{
+          width,
+          height,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--qb-text-faint)",
+          fontSize: 10,
+          fontFamily: "var(--qb-font-mono)",
+          letterSpacing: 1,
+        }}
+      >
+        ─ no tape ─
+      </div>
+    );
+  }
+
+  const min = Math.min(...history);
+  const max = Math.max(...history);
+  const range = max - min || 1;
+  const padY = 4;
+
+  const pts = history.map((v, i) => {
+    const x = (i / (history.length - 1)) * width;
+    const y = height - padY - ((v - min) / range) * (height - 2 * padY);
+    return [x, y];
+  });
+
+  const linePath = pts.map((p, i) => (i === 0 ? `M ${p[0]} ${p[1]}` : `L ${p[0]} ${p[1]}`)).join(" ");
+  // Area fill: extend down to bottom and close back to start
+  const areaPath =
+    linePath +
+    ` L ${pts[pts.length - 1][0]} ${height} L ${pts[0][0]} ${height} Z`;
+
+  const last = pts[pts.length - 1];
+
+  const gradId = `qb-spark-grad-${Math.floor(Math.random() * 1e6)}`;
+
+  return (
+    <svg width={width} height={height} style={{ overflow: "visible" }}>
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.25} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill={`url(#${gradId})`} />
+      <path d={linePath} fill="none" stroke={color} strokeWidth={1.5} opacity={0.95} strokeLinejoin="round" strokeLinecap="round" />
+      {/* Last value pulse dot */}
+      <circle cx={last[0]} cy={last[1]} r={3} fill={color} opacity={0.3} />
+      <circle cx={last[0]} cy={last[1]} r={1.8} fill={color} />
+    </svg>
+  );
+}
+
+// One row in the detected-tools timeline
+function EventRow({ event, fmt }) {
+  const colors = {
+    sweep: "#ffb74d",
+    mss: "#4fc3f7",
+    bos: "#42a5f5",
+    "fvg-created": event.direction === "LONG" ? "#66bb6a" : "#ef5350",
+    "ob-created": "#ba68c8",
+    "breaker-created": "#ff9800",
+    displacement: "#ffee58",
+    "ote-zone-entered": "#26c6da",
+  };
+  const labels = {
+    sweep: "SWEEP",
+    mss: "MSS",
+    bos: "BOS",
+    "fvg-created": "FVG",
+    "ob-created": "OB",
+    "breaker-created": "BREAKER",
+    displacement: "DISP",
+    "ote-zone-entered": "OTE",
+  };
+  const color = colors[event.type] || "#9e9e9e";
+  const label = labels[event.type] || event.type;
+
+  // Extract a useful "level" from evidence/zone
+  const level =
+    event.zone?.upper != null && event.zone?.lower != null
+      ? `${fmt(event.zone.lower)}-${fmt(event.zone.upper)}`
+      : event.evidence?.wickHigh != null
+      ? `H ${fmt(event.evidence.wickHigh)}`
+      : event.evidence?.wickLow != null
+      ? `L ${fmt(event.evidence.wickLow)}`
+      : event.evidence?.brokenLevel != null
+      ? fmt(event.evidence.brokenLevel)
+      : event.price != null
+      ? fmt(event.price)
+      : "—";
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "56px 36px 70px 56px 1fr",
+        gap: 8,
+        padding: "5px 0",
+        fontSize: 10,
+        fontFamily: "var(--qb-font-mono)",
+        borderBottom: "1px solid rgba(255,255,255,0.03)",
+        alignItems: "center",
+      }}
+    >
+      <span style={{ color: "var(--qb-text-faint)" }}>
+        {event.ts ? new Date(event.ts).toLocaleTimeString().slice(0, 5) : "—"}
+      </span>
+      <span style={{ color: "var(--qb-text-muted)", letterSpacing: 0.5 }}>
+        {event.timeframe || "—"}
+      </span>
+      <span
+        style={{
+          color,
+          letterSpacing: 0.8,
+          fontWeight: 500,
+          padding: "1px 4px",
+          background: `${color}15`,
+          borderRadius: 2,
+          textAlign: "center",
+        }}
+      >
+        {label}
+      </span>
+      <span title={`${event.direction || ""} ${label}`}>
+        <EventMockup event={event} color={color} width={52} height={24} />
+      </span>
+      <span style={{ color: "var(--qb-text-primary)" }}>{level}</span>
     </div>
   );
 }
 
 // =====================================================================
-// SECTION 9.9: COCKPIT — BOTTOM BAR
+// EVENT MOCKUP — tiny inline SVGs showing how each tool is drawn on a chart.
+// One per ICT event type, with direction encoded visually so no separate arrow
+// is needed. Each glyph is canonical to how ICT practitioners would mark it.
+// =====================================================================
+function EventMockup({ event, color, width = 50, height = 24 }) {
+  const isLong = event.direction === "LONG";
+  const isShort = event.direction === "SHORT";
+  const svgProps = { width, height, style: { display: "block" } };
+
+  switch (event.type) {
+    case "sweep": {
+      // Swept extreme: a wick pokes past a dashed level, body closes back inside.
+      // SHORT sweep = high taken (wick up). LONG sweep = low taken (wick down).
+      const levelY = isShort ? height * 0.18 : height * 0.82;
+      const wickX = width * 0.62;
+      const wickTop = isShort ? 2 : height * 0.45;
+      const wickBot = isShort ? height * 0.55 : height - 2;
+      const bodyY = isShort ? height * 0.45 : height * 0.35;
+      return (
+        <svg {...svgProps}>
+          <line x1="2" y1={levelY} x2={width - 2} y2={levelY}
+                stroke={color} strokeWidth="1" strokeDasharray="2,2" opacity="0.55" />
+          <line x1={wickX} y1={wickTop} x2={wickX} y2={wickBot}
+                stroke={color} strokeWidth="1.2" />
+          <rect x={wickX - 3} y={bodyY} width="6" height={height * 0.22}
+                fill={color} opacity="0.85" />
+          {/* Small "x" mark where the wick crosses the level */}
+          <circle cx={wickX} cy={levelY} r="1.6" fill="none" stroke={color} strokeWidth="1" />
+        </svg>
+      );
+    }
+
+    case "mss":
+    case "bos": {
+      // Break of structure: small candles tracking one way, then a big body
+      // crossing a dashed structural level the other way.
+      const levelY = isShort ? height * 0.5 : height * 0.5;
+      const arrowTipY = isShort ? height * 0.92 : height * 0.08;
+      const arrowBaseY = isShort ? height * 0.65 : height * 0.35;
+      return (
+        <svg {...svgProps}>
+          <line x1="2" y1={levelY} x2={width - 2} y2={levelY}
+                stroke={color} strokeWidth="1" strokeDasharray="2,2" opacity="0.55" />
+          <rect x="4"  y={isShort ? height * 0.42 : height * 0.4}  width="3" height={height * 0.15} fill={color} opacity="0.35" />
+          <rect x="11" y={isShort ? height * 0.35 : height * 0.45} width="3" height={height * 0.18} fill={color} opacity="0.45" />
+          <rect x="19" y={isShort ? height * 0.28 : height * 0.2}  width="5" height={height * 0.55} fill={color} opacity="0.95" />
+          {/* Arrow showing break direction */}
+          <path d={isShort
+            ? `M ${width - 14} ${arrowBaseY} L ${width - 6} ${arrowBaseY} L ${width - 10} ${arrowTipY} Z`
+            : `M ${width - 14} ${arrowBaseY} L ${width - 6} ${arrowBaseY} L ${width - 10} ${arrowTipY} Z`}
+                fill={color} />
+        </svg>
+      );
+    }
+
+    case "fvg-created": {
+      // 3-candle ICT FVG: gap between candle1 wick and candle3 wick, candle2 is
+      // the displacement that opened the gap. Shaded zone shows the imbalance.
+      const c1x = width * 0.22;
+      const c2x = width * 0.5;
+      const c3x = width * 0.78;
+      const cw = 4;
+      if (isLong) {
+        const c1Top = height * 0.55, c1Bot = height * 0.85;
+        const c2Top = height * 0.15, c2Bot = height * 0.85;
+        const c3Top = height * 0.15, c3Bot = height * 0.45;
+        return (
+          <svg {...svgProps}>
+            <rect x={c1x} y={c1Top} width={c3x - c1x + cw} height={c3Bot - c1Top}
+                  fill={color} opacity="0.18" />
+            <rect x={c1x - cw / 2} y={c1Top} width={cw} height={c1Bot - c1Top} fill={color} opacity="0.6" />
+            <rect x={c2x - cw / 2} y={c2Top} width={cw} height={c2Bot - c2Top} fill={color} opacity="0.95" />
+            <rect x={c3x - cw / 2} y={c3Top} width={cw} height={c3Bot - c3Top} fill={color} opacity="0.6" />
+          </svg>
+        );
+      }
+      const c1Top = height * 0.15, c1Bot = height * 0.45;
+      const c2Top = height * 0.15, c2Bot = height * 0.85;
+      const c3Top = height * 0.55, c3Bot = height * 0.85;
+      return (
+        <svg {...svgProps}>
+          <rect x={c1x} y={c1Bot} width={c3x - c1x + cw} height={c3Top - c1Bot}
+                fill={color} opacity="0.18" />
+          <rect x={c1x - cw / 2} y={c1Top} width={cw} height={c1Bot - c1Top} fill={color} opacity="0.6" />
+          <rect x={c2x - cw / 2} y={c2Top} width={cw} height={c2Bot - c2Top} fill={color} opacity="0.95" />
+          <rect x={c3x - cw / 2} y={c3Top} width={cw} height={c3Bot - c3Top} fill={color} opacity="0.6" />
+        </svg>
+      );
+    }
+
+    case "ob-created": {
+      // ICT Order Block: last opposite-direction candle before impulse, boxed.
+      const oppFill = isLong ? "#ef5350" : "#66bb6a";
+      return (
+        <svg {...svgProps}>
+          <rect x="4" y={height * 0.3} width="6" height={height * 0.4}
+                fill={oppFill} opacity="0.7" stroke={color} strokeWidth="1" strokeDasharray="2,1" />
+          <rect x="15" y={isLong ? height * 0.22 : height * 0.3}  width="4" height={height * 0.48} fill={color} opacity="0.55" />
+          <rect x="22" y={isLong ? height * 0.14 : height * 0.38} width="4" height={height * 0.55} fill={color} opacity="0.75" />
+          <rect x="29" y={isLong ? height * 0.08 : height * 0.45} width="4" height={height * 0.6}  fill={color} opacity="0.95" />
+        </svg>
+      );
+    }
+
+    case "breaker-created": {
+      // Breaker: an old OB that got broken & retested, now flipped role.
+      const lvlY = isLong ? height * 0.55 : height * 0.45;
+      return (
+        <svg {...svgProps}>
+          {/* Old broken OB (greyed) */}
+          <rect x="4" y={height * 0.3} width="6" height={height * 0.4}
+                fill="#888" opacity="0.35" stroke="#888" strokeWidth="0.8" strokeDasharray="2,1" />
+          <line x1="4"  y1={height * 0.3} x2="10" y2={height * 0.7} stroke="#888" strokeWidth="0.8" opacity="0.7" />
+          <line x1="10" y1={height * 0.3} x2="4"  y2={height * 0.7} stroke="#888" strokeWidth="0.8" opacity="0.7" />
+          {/* Break candle in new direction */}
+          <rect x="16" y={isLong ? height * 0.15 : height * 0.4} width="5" height={height * 0.55} fill={color} opacity="0.95" />
+          {/* New role level (price now respects it from the other side) */}
+          <line x1={width * 0.5} y1={lvlY} x2={width - 2} y2={lvlY}
+                stroke={color} strokeWidth="1.5" />
+          <circle cx={width - 5} cy={lvlY} r="1.5" fill={color} />
+        </svg>
+      );
+    }
+
+    case "displacement": {
+      // A single long-body candle with an arrow showing aggressive direction
+      return (
+        <svg {...svgProps}>
+          <rect x={width * 0.12} y={height * 0.4} width="3" height={height * 0.2} fill={color} opacity="0.3" />
+          <rect x={width * 0.26} y={height * 0.4} width="3" height={height * 0.2} fill={color} opacity="0.4" />
+          {/* Aggressive candle */}
+          <rect x={width * 0.42} y={height * 0.1} width="6" height={height * 0.8}
+                fill={color} opacity="0.95" />
+          {/* Arrow */}
+          {isLong ? (
+            <path d={`M ${width * 0.72} ${height * 0.5}
+                      L ${width * 0.92} ${height * 0.25}
+                      L ${width * 0.92} ${height * 0.42}
+                      L ${width * 0.82} ${height * 0.42}
+                      L ${width * 0.82} ${height * 0.58}
+                      L ${width * 0.92} ${height * 0.58}
+                      L ${width * 0.92} ${height * 0.75} Z`}
+                  fill={color} opacity="0.85" />
+          ) : (
+            <path d={`M ${width * 0.72} ${height * 0.5}
+                      L ${width * 0.92} ${height * 0.75}
+                      L ${width * 0.92} ${height * 0.58}
+                      L ${width * 0.82} ${height * 0.58}
+                      L ${width * 0.82} ${height * 0.42}
+                      L ${width * 0.92} ${height * 0.42}
+                      L ${width * 0.92} ${height * 0.25} Z`}
+                  fill={color} opacity="0.85" />
+          )}
+        </svg>
+      );
+    }
+
+    case "ote-zone-entered": {
+      // Impulse leg + retracement into 62-79% fib zone
+      if (isLong) {
+        return (
+          <svg {...svgProps}>
+            <line x1="3" y1={height - 3} x2={width * 0.45} y2={3}
+                  stroke={color} strokeWidth="1.5" opacity="0.9" />
+            <rect x={width * 0.42} y={height * 0.55} width={width * 0.55} height={height * 0.25}
+                  fill={color} opacity="0.22" />
+            <line x1={width * 0.42} y1={height * 0.6}  x2={width - 2} y2={height * 0.6}
+                  stroke={color} strokeWidth="0.5" strokeDasharray="1,2" opacity="0.7" />
+            <line x1={width * 0.42} y1={height * 0.78} x2={width - 2} y2={height * 0.78}
+                  stroke={color} strokeWidth="0.5" strokeDasharray="1,2" opacity="0.7" />
+            <line x1={width * 0.45} y1={3} x2={width * 0.88} y2={height * 0.7}
+                  stroke={color} strokeWidth="1" opacity="0.55" strokeDasharray="2,1" />
+            <circle cx={width * 0.88} cy={height * 0.7} r="1.8" fill={color} />
+          </svg>
+        );
+      }
+      return (
+        <svg {...svgProps}>
+          <line x1="3" y1={3} x2={width * 0.45} y2={height - 3}
+                stroke={color} strokeWidth="1.5" opacity="0.9" />
+          <rect x={width * 0.42} y={height * 0.2} width={width * 0.55} height={height * 0.25}
+                fill={color} opacity="0.22" />
+          <line x1={width * 0.42} y1={height * 0.22} x2={width - 2} y2={height * 0.22}
+                stroke={color} strokeWidth="0.5" strokeDasharray="1,2" opacity="0.7" />
+          <line x1={width * 0.42} y1={height * 0.4}  x2={width - 2} y2={height * 0.4}
+                stroke={color} strokeWidth="0.5" strokeDasharray="1,2" opacity="0.7" />
+          <line x1={width * 0.45} y1={height - 3} x2={width * 0.88} y2={height * 0.3}
+                stroke={color} strokeWidth="1" opacity="0.55" strokeDasharray="2,1" />
+          <circle cx={width * 0.88} cy={height * 0.3} r="1.8" fill={color} />
+        </svg>
+      );
+    }
+
+    default:
+      return <div style={{ width, height }} />;
+  }
+}
+
+// =====================================================================
+// SECTION 9.9: COCKPIT — BOTTOM BAR (V12.4: kept for backward compat, no longer rendered)
 // =====================================================================
 
 function CockpitBottomBar({ theme, open, onToggle, commentary, assetId, assetState }) {
@@ -2891,7 +2664,7 @@ function GridPage({ prefs, theme, account, positions, onNavigate }) {
       <PageHeader
         title="Grid"
         subtitle={data ? `${data.summary.total} instruments · ${data.killZoneDisplay}` : "loading…"}
-        onNavigate={onNavigate}
+        onBack={() => onNavigate("cockpit")}
         theme={theme}
       />
 
