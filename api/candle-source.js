@@ -218,21 +218,32 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     // more than requested).
     if (candles.length > cap) candles = candles.slice(-cap);
 
-    // FRESHNESS GUARD: refuse data older than N × TF period. This catches
-    // misconfigured endTime, dead brokers, or weekend stalls before they
-    // poison the event pipeline.
+    // FRESHNESS GUARD — relaxed in V12.4.1.
     //
-    // 1m candles get a generous 20× factor (20 min) because retail broker
-    // 1m streams routinely lag by several minutes — and the quotes endpoint
-    // (only caller using 1m) prefers stale-but-real data to nothing.
-    // Other TFs use the strict 5× factor.
+    // Original intent: detect the stale-startTime bug that returned weeks-old
+    // candles. With endTime removed and a tight startTime, that bug is fixed —
+    // so the guard only needs to catch genuinely DEAD brokers (no data for
+    // days), not normal hour-scale staleness from weekends/holidays/lag.
+    //
+    // Forex closes Friday 22:00 UTC and reopens Sunday 22:00 UTC = 48 hour gap.
+    // Markets observing US holidays can have ~3-day gaps. Crypto trades 24/7
+    // but broker streams can lag by minutes.
+    const FRESHNESS_LIMIT_MS = {
+      '1m':  60 * 60 * 1000,                // 1 hour (else fall back to 5m)
+      '5m':  6  * 60 * 60 * 1000,           // 6 hours
+      '15m': 12 * 60 * 60 * 1000,           // 12 hours
+      '1h':  72 * 60 * 60 * 1000,           // 72 hours (weekend + holiday)
+      '4h':  7  * 24 * 60 * 60 * 1000,      // 7 days
+      '1d':  14 * 24 * 60 * 60 * 1000,      // 14 days
+      '1w':  60 * 24 * 60 * 60 * 1000,      // 60 days
+      '1mn': 365 * 24 * 60 * 60 * 1000,     // 1 year
+    };
     const lastCandleAgeMs = nowMs - new Date(candles[candles.length - 1].time).getTime();
-    const stalenessFactor = (tf === '1m') ? 20 : 5;
-    const maxStaleMs = TF_MS[tf] * stalenessFactor;
+    const maxStaleMs = FRESHNESS_LIMIT_MS[tf] || (TF_MS[tf] * 100);
     if (lastCandleAgeMs > maxStaleMs) {
       return {
         ok: false,
-        error: `MetaAPI stale: latest ${tf} candle is ${Math.round(lastCandleAgeMs / 60000)}min old (max ${Math.round(maxStaleMs / 60000)}min)`,
+        error: `MetaAPI stale: latest ${tf} candle is ${Math.round(lastCandleAgeMs / 60000)}min old (max ${Math.round(maxStaleMs / 60000)}min) — broker likely disconnected or symbol unsubscribed`,
       };
     }
 
