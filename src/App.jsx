@@ -1372,7 +1372,14 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
   );
   const commentary = assetState?.commentary || [];
   const events = state?.events || [];
-  const intent = state?.intent || (assetState ? "AWAITING" : "—");
+  // V12.4: state.intent is the object {type, reason?, ...payload}. Extract `.type`
+  // for display. Falling back to undefined yields the "AWAITING" default below.
+  const intentObj = state?.intent;
+  const intentType =
+    intentObj && typeof intentObj === "object"
+      ? intentObj.type
+      : intentObj;
+  const intent = intentType || (assetState ? "AWAITING" : "—");
   const coherence = state?.coherence;
 
   // Current price preference: quotes (freshest) > state.currentPrice > chartData last close
@@ -1401,18 +1408,28 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         : "var(--qb-down-strong)"
       : "var(--qb-text-muted)";
 
-  // Determine status badge
+  // Determine status badge — map V12 intent types to readable labels
   const status = myPosition
     ? "IN TRADE"
     : activeSetup
     ? activeSetup.status === "placed"
       ? "ORDER LIVE"
       : "SETUP PENDING"
-    : intent === "WATCH"
+    : intent === "WATCHING"
     ? "WATCHING"
+    : intent === "AWAITING_FILL"
+    ? "AWAITING FILL"
+    : intent === "NEW_PENDING"
+    ? "NEW SETUP"
+    : intent === "HOLD_POSITION"
+    ? "HOLDING"
+    : intent === "IDLE"
+    ? "IDLE"
     : intent === "AWAITING"
     ? "AWAITING"
-    : intent;
+    : typeof intent === "string"
+    ? intent
+    : "—";
 
   // Format a price for the asset's pipSize precision
   const fmt = (n) => {
@@ -1664,32 +1681,51 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
           >
             Commentary
           </div>
-          {commentary.slice(0, 8).map((c, i) => (
-            <div
-              key={i}
-              style={{
-                fontSize: 10,
-                color: "var(--qb-text-muted)",
-                fontFamily: "var(--qb-font-mono)",
-                lineHeight: 1.6,
-                display: "flex",
-                gap: 8,
-              }}
-            >
-              <span style={{ color: "var(--qb-text-faint)" }}>
-                {c.ts ? new Date(c.ts).toLocaleTimeString().slice(0, 5) : "--:--"}
-              </span>
-              <span>{c.msg || c.message || c.text || JSON.stringify(c).slice(0, 60)}</span>
-            </div>
-          ))}
+          {commentary.slice(0, 8).map((c, i) => {
+            const text =
+              typeof c === "string"
+                ? c
+                : typeof c?.msg === "string"
+                ? c.msg
+                : typeof c?.message === "string"
+                ? c.message
+                : typeof c?.text === "string"
+                ? c.text
+                : JSON.stringify(c).slice(0, 60);
+            return (
+              <div
+                key={i}
+                style={{
+                  fontSize: 10,
+                  color: "var(--qb-text-muted)",
+                  fontFamily: "var(--qb-font-mono)",
+                  lineHeight: 1.6,
+                  display: "flex",
+                  gap: 8,
+                }}
+              >
+                <span style={{ color: "var(--qb-text-faint)" }}>
+                  {c?.ts ? new Date(c.ts).toLocaleTimeString().slice(0, 5) : "--:--"}
+                </span>
+                <span>{text}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-// Small reusable cell for the 3-column status row
+// Small reusable cell for the 3-column status row.
+// Coerces any object/null/undefined to a safe string to avoid React #31 crashes.
 function ReadoutCell({ label, value, sub }) {
+  const safe = (v) => {
+    if (v == null) return "—";
+    if (typeof v === "string" || typeof v === "number") return String(v);
+    if (typeof v === "object") return v.type || v.label || v.name || "—";
+    return String(v);
+  };
   return (
     <div
       style={{
@@ -1718,9 +1754,9 @@ function ReadoutCell({ label, value, sub }) {
           fontFamily: "var(--qb-font-mono)",
         }}
       >
-        {value || "—"}
+        {safe(value)}
       </div>
-      {sub && (
+      {sub != null && (
         <div
           style={{
             fontSize: 10,
@@ -1728,7 +1764,7 @@ function ReadoutCell({ label, value, sub }) {
             fontFamily: "var(--qb-font-mono)",
           }}
         >
-          {sub}
+          {safe(sub)}
         </div>
       )}
     </div>
