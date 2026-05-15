@@ -10,6 +10,7 @@
 const { getRedis, safeParse, applyCors, getCurrentSession } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
 const { getNewsContext } = require('./news-context');
+const { checkKillZone, killZoneDisplayName } = require('./kill-zones');
 
 // These keys must match watcher.js
 const STATE_KEY = (asset) => `v12:watcher:${asset}:state`;
@@ -45,6 +46,19 @@ module.exports = async (req, res) => {
       asset,
       ts: Date.now(),
       session: getCurrentSession(),
+      // V12.4.1: expose killzone explicitly. session is a STRING; killZone is
+      // the structured object the cockpit needs.
+      killZone: (() => {
+        const kz = checkKillZone();
+        return {
+          inKillZone: kz.inKillZone,
+          name: kz.name,
+          display: kz.inKillZone ? killZoneDisplayName(kz.name) : null,
+          minutesUntilClose: kz.minutesUntilClose || null,
+          minutesUntilNext: kz.minutesUntilNext || null,
+          nextKillZone: kz.nextKillZone || null,
+        };
+      })(),
       state,
       structural,
       commentary,

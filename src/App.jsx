@@ -1566,8 +1566,21 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         />
         <ReadoutCell
           label="Killzone"
-          value={state?.session?.killZone || assetState?.session?.killZone || "—"}
-          sub={state?.session?.window?.toLowerCase() || ""}
+          value={
+            assetState?.killZone?.display
+            || assetState?.killZone?.name
+            || (assetState?.killZone?.nextKillZone ? `→ ${assetState.killZone.nextKillZone}` : null)
+            || "OFF"
+          }
+          sub={
+            assetState?.killZone?.inKillZone
+              ? assetState.killZone.minutesUntilClose != null
+                ? `${assetState.killZone.minutesUntilClose}m left`
+                : ""
+              : assetState?.killZone?.minutesUntilNext != null
+                ? `in ${assetState.killZone.minutesUntilNext}m`
+                : ""
+          }
         />
       </div>
 
@@ -2017,7 +2030,7 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
         const c3Top = height * 0.15, c3Bot = height * 0.45;
         return (
           <svg {...svgProps}>
-            <rect x={c1x} y={c1Top} width={c3x - c1x + cw} height={c3Bot - c1Top}
+            <rect x={c1x} y={c3Bot} width={c3x - c1x + cw} height={c1Top - c3Bot}
                   fill={color} opacity="0.18" />
             <rect x={c1x - cw / 2} y={c1Top} width={cw} height={c1Bot - c1Top} fill={color} opacity="0.6" />
             <rect x={c2x - cw / 2} y={c2Top} width={cw} height={c2Bot - c2Top} fill={color} opacity="0.95" />

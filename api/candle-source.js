@@ -212,11 +212,17 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     // more than requested).
     if (candles.length > cap) candles = candles.slice(-cap);
 
-    // FRESHNESS GUARD: refuse data older than 5× TF period. This catches
+    // FRESHNESS GUARD: refuse data older than N × TF period. This catches
     // misconfigured endTime, dead brokers, or weekend stalls before they
     // poison the event pipeline.
+    //
+    // 1m candles get a generous 20× factor (20 min) because retail broker
+    // 1m streams routinely lag by several minutes — and the quotes endpoint
+    // (only caller using 1m) prefers stale-but-real data to nothing.
+    // Other TFs use the strict 5× factor.
     const lastCandleAgeMs = nowMs - new Date(candles[candles.length - 1].time).getTime();
-    const maxStaleMs = TF_MS[tf] * 5;
+    const stalenessFactor = (tf === '1m') ? 20 : 5;
+    const maxStaleMs = TF_MS[tf] * stalenessFactor;
     if (lastCandleAgeMs > maxStaleMs) {
       return {
         ok: false,

@@ -37,10 +37,17 @@ module.exports = async (req, res) => {
     if (!asset) return res.status(400).json({ error: 'asset required' });
     if (!getAssetById(asset)) return res.status(400).json({ error: 'unknown asset' });
 
-    const tf = '1m';
     const limit = Math.min(parseInt(req.query.limit || '30', 10), 60);
 
-    const result = await fetchCandles(asset, tf, limit);
+    // V12.4.1: try 1m first; if broker doesn't offer 1m OR data is too stale
+    // for the freshness guard, fall back to 5m (still a usable price tape).
+    let result = await fetchCandles(asset, '1m', limit);
+    let usedTf = '1m';
+    if (!result.candles || result.candles.length === 0) {
+      result = await fetchCandles(asset, '5m', limit);
+      usedTf = '5m';
+    }
+
     if (!result.candles || result.candles.length === 0) {
       return res.status(200).json({
         asset,
@@ -66,7 +73,7 @@ module.exports = async (req, res) => {
       high,
       low,
       candleCount: closes.length,
-      tf,
+      tf: usedTf,
       source: result.source,
       updatedAt: Date.now(),
     });

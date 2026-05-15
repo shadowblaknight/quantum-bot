@@ -11,9 +11,23 @@
 // ----------------------------------------------------------------------------
 
 const { applyCors, getRedis, safeParse } = require('./_lib');
-const { getAssetById } = require('./asset-registry');
+const { getAssetById, getAssetBySymbol, matchBrokerSymbol } = require('./asset-registry');
 
 const WATCHLIST_KEY = 'v12:watchlist';
+
+// V12.4.1: resolve any user-typed token (id, alias, or fuzzy form) to a
+// canonical asset ID. Returns null if no match. This makes the watchlist
+// forgiving — users can type "sp500" or "SPX500" and have it resolve to "us500".
+function resolveToAssetId(token) {
+  if (!token || typeof token !== 'string') return null;
+  const t = token.trim().toLowerCase();
+  if (getAssetById(t)) return t;                                  // exact id
+  const byAlias = getAssetBySymbol(token);                        // exact alias
+  if (byAlias) return byAlias.id;
+  const fuzzy = matchBrokerSymbol(token);                         // fuzzy fallback
+  if (fuzzy?.asset) return fuzzy.asset.id;
+  return null;
+}
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
@@ -33,16 +47,23 @@ module.exports = async (req, res) => {
       if (typeof body === 'string') { try { body = JSON.parse(body); } catch (_) { body = {}; } }
       const assets = body?.assets;
       if (!Array.isArray(assets) || assets.length === 0) {
-        return res.status(400).json({ error: 'assets must be a non-empty array of asset IDs' });
+        return res.status(400).json({ error: 'assets must be a non-empty array of asset IDs or symbols' });
       }
       if (assets.length > 12) {
-        return res.status(400).json({ error: 'maximum 12 assets per watchlist (TwelveData cost)' });
+        return res.status(400).json({ error: 'maximum 12 assets per watchlist' });
       }
-      const unknown = assets.filter((a) => !getAssetById(a));
+      // V12.4.1: resolve aliases to canonical IDs (e.g., "sp500" → "us500")
+      const resolved = [];
+      const unknown = [];
+      for (const a of assets) {
+        const id = resolveToAssetId(a);
+        if (id) resolved.push(id);
+        else unknown.push(a);
+      }
       if (unknown.length > 0) {
-        return res.status(400).json({ error: 'unknown asset IDs: ' + unknown.join(', ') });
+        return res.status(400).json({ error: 'unknown asset IDs or symbols: ' + unknown.join(', ') });
       }
-      const dedup = [...new Set(assets)];
+      const dedup = [...new Set(resolved)];
       await r.set(WATCHLIST_KEY, JSON.stringify(dedup), { ex: 86400 * 30 });
       return res.status(200).json({ ok: true, watchlist: dedup });
     }
