@@ -28,7 +28,7 @@
 // placed limit orders.
 // ----------------------------------------------------------------------------
 
-const { getRedis, safeParse, applyCors } = require('./_lib');
+const { getRedis, safeParse, applyCors, roundToPipSize } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
 const { resolveSymbol } = require('./symbol-resolver');
 const { fetchAccount, fetchPositions } = require('./broker');
@@ -284,13 +284,98 @@ async function tryPlace(pending, brokerSymbol) {
       `❌ Rejected: ${action.error}`);
     return action;
   }
+
+  // V12.4.1 — CHECK 5: entry must be on the correct side of current price
+  // for limit-order semantics.
+  //   BUY_LIMIT  (LONG):  entry must be ≤ current  (we want price to drop INTO entry)
+  //   SELL_LIMIT (SHORT): entry must be ≥ current  (we want price to rise INTO entry)
+  // If entry is on the wrong side, MT5 either silently converts to STOP order
+  // or rejects with INVALID_PRICE — both produce phantom "order placed" states.
+  // This is the bug behind "weird entries" reported across V12.x.
+  //
+  // We allow a small tolerance (~0.5 × m5ATR) so that an entry that's just barely
+  // past current price still passes — markets oscillate and a tight bias zone is OK.
+  try {
+    const { fetchCandles: fetchCandlesFromSource } = require('./candle-source');
+    const cRes = await fetchCandlesFromSource(pending.asset, '5m', 3);
+    const lastCandle = cRes?.candles?.length ? cRes.candles[cRes.candles.length - 1] : null;
+    const currentPrice = lastCandle?.close;
+    if (currentPrice && isFinite(currentPrice)) {
+      // Tolerance: small buffer in pip units. For gold m5ATR≈5, 0.5×5=2.5pt — generous.
+      const m5HighLow = lastCandle.high - lastCandle.low;
+      const tolerance = Math.max(m5HighLow * 0.5, (asset.pipSize || 0.0001) * 5);
+      const entryOnWrongSide = isLong
+        ? plannedEntry > currentPrice + tolerance
+        : plannedEntry < currentPrice - tolerance;
+      if (entryOnWrongSide) {
+        const dir = isLong ? 'above' : 'below';
+        action.error =
+          `Entry ${plannedEntry} is ${dir} current ${currentPrice.toFixed(asset.pipSize < 0.01 ? 5 : 2)} — ` +
+          `${isLong ? 'BUY_LIMIT requires entry ≤ current' : 'SELL_LIMIT requires entry ≥ current'} ` +
+          `(market moved past the entry zone)`;
+        action.skipped = 'entry-wrong-side-of-market';
+        await updatePendingSetup(pending.asset, pending.id, {
+          status: 'invalidated',
+          invalidationReason: action.error,
+          lastAttemptAt: Date.now(),
+        });
+        await pushCommentary(pending.asset, 'order-rejected',
+          `❌ Rejected: market moved past entry — setup invalidated`);
+        return action;
+      }
+    }
+  } catch (_) {
+    // If candle fetch fails, fall through and let MT5 reject if entry is bad.
+  }
   // ───────────────────────────────────────────────────────────────
 
   // Pick first TP level for the broker's TP field
   // (V11 used multi-TP ladder — manage-trades.js handles partial closes)
   // We use TP1 here. manage-trades.js takes over once filled and partial-closes
   // at TP1, TP2, TP3, TP4.
-  const tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[0].price : null;
+  let tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[0].price : null;
+
+  // V12.4.1 — CHECK 6: TP1 must be a meaningful distance from entry.
+  // Brokers have a "freeze level" (minimum distance from market for stops/limits).
+  // Even when accepted, TP1 too close means a normal wick closes the trade for
+  // pennies. Floor at max(2 × pipSize, 0.4 × typicalH1ATR) — same idea as SL floor.
+  if (tpPrice != null) {
+    const tp1Dist = Math.abs(tpPrice - plannedEntry);
+    const minTPByPip = (asset.pipSize || 0.0001) * 2;
+    const minTPByATR = (asset.typicalH1ATR || 0) * 0.40;
+    const minTP1Distance = Math.max(minTPByPip, minTPByATR);
+    if (tp1Dist < minTP1Distance) {
+      // Try to bump to next TP if available
+      let promoted = null;
+      for (let i = 1; i < tpLevels.length; i++) {
+        const candDist = Math.abs(tpLevels[i].price - plannedEntry);
+        if (candDist >= minTP1Distance) { promoted = tpLevels[i]; break; }
+      }
+      if (promoted) {
+        tpPrice = promoted.price;
+        await pushCommentary(pending.asset, 'tp-promoted',
+          `TP1 too close (${tp1Dist.toFixed(asset.pipSize < 0.01 ? 5 : 2)}); promoted to ${promoted.label}`);
+      } else {
+        // Synthesize a 1R TP as last resort
+        tpPrice = isLong
+          ? plannedEntry + Math.max(slDistance, minTP1Distance)
+          : plannedEntry - Math.max(slDistance, minTP1Distance);
+        await pushCommentary(pending.asset, 'tp-synth',
+          `All TPs too close — synthesized 1R fallback`);
+      }
+    }
+  }
+
+  // V12.4.1 — round all prices to the broker's pip increment to avoid
+  // INVALID_PRICE rejections from MT5 on assets with strict tick sizes.
+  // SL rounds AWAY from entry (wider, conservative). TP rounds TOWARDS entry
+  // (closer, conservative — slightly less profit but guaranteed to fill).
+  const pipSize = asset.pipSize || 0.0001;
+  const roundedEntry = roundToPipSize(plannedEntry, pipSize, 'nearest');
+  const roundedSL = roundToPipSize(slPrice, pipSize, isLong ? 'down' : 'up');
+  const roundedTP = tpPrice != null
+    ? roundToPipSize(tpPrice, pipSize, isLong ? 'down' : 'up')
+    : null;
 
   // Place
   // Use templateName + mode for the comment (V12.3 shape).
@@ -301,9 +386,9 @@ async function tryPlace(pending, brokerSymbol) {
     brokerSymbol,
     setup.direction,
     sizing.recommendedLot,
-    plannedEntry,
-    slPrice,
-    tpPrice,
+    roundedEntry,
+    roundedSL,
+    roundedTP,
     `QB-V12-${setup.mode || 'DAY'}-${commentLabel}`.slice(0, 64),
   );
 
@@ -313,9 +398,12 @@ async function tryPlace(pending, brokerSymbol) {
       brokerOrderId: placement.orderId,
       placedAt: Date.now(),
       placedKillZone: kz.name,
+      placedEntry: roundedEntry,
+      placedSL: roundedSL,
+      placedTP: roundedTP,
     });
     await pushCommentary(pending.asset, 'order-placed',
-      `Limit order placed in ${killZoneDisplayName(kz.name)}: ${setup.direction} ${sizing.recommendedLot} lot @ ${plannedEntry.toFixed(plannedEntry > 100 ? 2 : 5)}, SL ${slPrice.toFixed(slPrice > 100 ? 2 : 5)}`);
+      `Limit order placed in ${killZoneDisplayName(kz.name)}: ${setup.direction} ${sizing.recommendedLot} lot @ ${roundedEntry.toFixed(roundedEntry > 100 ? 2 : 5)}, SL ${roundedSL.toFixed(roundedSL > 100 ? 2 : 5)}`);
 
     // Telegram: trade placed
     try {

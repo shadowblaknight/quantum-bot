@@ -72,16 +72,22 @@ function match({ events, currentPrice, atrByTF }) {
         : sweptLevel + buffer;
 
       const slDist = Math.abs(entry - sl);
-      const slDistATR = slDist / ltfATR;
-      if (slDistATR > 3.0 || slDistATR < 0.3) continue;
+      // V12.4.1: gate on H1 ATR not LTF ATR. Using LTF (M5) ATR as the
+      // denominator made this filter ~5× stricter on forex than on gold,
+      // because forex M5 ATR is tiny relative to structural SL distances.
+      // H1 ATR is asset-scale-invariant and matches the SB template's gate.
+      const slDistH1ATR = h1ATR > 0 ? slDist / h1ATR : 0;
+      if (slDistH1ATR > 3.0 || slDistH1ATR < 0.3) continue;
+      const slDistATR = ltfATR > 0 ? slDist / ltfATR : 0; // for display only
 
-      // Price must be approaching/inside the unicorn zone
+      // Price must be approaching/inside the unicorn zone.
+      // V12.4.1: gate on H1 ATR not LTF — same scale-invariance reason as SL.
       const distToZone = Math.min(
         Math.abs(currentPrice - overlap.upper),
         Math.abs(currentPrice - overlap.lower)
       );
       const inZone = currentPrice >= overlap.lower && currentPrice <= overlap.upper;
-      if (!inZone && distToZone > ltfATR * 1.5) continue;
+      if (!inZone && distToZone > h1ATR * 0.5) continue;
 
       // TPs
       const sessionLevels = events.filter((e) => e.type === 'session-level');

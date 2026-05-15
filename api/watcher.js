@@ -402,10 +402,22 @@ async function processAsset(asset, account, openPositions) {
     }
 
     // 3. Get current price + reference ATR (H1)
-    const priceResult = await fetchPrice(asset);
-    const currentPrice = priceResult?.price;
-    if (!currentPrice) {
-      return { asset, error: 'price unavailable', processingMs: Date.now() - t0 };
+    // V12.4.1: derive currentPrice from the freshest candle, NOT from
+    // MetaAPI's current-price endpoint. The current-price endpoint only
+    // works for symbols the account is actively SUBSCRIBED to (streaming),
+    // which is typically only the asset you most recently traded. This
+    // silently failed for every non-gold asset across V12.1-V12.3, leaving
+    // the bot effectively single-asset. Candle data comes via the
+    // historical-market-data API which has no subscription requirement.
+    const cByTF = evResult.candlesByTF || {};
+    const newestCandle =
+      (cByTF['5m']?.length && cByTF['5m'][cByTF['5m'].length - 1]) ||
+      (cByTF['15m']?.length && cByTF['15m'][cByTF['15m'].length - 1]) ||
+      (cByTF['1h']?.length && cByTF['1h'][cByTF['1h'].length - 1]) ||
+      null;
+    const currentPrice = newestCandle?.close;
+    if (!currentPrice || !isFinite(currentPrice) || currentPrice <= 0) {
+      return { asset, error: 'price unavailable (no fresh candle close)', processingMs: Date.now() - t0 };
     }
     const h1ATR = evResult.atrByTF?.['1h'];
     if (!h1ATR) {

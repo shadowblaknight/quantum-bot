@@ -127,8 +127,10 @@ function match({ events, currentPrice, atrByTF }) {
     : sweepWick - buffer;
 
   const slDist = Math.abs(entry - sl);
-  const slDistATR = ltfATR > 0 ? slDist / ltfATR : 0;
-  if (slDistATR > 3.0 || slDistATR < 0.3) return null;
+  // V12.4.1: gate on H1 ATR (asset-scale-invariant) not LTF ATR (too strict on forex)
+  const slDistH1ATR = h1ATR > 0 ? slDist / h1ATR : 0;
+  if (slDistH1ATR > 3.0 || slDistH1ATR < 0.3) return null;
+  const slDistATR = ltfATR > 0 ? slDist / ltfATR : 0; // display only
 
   // TPs: opposing PDH/PDL, then HTF FVG magnets
   const htfFVGs = events.filter(

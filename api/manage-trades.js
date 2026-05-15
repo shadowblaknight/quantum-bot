@@ -22,7 +22,7 @@
 //   - All MetaAPI calls have error handling — failures don't crash watcher
 // ----------------------------------------------------------------------------
 
-const { getRedis, safeParse, applyCors, atr, getCurrentSession } = require('./_lib');
+const { getRedis, safeParse, applyCors, atr, getCurrentSession, roundToPipSize } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
 const { resolveSymbol, resolveAsset } = require('./symbol-resolver');
 const { fetchPositions, fetchCandles } = require('./broker');
@@ -72,16 +72,31 @@ function signedDollarsForLeg(assetId, entryPrice, exitPrice, direction, lot) {
 }
 
 // ===== MetaAPI: modify position SL/TP =====
-async function modifyPosition(positionId, slPrice, tpPrice) {
+async function modifyPosition(positionId, slPrice, tpPrice, assetId) {
   const token = process.env.METAAPI_TOKEN;
   const accountId = process.env.METAAPI_ACCOUNT_ID;
   const region = process.env.METAAPI_REGION || 'london';
   const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/trade`;
+
+  // V12.4.1: round to broker pip increment to avoid INVALID_PRICE rejections.
+  // If assetId is passed, we know the pipSize. Without it, prices pass through.
+  let sl = slPrice, tp = tpPrice;
+  if (assetId) {
+    const meta = getAssetById(assetId);
+    if (meta?.pipSize) {
+      // We don't know direction here, so use 'nearest' for both. The caller
+      // already chose the levels with direction in mind; this just snaps to
+      // a valid quote precision.
+      sl = roundToPipSize(slPrice, meta.pipSize, 'nearest');
+      tp = roundToPipSize(tpPrice, meta.pipSize, 'nearest');
+    }
+  }
+
   const payload = {
     actionType: 'POSITION_MODIFY',
     positionId,
-    stopLoss: slPrice,
-    takeProfit: tpPrice,
+    stopLoss: sl,
+    takeProfit: tp,
   };
   try {
     const resp = await fetch(url, {
@@ -337,7 +352,7 @@ async function managePosition(position) {
           if (newSL != null) {
             // Keep the next TP as the broker's TP target
             const nextTPPrice = tpLevels[i + 1] ? tpLevels[i + 1].price : tpPrice;
-            const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice);
+            const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice, asset);
             if (modifyResult.ok) {
               state.slMoves.push({ atTP: tpName, newSL, ts: Date.now() });
               actions.push({ action: 'sl-move', newSL, ok: true });
@@ -400,7 +415,7 @@ async function managePosition(position) {
         const nextTPPrice = tpLevels.find((tp) => {
           return isLong ? tp.price > currentPrice : tp.price < currentPrice;
         });
-        const modifyResult = await modifyPosition(position.id, trailSL, nextTPPrice ? nextTPPrice.price : null);
+        const modifyResult = await modifyPosition(position.id, trailSL, nextTPPrice ? nextTPPrice.price : null, asset);
         if (modifyResult.ok) {
           state.slMoves.push({ trailing: true, newSL: trailSL, atProfitR: profitR, ts: Date.now() });
           actions.push({ action: 'trail-sl', newSL: trailSL });

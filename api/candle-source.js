@@ -72,7 +72,10 @@ const TF_MS = {
   '1mn': 30 * 24 * 60 * 60 * 1000,
 };
 
-function CACHE_KEY(asset, tf) { return `v12:candles:${asset}:${tf}`; }
+// V12.4.1: bumped namespace from `v12:candles:` so the deploy that fixes the
+// stale-startTime bug doesn't inherit any of the old broken entries. Old keys
+// will expire naturally per their TTLs.
+function CACHE_KEY(asset, tf) { return `v12:candles2:${asset}:${tf}`; }
 
 // =================================================================
 // PROVIDER ROUTING
@@ -98,12 +101,18 @@ function pickProvider(asset) {
 
 const METAAPI_REGION = process.env.METAAPI_REGION || 'london';
 
-function metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, limit) {
+// V12.4 hotfix: pass BOTH startTime and endTime so MetaAPI returns candles
+// anchored at NOW, not the first N starting from startTime. Previously, with
+// a wide lookback factor, MetaAPI was returning the FIRST 200 H1 candles from
+// 14 days ago and never reached today — leading to multi-week-stale data.
+function metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, endTimeIso, limit) {
   return `https://mt-market-data-client-api-v1.${METAAPI_REGION}.agiliumtrade.ai`
     + `/users/current/accounts/${accountId}`
     + `/historical-market-data/symbols/${encodeURIComponent(brokerSymbol)}`
     + `/timeframes/${tf}/candles`
-    + `?startTime=${encodeURIComponent(startTimeIso)}&limit=${limit}`;
+    + `?startTime=${encodeURIComponent(startTimeIso)}`
+    + `&endTime=${encodeURIComponent(endTimeIso)}`
+    + `&limit=${limit}`;
 }
 
 async function fetchFromMetaAPI(asset, tf, limit) {
@@ -138,16 +147,23 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     return { ok: false, error: `Asset ${asset} not available on broker (no symbol after sync)` };
   }
 
-  // 3. Calculate startTime to fetch `limit` candles.
-  //    Multiply by safety factor for weekends/holidays/gaps:
-  //      forex: ~1.7× (weekend gap of 2 days)
-  //      higher TFs (1d/1w/1mn): 2× (covers Sundays + holidays)
+  // 3. Time window — endTime = NOW (anchor at present), startTime = enough
+  //    historical headroom to cover weekends + holidays for `limit` candles.
+  //
+  //    With endTime set, MetaAPI returns candles ending at NOW (not just the
+  //    first N from startTime). The lookback factor only needs to be large
+  //    enough for weekends/holidays, since limit caps the count.
+  //
+  //    Factor 2.0 for forex/indices (24/5 market with potential holidays);
+  //    higher for daily+ TFs (Sundays + bank holidays compound).
   const cap = Math.min(limit, 1000);
-  const lookbackFactor = (tf === '1d' || tf === '1w' || tf === '1mn') ? 2.0 : 1.7;
-  const startMs = Date.now() - cap * TF_MS[tf] * lookbackFactor;
+  const lookbackFactor = (tf === '1d' || tf === '1w' || tf === '1mn') ? 3.0 : 2.0;
+  const nowMs = Date.now();
+  const startMs = nowMs - cap * TF_MS[tf] * lookbackFactor;
   const startTimeIso = new Date(startMs).toISOString();
+  const endTimeIso   = new Date(nowMs).toISOString();
 
-  const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, cap);
+  const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, endTimeIso, cap);
 
   try {
     const resp = await fetch(url, {
@@ -178,9 +194,8 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     }
 
     // Convert MetaAPI candle → V12 candle format.
-    // MetaAPI returns candles in chronological (ascending) order already.
     // tickVolume preferred over volume for forex (real volume often 0 on MT5).
-    const candles = data.map((c) => ({
+    let candles = data.map((c) => ({
       time: c.time,
       open: parseFloat(c.open),
       high: parseFloat(c.high),
@@ -188,6 +203,26 @@ async function fetchFromMetaAPI(asset, tf, limit) {
       close: parseFloat(c.close),
       volume: parseFloat(c.tickVolume != null ? c.tickVolume : (c.volume || 0)),
     }));
+
+    // Defensive: ensure ascending order by time
+    candles.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+
+    // Keep only the most-recent `cap` candles (we asked for endTime=NOW, so the
+    // tail IS the most recent — but slice defensively in case MetaAPI returns
+    // more than requested).
+    if (candles.length > cap) candles = candles.slice(-cap);
+
+    // FRESHNESS GUARD: refuse data older than 5× TF period. This catches
+    // misconfigured endTime, dead brokers, or weekend stalls before they
+    // poison the event pipeline.
+    const lastCandleAgeMs = nowMs - new Date(candles[candles.length - 1].time).getTime();
+    const maxStaleMs = TF_MS[tf] * 5;
+    if (lastCandleAgeMs > maxStaleMs) {
+      return {
+        ok: false,
+        error: `MetaAPI stale: latest ${tf} candle is ${Math.round(lastCandleAgeMs / 60000)}min old (max ${Math.round(maxStaleMs / 60000)}min)`,
+      };
+    }
 
     return { ok: true, candles, source: `metaapi(${brokerSymbol})` };
   } catch (e) {

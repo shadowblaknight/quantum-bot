@@ -191,6 +191,29 @@ function fmtPrice(p) {
   return p.toFixed(priceDp(p));
 }
 
+// V12.4.1: Round a price to the broker's pip increment.
+// MT5 rejects orders with prices beyond the symbol's tick size as
+// INVALID_PRICE (numericCode 10015). For gold (pipSize=0.01), every price
+// must end in 2 decimals; for NAS100 (pipSize=1.0), integers only; etc.
+//
+// mode:
+//   'nearest' (default) — bankers rounding to the nearest tick
+//   'down' — floor (further from infinity, closer to zero)
+//   'up'   — ceil  (further from zero, away from infinity)
+//
+// Typical usage by the order layer:
+//   entry → 'nearest'
+//   LONG  SL → 'down' (wider, further from entry), TP → 'down' (closer to entry, conservative)
+//   SHORT SL → 'up'   (wider, further from entry), TP → 'up'   (closer to entry, conservative)
+function roundToPipSize(price, pipSize, mode = 'nearest') {
+  if (price == null || !isFinite(price)) return price;
+  if (!pipSize || pipSize <= 0) return price;
+  const factor = 1 / pipSize;
+  if (mode === 'down') return Math.floor(price * factor) / factor;
+  if (mode === 'up')   return Math.ceil(price  * factor) / factor;
+  return Math.round(price * factor) / factor;
+}
+
 // =================================================================
 // EXPORTS
 // =================================================================
@@ -214,4 +237,5 @@ module.exports = {
   // formatting
   priceDp,
   fmtPrice,
+  roundToPipSize,
 };

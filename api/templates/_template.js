@@ -125,7 +125,11 @@ function rMultipleTargets(direction, entry, sl, multipliers = [1, 2, 3, 4]) {
   }));
 }
 
-// Helper: build TP list using session levels first, then R-fallback
+// Helper: build TP list using session levels first, then R-fallback.
+// V12.4.1: minimum 1R floor for session-level/FVG candidates (was 0.8R).
+// A TP closer than 1R produces R:R < 1 — losing expectancy. ICT methodology
+// always requires R:R >= 1 at minimum. Execute's pre-flight CHECK 6 also
+// enforces a broker-safe minimum distance.
 function buildTPs(direction, entry, sl, sessionLevelEvents, opposingFVGEvents) {
   const slDist = Math.abs(entry - sl);
   if (slDist <= 0) return [];
@@ -139,7 +143,7 @@ function buildTPs(direction, entry, sl, sessionLevelEvents, opposingFVGEvents) {
     const inDir = direction === 'LONG' ? lvl > entry : lvl < entry;
     if (!inDir) continue;
     const r = Math.abs(lvl - entry) / slDist;
-    if (r >= 0.8 && r <= 8) {
+    if (r >= 1.0 && r <= 8) {
       targets.push({
         price: lvl,
         label: ev.evidence?.kind || 'session-level',
@@ -157,7 +161,7 @@ function buildTPs(direction, entry, sl, sessionLevelEvents, opposingFVGEvents) {
     const inDir = direction === 'LONG' ? lvl > entry : lvl < entry;
     if (!inDir) continue;
     const r = Math.abs(lvl - entry) / slDist;
-    if (r >= 0.8 && r <= 8) {
+    if (r >= 1.0 && r <= 8) {
       const dup = targets.some((t) => Math.abs(t.price - lvl) < slDist * 0.2);
       if (!dup) {
         targets.push({
