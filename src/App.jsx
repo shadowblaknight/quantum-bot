@@ -295,38 +295,39 @@ const GLOBAL_STYLES = `
 
 const ASSET_CATALOG = [
   // Forex majors
-  { id: "eurusd", name: "EUR/USD", category: "forex", description: "Euro vs US Dollar" },
-  { id: "gbpusd", name: "GBP/USD", category: "forex", description: "British Pound vs US Dollar" },
-  { id: "usdjpy", name: "USD/JPY", category: "forex", description: "US Dollar vs Japanese Yen" },
-  { id: "usdchf", name: "USD/CHF", category: "forex", description: "US Dollar vs Swiss Franc" },
-  { id: "audusd", name: "AUD/USD", category: "forex", description: "Australian Dollar vs US Dollar" },
-  { id: "nzdusd", name: "NZD/USD", category: "forex", description: "New Zealand Dollar vs US Dollar" },
-  { id: "usdcad", name: "USD/CAD", category: "forex", description: "US Dollar vs Canadian Dollar" },
+  { id: "eurusd", name: "EUR/USD", category: "forex", description: "Euro vs US Dollar", aliases: ["EURUSD", "EUR/USD", "EURUSD.s"] },
+  { id: "gbpusd", name: "GBP/USD", category: "forex", description: "British Pound vs US Dollar", aliases: ["GBPUSD", "GBP/USD", "GBPUSD.s"] },
+  { id: "usdjpy", name: "USD/JPY", category: "forex", description: "US Dollar vs Japanese Yen", aliases: ["USDJPY", "USD/JPY", "USDJPY.s"] },
+  { id: "usdchf", name: "USD/CHF", category: "forex", description: "US Dollar vs Swiss Franc", aliases: ["USDCHF", "USD/CHF", "USDCHF.s"] },
+  { id: "audusd", name: "AUD/USD", category: "forex", description: "Australian Dollar vs US Dollar", aliases: ["AUDUSD", "AUD/USD", "AUDUSD.s"] },
+  { id: "nzdusd", name: "NZD/USD", category: "forex", description: "New Zealand Dollar vs US Dollar", aliases: ["NZDUSD", "NZD/USD", "NZDUSD.s"] },
+  { id: "usdcad", name: "USD/CAD", category: "forex", description: "US Dollar vs Canadian Dollar", aliases: ["USDCAD", "USD/CAD", "USDCAD.s"] },
   // Crosses
-  { id: "eurjpy", name: "EUR/JPY", category: "forex", description: "Euro vs Japanese Yen" },
-  { id: "gbpjpy", name: "GBP/JPY", category: "forex", description: "British Pound vs Japanese Yen — high vol" },
-  { id: "eurgbp", name: "EUR/GBP", category: "forex", description: "Euro vs British Pound" },
-  { id: "audjpy", name: "AUD/JPY", category: "forex", description: "Australian Dollar vs Japanese Yen" },
+  { id: "eurjpy", name: "EUR/JPY", category: "forex", description: "Euro vs Japanese Yen", aliases: ["EURJPY", "EUR/JPY", "EURJPY.s"] },
+  { id: "gbpjpy", name: "GBP/JPY", category: "forex", description: "British Pound vs Japanese Yen — high vol", aliases: ["GBPJPY", "GBP/JPY", "GBPJPY.s"] },
+  { id: "eurgbp", name: "EUR/GBP", category: "forex", description: "Euro vs British Pound", aliases: ["EURGBP", "EUR/GBP", "EURGBP.s"] },
+  { id: "audjpy", name: "AUD/JPY", category: "forex", description: "Australian Dollar vs Japanese Yen", aliases: ["AUDJPY", "AUD/JPY", "AUDJPY.s"] },
   // Metals
-  { id: "gold",     name: "Gold",     category: "metal", description: "Spot Gold (XAU/USD)" },
-  { id: "silver",   name: "Silver",   category: "metal", description: "Spot Silver (XAG/USD)" },
-  { id: "platinum", name: "Platinum", category: "metal", description: "Spot Platinum (XPT/USD)" },
+  { id: "gold",     name: "Gold",     category: "metal", description: "Spot Gold (XAU/USD)", aliases: ["XAUUSD", "XAU/USD", "XAUUSD.s", "GOLD"] },
+  { id: "silver",   name: "Silver",   category: "metal", description: "Spot Silver (XAG/USD)", aliases: ["XAGUSD", "XAG/USD", "XAGUSD.s", "SILVER"] },
+  { id: "platinum", name: "Platinum", category: "metal", description: "Spot Platinum (XPT/USD)", aliases: ["XPTUSD", "XPT/USD", "XPTUSD.s", "PLATINUM"] },
   // Crypto
-  { id: "btc", name: "Bitcoin",  category: "crypto", description: "Bitcoin vs USD — 24/7" },
-  { id: "eth", name: "Ethereum", category: "crypto", description: "Ethereum vs USD — 24/7" },
-  { id: "sol", name: "Solana",   category: "crypto", description: "Solana vs USD" },
-  { id: "xrp", name: "Ripple",   category: "crypto", description: "Ripple vs USD" },
+  { id: "btc", name: "Bitcoin",  category: "crypto", description: "Bitcoin vs USD — 24/7",  aliases: ["BTCUSD", "BTC/USD", "BTCUSDT", "BTC", "BITCOIN"] },
+  { id: "eth", name: "Ethereum", category: "crypto", description: "Ethereum vs USD — 24/7", aliases: ["ETHUSD", "ETH/USD", "ETHUSDT", "ETH", "ETHEREUM"] },
+  { id: "sol", name: "Solana",   category: "crypto", description: "Solana vs USD",          aliases: ["SOLUSD", "SOL/USD", "SOLUSDT", "SOL", "SOLANA"] },
+  { id: "xrp", name: "Ripple",   category: "crypto", description: "Ripple vs USD",          aliases: ["XRPUSD", "XRP/USD", "XRPUSDT", "XRP", "RIPPLE"] },
   // Indices
-  { id: "nas100", name: "Nasdaq 100", category: "index", description: "US tech-heavy index" },
-  { id: "us30",   name: "Dow Jones",  category: "index", description: "Dow Jones Industrial Average" },
-  { id: "us500",  name: "S&P 500",    category: "index", description: "S&P 500 futures" },
-  { id: "ger40",  name: "DAX 40",     category: "index", description: "German DAX 40" },
-  { id: "uk100",  name: "FTSE 100",   category: "index", description: "UK FTSE 100" },
-  { id: "jp225",  name: "Nikkei 225", category: "index", description: "Japan Nikkei 225" },
+  { id: "nas100", name: "Nasdaq 100", category: "index", description: "US tech-heavy index",          aliases: ["NAS100", "NAS100.s", "NDX", "USTEC", "US100", "NASDAQ", "NASDAQ100"] },
+  { id: "us30",   name: "Dow Jones",  category: "index", description: "Dow Jones Industrial Average", aliases: ["US30", "US30.s", "DJ30", "DOW", "DOWJONES"] },
+  { id: "us500",  name: "S&P 500",    category: "index", description: "S&P 500 futures — SP500/SPX",  aliases: ["US500", "US500.s", "SP500", "SP500.s", "SPX500", "SPX", "SPY"] },
+  { id: "ger40",  name: "DAX 40",     category: "index", description: "German DAX 40",                aliases: ["GER40", "DE40", "DAX", "DAX40"] },
+  { id: "uk100",  name: "FTSE 100",   category: "index", description: "UK FTSE 100",                  aliases: ["UK100", "FTSE", "FTSE100"] },
+  { id: "jp225",  name: "Nikkei 225", category: "index", description: "Japan Nikkei 225",             aliases: ["JP225", "NIKKEI", "NIKKEI225", "JPN225", "N225"] },
+  { id: "usdx",   name: "US Dollar Index", category: "index", description: "USD basket / DXY — leading currency strength indicator", aliases: ["USDX", "USDX.s", "DXY", "DX", "USDOLLAR"] },
   // Commodities
-  { id: "oil_wti",   name: "WTI Crude Oil",   category: "commodity", description: "West Texas Intermediate" },
-  { id: "oil_brent", name: "Brent Crude Oil", category: "commodity", description: "Brent crude oil" },
-  { id: "natgas",    name: "Natural Gas",     category: "commodity", description: "Natural gas futures" },
+  { id: "oil_wti",   name: "WTI Crude Oil",   category: "commodity", description: "West Texas Intermediate", aliases: ["WTI", "USOIL", "OIL", "CRUDE", "XTIUSD"] },
+  { id: "oil_brent", name: "Brent Crude Oil", category: "commodity", description: "Brent crude oil",         aliases: ["BRENT", "UKOIL", "XBRUSD"] },
+  { id: "natgas",    name: "Natural Gas",     category: "commodity", description: "Natural gas futures",     aliases: ["NATGAS", "NGAS", "NG", "XNGUSD"] },
 ];
 
 const CATEGORY_LABELS = {
@@ -2388,7 +2389,10 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
     return ASSET_CATALOG.filter((a) =>
       a.id.toLowerCase().includes(q) ||
       a.name.toLowerCase().includes(q) ||
-      a.description.toLowerCase().includes(q)
+      a.description.toLowerCase().includes(q) ||
+      // V12.4.1: search aliases too — typing "sp500" must find us500,
+      // "dxy" must find usdx, "xau" must find gold, etc.
+      (a.aliases || []).some((alias) => alias.toLowerCase().includes(q))
     );
   }, [search]);
 

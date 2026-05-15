@@ -101,17 +101,22 @@ function pickProvider(asset) {
 
 const METAAPI_REGION = process.env.METAAPI_REGION || 'london';
 
-// V12.4 hotfix: pass BOTH startTime and endTime so MetaAPI returns candles
-// anchored at NOW, not the first N starting from startTime. Previously, with
-// a wide lookback factor, MetaAPI was returning the FIRST 200 H1 candles from
-// 14 days ago and never reached today — leading to multi-week-stale data.
-function metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, endTimeIso, limit) {
+// V12.4.1 — endTime is NOT a documented param on MetaAPI's historical-market-data
+// candles endpoint. Passing it either silently fails or returns 400. Instead we
+// use a TIGHT startTime so that fewer than `limit` candles fit in the range —
+// then MetaAPI returns all of them ending at NOW (not the first-N truncated).
+//
+// Calculation: for 24/5 markets, trading_ratio = 5/7 = 0.714.
+//   startTime = NOW - limit × TF_MS × 1.3
+// gives 1.3 × 0.714 = 0.93 × limit candles in the trading range, all delivered.
+// For 24/7 markets (crypto), 1.3 × 1.0 = 1.3 × limit — overshoots! We use 1.0
+// for crypto. For daily+, use 2.0 since the row count is small anyway.
+function metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, limit) {
   return `https://mt-market-data-client-api-v1.${METAAPI_REGION}.agiliumtrade.ai`
     + `/users/current/accounts/${accountId}`
     + `/historical-market-data/symbols/${encodeURIComponent(brokerSymbol)}`
     + `/timeframes/${tf}/candles`
     + `?startTime=${encodeURIComponent(startTimeIso)}`
-    + `&endTime=${encodeURIComponent(endTimeIso)}`
     + `&limit=${limit}`;
 }
 
@@ -147,23 +152,24 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     return { ok: false, error: `Asset ${asset} not available on broker (no symbol after sync)` };
   }
 
-  // 3. Time window — endTime = NOW (anchor at present), startTime = enough
-  //    historical headroom to cover weekends + holidays for `limit` candles.
-  //
-  //    With endTime set, MetaAPI returns candles ending at NOW (not just the
-  //    first N from startTime). The lookback factor only needs to be large
-  //    enough for weekends/holidays, since limit caps the count.
-  //
-  //    Factor 2.0 for forex/indices (24/5 market with potential holidays);
-  //    higher for daily+ TFs (Sundays + bank holidays compound).
+  // 3. Tight startTime — calibrated so the candles in [startTime, NOW] number
+  //    at most `limit`, with NOW as the right edge. Critical: too generous a
+  //    factor causes MetaAPI to return the FIRST-N (oldest) and miss recent.
   const cap = Math.min(limit, 1000);
-  const lookbackFactor = (tf === '1d' || tf === '1w' || tf === '1mn') ? 3.0 : 2.0;
+  let lookbackFactor;
+  if (tf === '1d' || tf === '1w' || tf === '1mn') {
+    lookbackFactor = 2.0;        // weekends + holidays don't compound much
+  } else {
+    // crypto trades 24/7 (1.0 just fits), forex/indices 24/5 (1.3 leaves margin)
+    const meta = require('./asset-registry').getAssetById(asset);
+    const isCrypto = meta?.category === 'crypto';
+    lookbackFactor = isCrypto ? 1.0 : 1.3;
+  }
   const nowMs = Date.now();
   const startMs = nowMs - cap * TF_MS[tf] * lookbackFactor;
   const startTimeIso = new Date(startMs).toISOString();
-  const endTimeIso   = new Date(nowMs).toISOString();
 
-  const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, endTimeIso, cap);
+  const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, cap);
 
   try {
     const resp = await fetch(url, {
