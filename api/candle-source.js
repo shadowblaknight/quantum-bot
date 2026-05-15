@@ -296,12 +296,13 @@ function validateCandles(candles) {
 //   5. Return
 //   On failure: fall back to stale cache if exists, else empty array.
 
-async function fetchCandles(asset, tf, limit = 200) {
+async function fetchCandles(asset, tf, limit = 200, opts = {}) {
   const r = getRedis();
   const cacheKey = CACHE_KEY(asset, tf);
+  const bypassCache = opts.bypassCache === true;
 
-  // 1. Try cache
-  if (r) {
+  // 1. Try cache (unless explicitly bypassed)
+  if (r && !bypassCache) {
     try {
       const cachedRaw = await r.get(cacheKey);
       const cached = safeParse(cachedRaw);
@@ -383,15 +384,17 @@ module.exports = async (req, res) => {
     const asset = req.query.asset;
     const tf = req.query.tf || '1h';
     const limit = parseInt(req.query.limit || '200', 10);
+    const bypassCache = req.query.fresh === '1';
 
     if (!asset) return res.status(400).json({ error: 'asset required' });
     if (!getAssetById(asset)) return res.status(400).json({ error: 'unknown asset' });
 
-    const result = await fetchCandles(asset, tf, limit);
+    const result = await fetchCandles(asset, tf, limit, { bypassCache });
     return res.status(200).json({
       asset,
       tf,
       limit,
+      bypassCache,
       candleCount: result.candles?.length || 0,
       source: result.source,
       provider: pickProvider(asset),
