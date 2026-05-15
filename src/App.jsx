@@ -528,8 +528,14 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
       try {
         const r = await fetch(API(`quotes?asset=${selectedAsset}&limit=30`))
           .then((r) => r.json());
-        if (alive && r && !r.error) setQuotes(r);
-      } catch (_) {}
+        // V12.4.1: always update state — even on error, we want quotes to be
+        // non-null so the UI can render a "─ no tape ─" placeholder rather
+        // than getting stuck on the initial-load state. The PriceSparkline
+        // component handles empty history gracefully.
+        if (alive && r) setQuotes(r);
+      } catch (_) {
+        if (alive) setQuotes({ history: [], error: 'fetch failed' });
+      }
     };
     tick();
     const id = setInterval(tick, 10000);

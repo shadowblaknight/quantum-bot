@@ -398,6 +398,22 @@ const ASSETS = [
     preferredSessions: ['ASIAN'],
     aliases: ['JP225', 'JP225.cash', 'JP225m', 'NIKKEI', 'NIKKEI225', 'NIKKEI225.S', 'JPN225', 'N225'],
   },
+  {
+    id: 'usdx',
+    name: 'US Dollar Index',
+    category: 'index',
+    description: 'USD basket against EUR/JPY/GBP/CAD/SEK/CHF — leading currency strength indicator',
+    pipSize: 0.01,
+    contractSize: 1,
+    dollarPerPipPerLot: 10,
+    typicalSpreadPips: 3,
+    typicalH1ATR: 0.10,
+    preferredSessions: ['LONDON', 'OVERLAP', 'NEW_YORK'],
+    aliases: [
+      'USDX', 'USDX.s', 'USDX.cash', 'USDXm', 'USDX#',
+      'DXY', 'DX', 'DXY.s', 'USDOLLAR',
+    ],
+  },
 
   // ===================================================================
   // COMMODITIES
