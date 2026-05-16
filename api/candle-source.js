@@ -101,16 +101,38 @@ function pickProvider(asset) {
 
 const METAAPI_REGION = process.env.METAAPI_REGION || 'london';
 
-// V12.4.1 — endTime is NOT a documented param on MetaAPI's historical-market-data
-// candles endpoint. Passing it either silently fails or returns 400. Instead we
-// use a TIGHT startTime so that fewer than `limit` candles fit in the range —
-// then MetaAPI returns all of them ending at NOW (not the first-N truncated).
+// V12.4.1 — MetaAPI rate limits historical-data requests to 5 concurrent per
+// account. Our cron fires 6 assets × 3 TFs = 18 requests in parallel which
+// trips this limit, causing 429 errors, retries, slow ticks, and ultimately
+// Vercel function timeouts that kill the entire watcher mid-write.
 //
-// Calculation: for 24/5 markets, trading_ratio = 5/7 = 0.714.
-//   startTime = NOW - limit × TF_MS × 1.3
-// gives 1.3 × 0.714 = 0.93 × limit candles in the trading range, all delivered.
-// For 24/7 markets (crypto), 1.3 × 1.0 = 1.3 × limit — overshoots! We use 1.0
-// for crypto. For daily+, use 2.0 since the row count is small anyway.
+// Solution: a lightweight global semaphore that throttles concurrent calls
+// into `fetchFromMetaAPI` to 4 (1 slot of headroom under the 5-cap). Pending
+// requests queue and resolve in FIFO order.
+const METAAPI_MAX_CONCURRENT = 4;
+let _metaapiActiveCount = 0;
+const _metaapiQueue = [];
+
+function _metaapiAcquire() {
+  return new Promise((resolve) => {
+    if (_metaapiActiveCount < METAAPI_MAX_CONCURRENT) {
+      _metaapiActiveCount++;
+      resolve();
+    } else {
+      _metaapiQueue.push(resolve);
+    }
+  });
+}
+
+function _metaapiRelease() {
+  _metaapiActiveCount--;
+  if (_metaapiQueue.length > 0) {
+    const next = _metaapiQueue.shift();
+    _metaapiActiveCount++;
+    next();
+  }
+}
+
 function metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, limit) {
   return `https://mt-market-data-client-api-v1.${METAAPI_REGION}.agiliumtrade.ai`
     + `/users/current/accounts/${accountId}`
@@ -171,6 +193,10 @@ async function fetchFromMetaAPI(asset, tf, limit) {
 
   const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, cap);
 
+  // V12.4.1: throttle through semaphore so we never exceed MetaAPI's
+  // 5-concurrent cap. Without this, 18 parallel requests trigger 429s.
+  await _metaapiAcquire();
+
   try {
     const resp = await fetch(url, {
       headers: {
@@ -218,21 +244,16 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     // more than requested).
     if (candles.length > cap) candles = candles.slice(-cap);
 
-    // FRESHNESS GUARD — relaxed in V12.4.1.
+    // FRESHNESS GUARD — V12.4.1: weekend-tolerant.
     //
-    // Original intent: detect the stale-startTime bug that returned weeks-old
-    // candles. With endTime removed and a tight startTime, that bug is fixed —
-    // so the guard only needs to catch genuinely DEAD brokers (no data for
-    // days), not normal hour-scale staleness from weekends/holidays/lag.
-    //
-    // Forex closes Friday 22:00 UTC and reopens Sunday 22:00 UTC = 48 hour gap.
-    // Markets observing US holidays can have ~3-day gaps. Crypto trades 24/7
-    // but broker streams can lag by minutes.
+    // All sub-daily TFs get 72-hour limit so Friday close → Monday open
+    // doesn't trigger false rejections. Only multi-day stale data (broker
+    // truly dead) gets blocked.
     const FRESHNESS_LIMIT_MS = {
-      '1m':  60 * 60 * 1000,                // 1 hour (else fall back to 5m)
-      '5m':  6  * 60 * 60 * 1000,           // 6 hours
-      '15m': 12 * 60 * 60 * 1000,           // 12 hours
-      '1h':  72 * 60 * 60 * 1000,           // 72 hours (weekend + holiday)
+      '1m':  4  * 60 * 60 * 1000,           // 4 hours
+      '5m':  72 * 60 * 60 * 1000,           // 72 hours (weekend tolerance)
+      '15m': 72 * 60 * 60 * 1000,           // 72 hours
+      '1h':  72 * 60 * 60 * 1000,           // 72 hours
       '4h':  7  * 24 * 60 * 60 * 1000,      // 7 days
       '1d':  14 * 24 * 60 * 60 * 1000,      // 14 days
       '1w':  60 * 24 * 60 * 60 * 1000,      // 60 days
@@ -250,6 +271,8 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     return { ok: true, candles, source: `metaapi(${brokerSymbol})` };
   } catch (e) {
     return { ok: false, error: 'MetaAPI: ' + e.message };
+  } finally {
+    _metaapiRelease();
   }
 }
 
