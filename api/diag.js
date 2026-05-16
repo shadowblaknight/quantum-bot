@@ -165,6 +165,10 @@ module.exports = async (req, res) => {
             intent: parsed.intent,
             coherenceDecision: parsed.coherence?.decision,
             coherenceReasoning: parsed.coherence?.reasoning,
+            // V12.4.1: surface skip-state diagnostics
+            skipped: parsed.skipped || null,
+            candleCountsByTF: parsed.candleCountsByTF || null,
+            fetchErrors: parsed.fetchErrors || null,
           };
         }
       } catch (_) {}

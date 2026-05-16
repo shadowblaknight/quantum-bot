@@ -391,6 +391,33 @@ async function processAsset(asset, account, openPositions) {
   const t0 = Date.now();
   const session = getCurrentSession();
 
+  // V12.4.1: helper to write a "skipped" state so /api/diag can show
+  // WHY each asset isn't producing setups, instead of stale state from hours ago.
+  async function writeSkipState(reason, extra = {}) {
+    const r = getRedis();
+    if (!r) return;
+    const skipState = {
+      asset,
+      ts: t0,
+      session,
+      currentPrice: null,
+      atr: null,
+      atrByTF: extra.atrByTF || {},
+      events: [],
+      eventCount: 0,
+      coherence: { decision: 'WAIT', reasoning: reason },
+      intent: { type: 'IDLE', reason },
+      pendingSetups: [],
+      myPosition: null,
+      news: null,
+      structural: null,
+      processingMs: Date.now() - t0,
+      skipped: reason,
+      ...extra,
+    };
+    try { await r.set(STATE_KEY(asset), JSON.stringify(skipState), { ex: 86400 }); } catch (_) {}
+  }
+
   try {
     // 1. Ensure structural context exists (cheap if cached)
     const structural = await ensureStructuralContext(asset);
@@ -398,7 +425,15 @@ async function processAsset(asset, account, openPositions) {
     // 2. Run all event detectors (V12.3 event-based flow)
     const evResult = await runEventsForAsset({ asset });
     if (!evResult || !Array.isArray(evResult.events)) {
+      await writeSkipState('no events from runEventsForAsset');
       return { asset, error: 'no events', processingMs: Date.now() - t0 };
+    }
+
+    // V12.4.1 — diagnostic: count candles received per TF so /api/diag
+    // can pinpoint when broker fetch returns empty arrays
+    const candleCountsByTF = {};
+    for (const tf of Object.keys(evResult.candlesByTF || {})) {
+      candleCountsByTF[tf] = (evResult.candlesByTF[tf] || []).length;
     }
 
     // 3. Get current price + reference ATR (H1)
@@ -417,11 +452,19 @@ async function processAsset(asset, account, openPositions) {
       null;
     const currentPrice = newestCandle?.close;
     if (!currentPrice || !isFinite(currentPrice) || currentPrice <= 0) {
-      return { asset, error: 'price unavailable (no fresh candle close)', processingMs: Date.now() - t0 };
+      await writeSkipState(
+        `price unavailable — candles per TF: ${JSON.stringify(candleCountsByTF)}`,
+        { candleCountsByTF, fetchErrors: evResult.errors || [] }
+      );
+      return { asset, error: 'price unavailable (no fresh candle close)', processingMs: Date.now() - t0, candleCountsByTF };
     }
     const h1ATR = evResult.atrByTF?.['1h'];
     if (!h1ATR) {
-      return { asset, error: 'ATR unavailable', processingMs: Date.now() - t0 };
+      await writeSkipState(
+        `ATR unavailable — 1h candles count: ${candleCountsByTF['1h'] || 0}, current price: ${currentPrice}`,
+        { candleCountsByTF, currentPrice, atrByTF: evResult.atrByTF }
+      );
+      return { asset, error: 'ATR unavailable', processingMs: Date.now() - t0, candleCountsByTF };
     }
 
     // 4. Clear expired/invalidated pending setups (smart auto-cancel)
@@ -574,6 +617,8 @@ async function processAsset(asset, account, openPositions) {
 
     return state;
   } catch (e) {
+    // V12.4.1: write a skip-state on uncaught exception so it's visible in /api/diag
+    await writeSkipState(`exception: ${e.message}`);
     return { asset, error: e.message, processingMs: Date.now() - t0 };
   }
 }
