@@ -82,6 +82,37 @@ async function runForAsset({ asset }) {
     }
   }));
 
+  // V12.4.1 — H1 AGGREGATION FALLBACK
+  // ==================================================================
+  // MetaAPI's free-tier historical-data endpoint delivers H1 unreliably
+  // (we've seen 0-5 H1 candles even when M15 returns 200). Without H1
+  // we can't compute trend bias, structural SL, or session levels — and
+  // every template gates on them.
+  //
+  // Workaround: if H1 fetch returns < 20 candles, synthesize H1 from
+  // M15 by aggregating 4 consecutive M15 candles into one H1 candle.
+  // Mathematically identical to broker H1 within hour-boundary alignment.
+  //
+  // This activates ONLY when the direct H1 fetch fails. If H1 fetch
+  // succeeds normally, this code is a no-op.
+  const { aggregateCandles } = require('./_lib');
+  const H1_MIN_DIRECT = 20; // below this, fall back to aggregation
+  const directH1Count = candlesByTF['1h']?.length || 0;
+  const m15Count = candlesByTF['15m']?.length || 0;
+  if (directH1Count < H1_MIN_DIRECT && m15Count >= 80) {
+    const aggregated = aggregateCandles(candlesByTF['15m'], 15 * 60 * 1000, 60 * 60 * 1000);
+    if (aggregated.length >= H1_MIN_DIRECT) {
+      candlesByTF['1h'] = aggregated;
+      // Informational entry in errors[] so diag can show fallback was used
+      errors.push({
+        tf: '1h',
+        info: `H1 aggregated from M15 (broker returned ${directH1Count} H1, synthesized ${aggregated.length} from ${m15Count} M15)`,
+        aggregatedCount: aggregated.length,
+        directCount: directH1Count,
+      });
+    }
+  }
+
   // TIMESTAMP SAFETY NET:
   // Some data sources (TwelveData with ambiguous datetime strings, etc.) return
   // candles whose timestamps are off by hours. Templates rely on `event.ts` being
@@ -119,7 +150,11 @@ async function runForAsset({ asset }) {
   // Run detectors for each TF
   for (const tf of timeframes) {
     const candles = candlesByTF[tf];
-    if (!candles || candles.length < 30) continue;
+    // V12.4.1: lowered from 30 → 20. ATR-14 needs 14 candles, swing
+    // detection needs 5-10, so 20 is safe headroom. Lower threshold means
+    // bot can start producing signals as soon as it has minimal data, not
+    // wait for 30 bars to accumulate.
+    if (!candles || candles.length < 20) continue;
 
     const tfATR = atr(candles, 14);
     if (!tfATR) continue;

@@ -218,6 +218,71 @@ function roundToPipSize(price, pipSize, mode = 'nearest') {
 // EXPORTS
 // =================================================================
 
+// =================================================================
+// CANDLE AGGREGATION
+// =================================================================
+// Aggregate lower-TF candles into higher-TF synthetic candles. Used when
+// the broker's higher-TF data feed is unreliable (V12.4.1: MetaAPI free
+// tier delivers 0-5 H1 candles for some assets even when M15/M5 deliver
+// 200+).
+//
+// Aggregation rule: ratio candles → 1 synthetic candle where
+//   open  = first.open
+//   high  = max of all highs
+//   low   = min of all lows
+//   close = last.close
+//   volume = sum of volumes
+//   time = first.time aligned to higher TF boundary (e.g. M15 → H1 aligns
+//          on the hour mark, M5 → M15 aligns on :00 :15 :30 :45)
+//
+// IMPORTANT: source candles must be SORTED ASCENDING by time. We align
+// groups to wall-clock boundaries (not just naive every-N grouping) so
+// the resulting H1 candle at 14:00 is the H1 starting at 14:00, not at
+// 14:11 because M15 happened to start there.
+
+function aggregateCandles(sourceCandles, sourceTfMs, targetTfMs) {
+  if (!Array.isArray(sourceCandles) || sourceCandles.length === 0) return [];
+  if (!sourceTfMs || !targetTfMs || targetTfMs <= sourceTfMs) return [];
+  if (targetTfMs % sourceTfMs !== 0) return []; // require clean ratio
+
+  // Group source candles by which target-TF bucket they fall into.
+  // bucketKey = floor(candleTime / targetTfMs)
+  const buckets = new Map();
+  for (const c of sourceCandles) {
+    const ts = new Date(c.time).getTime();
+    if (!isFinite(ts)) continue;
+    const bucketStartMs = Math.floor(ts / targetTfMs) * targetTfMs;
+    if (!buckets.has(bucketStartMs)) buckets.set(bucketStartMs, []);
+    buckets.get(bucketStartMs).push(c);
+  }
+
+  // Build aggregated candles. Only emit "complete" buckets — i.e. those
+  // with the expected number of source candles (targetTfMs / sourceTfMs).
+  // This prevents emitting a partial half-formed H1 from 2 M15 candles.
+  const expectedCount = targetTfMs / sourceTfMs;
+  const out = [];
+  const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
+  for (const key of sortedKeys) {
+    const group = buckets.get(key);
+    if (group.length < expectedCount) continue; // skip incomplete bucket
+    // group is sorted? Re-sort defensively
+    group.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+    out.push({
+      time: new Date(key).toISOString(),
+      open: group[0].open,
+      high: Math.max(...group.map((g) => g.high)),
+      low: Math.min(...group.map((g) => g.low)),
+      close: group[group.length - 1].close,
+      volume: group.reduce((sum, g) => sum + (g.volume || 0), 0),
+    });
+  }
+  return out;
+}
+
+// =================================================================
+// MODULE EXPORTS
+// =================================================================
+
 module.exports = {
   // redis
   getRedis,
@@ -238,4 +303,6 @@ module.exports = {
   priceDp,
   fmtPrice,
   roundToPipSize,
+  // V12.4.1: candle aggregation for TF fallback
+  aggregateCandles,
 };
