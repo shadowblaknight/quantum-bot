@@ -169,6 +169,8 @@ module.exports = async (req, res) => {
             skipped: parsed.skipped || null,
             candleCountsByTF: parsed.candleCountsByTF || null,
             fetchErrors: parsed.fetchErrors || null,
+            // V12.4.1: pd-zone info from coherence-checker (shows premium/discount filter at work)
+            pdZone: parsed.coherence?.pdZone || null,
           };
         }
       } catch (_) {}

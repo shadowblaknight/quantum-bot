@@ -29,6 +29,7 @@ const trendDetector = require('./events/trend');
 const oteZoneDetector = require('./events/ote-zone');
 const asianRangeDetector = require('./events/asian-range');
 const sessionLevelsDetector = require('./events/session-levels');
+const pdZoneDetector = require('./events/pd-zone');
 
 // Detector × timeframe matrix
 // V12.4: ICT day-trading stack is H1 → M15 → M5 (research-backed via TFlab/ChartSnipe).
@@ -38,7 +39,7 @@ const sessionLevelsDetector = require('./events/session-levels');
 const DETECTOR_MATRIX = {
   '5m':  ['sweep', 'displacement', 'mss', 'fvg', 'ob', 'breaker', 'ote', 'trend'],
   '15m': ['sweep', 'displacement', 'mss', 'bos', 'fvg', 'ob', 'breaker', 'ote', 'trend', 'asian-range'],
-  '1h':  ['sweep', 'displacement', 'mss', 'bos', 'fvg', 'ob', 'ote', 'trend', 'session-levels'],
+  '1h':  ['sweep', 'displacement', 'mss', 'bos', 'fvg', 'ob', 'ote', 'trend', 'session-levels', 'pd-zone'],
 };
 
 // Number of candles to fetch per timeframe
@@ -60,6 +61,7 @@ const DETECTOR_FNS = {
   'ote':             oteZoneDetector.detect,
   'asian-range':     asianRangeDetector.detect,
   'session-levels':  sessionLevelsDetector.detect,
+  'pd-zone':         pdZoneDetector.detect,
 };
 
 async function runForAsset({ asset }) {

@@ -124,6 +124,67 @@ function detect({ candles, atr, timeframe }) {
     }));
   }
 
+  // V12.4.1 — EQUAL HIGHS / EQUAL LOWS detection
+  // =================================================================
+  // Equal highs and lows are SWING price clusters where multiple swings
+  // have tested the same level (within tight tolerance). Smart money
+  // targets these because retail stop-loss orders cluster just beyond.
+  //
+  // We detect swings via the 5-bar fractal (_swings), then cluster
+  // swing prices that are within 0.25 × ATR of each other. A cluster
+  // of 2+ swing-touches becomes a tradeable liquidity level.
+  //
+  // CRITICAL: we cluster SWING POINTS only, not every candle's high/low.
+  // Otherwise consecutive candles in a trending move would all cluster
+  // together. Swing points represent actual structural turns.
+  // =================================================================
+  if (atr && atr > 0) {
+    const { detectSwings } = require('./_swings');
+    const TOLERANCE = atr * 0.25;
+    const recentCandles = candles.slice(-48);
+    const swings = detectSwings(recentCandles, 2);
+
+    // Helper: cluster swing prices and emit those with >= 2 members
+    function findClusters(swingPoints, kind) {
+      if (swingPoints.length < 2) return;
+      const sorted = [...swingPoints].sort((a, b) => a.price - b.price);
+      const clusters = [];
+      let current = [sorted[0]];
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i].price - current[current.length - 1].price <= TOLERANCE) {
+          current.push(sorted[i]);
+        } else {
+          if (current.length >= 2) clusters.push(current);
+          current = [sorted[i]];
+        }
+      }
+      if (current.length >= 2) clusters.push(current);
+
+      const lastTs = new Date(recentCandles[recentCandles.length - 1].time).getTime();
+      for (const cluster of clusters) {
+        const avg = cluster.reduce((a, b) => a + b.price, 0) / cluster.length;
+        const spread = cluster[cluster.length - 1].price - cluster[0].price;
+        events.push(makeEvent({
+          type: 'session-level',
+          ts: lastTs,
+          timeframe,
+          price: avg,
+          direction: 'NEUTRAL',
+          evidence: {
+            kind,
+            touches: cluster.length,
+            spread,
+            firstTouchTs: cluster[0].ts,
+            lastTouchTs: cluster[cluster.length - 1].ts,
+          },
+        }));
+      }
+    }
+
+    findClusters(swings.filter((s) => s.type === 'high'), 'EQUAL_HIGH');
+    findClusters(swings.filter((s) => s.type === 'low'), 'EQUAL_LOW');
+  }
+
   return events;
 }
 
