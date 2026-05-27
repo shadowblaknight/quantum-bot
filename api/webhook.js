@@ -233,20 +233,29 @@ module.exports = async (req, res) => {
   });
 
   // ── 12. Telegram confirmation (uses V12 formatter) ─────────────────
-  notifyTradePlaced({
-    asset: assetId,
-    direction: p.direction,
-    lot,
-    entry,
-    sl,
-    tpLevels: [
-      { price: tp1, rMultiple: 1.0, source: 'Pine TP1' },
-      { price: tp2, rMultiple: 2.0, source: 'Pine TP2' },
-      { price: tp3, rMultiple: 3.0, source: 'Pine TP3' },
-    ],
-    riskDollars,
-    brokerOrderId: placement.orderId,
-  }).catch(() => {});
+  // CRITICAL: await this. Vercel serverless functions terminate when the
+  // response is sent — fire-and-forget Telegram calls get killed mid-fetch.
+  let telegramResult;
+  try {
+    telegramResult = await notifyTradePlaced({
+      asset: assetId,
+      direction: p.direction,
+      lot,
+      entry,
+      sl,
+      tpLevels: [
+        { price: tp1, rMultiple: 1.0, source: 'Pine TP1' },
+        { price: tp2, rMultiple: 2.0, source: 'Pine TP2' },
+        { price: tp3, rMultiple: 3.0, source: 'Pine TP3' },
+      ],
+      riskDollars,
+      brokerOrderId: placement.orderId,
+    });
+    console.log('[webhook] telegram result:', JSON.stringify(telegramResult));
+  } catch (e) {
+    console.error('[webhook] telegram notify failed:', e.message);
+    telegramResult = { sent: false, error: e.message };
+  }
 
   // ── 13. Done ───────────────────────────────────────────────────────
   return res.status(200).json({
@@ -262,6 +271,7 @@ module.exports = async (req, res) => {
     tp1, tp2, tp3,
     riskDollars,
     template: p.template,
+    telegram: telegramResult,
     durationMs: Date.now() - t0,
   });
 };
