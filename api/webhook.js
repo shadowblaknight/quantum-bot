@@ -140,10 +140,14 @@ module.exports = async (req, res) => {
   }
 
   // ── 4. Resolve Pine ticker → V12 asset id ──────────────────────────
-  const pineTicker = (p.symbol || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Pine sends syminfo.tickerid which can include exchange prefix (e.g. "OANDA:XAUUSD"
+  // or "VANTAGE:NAS100"). Strip the prefix before mapping.
+  const rawSymbol = (p.symbol || '').toUpperCase();
+  const colonIdx = rawSymbol.lastIndexOf(':');
+  const pineTicker = (colonIdx >= 0 ? rawSymbol.slice(colonIdx + 1) : rawSymbol).replace(/[^A-Z0-9]/g, '');
   const assetId = PINE_TO_ASSET[pineTicker];
   if (!assetId) {
-    return res.status(400).json({ ok: false, error: `unknown symbol: ${p.symbol}` });
+    return res.status(400).json({ ok: false, error: `unknown symbol: ${p.symbol} (extracted: ${pineTicker})` });
   }
 
   // ── 5. Dedupe ──────────────────────────────────────────────────────
