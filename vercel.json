@@ -1,13 +1,9 @@
 {
   "version": 2,
   "functions": {
-    "api/cron.js": {
+    "api/webhook.js": {
       "memory": 1024,
-      "maxDuration": 60
-    },
-    "api/watcher.js": {
-      "memory": 1024,
-      "maxDuration": 60
+      "maxDuration": 30
     },
     "api/execute.js": {
       "memory": 1024,
@@ -17,27 +13,11 @@
       "memory": 1024,
       "maxDuration": 30
     },
-    "api/coherence-checker.js": {
-      "memory": 1024,
-      "maxDuration": 30
-    },
-    "api/state.js": {
-      "memory": 512,
-      "maxDuration": 10
-    },
     "api/broker.js": {
       "memory": 512,
       "maxDuration": 30
     },
-    "api/candle-source.js": {
-      "memory": 512,
-      "maxDuration": 30
-    },
     "api/news-context.js": {
-      "memory": 512,
-      "maxDuration": 15
-    },
-    "api/recognition-memory.js": {
       "memory": 512,
       "maxDuration": 15
     },
@@ -49,18 +29,6 @@
       "memory": 256,
       "maxDuration": 10
     },
-    "api/cockpit-grid.js": {
-      "memory": 256,
-      "maxDuration": 10
-    },
-    "api/watchlist.js": {
-      "memory": 256,
-      "maxDuration": 10
-    },
-    "api/quotes.js": {
-      "memory": 256,
-      "maxDuration": 15
-    },
     "api/diag.js": {
       "memory": 512,
       "maxDuration": 30
@@ -68,7 +36,7 @@
   },
   "crons": [
     {
-      "path": "/api/cron",
+      "path": "/api/manage-trades",
       "schedule": "* * * * *"
     }
   ],
