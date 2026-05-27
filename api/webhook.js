@@ -225,12 +225,65 @@ module.exports = async (req, res) => {
     return res.status(500).json({ ok: false, error: placement.error, dedupeKey });
   }
 
-  // ── 11. Mark executed (dedupe) ─────────────────────────────────────
+ // ── 11. Mark executed (dedupe) ─────────────────────────────────────
   await markExecuted(dedupeKey, {
     brokerOrderId: placement.orderId,
     template: p.template,
     placedAt: Date.now(),
   });
+
+  // ── 11b. Write pending-setup record so manage-trades can manage it ─
+  // manage-trades.js looks up pending records in `v12:watcher:{asset}:pending`
+  // to know TPs, sizing, and to feed recognition memory on close.
+  // The schema mirrors V12's coherence-checker output so the existing
+  // management logic (partial closes, BE moves, trailing, KNN feed) works
+  // unchanged on V13-placed positions.
+  try {
+    const { addPendingSetup } = require('./watcher');
+    const pendingRecord = {
+      id: `setup_${assetId}_v13_${p.timestamp}_${Date.now()}`,
+      asset: assetId,
+      setup: {
+        direction: p.direction,
+        mode: 'DAY',
+        session: p.window || (p.swept ? `swept ${p.swept}` : 'unknown'),
+        contributingTactics: [p.template],
+        timeframesInPlay: [p.timeframe],
+        slDistance: Math.abs(entry - sl),
+        slDistanceATR: parseFloat(p.impulseATR) || null,
+        entry,
+        sl,
+        targets: [
+          { price: tp1, rMultiple: 1.0 },
+          { price: tp2, rMultiple: 2.0 },
+          { price: tp3, rMultiple: 3.0 },
+        ],
+        template: p.template,
+      },
+      recognition: { advice: 'neutral', matchCount: 0, wins: 0, losses: 0, confidence: 'none' },
+      sizing: { baseLot: lot, recommendedLot: lot, baseRisk: riskDollars },
+      plannedEntry: entry,
+      slPrice: sl,
+      tpLevels: [
+        { price: tp1, rMultiple: 1.0, source: 'Pine TP1' },
+        { price: tp2, rMultiple: 2.0, source: 'Pine TP2' },
+        { price: tp3, rMultiple: 3.0, source: 'Pine TP3' },
+      ],
+      newsFeature: { newsState: 'none', highImpactWithin60min: false },
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 4 * 60 * 60 * 1000, // 4 hours
+      status: 'placed',
+      brokerOrderId: placement.orderId,
+      comment,
+      positionId: null,
+      v13: true,
+    };
+    await addPendingSetup(assetId, pendingRecord);
+    console.log('[webhook] pending setup written for manage-trades:', pendingRecord.id);
+  } catch (e) {
+    // Non-fatal — order is at broker, but manage-trades won't manage it for partials.
+    console.error('[webhook] pending setup write failed:', e.message);
+  }
 
   // ── 12. Telegram confirmation (uses V12 formatter) ─────────────────
   // CRITICAL: await this. Vercel serverless functions terminate when the

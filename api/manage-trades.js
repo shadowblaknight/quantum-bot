@@ -189,9 +189,9 @@ async function setPositionState(positionId, state) {
 async function managePosition(position) {
   if (!isTradingEnabled()) return { id: position.id, skipped: 'trading-disabled' };
 
-  // V12 positions are recognized by comment prefix
-  if (!position.comment || !position.comment.startsWith('QB-V12-')) {
-    return { id: position.id, skipped: 'not-v12-position' };
+  // V12 + V13 positions are recognized by comment prefix
+  if (!position.comment || !(position.comment.startsWith('QB-V12-') || position.comment.startsWith('QB-V13-'))) {
+    return { id: position.id, skipped: 'not-managed-position' };
   }
 
   // Resolve asset
@@ -573,23 +573,22 @@ async function runManageTick() {
       skipped: 'broker-positions-unavailable',
     };
   }
-  const v12Positions = positions.filter((p) => p.comment && p.comment.startsWith('QB-V12-'));
+  const managedPositions = positions.filter((p) => p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-')));
 
-  // 1. Manage each open V12 position
-  const manageResults = await Promise.all(v12Positions.map(managePosition));
+  // 1. Manage each open V12+V13 position
+  const manageResults = await Promise.all(managedPositions.map(managePosition));
 
   // 2. Detect any positions that closed since last tick → feed recognition memory
   const openIds = positions.map((p) => p.id);
   const recordings = await detectAndProcessClosed(openIds);
 
-  return {
+ return {
     ts: Date.now(),
     tradingEnabled: true,
-    openCount: v12Positions.length,
+    openCount: managedPositions.length,
     manageResults,
     closedAndRecorded: recordings,
   };
-}
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
