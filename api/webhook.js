@@ -45,22 +45,52 @@ const PINE_TO_ASSET = {
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60; // 1 hour — covers the signal expiry window
 
-// Per-asset safety guards (prevents sub-noise stops → oversized leverage bombs).
-// minSLPrice = absolute minimum stop distance in PRICE units for that asset.
-// maxLot = hard cap on position size for this account tier.
-// DEMO VALIDATION MODE — SL floor disabled (minSLPrice: 0 = no rejections).
-// Lot caps kept generous so orders fill; only BTC is capped tight because
-// crypto CFD leverage is low and a big BTC lot gets margin-rejected by the broker.
-// ⚠️ BEFORE GOING LIVE: restore real minSLPrice values (see chat history).
+// These caps ensure orders ACTUALLY FILL even on tight-stop setups (otherwise
+// suggestedLot balloons → broker rejects with 500). Normal-stop trades won't
+// hit these caps; only pathologically tight stops do, where capping is the
+// correct behavior anyway.
+// ⚠️ BEFORE GOING LIVE: also restore minSLPrice floors (see chat history).
 const ASSET_SAFETY = {
-  gold:   { minSLPrice: 0, maxLot: 5.0 },
-  eurusd: { minSLPrice: 0, maxLot: 10.0 },
-  gbpusd: { minSLPrice: 0, maxLot: 10.0 },
-  usdjpy: { minSLPrice: 0, maxLot: 10.0 },
-  nas100: { minSLPrice: 0, maxLot: 5.0 },
-  us500:  { minSLPrice: 0, maxLot: 5.0 },
-  btc:    { minSLPrice: 0, maxLot: 0.08 },  // margin-fit only, NOT a filter
+  gold:   { minSLPrice: 0, maxLot: 0.50 },
+  eurusd: { minSLPrice: 0, maxLot: 1.50 },
+  gbpusd: { minSLPrice: 0, maxLot: 1.50 },
+  usdjpy: { minSLPrice: 0, maxLot: 1.50 },
+  nas100: { minSLPrice: 0, maxLot: 0.50 },
+  us500:  { minSLPrice: 0, maxLot: 0.50 },
+  btc:    { minSLPrice: 0, maxLot: 0.08 },
 };
+// Race a promise against a timeout. Resolves to `fallback` if `promise` doesn't
+// finish within `ms`. Errors in the promise also resolve to `fallback` (silent).
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+// Fast capital lookup: bounded fetchAccount + Redis-cached fallback.
+// If MetaAPI is slow or fails, we fall back to last-known balance instead of
+// blocking the whole webhook response (which is what causes TradingView timeouts).
+const BALANCE_CACHE_KEY = 'v13:account:balance';
+async function getCapitalFast() {
+  const r = getRedis();
+  const account = await withTimeout(fetchAccount(), 2000, null);
+  if (account && (account.balance || account.equity)) {
+    const bal = account.balance || account.equity;
+    if (r) {
+      try { await r.set(BALANCE_CACHE_KEY, String(bal), { ex: 86400 }); } catch (_) {}
+    }
+    return bal;
+  }
+  // Fallback: last cached balance, then a conservative default
+  if (r) {
+    try {
+      const raw = await r.get(BALANCE_CACHE_KEY);
+      if (raw) return parseFloat(raw);
+    } catch (_) {}
+  }
+  return 10000;
+}
 function isTradingEnabled() {
   return process.env.QB_TRADING_ENABLED === 'true';
 }
@@ -177,8 +207,10 @@ module.exports = async (req, res) => {
     });
   }
 
-  // ── 6. Position already open? ──────────────────────────────────────
-  const positions = await fetchPositions().catch(() => []);
+  // ── 6. Position already open? (bounded — skip check if broker is slow) ──
+  // Worst case: 1.5s then we proceed. Redis dedupe already prevents true doubles,
+  // so skipping a slow position check is safe — it's a "nice to have" guard.
+  const positions = await withTimeout(fetchPositions(), 1500, []);
   const existing = (Array.isArray(positions) ? positions : []).find((pos) => {
     return (pos.assetId === assetId) ||
            (pos.symbol && pineTicker && pos.symbol.toUpperCase().includes(pineTicker));
@@ -231,11 +263,9 @@ module.exports = async (req, res) => {
     });
   }
 
-  // ── 9. Compute lot size for THIS user (single-tenant in V13) ──────
-  const account = await fetchAccount().catch(() => null);
-  const capital = (account && (account.balance || account.equity)) || 10000;
+ // ── 9. Compute lot size (bounded fetch + Redis-cached balance) ─────
+  const capital = await getCapitalFast();
   const riskPercent = parseFloat(process.env.QB_RISK_PERCENT || '0.01'); // 1% default
-
   const sizing = suggestLot({ assetId, slDistance, capital, riskPercent });
   if (sizing.error) {
     return res.status(500).json({ ok: false, error: `sizing failed: ${sizing.error}` });
