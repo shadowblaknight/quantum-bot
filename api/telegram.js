@@ -200,15 +200,25 @@ async function notifySetupBrewing({ asset, direction, mode, entry, sl, atrValue,
 // =================================================================
 // Fires when limit order is actually placed by execute.js
 
-async function notifyTradePlaced({ asset, direction, lot, entry, sl, tpLevels, riskDollars, brokerOrderId }) {
+async function notifyTradePlaced({ asset, direction, lot, entry, sl, tpLevels, riskDollars, brokerOrderId, template }) {
   const dedupeKey = `placed:${brokerOrderId || `${asset}-${entry}-${Date.now()}`}`;
 
   const tpLines = (tpLevels || []).slice(0, 4).map((tp, i) =>
     `TP${i + 1}: <code>${formatPrice(tp.price, asset)}</code> (${tp.rMultiple?.toFixed(1) || '?'}R) — ${tp.source || ''}`
   ).join('\n');
 
+  const templateLabels = {
+    'silver-bullet': '🥈 Silver Bullet',
+    'unicorn': '🦄 Unicorn',
+    'turtle-soup': '🐢 Turtle Soup',
+    'judas-swing': '🎭 Judas Swing',
+    'ote-continuation': '🎯 OTE Continuation',
+  };
+  const tmplLine = template ? `Setup: <b>${templateLabels[template] || template}</b>\n` : '';
+
   const text =
     `📤 <b>Order Placed — ${assetLabel(asset)}</b>\n\n` +
+    tmplLine +
     `${dirArrow(direction)}  •  ${lot} lot\n` +
     `Entry: <code>${formatPrice(entry, asset)}</code>\n` +
     `SL: <code>${formatPrice(sl, asset)}</code>\n` +

@@ -45,6 +45,18 @@ const PINE_TO_ASSET = {
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60; // 1 hour — covers the signal expiry window
 
+// Per-asset safety guards (prevents sub-noise stops → oversized leverage bombs).
+// minSLPrice = absolute minimum stop distance in PRICE units for that asset.
+// maxLot = hard cap on position size for this account tier.
+const ASSET_SAFETY = {
+  gold:   { minSLPrice: 2.0,    maxLot: 0.40 },  // $2.00 min stop on XAUUSD
+  eurusd: { minSLPrice: 0.0007, maxLot: 1.50 },  // 7 pips
+  gbpusd: { minSLPrice: 0.0008, maxLot: 1.50 },  // 8 pips
+  usdjpy: { minSLPrice: 0.070,  maxLot: 1.50 },  // 7 pips (JPY pip = 0.01)
+  nas100: { minSLPrice: 10.0,   maxLot: 1.50 },  // 10 index points
+  us500:  { minSLPrice: 4.0,    maxLot: 1.50 },
+  btc:    { minSLPrice: 50.0,   maxLot: 0.30 },  // $50
+};
 function isTradingEnabled() {
   return process.env.QB_TRADING_ENABLED === 'true';
 }
@@ -193,18 +205,45 @@ module.exports = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid entry/sl/tp1 in payload' });
   }
 
+  // ── 8b. SAFETY: reject sub-noise stops (the leverage-bomb guard) ───
+  // A stop tighter than the asset floor forces a huge lot to hit the risk
+  // budget. We reject rather than trade, to protect the account.
+  const safety = ASSET_SAFETY[assetId] || { minSLPrice: 0, maxLot: 999 };
+  const slDistance = Math.abs(entry - sl);
+  if (safety.minSLPrice > 0 && slDistance < safety.minSLPrice) {
+    sendOnce(`sl-too-tight:${dedupeKey}`,
+      `⚠️ <b>Signal REJECTED — ${pineTicker}</b>\n\n` +
+      `Template: ${p.template}\n` +
+      `Stop distance (${slDistance}) is below the safety floor (${safety.minSLPrice}).\n` +
+      `A stop this tight would force a dangerously oversized position. Skipped.`
+    ).catch(() => {});
+    return res.status(200).json({
+      ok: true,
+      executed: false,
+      reason: 'sl-too-tight',
+      slDistance,
+      minRequired: safety.minSLPrice,
+      template: p.template,
+    });
+  }
+
   // ── 9. Compute lot size for THIS user (single-tenant in V13) ──────
   const account = await fetchAccount().catch(() => null);
   const capital = (account && (account.balance || account.equity)) || 10000;
   const riskPercent = parseFloat(process.env.QB_RISK_PERCENT || '0.01'); // 1% default
 
-  const slDistance = Math.abs(entry - sl);
   const sizing = suggestLot({ assetId, slDistance, capital, riskPercent });
   if (sizing.error) {
     return res.status(500).json({ ok: false, error: `sizing failed: ${sizing.error}` });
   }
-  const lot = sizing.suggestedLot;
+  let lot = sizing.suggestedLot;
   const riskDollars = sizing.riskDollars;
+
+  // ── 9b. SAFETY: cap lot at per-asset maximum (backstop) ────────────
+  if (lot > safety.maxLot) {
+    console.warn(`[webhook] lot ${lot} exceeds cap ${safety.maxLot} for ${assetId} — capping`);
+    lot = safety.maxLot;
+  }
 
   // ── 10. Place the limit order ──────────────────────────────────────
   const comment = `QB-V13-${p.template}-${(p.window || p.swept || '').slice(0, 12)}`.slice(0, 64);
@@ -294,7 +333,7 @@ module.exports = async (req, res) => {
   // response is sent — fire-and-forget Telegram calls get killed mid-fetch.
   let telegramResult;
   try {
-    telegramResult = await notifyTradePlaced({
+   telegramResult = await notifyTradePlaced({
       asset: assetId,
       direction: p.direction,
       lot,
@@ -307,6 +346,7 @@ module.exports = async (req, res) => {
       ],
       riskDollars,
       brokerOrderId: placement.orderId,
+      template: p.template,
     });
     console.log('[webhook] telegram result:', JSON.stringify(telegramResult));
   } catch (e) {
