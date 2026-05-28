@@ -1,5 +1,5 @@
 /* eslint-disable */
-// V12 — api/manage-trades.js
+// V13 — api/manage-trades.js
 //
 // Manages open positions through their full lifecycle:
 //   - Detects when limit order fills → marks pending as 'filled', records actual entry
@@ -18,7 +18,7 @@
 //
 // CRITICAL SAFETY:
 //   - Only acts if QB_TRADING_ENABLED === 'true'
-//   - Won't touch positions not opened by V12 (recognized via comment prefix)
+//   - Recognizes V12 ('QB-V12-') and V13 ('QB-V13-') positions by comment prefix
 //   - All MetaAPI calls have error handling — failures don't crash watcher
 // ----------------------------------------------------------------------------
 
@@ -32,7 +32,6 @@ const { notifyTPHit, notifySLHit, notifyTradeClosed } = require('./telegram');
 
 // ===== Position management state =====
 const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
-// Stores: { tpsHit: ['TP1', 'TP2'], slMoves: [...], partialCloses: [...], originalLot, ... }
 
 // ===== Trading enabled gate =====
 function isTradingEnabled() {
@@ -42,13 +41,6 @@ function isTradingEnabled() {
 // =================================================================
 // $ ESTIMATION FROM PRICE DISTANCE
 // =================================================================
-// Used for telegram TP-hit notifications where we don't yet have
-// a closed deal in MetaAPI history. Uses asset-registry pipSize +
-// dollarPerPipPerLot for accurate-enough estimate.
-//
-// For final close summary (notifyTradeClosed), we use the EXACT P&L
-// from MetaAPI history-deals — this estimate is only used for
-// in-flight partial-close notifications.
 
 function estimateDollarsFromDistance(assetId, distance, lot) {
   const meta = getAssetById(assetId);
@@ -57,15 +49,12 @@ function estimateDollarsFromDistance(assetId, distance, lot) {
   return pips * meta.dollarPerPipPerLot * lot;
 }
 
-// Sign-aware variant: returns POSITIVE when tpPrice is in the profit direction
-// from entry, NEGATIVE when it's against. Critical for notification accuracy —
-// without this, a position closed at a loss would report a fake positive
-// "secured" amount because |distance| × multiplier is always positive.
+// Sign-aware variant: returns POSITIVE when exitPrice is in profit direction,
+// NEGATIVE when against. Critical for notification accuracy.
 function signedDollarsForLeg(assetId, entryPrice, exitPrice, direction, lot) {
   const meta = getAssetById(assetId);
   if (!meta || !meta.pipSize || !meta.dollarPerPipPerLot) return null;
   const isLong = direction === 'LONG';
-  // For LONG: profit when exit > entry; for SHORT: profit when exit < entry.
   const signedDistance = isLong ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
   const signedPips = signedDistance / meta.pipSize;
   return signedPips * meta.dollarPerPipPerLot * lot;
@@ -78,15 +67,10 @@ async function modifyPosition(positionId, slPrice, tpPrice, assetId) {
   const region = process.env.METAAPI_REGION || 'london';
   const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/trade`;
 
-  // V12.4.1: round to broker pip increment to avoid INVALID_PRICE rejections.
-  // If assetId is passed, we know the pipSize. Without it, prices pass through.
   let sl = slPrice, tp = tpPrice;
   if (assetId) {
     const meta = getAssetById(assetId);
-    if (meta?.pipSize) {
-      // We don't know direction here, so use 'nearest' for both. The caller
-      // already chose the levels with direction in mind; this just snaps to
-      // a valid quote precision.
+    if (meta && meta.pipSize) {
       sl = roundToPipSize(slPrice, meta.pipSize, 'nearest');
       tp = roundToPipSize(tpPrice, meta.pipSize, 'nearest');
     }
@@ -203,11 +187,6 @@ async function managePosition(position) {
 
   // Find pending setup that matches this position.
   //
-  // CRITICAL: matching must be precise. A previous bug used a 1% tolerance
-  // (46 pts for gold!) which would match COMPLETELY DIFFERENT setups whose
-  // TP levels pointed the wrong direction — causing the bot to report SL
-  // hits as "TP hits" with sign-inverted dollar amounts.
-  //
   // Strategy:
   //   1. Prefer matching by positionId (set when first managed) — exact match
   //   2. Fallback to strict price + direction + TP-direction-sanity check
@@ -221,7 +200,6 @@ async function managePosition(position) {
 
   // Pass 2: strict first-fill match
   if (!matchedPending) {
-    // Tighter tolerance: for gold, 2 points; for fx-like, 0.05% of price
     const isGold = position.openPrice > 100;
     const priceTolerance = isGold ? 2.0 : position.openPrice * 0.0005;
 
@@ -231,9 +209,6 @@ async function managePosition(position) {
       if (Math.abs(p.plannedEntry - position.openPrice) > priceTolerance) return false;
 
       // Sanity check: TPs must point the correct direction relative to entry.
-      // For SHORT: all TP prices should be BELOW entry.
-      // For LONG: all TP prices should be ABOVE entry.
-      // If they don't, this pending is from a different context — reject the match.
       const entry = position.openPrice;
       const tps = p.tpLevels || [];
       if (tps.length === 0) return false;
@@ -291,17 +266,13 @@ async function managePosition(position) {
   const actions = [];
 
   // TP HIT DETECTION
-  // For LONG: TP hit when current price >= TP level
-  // For SHORT: TP hit when current price <= TP level
   for (let i = 0; i < tpLevels.length && i < 4; i++) {
     const tpName = `TP${i + 1}`;
     if (state.tpsHit.includes(tpName)) continue;
 
     const tpPrice = tpLevels[i].price;
 
-    // SAFETY: TP must be on the profit side of entry. If it isn't, the
-    // matched pending setup is bogus (probably a stale one with TPs from a
-    // different context). Skip detection to avoid reporting SL hits as wins.
+    // SAFETY: TP must be on the profit side of entry.
     const tpOnProfitSide = isLong ? tpPrice > state.entry : tpPrice < state.entry;
     if (!tpOnProfitSide) {
       actions.push({ action: 'tp-skipped', tpName, reason: 'tp-on-loss-side', tpPrice, entry: state.entry });
@@ -313,7 +284,6 @@ async function managePosition(position) {
     if (hit) {
       // Partial close: 25% of original lot
       const closeAmount = Math.max(0.01, Math.round(state.originalLot * 0.25 * 100) / 100);
-      const remaining = position.volume - closeAmount;
 
       // Special case: if this is TP4 (final), close everything remaining
       const closingFinalTP = (i === 3) || (i === tpLevels.length - 1);
@@ -328,10 +298,6 @@ async function managePosition(position) {
         await pushCommentary(asset, 'tp-hit',
           `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed ${lotToClose} lot`);
 
-        // Estimate $ for this leg + cumulative using SIGN-AWARE calculation.
-        // If tpPrice happens to be on the wrong side of entry (e.g. due to a
-        // stale-pending matching bug), the result will be NEGATIVE and the
-        // notification will show the truth, not a fake gain.
         const dollarsThisLeg = signedDollarsForLeg(asset, state.entry, tpPrice, direction, lotToClose);
         const cumulativeDollars = (state.partialCloses || []).reduce((sum, pc) => {
           const d = signedDollarsForLeg(asset, state.entry, pc.atPrice, direction, pc.lotClosed) || 0;
@@ -342,15 +308,13 @@ async function managePosition(position) {
         //   TP1 hit → SL to entry (BE)
         //   TP2 hit → SL to TP1
         //   TP3 hit → SL to TP2
-        //   TP4 hit → all closed, no SL move needed
         let newSL = null;
         if (!closingFinalTP) {
-          if (i === 0) newSL = state.entry;                  // BE
-          else if (i === 1) newSL = tpLevels[0].price;       // SL to TP1
-          else if (i === 2) newSL = tpLevels[1].price;       // SL to TP2
+          if (i === 0) newSL = state.entry;
+          else if (i === 1) newSL = tpLevels[0].price;
+          else if (i === 2) newSL = tpLevels[1].price;
 
           if (newSL != null) {
-            // Keep the next TP as the broker's TP target
             const nextTPPrice = tpLevels[i + 1] ? tpLevels[i + 1].price : tpPrice;
             const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice, asset);
             if (modifyResult.ok) {
@@ -391,13 +355,11 @@ async function managePosition(position) {
   }
 
   // TRAILING STOP (when 2R+ in profit)
-  // SL initial distance = entry to original SL
   const initialSLDistance = Math.abs(state.entry - matchedPending.slPrice);
   const profitDistance = isLong ? currentPrice - state.entry : state.entry - currentPrice;
   const profitR = initialSLDistance > 0 ? profitDistance / initialSLDistance : 0;
 
   if (profitR >= 2.0 && state.tpsHit.length >= 2) {
-    // Compute trailing SL: 1 ATR behind current price
     const candles = await fetchCandles(asset, '1h', 30);
     const atrValue = atr(candles.candles || [], 14);
     if (atrValue) {
@@ -405,7 +367,6 @@ async function managePosition(position) {
       const trailSL = isLong ? currentPrice - trailDistance : currentPrice + trailDistance;
       const currentSL = position.stopLoss;
 
-      // Only move SL more favorable, never against
       const wouldImprove = isLong ? trailSL > currentSL : trailSL < currentSL;
       const lastMove = state.slMoves[state.slMoves.length - 1];
       const lastMoveAge = lastMove ? Date.now() - lastMove.ts : Infinity;
@@ -433,15 +394,12 @@ async function managePosition(position) {
 // =================================================================
 // CLOSE DETECTION + RECOGNITION FEED
 // =================================================================
-// On each tick, check positions that USED to be open but are now gone.
-// For each, fetch the closing deal from MetaAPI's history, build a feature
-// vector, and store in recognition memory.
 
 async function detectAndProcessClosed(currentOpenIds) {
   const r = getRedis();
   if (!r) return [];
 
-  // Track which V12 positions we've seen recently
+  // Track which V12/V13 positions we've seen recently
   const KNOWN_KEY = 'v12:positions:known';
   const knownRaw = await r.get(KNOWN_KEY).catch(() => null);
   const known = safeParse(knownRaw) || [];
@@ -456,7 +414,6 @@ async function detectAndProcessClosed(currentOpenIds) {
 
   if (closed.length === 0) return [];
 
-  // For each closed position, get its state (which has the linked pending setup)
   const recentDeals = await fetchClosedTradesRecent();
   const recordings = [];
 
@@ -464,19 +421,16 @@ async function detectAndProcessClosed(currentOpenIds) {
     const state = await getPositionState(positionId);
     if (!state) continue;
 
-    // Find deals for this position
     const positionDeals = recentDeals.filter((d) => d.positionId === positionId);
     if (positionDeals.length === 0) continue;
 
     // Compute total realized P&L
     const totalPnL = positionDeals.reduce((sum, d) => sum + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
 
-    // Find the matching pending setup (it has the feature vector)
     const pendingList = await getPendingSetups(state.asset);
     const matchedPending = pendingList.find((p) => p.id === state.pendingId);
     if (!matchedPending) continue;
 
-    // Build the closed trade record for recognition memory
     const closedTrade = {
       id: `trade_${state.asset}_${positionId}`,
       asset: state.asset,
@@ -489,9 +443,9 @@ async function detectAndProcessClosed(currentOpenIds) {
       slDistanceATR: matchedPending.setup.slDistanceATR,
       pnl: totalPnL,
       riskDollars: matchedPending.sizing.baseRisk,
-      newsState: matchedPending.newsFeature?.newsState || 'none',
-      highImpactWithin60min: matchedPending.newsFeature?.highImpactWithin60min || false,
-      enabledTools: null, // V12.1 — when we have per-user tool config
+      newsState: matchedPending.newsFeature ? matchedPending.newsFeature.newsState : 'none',
+      highImpactWithin60min: matchedPending.newsFeature ? matchedPending.newsFeature.highImpactWithin60min : false,
+      enabledTools: null,
       openedAt: state.createdAt,
       closedAt: Date.now(),
       synthetic: false,
@@ -500,29 +454,22 @@ async function detectAndProcessClosed(currentOpenIds) {
     const stored = await storeClosedTrade(closedTrade);
     recordings.push({ positionId, asset: state.asset, pnl: totalPnL, stored });
 
-    // Update pending status
     await updatePendingSetup(state.asset, state.pendingId, {
       status: 'closed',
       finalPnL: totalPnL,
       closedAt: Date.now(),
     });
 
-    // Commentary
     const outcome = totalPnL > 0.5 ? '✓ WIN' : totalPnL < -0.5 ? '✗ LOSS' : '— BE';
     await pushCommentary(state.asset, 'trade-closed',
       `${outcome} — ${state.direction} closed: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
 
     // Telegram: trade closed
-    // Determine if this was a clean SL hit (no TPs hit) vs partial-then-SL vs full TP sweep.
-    // tpsHit array tells us tier. SL hit when 0 TPs hit AND outcome is loss.
     try {
       const tpsHit = state.tpsHit || [];
       const isCleanSLHit = tpsHit.length === 0 && totalPnL < -0.5;
 
       if (isCleanSLHit) {
-        // Just an SL hit — no partials secured
-        // Find the SL price: it's the matchedPending.slPrice (original SL)
-        // unless trail moved it; check state.slMoves for last move
         const lastSL = state.slMoves && state.slMoves.length > 0
           ? state.slMoves[state.slMoves.length - 1].newSL
           : matchedPending.slPrice;
@@ -534,7 +481,6 @@ async function detectAndProcessClosed(currentOpenIds) {
           positionId,
         });
       } else {
-        // Trade closed with at least one TP, or BE, or trail
         await notifyTradeClosed({
           asset: state.asset,
           direction: state.direction,
@@ -560,10 +506,7 @@ async function runManageTick() {
     return { ts: Date.now(), tradingEnabled: false };
   }
 
-  // CRITICAL: If broker fetch fails, we MUST NOT proceed. Otherwise
-  // detectAndProcessClosed will see "no open positions" and mark every
-  // previously-tracked position as just-closed, corrupting the track
-  // record and firing fake Telegram notifications.
+  // CRITICAL: If broker fetch fails, we MUST NOT proceed.
   const positions = await fetchPositions();
   if (positions === null) {
     console.warn('[manage-trades] broker positions fetch failed — skipping tick to preserve state');
@@ -573,6 +516,8 @@ async function runManageTick() {
       skipped: 'broker-positions-unavailable',
     };
   }
+
+  // V13: accept both V12 and V13 positions
   const managedPositions = positions.filter((p) => p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-')));
 
   // 1. Manage each open V12+V13 position
@@ -582,13 +527,14 @@ async function runManageTick() {
   const openIds = positions.map((p) => p.id);
   const recordings = await detectAndProcessClosed(openIds);
 
- return {
+  return {
     ts: Date.now(),
     tradingEnabled: true,
     openCount: managedPositions.length,
     manageResults,
     closedAndRecorded: recordings,
   };
+}
 
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
