@@ -48,14 +48,18 @@ const DEDUPE_TTL = 60 * 60; // 1 hour — covers the signal expiry window
 // Per-asset safety guards (prevents sub-noise stops → oversized leverage bombs).
 // minSLPrice = absolute minimum stop distance in PRICE units for that asset.
 // maxLot = hard cap on position size for this account tier.
+// DEMO VALIDATION MODE — SL floor disabled (minSLPrice: 0 = no rejections).
+// Lot caps kept generous so orders fill; only BTC is capped tight because
+// crypto CFD leverage is low and a big BTC lot gets margin-rejected by the broker.
+// ⚠️ BEFORE GOING LIVE: restore real minSLPrice values (see chat history).
 const ASSET_SAFETY = {
-  gold:   { minSLPrice: 2.0,    maxLot: 0.40 },  // $2.00 min stop on XAUUSD
-  eurusd: { minSLPrice: 0.0007, maxLot: 1.50 },  // 7 pips
-  gbpusd: { minSLPrice: 0.0008, maxLot: 1.50 },  // 8 pips
-  usdjpy: { minSLPrice: 0.070,  maxLot: 1.50 },  // 7 pips (JPY pip = 0.01)
-  nas100: { minSLPrice: 10.0,   maxLot: 1.50 },  // 10 index points
-  us500:  { minSLPrice: 4.0,    maxLot: 1.50 },
-  btc:    { minSLPrice: 50.0,   maxLot: 0.30 },  // $50
+  gold:   { minSLPrice: 0, maxLot: 5.0 },
+  eurusd: { minSLPrice: 0, maxLot: 10.0 },
+  gbpusd: { minSLPrice: 0, maxLot: 10.0 },
+  usdjpy: { minSLPrice: 0, maxLot: 10.0 },
+  nas100: { minSLPrice: 0, maxLot: 5.0 },
+  us500:  { minSLPrice: 0, maxLot: 5.0 },
+  btc:    { minSLPrice: 0, maxLot: 0.08 },  // margin-fit only, NOT a filter
 };
 function isTradingEnabled() {
   return process.env.QB_TRADING_ENABLED === 'true';
