@@ -1,24 +1,18 @@
 /* eslint-disable */
 // =====================================================================
-// QUANTUM BOT V12 — FRONTEND
+// QUANTUM BOT V13 — FRONTEND
 // =====================================================================
-// Crystal black cockpit. Asset-aware throughout. No Claude in the runtime.
-//
-// Single-file React app following the same convention as V11.
-//
-// PAGES:
-//   /          — Cockpit (chart-first trading workstation)
-//   /portfolio — Equity curve + per-instrument overview
-//   /reports   — Performance + Recognition + Activity log
-//   /settings  — Theme + Tools & Display + Account + Instruments
-//
-// The backend V12 endpoints come online progressively across sessions 1-4.
-// In session 2 (this file), some panels will show "no data yet" — that's
-// expected. The visual shell is complete; the data plumbing fills in.
+// Update on top of V12. Same architecture, same endpoints, same look.
+// Only changes:
+//   1. TEMPLATE_DISPLAY map → pretty names (incl. "🌅 AM IFVG Reversal")
+//   2. --qb-text-faint defined in theme (was referenced but missing)
+//   3. meta.displayName → meta.name (displayName never existed)
+//   4. getPipSizeFor() helper (inline meta.pipSize was always undefined)
+//   5. AM IFVG kill zone awareness in the status row
+// Nothing else changed from V12.
 // =====================================================================
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-// V12.4: lightweight-charts removed — cockpit is no longer chart-based.
 
 // =====================================================================
 // SECTION 1: CONSTANTS, ENDPOINTS, STORAGE KEYS
@@ -28,69 +22,73 @@ const API = (path) => `/api/${path}`;
 const PREFS_KEY = "qb_v12_prefs";
 const THEME_KEY = "qb_v12_theme";
 
-// Trading sessions — used for context labeling
 const SESSION_LABELS = ["ASIAN", "LONDON", "OVERLAP", "NEW_YORK"];
+
+// V13: pretty display names for templates that arrive from Pine via webhook.
+// Backend stores raw template strings (silver-bullet, am-ifvg, etc.). The UI
+// maps them to readable names with an emoji glyph for quick visual scanning.
+const TEMPLATE_DISPLAY = {
+  "silver-bullet":     "🥈 Silver Bullet",
+  "unicorn":           "🦄 Unicorn",
+  "turtle-soup":       "🐢 Turtle Soup",
+  "judas-swing":       "🎭 Judas Swing",
+  "ote-continuation":  "📈 OTE Continuation",
+  "am-ifvg":           "🌅 AM IFVG Reversal",
+};
+
+function displayTemplate(raw) {
+  if (!raw) return "setup";
+  return TEMPLATE_DISPLAY[raw] || raw;
+}
 
 // =====================================================================
 // SECTION 2: THEME SYSTEM
 // =====================================================================
-// Crystal black + cyan accent default. User can override every color in
-// Settings → Theme. Stored in localStorage + synced to Redis (later).
-// =====================================================================
 
 const DEFAULT_THEME = {
-  // Backgrounds (crystal black with subtle blue-violet undertone)
   bgBase:       "#0a0b0f",
   bgLayer:      "#0e1014",
-  bgGlass:      "rgba(15,17,22,0.5)",  // for transparent overlays
+  bgGlass:      "rgba(15,17,22,0.5)",
 
-  // Borders
   border:       "rgba(255,255,255,0.06)",
   borderActive: "rgba(0,217,255,0.4)",
 
-  // Text
   textPrimary:  "#e8e8ed",
   textMuted:    "#7a7a85",
   textDim:      "#4a4a55",
+  textFaint:    "#3a3a45",   // V13: was missing; --qb-text-faint is used throughout
 
-  // Accent (the "alive" color)
-  accent:       "#00d9ff",     // cyan glow
+  accent:       "#00d9ff",
   accentSoft:   "rgba(0,217,255,0.15)",
 
-  // Direction colors (TradingView-style)
-  upStrong:     "#00e676",     // bright green for candles, P&L positive
-  downStrong:   "#ff3b5c",     // bright red for candles, P&L negative
+  upStrong:     "#00e676",
+  downStrong:   "#ff3b5c",
   upSoft:       "rgba(0,230,118,0.15)",
   downSoft:     "rgba(255,59,92,0.15)",
 
-  // News indicator
-  newsScheduled: "#ffd166",    // yellow — news today
-  newsImminent:  "#ff9a3c",    // amber — within 30 min
-  newsLive:      "#ff2050",    // red — happening now (pulses)
+  newsScheduled: "#ffd166",
+  newsImminent:  "#ff9a3c",
+  newsLive:      "#ff2050",
 
-  // Tactic overlay colors
   obBullish:    "rgba(0,230,118,0.10)",
   obBearish:    "rgba(255,59,92,0.10)",
   fvgBullish:   "rgba(0,230,118,0.08)",
   fvgBearish:   "rgba(255,59,92,0.08)",
-  asianLevel:   "#a78bfa",     // violet
-  londonLevel:  "#22d3ee",     // cyan
-  nyLevel:      "#f59e0b",     // amber
-  pdhPdl:       "#fb923c",     // orange
-  swingLevel:   "#94a3b8",     // slate
-  weeklyOpen:   "#f59e0b",     // amber
-  roundLevel:   "#64748b",     // muted
+  asianLevel:   "#a78bfa",
+  londonLevel:  "#22d3ee",
+  nyLevel:      "#f59e0b",
+  pdhPdl:       "#fb923c",
+  swingLevel:   "#94a3b8",
+  weeklyOpen:   "#f59e0b",
+  roundLevel:   "#64748b",
 
-  // Position lines
-  posEntry:     "#fbbf24",     // gold yellow
-  posSL:        "#dc2626",     // red
-  posTPpending: "#22c55e",     // green dashed (pending TP)
-  posTPhit:     "#10b981",     // green solid (hit TP)
+  posEntry:     "#fbbf24",
+  posSL:        "#dc2626",
+  posTPpending: "#22c55e",
+  posTPhit:     "#10b981",
 
-  // Chart grid
-  gridIntensity: 0.05,         // 5% white
+  gridIntensity: 0.05,
 
-  // Fonts
   fontMono:     "'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace",
   fontSans:     "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
 };
@@ -110,7 +108,6 @@ function saveTheme(theme) {
   try { localStorage.setItem(THEME_KEY, JSON.stringify(theme)); } catch (_) {}
 }
 
-// Apply theme as CSS variables on root (so anywhere can use them)
 function applyThemeToRoot(theme) {
   const root = document.documentElement;
   for (const [k, v] of Object.entries(theme)) {
@@ -131,25 +128,24 @@ function camelToKebab(s) {
 const DEFAULT_PREFS = {
   selectedAsset:    "gold",
   selectedTF:       "1h",
-  watchlist:        ["gold", "btc", "eurusd"],   // asset IDs
+  watchlist:        ["gold", "btc", "eurusd"],
   perInstrumentLot: { gold: 0.05, btc: 0.01, eurusd: 0.05 },
-  pauseOnAsset:     {},                          // { gold: false, btc: false, ... }
+  pauseOnAsset:     {},
   pauseSettings: {
-    suggestStopAfterDailyLoss: 200,    // dollars
+    suggestStopAfterDailyLoss: 200,
     suggestStopAfterDailyGain: 500,
     suggestStopAfterLossStreak: 3,
   },
   toolsConfig: {
-    // tactic: [showOnChart, useInAnalysis] — keys MATCH backend op.tactic exactly
     orderBlock:        [true, true],
     fvg:               [true, true],
     bos:               [true, true],
     trendStructure:    [true, true],
     liquiditySweep:    [true, true],
-    sessionLevel:      [true, true],     // singular — matches backend
+    sessionLevel:      [true, true],
     unfilledImbalance: [true, true],
     fakeout:           [true, true],
-    roundNumber:       [false, true],    // singular — matches backend; off by default on chart
+    roundNumber:       [false, true],
     fibonacci:         [false, false],
     ema21:             [false, false],
     ema50:             [false, false],
@@ -159,7 +155,7 @@ const DEFAULT_PREFS = {
     rsi:               [false, false],
   },
   sideBarOpen:      false,
-  tutorialMode:     true,    // verbose tooltips for new users
+  tutorialMode:     true,
 };
 
 function loadPrefs() {
@@ -234,6 +230,16 @@ function fmtRelTime(ts) {
   return d + "d";
 }
 
+// V13: detect whether NY AM IFVG kill zone is currently active (13:30–15:00 UTC summer).
+// Used by the status row to show users when their AM IFVG template is in its window.
+function isAmIfvgWindow() {
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  const utcM = now.getUTCMinutes();
+  const utcMin = utcH * 60 + utcM;
+  return utcMin >= 13 * 60 + 30 && utcMin < 15 * 60;
+}
+
 // =====================================================================
 // SECTION 5: GLOBAL STYLES (injected once, uses theme variables)
 // =====================================================================
@@ -243,7 +249,6 @@ const GLOBAL_STYLES = `
   html, body, #root { margin: 0; padding: 0; height: 100%; background: var(--qb-bg-base); color: var(--qb-text-primary); font-family: var(--qb-font-sans); -webkit-font-smoothing: antialiased; }
   body { overflow: hidden; }
 
-  /* Glass surface — used everywhere for overlays */
   .qb-glass {
     background: var(--qb-bg-glass);
     backdrop-filter: blur(20px) saturate(150%);
@@ -251,50 +256,38 @@ const GLOBAL_STYLES = `
     border: 1px solid var(--qb-border);
   }
 
-  /* Mono numbers */
   .qb-mono { font-family: var(--qb-font-mono); font-variant-numeric: tabular-nums; }
 
-  /* Pulse animation for live indicators */
   @keyframes qbPulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
   }
   .qb-pulse { animation: qbPulse 2s ease-in-out infinite; }
 
-  /* Smooth glow */
   @keyframes qbGlow {
     0%, 100% { box-shadow: 0 0 8px var(--qb-accent-soft), 0 0 16px var(--qb-accent-soft); }
     50% { box-shadow: 0 0 12px var(--qb-accent-soft), 0 0 24px var(--qb-accent-soft); }
   }
   .qb-glow { animation: qbGlow 3s ease-in-out infinite; }
 
-  /* Hover lift */
   .qb-hover:hover { transform: translateY(-1px); transition: transform 200ms; }
 
-  /* Custom scrollbar */
   *::-webkit-scrollbar { width: 6px; height: 6px; }
   *::-webkit-scrollbar-track { background: transparent; }
   *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
   *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
 
-  /* Inputs */
   input, button, select { font-family: inherit; color: inherit; }
   input:focus, button:focus, select:focus { outline: none; }
 
-  /* Chart container — let lightweight-charts fill its parent */
   .qb-chart-container { position: relative; width: 100%; height: 100%; }
 `;
 
 // =====================================================================
 // SECTION 6: ASSET REGISTRY (mirrored frontend-side for the modal)
 // =====================================================================
-// This duplicates a subset of the backend asset-registry. The backend is
-// authoritative; this is just for the Add Instrument modal UI when the
-// backend hasn't loaded yet.
-// =====================================================================
 
 const ASSET_CATALOG = [
-  // Forex majors
   { id: "eurusd", name: "EUR/USD", category: "forex", description: "Euro vs US Dollar", aliases: ["EURUSD", "EUR/USD", "EURUSD.s"] },
   { id: "gbpusd", name: "GBP/USD", category: "forex", description: "British Pound vs US Dollar", aliases: ["GBPUSD", "GBP/USD", "GBPUSD.s"] },
   { id: "usdjpy", name: "USD/JPY", category: "forex", description: "US Dollar vs Japanese Yen", aliases: ["USDJPY", "USD/JPY", "USDJPY.s"] },
@@ -302,21 +295,17 @@ const ASSET_CATALOG = [
   { id: "audusd", name: "AUD/USD", category: "forex", description: "Australian Dollar vs US Dollar", aliases: ["AUDUSD", "AUD/USD", "AUDUSD.s"] },
   { id: "nzdusd", name: "NZD/USD", category: "forex", description: "New Zealand Dollar vs US Dollar", aliases: ["NZDUSD", "NZD/USD", "NZDUSD.s"] },
   { id: "usdcad", name: "USD/CAD", category: "forex", description: "US Dollar vs Canadian Dollar", aliases: ["USDCAD", "USD/CAD", "USDCAD.s"] },
-  // Crosses
   { id: "eurjpy", name: "EUR/JPY", category: "forex", description: "Euro vs Japanese Yen", aliases: ["EURJPY", "EUR/JPY", "EURJPY.s"] },
   { id: "gbpjpy", name: "GBP/JPY", category: "forex", description: "British Pound vs Japanese Yen — high vol", aliases: ["GBPJPY", "GBP/JPY", "GBPJPY.s"] },
   { id: "eurgbp", name: "EUR/GBP", category: "forex", description: "Euro vs British Pound", aliases: ["EURGBP", "EUR/GBP", "EURGBP.s"] },
   { id: "audjpy", name: "AUD/JPY", category: "forex", description: "Australian Dollar vs Japanese Yen", aliases: ["AUDJPY", "AUD/JPY", "AUDJPY.s"] },
-  // Metals
   { id: "gold",     name: "Gold",     category: "metal", description: "Spot Gold (XAU/USD)", aliases: ["XAUUSD", "XAU/USD", "XAUUSD.s", "GOLD"] },
   { id: "silver",   name: "Silver",   category: "metal", description: "Spot Silver (XAG/USD)", aliases: ["XAGUSD", "XAG/USD", "XAGUSD.s", "SILVER"] },
   { id: "platinum", name: "Platinum", category: "metal", description: "Spot Platinum (XPT/USD)", aliases: ["XPTUSD", "XPT/USD", "XPTUSD.s", "PLATINUM"] },
-  // Crypto
   { id: "btc", name: "Bitcoin",  category: "crypto", description: "Bitcoin vs USD — 24/7",  aliases: ["BTCUSD", "BTC/USD", "BTCUSDT", "BTC", "BITCOIN"] },
   { id: "eth", name: "Ethereum", category: "crypto", description: "Ethereum vs USD — 24/7", aliases: ["ETHUSD", "ETH/USD", "ETHUSDT", "ETH", "ETHEREUM"] },
   { id: "sol", name: "Solana",   category: "crypto", description: "Solana vs USD",          aliases: ["SOLUSD", "SOL/USD", "SOLUSDT", "SOL", "SOLANA"] },
   { id: "xrp", name: "Ripple",   category: "crypto", description: "Ripple vs USD",          aliases: ["XRPUSD", "XRP/USD", "XRPUSDT", "XRP", "RIPPLE"] },
-  // Indices
   { id: "nas100", name: "Nasdaq 100", category: "index", description: "US tech-heavy index",          aliases: ["NAS100", "NAS100.s", "NDX", "USTEC", "US100", "NASDAQ", "NASDAQ100"] },
   { id: "us30",   name: "Dow Jones",  category: "index", description: "Dow Jones Industrial Average", aliases: ["US30", "US30.s", "DJ30", "DOW", "DOWJONES"] },
   { id: "us500",  name: "S&P 500",    category: "index", description: "S&P 500 futures — SP500/SPX",  aliases: ["US500", "US500.s", "SP500", "SP500.s", "SPX500", "SPX", "SPY"] },
@@ -324,7 +313,6 @@ const ASSET_CATALOG = [
   { id: "uk100",  name: "FTSE 100",   category: "index", description: "UK FTSE 100",                  aliases: ["UK100", "FTSE", "FTSE100"] },
   { id: "jp225",  name: "Nikkei 225", category: "index", description: "Japan Nikkei 225",             aliases: ["JP225", "NIKKEI", "NIKKEI225", "JPN225", "N225"] },
   { id: "usdx",   name: "US Dollar Index", category: "index", description: "USD basket / DXY — leading currency strength indicator", aliases: ["USDX", "USDX.s", "DXY", "DX", "USDOLLAR"] },
-  // Commodities
   { id: "oil_wti",   name: "WTI Crude Oil",   category: "commodity", description: "West Texas Intermediate", aliases: ["WTI", "USOIL", "OIL", "CRUDE", "XTIUSD"] },
   { id: "oil_brent", name: "Brent Crude Oil", category: "commodity", description: "Brent crude oil",         aliases: ["BRENT", "UKOIL", "XBRUSD"] },
   { id: "natgas",    name: "Natural Gas",     category: "commodity", description: "Natural gas futures",     aliases: ["NATGAS", "NGAS", "NG", "XNGUSD"] },
@@ -340,6 +328,32 @@ const CATEGORY_LABELS = {
 
 function getAssetById(id) {
   return ASSET_CATALOG.find((a) => a.id === id) || null;
+}
+
+// V13: pip-size lookup helper used by InstrumentPanel for price decimals.
+// V12 referenced meta.pipSize directly but ASSET_CATALOG never had that field,
+// so the conditional always fell to the "else 4" branch. This makes precision correct.
+function getPipSizeFor(assetId) {
+  const map = {
+    eurusd: 0.0001, gbpusd: 0.0001, audusd: 0.0001, nzdusd: 0.0001,
+    usdjpy: 0.01, usdchf: 0.0001, usdcad: 0.0001,
+    eurjpy: 0.01, gbpjpy: 0.01, eurgbp: 0.0001, audjpy: 0.01,
+    gold: 0.01, silver: 0.01, platinum: 0.01,
+    btc: 1, eth: 0.01, sol: 0.01, xrp: 0.0001,
+    nas100: 1, us30: 1, us500: 0.1, ger40: 0.1, uk100: 0.1, jp225: 1,
+    usdx: 0.01,
+    oil_wti: 0.01, oil_brent: 0.01, natgas: 0.001,
+  };
+  return map[assetId] || 0.0001;
+}
+
+function decimalsForAsset(assetId) {
+  const pip = getPipSizeFor(assetId);
+  if (pip >= 1)     return 2;
+  if (pip >= 0.01)  return 2;
+  if (pip >= 0.001) return 3;
+  if (pip >= 0.0001)return 5;
+  return 4;
 }
 
 // =====================================================================
@@ -389,11 +403,9 @@ const TACTIC_DESCRIPTIONS = {
 // =====================================================================
 
 export default function App() {
-  // Theme — applied as CSS variables on root
   const [theme, setTheme] = useState(loadTheme);
   useEffect(() => { applyThemeToRoot(theme); saveTheme(theme); }, [theme]);
 
-  // Inject global styles once
   useEffect(() => {
     const id = "qb-global-styles";
     if (document.getElementById(id)) return;
@@ -403,18 +415,14 @@ export default function App() {
     document.head.appendChild(style);
   }, []);
 
-  // Preferences (selected asset, watchlist, lots, tools, etc.)
   const [prefs, setPrefs] = useState(loadPrefs);
   useEffect(() => { savePrefs(prefs); }, [prefs]);
 
-  // Routing — simple state-based, no router library
   const [page, setPage] = useState("cockpit");
 
-  // Live data shared across pages
   const [account, setAccount] = useState(null);
   const [positions, setPositions] = useState([]);
 
-  // Poll account + positions every 5 seconds
   useEffect(() => {
     let alive = true;
     const tick = async () => {
@@ -490,16 +498,11 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
   const selectedAssetMeta = getAssetById(selectedAsset);
   const isPaused = prefs.pauseOnAsset?.[selectedAsset] || false;
 
-  // V12.4: chart removed. We still poll candles as a fallback price source
-  // (assetState.currentPrice is the primary source via the watcher tick).
   const [chartData, setChartData] = useState(null);
-  // V12.4: live quotes for the cockpit price tape (sparkline)
   const [quotes, setQuotes] = useState(null);
 
-  // Position on the selected asset (if any)
   const myPosition = positions.find((p) => p.assetId === selectedAsset) || null;
 
-  // Fetch fallback price from broker candles
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -521,18 +524,13 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
     return () => { alive = false; clearInterval(id); };
   }, [selectedAsset, prefs.selectedTF]);
 
-  // V12.4: poll live quotes (M1 closes for sparkline) every 10s
   useEffect(() => {
     let alive = true;
-    setQuotes(null); // clear when asset changes
+    setQuotes(null);
     const tick = async () => {
       try {
         const r = await fetch(API(`quotes?asset=${selectedAsset}&limit=30`))
           .then((r) => r.json());
-        // V12.4.1: always update state — even on error, we want quotes to be
-        // non-null so the UI can render a "─ no tape ─" placeholder rather
-        // than getting stuck on the initial-load state. The PriceSparkline
-        // component handles empty history gracefully.
         if (alive && r) setQuotes(r);
       } catch (_) {
         if (alive) setQuotes({ history: [], error: 'fetch failed' });
@@ -543,12 +541,10 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
     return () => { alive = false; clearInterval(id); };
   }, [selectedAsset]);
 
-  // Persist sidebar state to prefs
   useEffect(() => {
     setPrefs((p) => ({ ...p, sideBarOpen }));
   }, [sideBarOpen]);
 
-  // Live state from V12 backend (watcher's mental model) — polled
   const [assetState, setAssetState] = useState(null);
   useEffect(() => {
     let alive = true;
@@ -559,11 +555,10 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
       } catch (_) {}
     };
     tick();
-    const id = setInterval(tick, 15000);  // poll every 15s
+    const id = setInterval(tick, 15000);
     return () => { alive = false; clearInterval(id); };
   }, [selectedAsset]);
 
-  // Handle pause toggle
   const togglePause = useCallback(() => {
     setPrefs((p) => ({
       ...p,
@@ -571,12 +566,10 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
     }));
   }, [selectedAsset, isPaused, setPrefs]);
 
-  // Handle asset switch from sidebar
   const switchAsset = useCallback((assetId) => {
     setPrefs((p) => ({ ...p, selectedAsset: assetId }));
   }, [setPrefs]);
 
-  // Handle add instrument from modal
   const addInstrument = useCallback((assetId) => {
     setPrefs((p) => ({
       ...p,
@@ -589,7 +582,6 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative", background: "var(--qb-bg-base)" }}>
-      {/* TOP BAR */}
       <CockpitTopBar
         theme={theme}
         prefs={prefs}
@@ -609,7 +601,6 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
         assetState={assetState}
       />
 
-      {/* SIDE BAR */}
       <CockpitSideBar
         theme={theme}
         open={sideBarOpen}
@@ -623,7 +614,6 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
         assetState={assetState}
       />
 
-      {/* INSTRUMENT PANEL (V12.4: replaces chart) */}
       <div
         style={{
           position: "absolute",
@@ -645,7 +635,6 @@ function CockpitPage({ prefs, setPrefs, theme, account, positions, onNavigate })
         />
       </div>
 
-      {/* MODALS / POPOVERS */}
       {assetModalOpen && (
         <AssetSelectionModal
           theme={theme}
@@ -679,7 +668,6 @@ function CockpitTopBar({
   const selectedAsset = prefs.selectedAsset || "gold";
   const lot = prefs.perInstrumentLot?.[selectedAsset] || 0.01;
 
-  // Last close from chart data = current price approximation
   const lastCandle = chartData?.candles?.[chartData.candles.length - 1];
   const currentPrice = lastCandle?.close;
   const prevPrice = chartData?.candles?.[chartData.candles.length - 2]?.close;
@@ -688,7 +676,6 @@ function CockpitTopBar({
 
   const balance = account?.balance ?? null;
 
-  // Suggested lot from V12 backend (watcher includes sizing in pending setups)
   const suggestedLot = assetState?.pending?.[0]?.sizing?.recommendedLot || null;
 
   return (
@@ -708,7 +695,6 @@ function CockpitTopBar({
         borderBottom: "1px solid var(--qb-border)",
       }}
     >
-      {/* Logo */}
       <div style={{ position: "relative" }}>
         <button
           onClick={onLogoClick}
@@ -736,7 +722,6 @@ function CockpitTopBar({
         )}
       </div>
 
-      {/* Asset symbol switcher */}
       <button
         onClick={onAddInstrument}
         style={{
@@ -759,7 +744,6 @@ function CockpitTopBar({
         <span style={{ color: "var(--qb-text-muted)", fontSize: 10 }}>▾</span>
       </button>
 
-      {/* Current price */}
       {currentPrice && (
         <div
           className="qb-mono"
@@ -774,17 +758,14 @@ function CockpitTopBar({
         </div>
       )}
 
-      {/* Spacer */}
       <div style={{ flex: 1 }} />
 
-      {/* Balance */}
       {balance != null && (
         <div className="qb-mono" style={{ fontSize: 13, color: "var(--qb-text-muted)" }}>
           ${balance.toFixed(2)}
         </div>
       )}
 
-      {/* Lot input */}
       <LotInput
         lot={lot}
         onChange={(newLot) => {
@@ -796,7 +777,6 @@ function CockpitTopBar({
         suggested={suggestedLot}
       />
 
-      {/* Pause toggle */}
       <button
         onClick={onTogglePause}
         onContextMenu={(e) => { e.preventDefault(); onPauseSettings(); }}
@@ -817,10 +797,8 @@ function CockpitTopBar({
         {isPaused ? "⏸ Paused" : "● Active"}
       </button>
 
-      {/* News indicator (real data from V12 backend) */}
       <NewsIndicator theme={theme} assetId={selectedAsset} news={assetState?.news} />
 
-      {/* Recognition indicator (real data from V12 backend) */}
       <RecognitionIndicator theme={theme} assetId={selectedAsset} pending={assetState?.pending} />
     </div>
   );
@@ -986,12 +964,8 @@ function LotInput({ lot, onChange, suggested }) {
 // =====================================================================
 // SECTION 9.4: COCKPIT — NEWS INDICATOR
 // =====================================================================
-// Three intensities: scheduled today (yellow dot), within 30 min (amber pill),
-// live (red pulsing pill). Wired up properly in session 4.
-// =====================================================================
 
 function NewsIndicator({ theme, assetId, news }) {
-  // news is a NewsContext object: { state, currencies, events: { live, imminent, today }, summary }
   if (!news || news.state === 'none') return null;
 
   if (news.state === 'live') {
@@ -1048,12 +1022,8 @@ function NewsIndicator({ theme, assetId, news }) {
 // =====================================================================
 // SECTION 9.5: COCKPIT — RECOGNITION INDICATOR
 // =====================================================================
-// Visible when bot has identified a coherent setup. Shows match % and count.
-// Wires up in session 4.
-// =====================================================================
 
 function RecognitionIndicator({ theme, assetId, pending }) {
-  // Show only when there's an active pending setup with recognition data
   const activePending = pending?.find?.((p) => p.status === 'pending' || p.status === 'placed');
   const recognition = activePending?.recognition;
 
@@ -1106,7 +1076,6 @@ function CockpitSideBar({
 
   return (
     <>
-      {/* Edge strip — wider (16px) so it's actually clickable; glows on hover */}
       <div
         onClick={onToggle}
         style={{
@@ -1128,7 +1097,6 @@ function CockpitSideBar({
         onMouseLeave={(e) => (e.currentTarget.style.background = open ? "var(--qb-accent-soft)" : "var(--qb-border)")}
         title={open ? "Collapse sidebar" : "Open sidebar"}
       >
-        {/* Visual indicator chevron */}
         <div
           style={{
             color: "var(--qb-accent)",
@@ -1142,7 +1110,6 @@ function CockpitSideBar({
         </div>
       </div>
 
-      {/* Side bar content */}
       {open && (
         <div
           className="qb-glass"
@@ -1160,7 +1127,6 @@ function CockpitSideBar({
             gap: 12,
           }}
         >
-          {/* Header with explicit close button */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ fontSize: 11, color: "var(--qb-text-muted)", textTransform: "uppercase", letterSpacing: 0.8 }}>
               Watchlist
@@ -1181,7 +1147,6 @@ function CockpitSideBar({
               >
                 + Add
               </button>
-              {/* CLOSE BUTTON — explicit, large, easy to hit */}
               <button
                 onClick={onToggle}
                 style={{
@@ -1209,7 +1174,6 @@ function CockpitSideBar({
             </div>
           </div>
 
-          {/* Instrument list */}
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {watchlist.map((assetId) => {
               const meta = getAssetById(assetId);
@@ -1281,7 +1245,6 @@ function CockpitSideBar({
             })}
           </div>
 
-          {/* Settings shortcut */}
           <div style={{ marginTop: "auto" }}>
             <button
               onClick={onSettings}
@@ -1311,10 +1274,9 @@ function CockpitSideBar({
 }
 
 // =====================================================================
-// SECTION 9.7: COCKPIT — CHART
+// SECTION 9.7: COCKPIT — PIP HELPERS (for sizing/SL math elsewhere)
 // =====================================================================
 
-// Pip dollar value per lot (mirrors backend asset-registry)
 function getPipDollar(assetId) {
   const map = {
     eurusd: 10, gbpusd: 10, audusd: 10, nzdusd: 10,
@@ -1329,47 +1291,12 @@ function getPipDollar(assetId) {
 }
 
 function getPipSize(assetId) {
-  const map = {
-    eurusd: 0.0001, gbpusd: 0.0001, audusd: 0.0001, nzdusd: 0.0001,
-    usdjpy: 0.01, usdchf: 0.0001, usdcad: 0.0001,
-    eurjpy: 0.01, gbpjpy: 0.01, eurgbp: 0.0001, audjpy: 0.01,
-    gold: 0.01, silver: 0.01, platinum: 0.01,
-    btc: 1, eth: 0.01, sol: 0.01, xrp: 0.0001,
-    nas100: 1, us30: 1, us500: 0.1, ger40: 0.1, uk100: 0.1, jp225: 1,
-    oil_wti: 0.01, oil_brent: 0.01, natgas: 0.001,
-  };
-  return map[assetId] || 0.0001;
+  return getPipSizeFor(assetId);
 }
 
 // =====================================================================
-// TACTIC ANNOTATION OVERLAY
+// SECTION 9.8: COCKPIT — INSTRUMENT PANEL (V13)
 // =====================================================================
-// Renders bot's contributing tactics on the chart ONLY when bot is acting.
-// Uses HTML overlay aligned to chart's coordinate system via lightweight-charts'
-// timeToCoordinate / priceToCoordinate.
-//
-// Visibility rule: only renders when there's a pending setup, filled position,
-// or current TRADE decision. During quiet times, chart stays clean.
-//
-// Tactics rendered:
-//   - Order Block: shaded rectangle from OB candle to current bar
-//   - FVG: shaded rectangle in the gap zone, opacity reflects fill %
-//   - BOS: horizontal line at broken level + label
-//   - Liquidity Sweep: small starburst marker + reversal arrow
-//   - Session Levels: dotted horizontal lines (asian violet, london cyan, ny amber)
-//   - Trend Structure: HH/HL/LH/LL labels at swing points
-//   - Unfilled Imbalance: wider shaded gap zone
-//   - Fakeout: failed-breakout marker
-//   - Round Numbers: thin horizontal lines
-// SECTION 9.8b: COCKPIT — INSTRUMENT PANEL (V12.4)
-// =====================================================================
-// Replaces the chart. A professional flight-deck instrument panel showing:
-//  - Current price + direction badge
-//  - Quick status (intent, bias, coherence)
-//  - Active setup (template, entry/SL/TPs, narrative)
-//  - Detected tools (event timeline)
-//  - Commentary feed
-// User views actual price charts in MT5; this surfaces what only QB can see.
 
 function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition, chartData, quotes }) {
   const meta = getAssetById(assetId);
@@ -1379,8 +1306,7 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
   );
   const commentary = assetState?.commentary || [];
   const events = state?.events || [];
-  // V12.4: state.intent is the object {type, reason?, ...payload}. Extract `.type`
-  // for display. Falling back to undefined yields the "AWAITING" default below.
+
   const intentObj = state?.intent;
   const intentType =
     intentObj && typeof intentObj === "object"
@@ -1389,7 +1315,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
   const intent = intentType || (assetState ? "AWAITING" : "—");
   const coherence = state?.coherence;
 
-  // Current price preference: quotes (freshest) > state.currentPrice > chartData last close
   const currentPrice =
     quotes?.price ??
     state?.currentPrice ??
@@ -1397,7 +1322,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
       ? chartData.candles[chartData.candles.length - 1].close
       : null);
 
-  // Direction inferred from active pending setup OR coherence intent
   const activeSetup = pending[0] || null;
   const bias = activeSetup?.direction || coherence?.bias || "NEUTRAL";
   const biasColor =
@@ -1407,7 +1331,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
       ? "var(--qb-down-strong)"
       : "var(--qb-text-muted)";
 
-  // Sparkline direction follows actual price movement, not bias intent
   const sparkColor =
     quotes && quotes.change != null
       ? quotes.change >= 0
@@ -1415,7 +1338,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         : "var(--qb-down-strong)"
       : "var(--qb-text-muted)";
 
-  // Determine status badge — map V12 intent types to readable labels
   const status = myPosition
     ? "IN TRADE"
     : activeSetup
@@ -1438,20 +1360,20 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
     ? intent
     : "—";
 
-  // Format a price for the asset's pipSize precision
+  // V13: use lookup helper (v12's meta.pipSize was undefined, defaulted decimals to 4)
+  const decimals = decimalsForAsset(assetId);
   const fmt = (n) => {
     if (n == null || !isFinite(n)) return "—";
-    if (!meta) return n.toFixed(2);
-    const decimals =
-      meta.pipSize >= 1 ? 2 : meta.pipSize >= 0.01 ? 2 : meta.pipSize >= 0.0001 ? 5 : 4;
     return n.toFixed(decimals);
   };
 
-  // Recent interesting events for the timeline
   const interestingEvents = events
     .filter((e) => ["sweep", "mss", "bos", "fvg-created", "ob-created", "breaker-created", "displacement", "ote-zone-entered"].includes(e.type))
     .sort((a, b) => (b.ts || 0) - (a.ts || 0))
     .slice(0, 14);
+
+  // V13: AM IFVG window awareness — small indicator in killzone cell when 13:30-15:00 UTC
+  const amIfvgActive = isAmIfvgWindow();
 
   return (
     <div
@@ -1464,7 +1386,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         overflow: "hidden",
       }}
     >
-      {/* ── HEADER: ASSET + PRICE + SPARKLINE + DIRECTION ─────────────────── */}
       <div
         style={{
           padding: "14px 20px 12px",
@@ -1480,7 +1401,8 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
               {meta?.id || assetId}
             </span>
             <span style={{ fontSize: 10, color: "var(--qb-text-faint)" }}>
-              {meta?.displayName}
+              {/* V13: was meta?.displayName which doesn't exist */}
+              {meta?.name}
             </span>
           </div>
           <div
@@ -1512,7 +1434,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
           )}
         </div>
 
-        {/* SPARKLINE */}
         <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center" }}>
           <PriceSparkline
             history={quotes?.history || []}
@@ -1549,7 +1470,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         </div>
       </div>
 
-      {/* ── QUICK STATUS: 3-COLUMN INSTRUMENT READOUT ─────────────────────── */}
       <div
         style={{
           display: "grid",
@@ -1577,21 +1497,22 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
             assetState?.killZone?.display
             || assetState?.killZone?.name
             || (assetState?.killZone?.nextKillZone ? `→ ${assetState.killZone.nextKillZone}` : null)
-            || "OFF"
+            || (amIfvgActive ? "🌅 AM IFVG" : "OFF")
           }
           sub={
-            assetState?.killZone?.inKillZone
-              ? assetState.killZone.minutesUntilClose != null
-                ? `${assetState.killZone.minutesUntilClose}m left`
-                : ""
-              : assetState?.killZone?.minutesUntilNext != null
-                ? `in ${assetState.killZone.minutesUntilNext}m`
-                : ""
+            amIfvgActive
+              ? "13:30-15:00 UTC · IFVG hunt"
+              : assetState?.killZone?.inKillZone
+                ? assetState.killZone.minutesUntilClose != null
+                  ? `${assetState.killZone.minutesUntilClose}m left`
+                  : ""
+                : assetState?.killZone?.minutesUntilNext != null
+                  ? `in ${assetState.killZone.minutesUntilNext}m`
+                  : ""
           }
         />
       </div>
 
-      {/* ── ACTIVE SETUP PANEL ─────────────────────────────────────────────── */}
       {activeSetup && (
         <div
           style={{
@@ -1610,7 +1531,8 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
                 fontFamily: "var(--qb-font-mono)",
               }}
             >
-              ⚡ {activeSetup.setup?.templateName || activeSetup.templateName || "setup"}
+              {/* V13: use TEMPLATE_DISPLAY map so "am-ifvg" renders as "🌅 AM IFVG Reversal" */}
+              {displayTemplate(activeSetup.setup?.templateName || activeSetup.templateName)}
             </span>
             <span style={{ fontSize: 10, color: biasColor }}>
               {activeSetup.setup?.direction || activeSetup.direction}
@@ -1652,7 +1574,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         </div>
       )}
 
-      {/* ── DETECTED TOOLS TIMELINE ────────────────────────────────────────── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div
           style={{
@@ -1678,7 +1599,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
         </div>
       </div>
 
-      {/* ── COMMENTARY FEED (replaces BottomBar) ───────────────────────────── */}
       {commentary.length > 0 && (
         <div
           style={{
@@ -1737,8 +1657,6 @@ function CockpitInstrumentPanel({ theme, prefs, assetId, assetState, myPosition,
   );
 }
 
-// Small reusable cell for the 3-column status row.
-// Coerces any object/null/undefined to a safe string to avoid React #31 crashes.
 function ReadoutCell({ label, value, sub }) {
   const safe = (v) => {
     if (v == null) return "—";
@@ -1791,7 +1709,6 @@ function ReadoutCell({ label, value, sub }) {
   );
 }
 
-// Setup price row (entry/SL/TPs) formatted in a clean horizontal grid
 function SetupPrices({ setup, fmt }) {
   if (!setup) return null;
   const tps = setup.tps || [];
@@ -1828,8 +1745,6 @@ function PriceCell({ label, value, color }) {
   );
 }
 
-// Pure-SVG price tape. Last value gets a glowing dot. Subtle area fill below.
-// No charting library — small enough to be a single function.
 function PriceSparkline({ history, color, width = 200, height = 40 }) {
   if (!history || history.length < 2) {
     return (
@@ -1863,7 +1778,6 @@ function PriceSparkline({ history, color, width = 200, height = 40 }) {
   });
 
   const linePath = pts.map((p, i) => (i === 0 ? `M ${p[0]} ${p[1]}` : `L ${p[0]} ${p[1]}`)).join(" ");
-  // Area fill: extend down to bottom and close back to start
   const areaPath =
     linePath +
     ` L ${pts[pts.length - 1][0]} ${height} L ${pts[0][0]} ${height} Z`;
@@ -1882,14 +1796,12 @@ function PriceSparkline({ history, color, width = 200, height = 40 }) {
       </defs>
       <path d={areaPath} fill={`url(#${gradId})`} />
       <path d={linePath} fill="none" stroke={color} strokeWidth={1.5} opacity={0.95} strokeLinejoin="round" strokeLinecap="round" />
-      {/* Last value pulse dot */}
       <circle cx={last[0]} cy={last[1]} r={3} fill={color} opacity={0.3} />
       <circle cx={last[0]} cy={last[1]} r={1.8} fill={color} />
     </svg>
   );
 }
 
-// One row in the detected-tools timeline
 function EventRow({ event, fmt }) {
   const colors = {
     sweep: "#ffb74d",
@@ -1914,7 +1826,6 @@ function EventRow({ event, fmt }) {
   const color = colors[event.type] || "#9e9e9e";
   const label = labels[event.type] || event.type;
 
-  // Extract a useful "level" from evidence/zone
   const level =
     event.zone?.upper != null && event.zone?.lower != null
       ? `${fmt(event.zone.lower)}-${fmt(event.zone.upper)}`
@@ -1968,11 +1879,6 @@ function EventRow({ event, fmt }) {
   );
 }
 
-// =====================================================================
-// EVENT MOCKUP — tiny inline SVGs showing how each tool is drawn on a chart.
-// One per ICT event type, with direction encoded visually so no separate arrow
-// is needed. Each glyph is canonical to how ICT practitioners would mark it.
-// =====================================================================
 function EventMockup({ event, color, width = 50, height = 24 }) {
   const isLong = event.direction === "LONG";
   const isShort = event.direction === "SHORT";
@@ -1980,8 +1886,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
 
   switch (event.type) {
     case "sweep": {
-      // Swept extreme: a wick pokes past a dashed level, body closes back inside.
-      // SHORT sweep = high taken (wick up). LONG sweep = low taken (wick down).
       const levelY = isShort ? height * 0.18 : height * 0.82;
       const wickX = width * 0.62;
       const wickTop = isShort ? 2 : height * 0.45;
@@ -1995,7 +1899,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
                 stroke={color} strokeWidth="1.2" />
           <rect x={wickX - 3} y={bodyY} width="6" height={height * 0.22}
                 fill={color} opacity="0.85" />
-          {/* Small "x" mark where the wick crosses the level */}
           <circle cx={wickX} cy={levelY} r="1.6" fill="none" stroke={color} strokeWidth="1" />
         </svg>
       );
@@ -2003,8 +1906,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
 
     case "mss":
     case "bos": {
-      // Break of structure: small candles tracking one way, then a big body
-      // crossing a dashed structural level the other way.
       const levelY = isShort ? height * 0.5 : height * 0.5;
       const arrowTipY = isShort ? height * 0.92 : height * 0.08;
       const arrowBaseY = isShort ? height * 0.65 : height * 0.35;
@@ -2015,7 +1916,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
           <rect x="4"  y={isShort ? height * 0.42 : height * 0.4}  width="3" height={height * 0.15} fill={color} opacity="0.35" />
           <rect x="11" y={isShort ? height * 0.35 : height * 0.45} width="3" height={height * 0.18} fill={color} opacity="0.45" />
           <rect x="19" y={isShort ? height * 0.28 : height * 0.2}  width="5" height={height * 0.55} fill={color} opacity="0.95" />
-          {/* Arrow showing break direction */}
           <path d={isShort
             ? `M ${width - 14} ${arrowBaseY} L ${width - 6} ${arrowBaseY} L ${width - 10} ${arrowTipY} Z`
             : `M ${width - 14} ${arrowBaseY} L ${width - 6} ${arrowBaseY} L ${width - 10} ${arrowTipY} Z`}
@@ -2025,8 +1925,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
     }
 
     case "fvg-created": {
-      // 3-candle ICT FVG: gap between candle1 wick and candle3 wick, candle2 is
-      // the displacement that opened the gap. Shaded zone shows the imbalance.
       const c1x = width * 0.22;
       const c2x = width * 0.5;
       const c3x = width * 0.78;
@@ -2060,7 +1958,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
     }
 
     case "ob-created": {
-      // ICT Order Block: last opposite-direction candle before impulse, boxed.
       const oppFill = isLong ? "#ef5350" : "#66bb6a";
       return (
         <svg {...svgProps}>
@@ -2074,18 +1971,14 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
     }
 
     case "breaker-created": {
-      // Breaker: an old OB that got broken & retested, now flipped role.
       const lvlY = isLong ? height * 0.55 : height * 0.45;
       return (
         <svg {...svgProps}>
-          {/* Old broken OB (greyed) */}
           <rect x="4" y={height * 0.3} width="6" height={height * 0.4}
                 fill="#888" opacity="0.35" stroke="#888" strokeWidth="0.8" strokeDasharray="2,1" />
           <line x1="4"  y1={height * 0.3} x2="10" y2={height * 0.7} stroke="#888" strokeWidth="0.8" opacity="0.7" />
           <line x1="10" y1={height * 0.3} x2="4"  y2={height * 0.7} stroke="#888" strokeWidth="0.8" opacity="0.7" />
-          {/* Break candle in new direction */}
           <rect x="16" y={isLong ? height * 0.15 : height * 0.4} width="5" height={height * 0.55} fill={color} opacity="0.95" />
-          {/* New role level (price now respects it from the other side) */}
           <line x1={width * 0.5} y1={lvlY} x2={width - 2} y2={lvlY}
                 stroke={color} strokeWidth="1.5" />
           <circle cx={width - 5} cy={lvlY} r="1.5" fill={color} />
@@ -2094,15 +1987,12 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
     }
 
     case "displacement": {
-      // A single long-body candle with an arrow showing aggressive direction
       return (
         <svg {...svgProps}>
           <rect x={width * 0.12} y={height * 0.4} width="3" height={height * 0.2} fill={color} opacity="0.3" />
           <rect x={width * 0.26} y={height * 0.4} width="3" height={height * 0.2} fill={color} opacity="0.4" />
-          {/* Aggressive candle */}
           <rect x={width * 0.42} y={height * 0.1} width="6" height={height * 0.8}
                 fill={color} opacity="0.95" />
-          {/* Arrow */}
           {isLong ? (
             <path d={`M ${width * 0.72} ${height * 0.5}
                       L ${width * 0.92} ${height * 0.25}
@@ -2127,7 +2017,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
     }
 
     case "ote-zone-entered": {
-      // Impulse leg + retracement into 62-79% fib zone
       if (isLong) {
         return (
           <svg {...svgProps}>
@@ -2168,206 +2057,6 @@ function EventMockup({ event, color, width = 50, height = 24 }) {
 }
 
 // =====================================================================
-// SECTION 9.9: COCKPIT — BOTTOM BAR (V12.4: kept for backward compat, no longer rendered)
-// =====================================================================
-
-function CockpitBottomBar({ theme, open, onToggle, commentary, assetId, assetState }) {
-  // V12.3: state has events (typed) instead of opinions (tactic-keyed)
-  const events = assetState?.state?.events || [];
-  // Show recent meaningful events: sweep/displacement/mss/bos/fvg/ob/breaker/asian-range/ote/trend
-  const interestingEvents = events
-    .filter((e) => e.type !== 'session-level' && e.type !== 'trend')
-    .slice(-12)
-    .reverse();
-  const recent = (commentary || []).slice(-6); // last 6 commentary lines
-
-  return (
-    <>
-      {/* Edge strip */}
-      <div
-        onClick={onToggle}
-        style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: 12,
-          background: open ? "var(--qb-accent-soft)" : "var(--qb-border)",
-          cursor: "pointer",
-          zIndex: 5,
-          transition: "background 200ms",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--qb-accent-soft)")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = open ? "var(--qb-accent-soft)" : "var(--qb-border)")}
-        title={open ? "Collapse activity feed" : "Expand activity feed"}
-      >
-        <div style={{ color: "var(--qb-accent)", fontSize: 10, opacity: 0.7, userSelect: "none", pointerEvents: "none" }}>
-          {open ? "▾" : "▴"}
-        </div>
-      </div>
-
-      {/* Content */}
-      {open && (
-        <div
-          className="qb-glass"
-          style={{
-            position: "absolute",
-            bottom: 12,
-            left: 8,
-            right: 8,
-            height: 86,
-            zIndex: 6,
-            padding: "8px 14px",
-            display: "flex",
-            gap: 14,
-            overflow: "hidden",
-            borderTop: "1px solid var(--qb-border)",
-          }}
-        >
-          {/* LEFT: Commentary feed */}
-          <div style={{
-            flex: "1 1 0%",
-            minWidth: 0,
-            display: "flex",
-            flexDirection: "column",
-            gap: 2,
-            overflow: "hidden",
-          }}>
-            <div style={{
-              fontSize: 9,
-              color: "var(--qb-text-muted)",
-              textTransform: "uppercase",
-              letterSpacing: 0.8,
-              marginBottom: 2,
-            }}>
-              Activity
-            </div>
-            {recent.length === 0 ? (
-              <div style={{ fontSize: 11, color: "var(--qb-text-dim)", fontStyle: "italic" }}>
-                Watching {assetId.toUpperCase()}. Activity will appear when bot detects setups, fills, TP/SL hits.
-              </div>
-            ) : (
-              <div style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 2,
-                overflowY: "auto",
-              }}>
-                {recent.slice().reverse().map((c, i) => (
-                  <div
-                    key={`${c.ts}-${i}`}
-                    style={{
-                      fontSize: 11,
-                      color: "var(--qb-text-primary)",
-                      display: "flex",
-                      gap: 10,
-                      opacity: 1 - i * 0.12,
-                    }}
-                  >
-                    <span className="qb-mono" style={{ color: "var(--qb-text-muted)", minWidth: 48, fontSize: 10 }}>
-                      {fmtTimeS(c.ts)}
-                    </span>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {c.text}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* DIVIDER */}
-          <div style={{ width: 1, background: "var(--qb-border)" }} />
-
-          {/* RIGHT: Recent events */}
-          <div style={{
-            flex: "0 0 280px",
-            minWidth: 0,
-            display: "flex",
-            flexDirection: "column",
-            gap: 2,
-            overflow: "hidden",
-          }}>
-            <div style={{
-              fontSize: 9,
-              color: "var(--qb-text-muted)",
-              textTransform: "uppercase",
-              letterSpacing: 0.8,
-              marginBottom: 2,
-            }}>
-              Recent events on {assetId.toUpperCase()}
-            </div>
-            {interestingEvents.length > 0 ? (
-              <div style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 3,
-                overflow: "hidden",
-              }}>
-                {interestingEvents.slice(0, 10).map((ev, i) => {
-                  const dirColor = ev.direction === "LONG" ? "var(--qb-up-strong)"
-                    : ev.direction === "SHORT" ? "var(--qb-down-strong)"
-                    : "var(--qb-text-muted)";
-                  const dirChar = ev.direction === "LONG" ? "↑" : ev.direction === "SHORT" ? "↓" : "·";
-                  // Pretty event labels
-                  const eventLabel = {
-                    'sweep': 'Sweep',
-                    'displacement': 'Displ',
-                    'mss': 'MSS',
-                    'bos': 'BOS',
-                    'fvg-created': 'FVG',
-                    'ob-created': 'OB',
-                    'breaker-created': 'Breaker',
-                    'asian-range-formed': 'Asian',
-                    'ote-zone-entered': 'OTE',
-                  }[ev.type] || ev.type;
-                  return (
-                    <div
-                      key={ev.id || i}
-                      style={{
-                        display: "flex",
-                        gap: 4,
-                        alignItems: "center",
-                        padding: "2px 6px",
-                        fontSize: 9,
-                        background: "rgba(255,255,255,0.03)",
-                        borderRadius: 3,
-                        borderLeft: `2px solid ${dirColor}`,
-                      }}
-                      title={`${ev.type} on ${ev.timeframe} @ ${ev.price?.toFixed?.(5) || '?'}`}
-                    >
-                      <span style={{ color: dirColor, fontWeight: 700, fontSize: 10 }}>{dirChar}</span>
-                      <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-primary)" }}>
-                        {ev.timeframe}
-                      </span>
-                      <span style={{ fontSize: 9, color: "var(--qb-text-muted)" }}>
-                        {eventLabel}
-                      </span>
-                    </div>
-                  );
-                })}
-                {interestingEvents.length > 10 && (
-                  <div style={{ fontSize: 9, color: "var(--qb-text-dim)", padding: "2px 4px" }}>
-                    +{interestingEvents.length - 10}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div style={{ fontSize: 11, color: "var(--qb-text-dim)", fontStyle: "italic" }}>
-                {assetState ? "No events detected now" : "Loading..."}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-// =====================================================================
 // SECTION 10: ASSET SELECTION MODAL
 // =====================================================================
 
@@ -2375,7 +2064,6 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
   const [search, setSearch] = useState("");
   const [resolverStatus, setResolverStatus] = useState(null);
 
-  // Fetch the user's asset map from backend so we can show what's available
   useEffect(() => {
     fetch(API("symbol-resolver?action=status"))
       .then((r) => r.json())
@@ -2390,8 +2078,6 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
       a.id.toLowerCase().includes(q) ||
       a.name.toLowerCase().includes(q) ||
       a.description.toLowerCase().includes(q) ||
-      // V12.4.1: search aliases too — typing "sp500" must find us500,
-      // "dxy" must find usdx, "xau" must find gold, etc.
       (a.aliases || []).some((alias) => alias.toLowerCase().includes(q))
     );
   }, [search]);
@@ -2436,7 +2122,6 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ fontSize: 16, fontWeight: 600 }}>Add instrument</div>
           <button
@@ -2449,7 +2134,6 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
           >×</button>
         </div>
 
-        {/* Resolver status */}
         {resolverStatus && (
           <div
             style={{
@@ -2469,7 +2153,6 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
           </div>
         )}
 
-        {/* Search */}
         <input
           type="text"
           placeholder="Search instruments..."
@@ -2486,7 +2169,6 @@ function AssetSelectionModal({ theme, watchlist, onAdd, onClose }) {
           }}
         />
 
-        {/* List */}
         <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
           {Object.entries(grouped).map(([cat, items]) => (
             <div key={cat}>
@@ -2660,11 +2342,8 @@ function NumberRow({ label, value, prefix, suffix, onChange }) {
 }
 
 // =====================================================================
-// SECTION 11.5: GRID PAGE — multi-instrument plain cockpit
+// SECTION 11.5: GRID PAGE
 // =====================================================================
-// Reads /api/cockpit-grid (Redis-only, no broker/TwelveData calls), polls
-// every 5s. Each row shows one watchlist asset's full state: status, price,
-// ATR, last setup, P&L. Built for testing-phase visibility across instruments.
 
 function GridPage({ prefs, theme, account, positions, onNavigate }) {
   const [data, setData] = useState(null);
@@ -2803,7 +2482,7 @@ function GridRow({ a, c }) {
     );
   };
 
-  const fmtPrice = (p) => {
+  const fmtPriceLocal = (p) => {
     if (p == null) return "—";
     if (a.category === "forex") return p.toFixed(5);
     if (a.category === "crypto" && p > 1000) return p.toFixed(2);
@@ -2814,7 +2493,7 @@ function GridRow({ a, c }) {
     const color = p >= 0 ? c.green : c.red;
     return <span style={{ color }}>{p >= 0 ? "+" : ""}{p.toFixed(2)}</span>;
   };
-  const fmtTime = (ts) => {
+  const fmtTimeLocal = (ts) => {
     if (!ts) return "—";
     const sec = Math.round((Date.now() - ts) / 1000);
     if (sec < 60) return `${sec}s ago`;
@@ -2828,26 +2507,27 @@ function GridRow({ a, c }) {
         {a.name}<span style={{ color: c.muted, fontSize: 10, marginLeft: 6 }}>{a.id}</span>
       </td>
       <td style={{ padding: "8px 12px" }}>{statusBadge(a.status)}</td>
-      <td style={{ padding: "8px 12px" }}>{fmtPrice(a.currentPrice)}</td>
+      <td style={{ padding: "8px 12px" }}>{fmtPriceLocal(a.currentPrice)}</td>
       <td style={{ padding: "8px 12px", color: c.muted }}>{a.atrH1 ? a.atrH1.toFixed(a.category === "forex" ? 5 : 2) : "—"}</td>
       <td style={{ padding: "8px 12px", color: a.lastSetup ? c.text : c.muted }}>
-        {a.lastSetup?.template || "—"}
+        {/* V13: use display map so "am-ifvg" shows as "🌅 AM IFVG Reversal" */}
+        {a.lastSetup?.template ? displayTemplate(a.lastSetup.template) : "—"}
       </td>
       <td style={{ padding: "8px 12px", color: dirColor, fontWeight: 500 }}>{a.lastSetup?.direction || "—"}</td>
-      <td style={{ padding: "8px 12px" }}>{fmtPrice(a.lastSetup?.entry)}</td>
-      <td style={{ padding: "8px 12px", color: c.muted }}>{fmtPrice(a.lastSetup?.sl)}</td>
-      <td style={{ padding: "8px 12px", color: c.muted }}>{fmtPrice(a.lastSetup?.tp1)}</td>
+      <td style={{ padding: "8px 12px" }}>{fmtPriceLocal(a.lastSetup?.entry)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted }}>{fmtPriceLocal(a.lastSetup?.sl)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted }}>{fmtPriceLocal(a.lastSetup?.tp1)}</td>
       <td style={{ padding: "8px 12px" }}>{fmtPnL(a.lastSetup?.pnl)}</td>
       <td style={{ padding: "8px 12px", color: c.muted, fontSize: 11 }}>
         {a.recognition ? `${(a.recognition.winRate * 100).toFixed(0)}% (${a.recognition.matchCount})` : "—"}
       </td>
-      <td style={{ padding: "8px 12px", color: c.muted, fontSize: 11 }}>{fmtTime(a.lastTickAt)}</td>
+      <td style={{ padding: "8px 12px", color: c.muted, fontSize: 11 }}>{fmtTimeLocal(a.lastTickAt)}</td>
     </tr>
   );
 }
 
 // =====================================================================
-// SECTION 12: PORTFOLIO PAGE (skeleton — full design in later session)
+// SECTION 12: PORTFOLIO PAGE
 // =====================================================================
 
 function PortfolioPage({ prefs, theme, account, positions, onNavigate }) {
@@ -2875,7 +2555,6 @@ function PortfolioEquityTab({ account }) {
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
-      {/* Hero balance */}
       <div style={{ textAlign: "center", padding: "24px 0" }}>
         <div className="qb-mono" style={{ fontSize: 56, fontWeight: 700, color: "var(--qb-text-primary)", letterSpacing: -1 }}>
           ${balance.toFixed(2)}
@@ -2885,7 +2564,6 @@ function PortfolioEquityTab({ account }) {
         </div>
       </div>
 
-      {/* Equity curve placeholder */}
       <div className="qb-glass" style={{ padding: 20, borderRadius: 8, minHeight: 280, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--qb-text-muted)" }}>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: 14, marginBottom: 4 }}>Equity curve</div>
@@ -2895,7 +2573,6 @@ function PortfolioEquityTab({ account }) {
         </div>
       </div>
 
-      {/* Period stats placeholder */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         {["Today", "This week", "This month", "All-time"].map((label) => (
           <div key={label} className="qb-glass" style={{ padding: 16, borderRadius: 6, textAlign: "center" }}>
@@ -2924,7 +2601,7 @@ function PortfolioInstrumentsTab({ prefs, positions, onNavigate }) {
           <div
             key={assetId}
             className="qb-glass qb-hover"
-            onClick={() => { /* switch in cockpit */ onNavigate("cockpit"); }}
+            onClick={() => { onNavigate("cockpit"); }}
             style={{
               padding: 16,
               borderRadius: 6,
@@ -2964,7 +2641,7 @@ function PortfolioInstrumentsTab({ prefs, positions, onNavigate }) {
 }
 
 // =====================================================================
-// SECTION 13: REPORTS PAGE (skeleton — full design in later session)
+// SECTION 13: REPORTS PAGE
 // =====================================================================
 
 function ReportsPage({ prefs, theme, onNavigate }) {
@@ -3030,6 +2707,7 @@ function SettingsThemeTab({ theme, setTheme }) {
     ["downStrong",   "Down candle"],
     ["textPrimary",  "Text primary"],
     ["textMuted",    "Text muted"],
+    ["textFaint",    "Text faint"],
   ];
 
   const reset = () => setTheme(DEFAULT_THEME);
@@ -3087,7 +2765,7 @@ function ColorPickerRow({ label, value, onChange }) {
       <div style={{ flex: 1, fontSize: 12 }}>{label}</div>
       <input
         type="color"
-        value={value.startsWith("#") ? value : "#000000"}
+        value={value && value.startsWith("#") ? value : "#000000"}
         onChange={(e) => onChange(e.target.value)}
         style={{ width: 36, height: 28, border: "none", cursor: "pointer", background: "transparent" }}
       />
@@ -3325,7 +3003,7 @@ function SettingsAccountTab() {
       <div className="qb-glass" style={{ padding: 16, borderRadius: 6 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Bot version</div>
         <div className="qb-mono" style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>
-          Quantum Bot V12 (Session 2 — Cockpit shell)
+          Quantum Bot V13 — AM IFVG Reversal (Phase 1)
         </div>
       </div>
     </div>
@@ -3333,10 +3011,10 @@ function SettingsAccountTab() {
 }
 
 // =====================================================================
-// SECTION 15: PAGE HEADER (shared by Portfolio, Reports, Settings)
+// SECTION 15: PAGE HEADER (shared by Portfolio, Reports, Settings, Grid)
 // =====================================================================
 
-function PageHeader({ title, onBack, tabs, activeTab, onTabChange }) {
+function PageHeader({ title, onBack, tabs, activeTab, onTabChange, subtitle }) {
   return (
     <div
       className="qb-glass"
@@ -3364,6 +3042,9 @@ function PageHeader({ title, onBack, tabs, activeTab, onTabChange }) {
         ← Cockpit
       </button>
       <div style={{ fontSize: 14, fontWeight: 600 }}>{title}</div>
+      {subtitle && (
+        <div style={{ fontSize: 11, color: "var(--qb-text-muted)" }}>{subtitle}</div>
+      )}
       {tabs && (
         <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
           {tabs.map((t) => (
