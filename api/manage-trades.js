@@ -29,6 +29,7 @@ const { fetchPositions, fetchCandles } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
 const { notifyTPHit, notifySLHit, notifyTradeClosed } = require('./telegram');
+const { checkAllWatchedSetups } = require('./watched-setups-checker');
 
 // ===== Position management state =====
 const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
@@ -527,12 +528,15 @@ async function runManageTick() {
   const openIds = positions.map((p) => p.id);
   const recordings = await detectAndProcessClosed(openIds);
 
+  // v1.1: check watched setups (manual mode) — alert when price enters zone
+  const watched = await checkAllWatchedSetups().catch((e) => ({ error: e.message }));
+
   return {
     ts: Date.now(),
     tradingEnabled: true,
     openCount: managedPositions.length,
     manageResults,
-    closedAndRecorded: recordings,
+    closedAndRecorded: recordings, watched,
   };
 }
 

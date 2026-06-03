@@ -213,6 +213,7 @@ async function notifyTradePlaced({ asset, direction, lot, entry, sl, tpLevels, r
     'turtle-soup': '🐢 Turtle Soup',
     'judas-swing': '🎭 Judas Swing',
     'ote-continuation': '🎯 OTE Continuation',
+    'am-ifvg':          '🌅 AM IFVG Reversal',
   };
   const tmplLine = template ? `Setup: <b>${templateLabels[template] || template}</b>\n` : '';
 
