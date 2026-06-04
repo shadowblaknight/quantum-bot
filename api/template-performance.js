@@ -1,186 +1,188 @@
-/* eslint-disable */
-// api/template-performance.js  (Pilot Dashboard v1.2 — adds bySession)
-const { getRedis, safeParse } = require('./_lib');
+// =====================================================================
+// QUANTUM BOT V13 · /api/template-performance
+// =====================================================================
+// Aggregates closed trades by template name, returns rolling stats.
+//
+// Source of truth: Redis list "qb:trades:closed" — your watcher should
+// push every closed trade here with shape:
+//   {
+//     id, assetId, templateName, direction, entry, sl, tp,
+//     exitPrice, exitReason, profit, rMultiple,
+//     openedAt, closedAt
+//   }
+//
+// Endpoint:
+//   GET /api/template-performance       → all templates, all-time
+//   GET /api/template-performance?days=30
+//
+// Response:
+//   {
+//     byTemplate: {
+//       "silver-bullet": { sample, wins, losses, winRate, profitFactor, avgR, verdict, trend, lastN },
+//       ...
+//     },
+//     overall: { sample, winRate, profitFactor, avgR },
+//     updatedAt: 1234567890
+//   }
+//
+// Defensive: if Redis is empty / not set up, returns { byTemplate: {} } so
+// the dashboard renders "no data yet" rows instead of crashing.
+// =====================================================================
 
-const POSSIBLE_TRADE_KEYS = ['v12:knn:trades', 'v12:recognition:trades', 'v12:closed-trades'];
+const REDIS_URL   = process.env.KV_REST_API_URL;
+const REDIS_TOKEN = process.env.KV_REST_API_TOKEN;
+const CLOSED_KEY  = "qb:trades:closed";
 
-async function listAllClosedTrades() {
-  try {
-    const recmem = require('./recognition-memory');
-    if (typeof recmem.listClosedTrades === 'function') {
-      const trades = await recmem.listClosedTrades();
-      if (Array.isArray(trades)) return trades;
-    }
-    if (typeof recmem.getAllTrades === 'function') {
-      const trades = await recmem.getAllTrades();
-      if (Array.isArray(trades)) return trades;
-    }
-  } catch (_) {}
-  const r = getRedis();
-  if (!r) return [];
-  for (const key of POSSIBLE_TRADE_KEYS) {
-    try {
-      const raw = await r.get(key);
-      const parsed = safeParse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch (_) {}
-  }
-  return [];
+async function redisLRANGE(key, start, stop) {
+  if (!REDIS_URL || !REDIS_TOKEN) throw new Error("Upstash env vars missing");
+  const res = await fetch(
+    `${REDIS_URL}/lrange/${encodeURIComponent(key)}/${start}/${stop}`,
+    { headers: { Authorization: `Bearer ${REDIS_TOKEN}` } }
+  );
+  const j = await res.json();
+  return j.result || [];
 }
 
-function templateOf(trade) {
-  if (trade.template) return trade.template;
-  if (Array.isArray(trade.contributingTactics) && trade.contributingTactics.length > 0) {
-    return trade.contributingTactics[0];
-  }
-  return null;
+function parseTrades(rawList) {
+  return rawList
+    .map((s) => { try { return typeof s === "string" ? JSON.parse(s) : s; } catch (_) { return null; }})
+    .filter(Boolean);
 }
 
-function sessionFromTimestamp(ts) {
-  if (!ts || !isFinite(ts)) return 'unknown';
+function statsFor(trades) {
+  if (trades.length === 0) {
+    return { sample: 0, wins: 0, losses: 0, winRate: 0, profitFactor: 0, avgR: 0, verdict: "too-few-trades", trend: "flat", lastN: [] };
+  }
+  let wins = 0, losses = 0, grossProfit = 0, grossLoss = 0, sumR = 0;
+  for (const t of trades) {
+    const p = t.profit || 0;
+    const r = t.rMultiple || 0;
+    if (p > 0) { wins++; grossProfit += p; }
+    else if (p < 0) { losses++; grossLoss += Math.abs(p); }
+    sumR += r;
+  }
+  const sample = trades.length;
+  const winRate = wins / sample;
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 99 : 0);
+  const avgR = sumR / sample;
+
+  // Verdict
+  let verdict = "too-few-trades";
+  if (sample >= 5) {
+    if (profitFactor >= 1.5)      verdict = "profitable";
+    else if (profitFactor >= 1.0) verdict = "marginal";
+    else                          verdict = "underperforming";
+  }
+
+  // Recent-trend: compare last 5 vs prior 5
+  let trend = "flat";
+  if (sample >= 10) {
+    const recent = trades.slice(-5);
+    const prior  = trades.slice(-10, -5);
+    const recentR = recent.reduce((a, t) => a + (t.rMultiple || 0), 0) / 5;
+    const priorR  = prior.reduce((a, t) => a + (t.rMultiple || 0), 0) / 5;
+    if (recentR > priorR + 0.2)      trend = "improving";
+    else if (recentR < priorR - 0.2) trend = "declining";
+  }
+
+  const lastN = trades.slice(-5).map((t) => (t.rMultiple || 0));
+
+  return { sample, wins, losses, winRate, profitFactor, avgR, verdict, trend, lastN };
+}
+
+function bySession(trades) {
+  const out = {};
+  for (const t of trades) {
+    const s = t.session || classifySession(t.closedAt || t.openedAt);
+    if (!out[s]) out[s] = [];
+    out[s].push(t);
+  }
+  const result = {};
+  for (const [s, arr] of Object.entries(out)) {
+    result[s] = statsFor(arr);
+  }
+  return result;
+}
+
+function byAsset(trades) {
+  const out = {};
+  for (const t of trades) {
+    const a = t.assetId || "unknown";
+    if (!out[a]) out[a] = [];
+    out[a].push(t);
+  }
+  const result = {};
+  for (const [a, arr] of Object.entries(out)) {
+    result[a] = statsFor(arr);
+  }
+  return result;
+}
+
+function classifySession(ts) {
+  if (!ts) return "unknown";
   const d = new Date(ts);
-  const day = d.getUTCDay();
-  if (day === 0 || day === 6) return 'weekend';
-  const hour = d.getUTCHours();
-  const min  = d.getUTCMinutes();
-  const t = hour + min / 60;
-  if (t < 6)  return 'asia';
-  if (t < 7)  return 'frankfurt-open';
-  if (t < 9)  return 'london-open';
-  if (t < 12) return 'london-mid';
-  if (t < 13) return 'pre-ny';
-  if (t < 15) return 'ny-open';
-  if (t < 19) return 'ny-mid';
-  if (t < 22) return 'ny-late';
-  return 'asia';
+  const dow = d.getUTCDay();
+  const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes();
+  if (dow === 0 || dow === 6) return "weekend";
+  if (utcMin < 6 * 60)        return "asia";
+  if (utcMin < 7 * 60)        return "frankfurt-open";
+  if (utcMin < 9 * 60)        return "london-open";
+  if (utcMin < 12 * 60)       return "london-mid";
+  if (utcMin < 13 * 60)       return "pre-ny";
+  if (utcMin < 15 * 60)       return "ny-open";
+  if (utcMin < 19 * 60)       return "ny-mid";
+  if (utcMin < 22 * 60)       return "ny-late";
+  return "asia";
 }
 
-const SESSION_ORDER = [
-  'asia', 'frankfurt-open', 'london-open', 'london-mid',
-  'pre-ny', 'ny-open', 'ny-mid', 'ny-late', 'weekend', 'unknown',
-];
+export default async function handler(req, res) {
+  try {
+    const days = parseInt(req.query?.days || "0", 10);
+    const cutoff = days > 0 ? Date.now() - days * 86400000 : 0;
 
-function computeGroupStats(template, trades) {
-  if (!trades || trades.length === 0) return null;
-  const wins   = trades.filter((t) => (t.pnl || 0) >  0.5);
-  const losses = trades.filter((t) => (t.pnl || 0) < -0.5);
-  const breakevens = trades.filter((t) => Math.abs(t.pnl || 0) <= 0.5);
-  const decided = wins.length + losses.length;
-  const winRate = decided > 0 ? wins.length / decided : 0;
-  const totalPnL = trades.reduce((s, t) => s + (t.pnl || 0), 0);
-  const grossWins   = wins.reduce((s, t) => s + (t.pnl || 0), 0);
-  const grossLosses = Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0));
-  const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? null : 0);
+    let trades = [];
+    try {
+      const raw = await redisLRANGE(CLOSED_KEY, 0, -1);
+      trades = parseTrades(raw);
+    } catch (_) {
+      // Redis empty / not set up — return empty stats, not an error
+    }
 
-  const rValues = trades.map((t) => {
-    const risk = Math.abs(t.riskDollars || 0);
-    if (risk === 0) return 0;
-    return (t.pnl || 0) / risk;
-  });
-  const avgR = rValues.length > 0 ? rValues.reduce((s, x) => s + x, 0) / rValues.length : 0;
+    if (cutoff > 0) {
+      trades = trades.filter((t) => (t.closedAt || 0) >= cutoff);
+    }
 
-  const byAsset = {};
-  for (const t of trades) {
-    if (!t.asset) continue;
-    if (!byAsset[t.asset]) byAsset[t.asset] = { wins: 0, losses: 0, be: 0, pnl: 0, count: 0 };
-    const pnl = t.pnl || 0;
-    byAsset[t.asset].pnl += pnl;
-    byAsset[t.asset].count++;
-    if (pnl > 0.5) byAsset[t.asset].wins++;
-    else if (pnl < -0.5) byAsset[t.asset].losses++;
-    else byAsset[t.asset].be++;
+    // Sort chronologically for trend math
+    trades.sort((a, b) => (a.closedAt || 0) - (b.closedAt || 0));
+
+    // Bucket by template
+    const buckets = {};
+    for (const t of trades) {
+      const tpl = t.templateName || "unknown";
+      if (!buckets[tpl]) buckets[tpl] = [];
+      buckets[tpl].push(t);
+    }
+
+    const byTemplate = {};
+    for (const [tpl, arr] of Object.entries(buckets)) {
+      const base = statsFor(arr);
+      byTemplate[tpl] = {
+        ...base,
+        bySession: bySession(arr),
+        byAsset:   byAsset(arr),
+      };
+    }
+
+    const overall = statsFor(trades);
+
+    return res.status(200).json({
+      byTemplate,
+      overall,
+      totalTrades: trades.length,
+      windowDays: days || null,
+      updatedAt: Date.now(),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "template-performance error" });
   }
-
-  const bySession = {};
-  for (const t of trades) {
-    const session = sessionFromTimestamp(t.openedAt || t.closedAt);
-    if (!bySession[session]) bySession[session] = { wins: 0, losses: 0, be: 0, pnl: 0, count: 0 };
-    const pnl = t.pnl || 0;
-    bySession[session].pnl += pnl;
-    bySession[session].count++;
-    if (pnl > 0.5) bySession[session].wins++;
-    else if (pnl < -0.5) bySession[session].losses++;
-    else bySession[session].be++;
-  }
-
-  for (const key of Object.keys(bySession)) {
-    bySession[key].pnl = round2(bySession[key].pnl);
-    bySession[key].winRate = (bySession[key].wins + bySession[key].losses) > 0
-      ? round4(bySession[key].wins / (bySession[key].wins + bySession[key].losses)) : 0;
-  }
-  for (const key of Object.keys(byAsset)) {
-    byAsset[key].pnl = round2(byAsset[key].pnl);
-    byAsset[key].winRate = (byAsset[key].wins + byAsset[key].losses) > 0
-      ? round4(byAsset[key].wins / (byAsset[key].wins + byAsset[key].losses)) : 0;
-  }
-
-  const sortedByTime = [...trades].sort((a, b) => (a.closedAt || 0) - (b.closedAt || 0));
-  const recent = sortedByTime.slice(-10);
-  const recentWins   = recent.filter((t) => (t.pnl || 0) >  0.5).length;
-  const recentLosses = recent.filter((t) => (t.pnl || 0) < -0.5).length;
-  const recentDecided = recentWins + recentLosses;
-  const recentWinRate = recentDecided > 0 ? recentWins / recentDecided : winRate;
-
-  let trend = 'stable';
-  if (recentDecided >= 3) {
-    if (recentWinRate > winRate * 1.15) trend = 'improving';
-    else if (recentWinRate < winRate * 0.85) trend = 'declining';
-  } else if (trades.length < 5) trend = 'insufficient-data';
-
-  let verdict;
-  if (trades.length < 10) verdict = 'too-few-trades';
-  else if (winRate >= 0.5 && profitFactor >= 1.5) verdict = 'profitable';
-  else if (winRate >= 0.4 && profitFactor >= 1.2) verdict = 'marginal';
-  else verdict = 'underperforming';
-
-  return {
-    template,
-    sampleSize: trades.length,
-    wins: wins.length, losses: losses.length, breakevens: breakevens.length,
-    winRate: round4(winRate),
-    avgR: round4(avgR),
-    totalPnL: round2(totalPnL),
-    profitFactor: profitFactor == null ? null : round4(profitFactor),
-    grossWins: round2(grossWins),
-    grossLosses: round2(grossLosses),
-    recentWinRate: round4(recentWinRate),
-    trend, verdict,
-    byAsset, bySession,
-    sessionOrder: SESSION_ORDER,
-    lastTradeAt: sortedByTime.length > 0 ? (sortedByTime[sortedByTime.length - 1].closedAt || null) : null,
-    firstTradeAt: sortedByTime.length > 0 ? (sortedByTime[0].openedAt || sortedByTime[0].closedAt || null) : null,
-  };
 }
-
-async function computeTemplatePerformance() {
-  const trades = await listAllClosedTrades();
-  if (!Array.isArray(trades) || trades.length === 0) {
-    return { ok: true, templates: [], totalTrades: 0, message: 'no closed trades yet — gather demo data first' };
-  }
-  const byTemplate = {};
-  for (const t of trades) {
-    const tmpl = templateOf(t);
-    if (!tmpl) continue;
-    if (!byTemplate[tmpl]) byTemplate[tmpl] = [];
-    byTemplate[tmpl].push(t);
-  }
-  const stats = Object.entries(byTemplate)
-    .map(([tmpl, group]) => computeGroupStats(tmpl, group))
-    .filter(Boolean)
-    .sort((a, b) => b.sampleSize - a.sampleSize);
-  const overall = {
-    totalTrades: trades.length,
-    totalPnL: round2(trades.reduce((s, t) => s + (t.pnl || 0), 0)),
-    overallWinRate: (() => {
-      const w = trades.filter((t) => (t.pnl || 0) > 0.5).length;
-      const l = trades.filter((t) => (t.pnl || 0) < -0.5).length;
-      return (w + l) > 0 ? round4(w / (w + l)) : 0;
-    })(),
-  };
-  return { ok: true, templates: stats, overall, computedAt: Date.now() };
-}
-
-function round2(n) { return Math.round((n || 0) * 100) / 100; }
-function round4(n) { return Math.round((n || 0) * 10000) / 10000; }
-
-module.exports = { computeTemplatePerformance, listAllClosedTrades, sessionFromTimestamp };

@@ -1,6 +1,20 @@
 /* eslint-disable */
-// api/watched-setups.js  (Pilot Dashboard v1.1 — manual mode)
-const { getRedis, safeParse } = require('./_lib');
+// api/watched-setups.js  (Pilot Dashboard v1.2 — adds HTTP endpoint)
+//
+// CHANGE FROM v1.1: same module exports (addWatchedSetup, updateWatchedSetup,
+// etc.) so webhook.js + cron keep working unchanged. Adds default export
+// (HTTP handler) so the frontend dashboard can GET this endpoint.
+//
+// HTTP behavior:
+//   GET  /api/watched-setups                 → { list: [active setups], total, alerted, expired }
+//   GET  /api/watched-setups?asset=gold      → filter by asset
+//   GET  /api/watched-setups?action=cancel&id=watch_xxx → cancel a watch
+//   POST /api/watched-setups  (with body action=cancel + id) → cancel
+//
+// All existing webhook.js and watched-setups-checker.js imports continue to work.
+// ----------------------------------------------------------------------------
+
+const { getRedis, safeParse, applyCors } = require('./_lib');
 
 const WATCHED_KEY = 'v13:pilot:watched-setups';
 const TTL_SECONDS = 86400;
@@ -108,7 +122,54 @@ function priceInZone(currentPrice, setup) {
   return false;
 }
 
-module.exports = {
-  getAllWatched, getActiveWatched, addWatchedSetup,
-  updateWatchedSetup, removeWatchedSetup, pruneExpired, priceInZone,
+// ── HTTP handler (default export) ────────────────────────────────────
+module.exports = async function handler(req, res) {
+  if (applyCors(req, res)) return;
+
+  try {
+    const action = (req.query?.action || '').toLowerCase();
+    const asset  = req.query?.asset;
+    const id     = req.query?.id;
+
+    // POST/GET cancel
+    if (action === 'cancel') {
+      if (!id) return res.status(400).json({ error: 'id required for cancel' });
+      const r = await updateWatchedSetup(id, { status: 'cancelled', cancelledAt: Date.now() });
+      return res.status(200).json(r);
+    }
+
+    if (action === 'remove') {
+      if (!id) return res.status(400).json({ error: 'id required for remove' });
+      const r = await removeWatchedSetup(id);
+      return res.status(200).json(r);
+    }
+
+    // Default: list active (and recent) setups
+    await pruneExpired();
+    const all = await getAllWatched();
+    const filtered = asset ? all.filter((s) => s.asset === asset) : all;
+    const list = filtered
+      .filter((s) => s.status !== 'expired' && s.status !== 'cancelled')
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    return res.status(200).json({
+      list,
+      total:    list.length,
+      watching: list.filter((s) => s.status === 'watching').length,
+      alerted:  list.filter((s) => s.status === 'alerted').length,
+      asset:    asset || null,
+      updatedAt: Date.now(),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || 'watched-setups handler error' });
+  }
 };
+
+// ── Module exports (for webhook.js + cron) ───────────────────────────
+module.exports.getAllWatched       = getAllWatched;
+module.exports.getActiveWatched    = getActiveWatched;
+module.exports.addWatchedSetup     = addWatchedSetup;
+module.exports.updateWatchedSetup  = updateWatchedSetup;
+module.exports.removeWatchedSetup  = removeWatchedSetup;
+module.exports.pruneExpired        = pruneExpired;
+module.exports.priceInZone         = priceInZone;
