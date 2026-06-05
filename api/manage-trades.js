@@ -1,14 +1,20 @@
 /* eslint-disable */
-// V13 — api/manage-trades.js
+// V13 — api/manage-trades.js  (v1.2 — 3-TP ladder, SL trails to each hit TP)
 //
 // Manages open positions through their full lifecycle:
 //   - Detects when limit order fills → marks pending as 'filled', records actual entry
-//   - At TP1 hit: close 25% of position, move SL to entry (BE)
-//   - At TP2 hit: close 25%, move SL to TP1 (lock profit)
-//   - At TP3 hit: close 25%, move SL to TP2
-//   - At TP4 hit: close remaining 25%, position closed
+//
+// v1.2 partial-close + SL-trail behavior:
+//   - At TP1 hit: close 33% of original lot, move SL to TP1 (locks in TP1 profit on remaining)
+//   - At TP2 hit: close 33% of original lot, move SL to TP2 (locks in TP2 profit on remaining)
+//   - At TP3 hit: close remaining 34%, position fully closed
 //   - When SL hit: position closes naturally
-//   - Trailing: once 2R in profit, also enable trailing stop at 1 ATR
+//   - Trailing: once 2R+ in profit AND 2 TPs hit, also enable trailing stop at 1 ATR
+//
+// CAVEAT: When TP1 just hit, price ≈ TP1. Setting SL = TP1 may be rejected by the
+//   broker (minimum stop distance violation). If so, the modify call returns an
+//   error in `actions[]` but the position continues unharmed with the previous SL.
+//   This is intentional and non-fatal. Observe how often this rejects in practice.
 //
 // On position CLOSE:
 //   - Reads pending setup record (still in Redis) for entry-time feature vector
@@ -266,8 +272,12 @@ async function managePosition(position) {
   const currentPrice = position.currentPrice || position.openPrice;
   const actions = [];
 
-  // TP HIT DETECTION
-  for (let i = 0; i < tpLevels.length && i < 4; i++) {
+  // ─── TP HIT DETECTION ────────────────────────────────────────────
+  // v1.2: 3-TP ladder with 33% / 33% / 34% partial closes.
+  //   TP1 hit → close 33% of ORIGINAL lot, move SL to TP1
+  //   TP2 hit → close 33% of ORIGINAL lot, move SL to TP2
+  //   TP3 hit → close ALL remaining lot, no SL move (position closes)
+  for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
     if (state.tpsHit.includes(tpName)) continue;
 
@@ -281,81 +291,90 @@ async function managePosition(position) {
     }
 
     const hit = isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice;
+    if (!hit) continue;
 
-    if (hit) {
-      // Partial close: 25% of original lot
-      const closeAmount = Math.max(0.01, Math.round(state.originalLot * 0.25 * 100) / 100);
+    // ─── Determine close volume ─────
+    // Final TP (TP3) closes all remaining volume. Earlier TPs close 33% of ORIGINAL lot.
+    const closingFinalTP = (i === 2) || (i === tpLevels.length - 1);
+    let lotToClose;
+    if (closingFinalTP) {
+      lotToClose = position.volume; // everything remaining
+    } else {
+      lotToClose = Math.max(0.01, Math.round(state.originalLot * 0.33 * 100) / 100);
+      // Safety: never try to close more than what's currently open
+      if (lotToClose > position.volume) lotToClose = position.volume;
+    }
 
-      // Special case: if this is TP4 (final), close everything remaining
-      const closingFinalTP = (i === 3) || (i === tpLevels.length - 1);
-      const lotToClose = closingFinalTP ? position.volume : closeAmount;
+    const closeResult = await partialClose(position.id, lotToClose);
+    if (closeResult.ok) {
+      state.tpsHit.push(tpName);
+      state.partialCloses.push({ tpName, lotClosed: lotToClose, atPrice: tpPrice, ts: Date.now() });
+      actions.push({ action: 'partial-close', tpName, lotClosed: lotToClose, ok: true });
 
-      const closeResult = await partialClose(position.id, lotToClose);
-      if (closeResult.ok) {
-        state.tpsHit.push(tpName);
-        state.partialCloses.push({ tpName, lotClosed: lotToClose, atPrice: tpPrice, ts: Date.now() });
-        actions.push({ action: 'partial-close', tpName, lotClosed: lotToClose, ok: true });
+      await pushCommentary(asset, 'tp-hit',
+        `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed ${lotToClose} lot (33% of ${state.originalLot})`);
 
-        await pushCommentary(asset, 'tp-hit',
-          `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed ${lotToClose} lot`);
+      const dollarsThisLeg = signedDollarsForLeg(asset, state.entry, tpPrice, direction, lotToClose);
+      const cumulativeDollars = (state.partialCloses || []).reduce((sum, pc) => {
+        const d = signedDollarsForLeg(asset, state.entry, pc.atPrice, direction, pc.lotClosed) || 0;
+        return sum + d;
+      }, 0);
 
-        const dollarsThisLeg = signedDollarsForLeg(asset, state.entry, tpPrice, direction, lotToClose);
-        const cumulativeDollars = (state.partialCloses || []).reduce((sum, pc) => {
-          const d = signedDollarsForLeg(asset, state.entry, pc.atPrice, direction, pc.lotClosed) || 0;
-          return sum + d;
-        }, 0);
+      // ─── SL MOVE (v1.2: SL trails to the TP that just hit) ─────────
+      //   TP1 hit → SL to TP1 (locks in TP1 profit on remaining 67%)
+      //   TP2 hit → SL to TP2 (locks in TP2 profit on remaining 34%)
+      //   TP3 hit → no SL move (closingFinalTP=true skips this block)
+      //
+      // Broker may reject SL = current price (minimum stop distance). If so,
+      // the error is captured in actions and the position continues with the
+      // previous SL — non-fatal.
+      let newSL = null;
+      if (!closingFinalTP) {
+        newSL = tpPrice; // SL trails to the TP that just hit
 
-        // Move SL based on TP that hit:
-        //   TP1 hit → SL to entry (BE)
-        //   TP2 hit → SL to TP1
-        //   TP3 hit → SL to TP2
-        let newSL = null;
-        if (!closingFinalTP) {
-          if (i === 0) newSL = state.entry;
-          else if (i === 1) newSL = tpLevels[0].price;
-          else if (i === 2) newSL = tpLevels[1].price;
-
-          if (newSL != null) {
-            const nextTPPrice = tpLevels[i + 1] ? tpLevels[i + 1].price : tpPrice;
-            const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice, asset);
-            if (modifyResult.ok) {
-              state.slMoves.push({ atTP: tpName, newSL, ts: Date.now() });
-              actions.push({ action: 'sl-move', newSL, ok: true });
-              await pushCommentary(asset, 'sl-moved',
-                `SL moved to ${i === 0 ? 'breakeven' : `TP${i}`} @ ${newSL.toFixed(newSL > 100 ? 2 : 5)}`);
-            } else {
-              actions.push({ action: 'sl-move', error: modifyResult.error });
-            }
-          }
+        // Next broker-side TP is the next ladder rung (or null if no further TP)
+        const nextTPPrice = tpLevels[i + 1] ? tpLevels[i + 1].price : null;
+        const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice, asset);
+        if (modifyResult.ok) {
+          state.slMoves.push({ atTP: tpName, newSL, ts: Date.now() });
+          actions.push({ action: 'sl-move', newSL, ok: true });
+          await pushCommentary(asset, 'sl-moved',
+            `SL moved to ${tpName} @ ${newSL.toFixed(newSL > 100 ? 2 : 5)} (locks in ${tpName} profit on remaining)`);
+        } else {
+          actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: newSL });
+          await pushCommentary(asset, 'sl-move-rejected',
+            `SL move to ${tpName} rejected by broker: ${modifyResult.error.slice(0, 80)}`);
         }
-
-        // Telegram: TP hit (only for TP1-TP3 — TP4 emits as part of "trade closed")
-        if (!closingFinalTP) {
-          try {
-            await notifyTPHit({
-              asset,
-              direction,
-              tpName,
-              tpPrice,
-              lotClosed: lotToClose,
-              dollarsSecured: dollarsThisLeg,
-              cumulativeDollars,
-              slMovedTo: newSL,
-              dedupeKey: `tphit:${position.id}:${tpName}`,
-            });
-          } catch (_) {}
-        }
-      } else {
-        actions.push({ action: 'partial-close', tpName, error: closeResult.error });
       }
 
-      await setPositionState(position.id, state);
-      // Only one TP per tick (avoid race conditions)
-      break;
+      // Telegram: TP hit (only for TP1 + TP2 — TP3 emits via "trade closed")
+      if (!closingFinalTP) {
+        try {
+          await notifyTPHit({
+            asset,
+            direction,
+            tpName,
+            tpPrice,
+            lotClosed: lotToClose,
+            dollarsSecured: dollarsThisLeg,
+            cumulativeDollars,
+            slMovedTo: newSL,
+            dedupeKey: `tphit:${position.id}:${tpName}`,
+          });
+        } catch (_) {}
+      }
+    } else {
+      actions.push({ action: 'partial-close', tpName, error: closeResult.error });
     }
+
+    await setPositionState(position.id, state);
+    // Only one TP per tick (avoid race conditions)
+    break;
   }
 
-  // TRAILING STOP (when 2R+ in profit)
+  // ─── TRAILING STOP (after both TPs hit + 2R profit) ──────────────
+  // Runs on the final 34% chunk after TP1 + TP2 hit. SL is already at TP2;
+  // trailing only kicks in if it would tighten further.
   const initialSLDistance = Math.abs(state.entry - matchedPending.slPrice);
   const profitDistance = isLong ? currentPrice - state.entry : state.entry - currentPrice;
   const profitR = initialSLDistance > 0 ? profitDistance / initialSLDistance : 0;
