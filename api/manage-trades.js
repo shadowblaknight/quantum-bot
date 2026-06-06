@@ -1,31 +1,18 @@
 /* eslint-disable */
-// V13 — api/manage-trades.js  (v1.2 — 3-TP ladder, SL trails to each hit TP)
+// V13 — api/manage-trades.js  (v1.3 — adds missing addDailyPnL call)
 //
-// Manages open positions through their full lifecycle:
-//   - Detects when limit order fills → marks pending as 'filled', records actual entry
+// v1.3 CHANGE (one-line fix that unbroke daily P&L):
+//   v1.2 stored closed trades into recognition memory via storeClosedTrade()
+//   but NEVER called addDailyPnL(). The dashboard's "Today realized P&L"
+//   reads from v13:pilot:daily-pnl:YYYY-MM-DD which was never written.
+//   Now: each closed trade contributes its totalPnL to today's daily-pnl key.
 //
-// v1.2 partial-close + SL-trail behavior:
-//   - At TP1 hit: close 33% of original lot, move SL to TP1 (locks in TP1 profit on remaining)
-//   - At TP2 hit: close 33% of original lot, move SL to TP2 (locks in TP2 profit on remaining)
+// v1.2 behavior (unchanged):
+//   - At TP1 hit: close 33% of original lot, move SL to TP1
+//   - At TP2 hit: close 33% of original lot, move SL to TP2
 //   - At TP3 hit: close remaining 34%, position fully closed
 //   - When SL hit: position closes naturally
 //   - Trailing: once 2R+ in profit AND 2 TPs hit, also enable trailing stop at 1 ATR
-//
-// CAVEAT: When TP1 just hit, price ≈ TP1. Setting SL = TP1 may be rejected by the
-//   broker (minimum stop distance violation). If so, the modify call returns an
-//   error in `actions[]` but the position continues unharmed with the previous SL.
-//   This is intentional and non-fatal. Observe how often this rejects in practice.
-//
-// On position CLOSE:
-//   - Reads pending setup record (still in Redis) for entry-time feature vector
-//   - Computes outcome: WIN / LOSS / BREAKEVEN
-//   - Calls recognition-memory.storeClosedTrade with full feature vector
-//   - Pushes commentary
-//
-// CRITICAL SAFETY:
-//   - Only acts if QB_TRADING_ENABLED === 'true'
-//   - Recognizes V12 ('QB-V12-') and V13 ('QB-V13-') positions by comment prefix
-//   - All MetaAPI calls have error handling — failures don't crash watcher
 // ----------------------------------------------------------------------------
 
 const { getRedis, safeParse, applyCors, atr, getCurrentSession, roundToPipSize } = require('./_lib');
@@ -34,6 +21,7 @@ const { resolveSymbol, resolveAsset } = require('./symbol-resolver');
 const { fetchPositions, fetchCandles } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
+const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
 const { notifyTPHit, notifySLHit, notifyTradeClosed } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
 
@@ -56,8 +44,6 @@ function estimateDollarsFromDistance(assetId, distance, lot) {
   return pips * meta.dollarPerPipPerLot * lot;
 }
 
-// Sign-aware variant: returns POSITIVE when exitPrice is in profit direction,
-// NEGATIVE when against. Critical for notification accuracy.
 function signedDollarsForLeg(assetId, entryPrice, exitPrice, direction, lot) {
   const meta = getAssetById(assetId);
   if (!meta || !meta.pipSize || !meta.dollarPerPipPerLot) return null;
@@ -180,32 +166,23 @@ async function setPositionState(positionId, state) {
 async function managePosition(position) {
   if (!isTradingEnabled()) return { id: position.id, skipped: 'trading-disabled' };
 
-  // V12 + V13 positions are recognized by comment prefix
   if (!position.comment || !(position.comment.startsWith('QB-V12-') || position.comment.startsWith('QB-V13-'))) {
     return { id: position.id, skipped: 'not-managed-position' };
   }
 
-  // Resolve asset
   const asset = position.assetId || await resolveAsset(position.symbol);
   if (!asset) return { id: position.id, error: 'cannot resolve asset' };
 
   const isLong = position.type === 'POSITION_TYPE_BUY' || position.direction === 'LONG';
   const direction = isLong ? 'LONG' : 'SHORT';
 
-  // Find pending setup that matches this position.
-  //
-  // Strategy:
-  //   1. Prefer matching by positionId (set when first managed) — exact match
-  //   2. Fallback to strict price + direction + TP-direction-sanity check
   const pendingList = await getPendingSetups(asset);
 
-  // Pass 1: exact positionId match (managed before)
   let matchedPending = pendingList.find((p) =>
     p.positionId && p.positionId === position.id &&
     (p.status === 'placed' || p.status === 'filled')
   );
 
-  // Pass 2: strict first-fill match
   if (!matchedPending) {
     const isGold = position.openPrice > 100;
     const priceTolerance = isGold ? 2.0 : position.openPrice * 0.0005;
@@ -215,7 +192,6 @@ async function managePosition(position) {
       if (p.setup.direction !== direction) return false;
       if (Math.abs(p.plannedEntry - position.openPrice) > priceTolerance) return false;
 
-      // Sanity check: TPs must point the correct direction relative to entry.
       const entry = position.openPrice;
       const tps = p.tpLevels || [];
       if (tps.length === 0) return false;
@@ -228,7 +204,6 @@ async function managePosition(position) {
     });
   }
 
-  // Mark as filled if just discovered (first time manage sees this position)
   if (matchedPending && matchedPending.status === 'placed') {
     await updatePendingSetup(asset, matchedPending.id, {
       status: 'filled',
@@ -244,7 +219,6 @@ async function managePosition(position) {
     return { id: position.id, error: 'no matching pending setup found', positionId: position.id };
   }
 
-  // Get position state (TP hits, SL moves so far)
   let state = await getPositionState(position.id);
   if (!state) {
     state = {
@@ -262,28 +236,21 @@ async function managePosition(position) {
     await setPositionState(position.id, state);
   }
 
-  // Get TP levels and current price
   const tpLevels = matchedPending.tpLevels || [];
   if (tpLevels.length === 0) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
 
-  // Read fresh price (use position.currentPrice from broker if available)
   const currentPrice = position.currentPrice || position.openPrice;
   const actions = [];
 
   // ─── TP HIT DETECTION ────────────────────────────────────────────
-  // v1.2: 3-TP ladder with 33% / 33% / 34% partial closes.
-  //   TP1 hit → close 33% of ORIGINAL lot, move SL to TP1
-  //   TP2 hit → close 33% of ORIGINAL lot, move SL to TP2
-  //   TP3 hit → close ALL remaining lot, no SL move (position closes)
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
     if (state.tpsHit.includes(tpName)) continue;
 
     const tpPrice = tpLevels[i].price;
 
-    // SAFETY: TP must be on the profit side of entry.
     const tpOnProfitSide = isLong ? tpPrice > state.entry : tpPrice < state.entry;
     if (!tpOnProfitSide) {
       actions.push({ action: 'tp-skipped', tpName, reason: 'tp-on-loss-side', tpPrice, entry: state.entry });
@@ -293,15 +260,12 @@ async function managePosition(position) {
     const hit = isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice;
     if (!hit) continue;
 
-    // ─── Determine close volume ─────
-    // Final TP (TP3) closes all remaining volume. Earlier TPs close 33% of ORIGINAL lot.
     const closingFinalTP = (i === 2) || (i === tpLevels.length - 1);
     let lotToClose;
     if (closingFinalTP) {
-      lotToClose = position.volume; // everything remaining
+      lotToClose = position.volume;
     } else {
       lotToClose = Math.max(0.01, Math.round(state.originalLot * 0.33 * 100) / 100);
-      // Safety: never try to close more than what's currently open
       if (lotToClose > position.volume) lotToClose = position.volume;
     }
 
@@ -320,19 +284,9 @@ async function managePosition(position) {
         return sum + d;
       }, 0);
 
-      // ─── SL MOVE (v1.2: SL trails to the TP that just hit) ─────────
-      //   TP1 hit → SL to TP1 (locks in TP1 profit on remaining 67%)
-      //   TP2 hit → SL to TP2 (locks in TP2 profit on remaining 34%)
-      //   TP3 hit → no SL move (closingFinalTP=true skips this block)
-      //
-      // Broker may reject SL = current price (minimum stop distance). If so,
-      // the error is captured in actions and the position continues with the
-      // previous SL — non-fatal.
       let newSL = null;
       if (!closingFinalTP) {
-        newSL = tpPrice; // SL trails to the TP that just hit
-
-        // Next broker-side TP is the next ladder rung (or null if no further TP)
+        newSL = tpPrice;
         const nextTPPrice = tpLevels[i + 1] ? tpLevels[i + 1].price : null;
         const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice, asset);
         if (modifyResult.ok) {
@@ -347,7 +301,6 @@ async function managePosition(position) {
         }
       }
 
-      // Telegram: TP hit (only for TP1 + TP2 — TP3 emits via "trade closed")
       if (!closingFinalTP) {
         try {
           await notifyTPHit({
@@ -368,13 +321,10 @@ async function managePosition(position) {
     }
 
     await setPositionState(position.id, state);
-    // Only one TP per tick (avoid race conditions)
     break;
   }
 
-  // ─── TRAILING STOP (after both TPs hit + 2R profit) ──────────────
-  // Runs on the final 34% chunk after TP1 + TP2 hit. SL is already at TP2;
-  // trailing only kicks in if it would tighten further.
+  // ─── TRAILING STOP ──────────────
   const initialSLDistance = Math.abs(state.entry - matchedPending.slPrice);
   const profitDistance = isLong ? currentPrice - state.entry : state.entry - currentPrice;
   const profitR = initialSLDistance > 0 ? profitDistance / initialSLDistance : 0;
@@ -391,7 +341,6 @@ async function managePosition(position) {
       const lastMove = state.slMoves[state.slMoves.length - 1];
       const lastMoveAge = lastMove ? Date.now() - lastMove.ts : Infinity;
 
-      // Throttle: don't trail more than once per 15 min
       if (wouldImprove && lastMoveAge > 15 * 60 * 1000) {
         const nextTPPrice = tpLevels.find((tp) => {
           return isLong ? tp.price > currentPrice : tp.price < currentPrice;
@@ -419,15 +368,12 @@ async function detectAndProcessClosed(currentOpenIds) {
   const r = getRedis();
   if (!r) return [];
 
-  // Track which V12/V13 positions we've seen recently
   const KNOWN_KEY = 'v12:positions:known';
   const knownRaw = await r.get(KNOWN_KEY).catch(() => null);
   const known = safeParse(knownRaw) || [];
 
-  // Find positions we knew about that are NO LONGER open
   const closed = known.filter((id) => !currentOpenIds.includes(id));
 
-  // Update known list
   const stillOpen = known.filter((id) => currentOpenIds.includes(id));
   const allKnown = [...new Set([...stillOpen, ...currentOpenIds])];
   await r.set(KNOWN_KEY, JSON.stringify(allKnown), { ex: 86400 * 7 }).catch(() => {});
@@ -444,7 +390,6 @@ async function detectAndProcessClosed(currentOpenIds) {
     const positionDeals = recentDeals.filter((d) => d.positionId === positionId);
     if (positionDeals.length === 0) continue;
 
-    // Compute total realized P&L
     const totalPnL = positionDeals.reduce((sum, d) => sum + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
 
     const pendingList = await getPendingSetups(state.asset);
@@ -472,6 +417,15 @@ async function detectAndProcessClosed(currentOpenIds) {
     };
 
     const stored = await storeClosedTrade(closedTrade);
+
+    // v1.3: NEW — contribute to today's realized P&L
+    // Without this, dashboard's "Today realized" stays at $0 forever.
+    try {
+      await addDailyPnL(totalPnL);
+    } catch (e) {
+      console.error('[manage-trades] addDailyPnL failed:', e.message);
+    }
+
     recordings.push({ positionId, asset: state.asset, pnl: totalPnL, stored });
 
     await updatePendingSetup(state.asset, state.pendingId, {
@@ -484,7 +438,6 @@ async function detectAndProcessClosed(currentOpenIds) {
     await pushCommentary(state.asset, 'trade-closed',
       `${outcome} — ${state.direction} closed: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
 
-    // Telegram: trade closed
     try {
       const tpsHit = state.tpsHit || [];
       const isCleanSLHit = tpsHit.length === 0 && totalPnL < -0.5;
@@ -526,7 +479,6 @@ async function runManageTick() {
     return { ts: Date.now(), tradingEnabled: false };
   }
 
-  // CRITICAL: If broker fetch fails, we MUST NOT proceed.
   const positions = await fetchPositions();
   if (positions === null) {
     console.warn('[manage-trades] broker positions fetch failed — skipping tick to preserve state');
@@ -537,17 +489,13 @@ async function runManageTick() {
     };
   }
 
-  // V13: accept both V12 and V13 positions
   const managedPositions = positions.filter((p) => p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-')));
 
-  // 1. Manage each open V12+V13 position
   const manageResults = await Promise.all(managedPositions.map(managePosition));
 
-  // 2. Detect any positions that closed since last tick → feed recognition memory
   const openIds = positions.map((p) => p.id);
   const recordings = await detectAndProcessClosed(openIds);
 
-  // v1.1: check watched setups (manual mode) — alert when price enters zone
   const watched = await checkAllWatchedSetups().catch((e) => ({ error: e.message }));
 
   return {
@@ -555,7 +503,8 @@ async function runManageTick() {
     tradingEnabled: true,
     openCount: managedPositions.length,
     manageResults,
-    closedAndRecorded: recordings, watched,
+    closedAndRecorded: recordings,
+    watched,
   };
 }
 

@@ -1,14 +1,20 @@
 /* eslint-disable */
-// api/rules-store.js  (Pilot Dashboard v1.2)
+// api/rules-store.js  (Pilot Dashboard v1.4)
 //
-// v1.2 changes vs v1.1:
-//   1. Adds 'am-ifvg' template to DEFAULT_RULES.templateOverrides (Phase 1)
-//   2. Adds 'am-ifvg' to active + defensive mode acceptedTemplates (Phase 1)
-//   3. When slMode is overridden (fixed-pips or fixed-dollars), recomputes
-//      TPs as R-multiples of the NEW SL distance — preserves risk:reward
-//      integrity that Pine's TPs would break under wider SL.
-//   4. Recomputed TP1 respects effectiveMinRR (uses max(1, minRR)) so it
-//      passes the downstream RR gate cleanly.
+// v1.4 CHANGE (the float-precision fix):
+//   v1.3 used `tp1RR < effectiveMinRR` for the RR gate. JavaScript float
+//   arithmetic on Pine-supplied prices can produce 0.99999999... when the
+//   true ratio is exactly 1.0, causing valid trades to be skipped with the
+//   nonsensical reason "rr-below-threshold (1.00 < 1.00)".
+//   Fix: tolerance of 0.001 (one-tenth of a pip of R precision).
+//   Below 0.999R is still rejected; anything from 0.999 upward passes.
+//
+// v1.3 changes (kept):
+//   • TP recompute now triggers when (slWasOverridden OR effectiveMinRR > 1.0).
+//
+// v1.2 changes (kept):
+//   • 'am-ifvg' template in defaults + active + defensive acceptedTemplates
+//   • TP recompute when SL is overridden, with TP1 honoring effectiveMinRR
 //
 // DEPENDS ONLY ON: ./_lib
 // ----------------------------------------------------------------------------
@@ -20,10 +26,15 @@ const ACTIVITY_LOG_KEY = 'v13:pilot:activity';
 const DAILY_PNL_KEY = (date) => `v13:pilot:daily-pnl:${date}`;
 const RULES_TTL_DAYS = 365;
 
+// v1.4: tolerance for RR comparison to defeat float precision errors.
+// Pine sends TP1 = entry + 1.0 * slDist exactly, but JS arithmetic can
+// land at 0.9999999998 — strict "<" then trips. 0.001 = 0.1% tolerance.
+const RR_FLOAT_TOLERANCE = 0.001;
+
 // ───── Defaults ──────────────────────────────────────────────────────
 
 const DEFAULT_RULES = {
-  version: 1.2,
+  version: 1.4,
 
   // Trading mode (independent of activeMode preset)
   tradingMode: 'auto', // 'auto' = place orders; 'manual' = notify only
@@ -47,25 +58,23 @@ const DEFAULT_RULES = {
     },
     active: {
       lotMultiplier: 1.00, minRR: 0,
-      // Phase 1: includes 'am-ifvg'
       acceptedTemplates: ['silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'],
       maxConcurrent: 5,
-      label: '☕ Active',
+      label: '🐻 Active',
       description: 'All templates, full lot, full management',
     },
     defensive: {
       lotMultiplier: 0.50, minRR: 2.0,
-      // Phase 1: includes 'am-ifvg' (high-confidence template)
       acceptedTemplates: ['silver-bullet','unicorn','ote-continuation','am-ifvg'],
       maxConcurrent: 2,
-      label: '🛡️ Defensive',
+      label: '🛡 Defensive',
       description: 'High-confidence templates only, half lot, min 2R required',
     },
     vacation: {
       lotMultiplier: 0, minRR: 99,
       acceptedTemplates: [],
       maxConcurrent: 0,
-      label: '🏖️ Vacation',
+      label: '🏖 Vacation',
       description: 'Block all new trades. Existing positions continue to manage.',
     },
   },
@@ -86,7 +95,6 @@ const DEFAULT_RULES = {
     'turtle-soup':      { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🐢 Turtle Soup' },
     'judas-swing':      { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🎭 Judas Swing' },
     'ote-continuation': { enabled: true, tradingStyle: 'swing',    lotMultiplier: 1.0, label: '🎯 OTE Continuation' },
-    // Phase 1: AM IFVG Reversal
     'am-ifvg':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🌅 AM IFVG Reversal' },
   },
 
@@ -260,23 +268,28 @@ async function applyRulesToSignal({
 
   // ─── Compute final TPs ─────
   let finalTP1 = tp1, finalTP2 = tp2, finalTP3 = tp3;
+  let tpsAutoPromoted = false;
   if (inst.tpMode === 'trail-only') {
     finalTP1 = null; finalTP2 = null; finalTP3 = null;
-  } else if (slWasOverridden) {
-    // v1.2 NEW: when SL is overridden, recompute TPs as R-multiples of the
-    // NEW SL distance. TP1 = max(1R, effectiveMinRR) so it passes the RR gate.
-    // TP2 = TP1+1R, TP3 = TP1+2R. Preserves risk:reward integrity.
+  } else if (slWasOverridden || effectiveMinRR > 1.0) {
+    // v1.3: recompute TPs whenever SL was overridden OR mode requires >1R.
+    // Pine sends 1R/2R/3R TPs by default — in Sleep/Defensive (minRR=2.0)
+    // those would always fail the RR gate without this promotion.
+    // TP1 = max(1R, effectiveMinRR), TP2 = TP1+1R, TP3 = TP1+2R.
     const tp1R = Math.max(1.0, effectiveMinRR);
     finalTP1 = direction === 'LONG' ? entry + finalSLDistance * tp1R       : entry - finalSLDistance * tp1R;
     finalTP2 = direction === 'LONG' ? entry + finalSLDistance * (tp1R + 1) : entry - finalSLDistance * (tp1R + 1);
     finalTP3 = direction === 'LONG' ? entry + finalSLDistance * (tp1R + 2) : entry - finalSLDistance * (tp1R + 2);
+    tpsAutoPromoted = true;
   }
 
-  // RR filter
+  // RR filter — v1.4: tolerance applied to defeat float precision errors.
+  // Without this, valid 1.0R trades were rejected with "rr-below-threshold
+  // (1.00 < 1.00)" — mathematically impossible but observed in practice.
   if (finalTP1 != null) {
     const tp1Distance = Math.abs(finalTP1 - entry);
     const tp1RR = tp1Distance / finalSLDistance;
-    if (tp1RR < effectiveMinRR) {
+    if (tp1RR < effectiveMinRR - RR_FLOAT_TOLERANCE) {
       return { allow: false, reason: `rr-below-threshold (${tp1RR.toFixed(2)} < ${effectiveMinRR.toFixed(2)})` };
     }
   }
@@ -295,7 +308,6 @@ async function applyRulesToSignal({
       finalLot = inst.fixedLot;
     }
   }
-
   finalLot = finalLot * (preset.lotMultiplier || 1.0) * (tmplOverride.lotMultiplier || 1.0);
   if (finalLot > inst.maxLot) finalLot = inst.maxLot;
   finalLot = Math.max(0.01, Math.round(finalLot * 100) / 100);
@@ -326,6 +338,7 @@ async function applyRulesToSignal({
     rulesApplied: {
       slMode: inst.slMode, tpMode: inst.tpMode, lotMode: inst.lotMode,
       slWasOverridden,
+      tpsAutoPromoted,
       effectiveMinRR,
       modeLotMultiplier: preset.lotMultiplier, templateLotMultiplier: tmplOverride.lotMultiplier,
       tradingMode: rules.tradingMode || 'auto',
