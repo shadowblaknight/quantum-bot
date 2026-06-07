@@ -1,6 +1,6 @@
 /* eslint-disable */
 // =====================================================================
-// QUANTUM BOT V13 — PILOT DASHBOARD (final)
+// QUANTUM BOT V13 — PILOT DASHBOARD (v13.1)
 // =====================================================================
 // Aligned to rules-store.js v1.2 shape. Backend endpoints used:
 //   /api/broker               — account, positions
@@ -8,15 +8,22 @@
 //   /api/rules?action=activity — server-side activity log
 //   /api/rules?action=daily-pnl — today's realized P&L
 //   /api/template-performance — closed-trade stats
+//   /api/recognition-memory?action=stats — KNN memory stats   [v13.1]
 //   /api/watched-setups       — manual-mode active watches
 //   /api/symbol-resolver      — broker symbol mapping
 //
 // TWO-AXIS MODE MODEL:
 //   activeMode:   sleep | active | defensive | vacation  (what setups are allowed)
 //   tradingMode:  auto | manual                          (does bot execute, or alert only?)
+//
+// v13.1 ADDITIVE FEATURES (no existing logic touched):
+//   1. Collapsible activity feed (▼/▲ toggle)
+//   2. UTC time + session + date in header (TimeDisplay)
+//   3. Recognition memory statistics panel (RecognitionPanel)
+//   4. Template × Instrument performance heatmap, WR/PF toggle (PerfHeatmapPanel)
 // =====================================================================
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 
 // =====================================================================
 // 1 · CONSTANTS
@@ -200,6 +207,20 @@ const GLOBAL_STYLES = `
 // 6 · ROOT
 // =====================================================================
 
+// v13.2 — viewport width detection for desktop/mobile layout switch
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(
+    () => (typeof window !== "undefined" ? window.innerWidth < breakpoint : false)
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
+    window.addEventListener("resize", onResize);
+    onResize();
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
+
 export default function App() {
   const [theme, setTheme] = useState(loadTheme);
   useEffect(() => { applyThemeVars(theme); saveTheme(theme); }, [theme]);
@@ -210,6 +231,15 @@ export default function App() {
     const s = document.createElement("style");
     s.id = id; s.textContent = GLOBAL_STYLES;
     document.head.appendChild(s);
+  }, []);
+
+  // v13.2 — ensure a mobile viewport meta exists (won't clobber an existing one)
+  useEffect(() => {
+    let m = document.querySelector('meta[name="viewport"]');
+    if (!m) { m = document.createElement("meta"); m.name = "viewport"; document.head.appendChild(m); }
+    if (!m.content || !/width=device-width/.test(m.content)) {
+      m.content = "width=device-width, initial-scale=1, viewport-fit=cover";
+    }
   }, []);
 
   const [prefs, setPrefs] = useState(loadPrefs);
@@ -223,6 +253,8 @@ export default function App() {
 // =====================================================================
 
 function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
+
+  const isMobile = useIsMobile();
 
   // ── Broker state (existing endpoint) ───────────────────────────────
   const [account, setAccount]     = useState(null);
@@ -353,6 +385,26 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
   const triggerEStop  = () => { callRulesAction("emergency-stop", { enable: true  }); setEstopOpen(false); };
   const clearEStop    = () => callRulesAction("emergency-stop", { enable: false });
 
+  // ── v13.2 · MOBILE LAYOUT (desktop layout below is untouched) ───────
+  if (isMobile) {
+    return (
+      <MobileLayout
+        equity={equity} balance={balance}
+        floatingPnL={floatingPnL} dailyPnL={dailyPnL}
+        positions={positions}
+        rules={rules} rulesError={rulesError}
+        perf={perf} perfError={perfError}
+        activity={activity}
+        resolver={resolver}
+        prefs={prefs} setPrefs={setPrefs}
+        theme={theme} setTheme={setTheme}
+        activeMode={activeMode} tradingMode={tradingMode}
+        estopActive={estopActive}
+        callRulesAction={callRulesAction}
+      />
+    );
+  }
+
   return (
     <div style={{
       width: "100vw", height: "100vh",
@@ -385,8 +437,8 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         padding: 14,
         display: "grid",
         gridTemplateColumns: "1fr 1fr 1fr",
-        gridTemplateRows: "minmax(240px, auto) minmax(240px, 1fr)",
-        gap: 10, overflow: "hidden",
+        gridTemplateRows: "minmax(240px, auto) minmax(240px, 1fr) minmax(240px, auto)",
+        gap: 10, overflow: "auto",
       }}>
         <AccountSafetyPanel
           balance={balance} equity={equity}
@@ -418,6 +470,11 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
           tradingMode={tradingMode}
           callRulesAction={callRulesAction}
         />
+
+        {/* ─── v13.1 · 3rd ROW: Recognition (cols 1-2) + Heatmap (col 3) ─── */}
+        <RecognitionPanel perf={perf} />
+
+        <PerfHeatmapPanel perf={perf} watchlist={prefs.watchlist} />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -489,6 +546,9 @@ function DashboardHeader({
 
       <div style={{ flex: 1 }} />
 
+      {/* v13.1 — UTC clock + session + date */}
+      <TimeDisplay />
+
       {rulesError ? (
         <span className="qb-mono" title={rulesError} style={{
           fontSize: 10, padding: "3px 10px",
@@ -535,6 +595,52 @@ function HeaderStat({ label, value, mono, accent }) {
     <div style={{ display: "flex", flexDirection: "column" }}>
       <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>{label}</span>
       <span className={mono ? "qb-mono" : ""} style={{ fontSize: 14, color: accent || "var(--qb-text-hi)", fontWeight: 500 }}>{value}</span>
+    </div>
+  );
+}
+
+// ── v13.1 · UTC TIME + SESSION + DATE ──────────────────────────────────
+// Sessions (UTC), aligned to qb-v2.2.pine windows:
+//   Asian   20:00–05:00   ·   London 07:00–10:00   ·   New York 12:00–17:00
+function activeSessionUTC(d) {
+  const t = d.getUTCHours() * 60 + d.getUTCMinutes();
+  if (t >= 20 * 60 || t < 5 * 60)  return { label: "ASIA",     color: "var(--qb-warn)" };
+  if (t >= 7 * 60  && t < 10 * 60) return { label: "LONDON",   color: "var(--qb-accent)" };
+  if (t >= 12 * 60 && t < 17 * 60) return { label: "NEW YORK", color: "#ec4899" };
+  return { label: "OFF", color: "var(--qb-text-lo)" };
+}
+
+function TimeDisplay() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+  const mons = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const dow = days[now.getUTCDay()];
+  const dd  = String(now.getUTCDate()).padStart(2, "0");
+  const mon = mons[now.getUTCMonth()];
+  const hh  = String(now.getUTCHours()).padStart(2, "0");
+  const mm  = String(now.getUTCMinutes()).padStart(2, "0");
+  const ss  = String(now.getUTCSeconds()).padStart(2, "0");
+  const ses = activeSessionUTC(now);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", lineHeight: 1.25 }}>
+      <span className="qb-mono" style={{ fontSize: 13, color: "var(--qb-text-hi)", letterSpacing: 0.5 }}>
+        {hh}:{mm}<span style={{ color: "var(--qb-text-lo)" }}>:{ss}</span>
+        <span style={{ color: "var(--qb-text-faint)", fontSize: 9, marginLeft: 4 }}>UTC</span>
+      </span>
+      <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-mid)", letterSpacing: 0.5, display: "flex", gap: 6, alignItems: "center" }}>
+        <span>{dow} {dd} {mon}</span>
+        <span style={{ color: "var(--qb-text-faint)" }}>·</span>
+        <span style={{ color: ses.color, display: "flex", alignItems: "center", gap: 3 }}>
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: ses.color, display: "inline-block" }} />
+          {ses.label}
+        </span>
+      </span>
     </div>
   );
 }
@@ -1340,34 +1446,454 @@ function WatchRow({ watch, onCancel }) {
 }
 
 // =====================================================================
-// 16 · ACTIVITY FEED
+// 15b · RECOGNITION MEMORY PANEL  [v13.1]
+// =====================================================================
+// Statistics view only (3A). Reads /api/recognition-memory?action=stats
+// — the confirmed-working endpoint that returns:
+//   { totalTrades, wins, losses, winRate, synthetic, real }
+// This panel is purely informational: it shows what the KNN advisor has
+// learned. Recognition is in OBSERVATION mode — it stores outcomes and can
+// advise, but does not yet auto-size live trades.
+
+function RecognitionPanel({ perf, gridColumn = "1 / 3" }) {
+  const [stats, setStats] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("recognition-memory?action=stats")).then((res) => res.json());
+        if (alive) {
+          if (r && !r.error) { setStats(r); setError(null); }
+          else setError(r?.error || "endpoint not deployed");
+        }
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const total   = stats?.totalTrades ?? 0;
+  const wins    = stats?.wins ?? 0;
+  const losses  = stats?.losses ?? 0;
+  const real    = stats?.real ?? 0;
+  const synth   = stats?.synthetic ?? 0;
+  const wr      = stats?.winRate != null ? stats.winRate : (total > 0 ? wins / total : null);
+  const wrColor = wr == null ? "var(--qb-text-lo)" : wr >= 0.55 ? "var(--qb-ok)" : wr >= 0.45 ? "var(--qb-warn)" : "var(--qb-bad)";
+
+  // Memory maturity: how close to a statistically meaningful sample.
+  const MATURE_AT = 200;
+  const maturity = Math.min(1, total / MATURE_AT);
+
+  return (
+    <Panel title="Recognition Memory" subtitle="KNN advisor · observation mode" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+
+        {/* LEFT — the numbers */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {error && <PlaceholderError msg={`Recognition: ${error}`} />}
+
+          <div style={{ display: "flex", gap: 18, alignItems: "flex-end" }}>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
+                Memory win rate
+              </span>
+              <span className="qb-mono" style={{ fontSize: 30, fontWeight: 300, color: wrColor, lineHeight: 1.1 }}>
+                {wr == null ? "—" : `${Math.round(wr * 100)}%`}
+              </span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", paddingBottom: 4 }}>
+              <span className="qb-mono" style={{ fontSize: 12, color: "var(--qb-ok)" }}>{wins} W</span>
+              <span className="qb-mono" style={{ fontSize: 12, color: "var(--qb-bad)" }}>{losses} L</span>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <MiniStat label="Stored trades" value={total} />
+            <MiniStat label="Real / Synthetic" value={`${real} / ${synth}`} />
+          </div>
+
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--qb-text-lo)", marginBottom: 4 }}>
+              <span>Sample maturity</span>
+              <span className="qb-mono">{total} / {MATURE_AT}</span>
+            </div>
+            <Meter value={maturity} color={maturity >= 1 ? "var(--qb-ok)" : "var(--qb-accent)"} />
+            <span style={{ fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic", marginTop: 4, display: "block" }}>
+              {maturity >= 1
+                ? "Sample is statistically meaningful — advisor signals are reliable."
+                : `Need ~${Math.max(0, MATURE_AT - total)} more closed trades before the advisor's edge estimates stabilize.`}
+            </span>
+          </div>
+        </div>
+
+        {/* RIGHT — how it's used */}
+        <div className="qb-cell" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
+            How the bot uses this
+          </span>
+          <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 1.7 }}>
+            <li>Every closed trade is stored as a <strong style={{ color: "var(--qb-text-hi)" }}>feature vector</strong> (template, session, structure context, outcome).</li>
+            <li>When a new setup forms, the advisor finds the <strong style={{ color: "var(--qb-text-hi)" }}>K nearest</strong> historical situations and reports their win/loss record.</li>
+            <li>Current status: <span style={{ color: "var(--qb-warn)" }}>observation only</span> — it advises but does not yet auto-adjust live lot size.</li>
+            <li>Auto-sizing from recognition unlocks once the sample is mature (≈{MATURE_AT} trades) to avoid amplifying early, biased data.</li>
+          </ul>
+          <div style={{ flex: 1 }} />
+          <span style={{ fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            Memory is never deleted on losses — it learns from both wins and losses equally.
+          </span>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="qb-cell" style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
+      <span className="qb-mono" style={{ fontSize: 16, color: "var(--qb-text-hi)" }}>{value}</span>
+    </div>
+  );
+}
+
+// =====================================================================
+// 15c · TEMPLATE × INSTRUMENT PERFORMANCE HEATMAP  [v13.1]
+// =====================================================================
+// Full matrix: templates (rows) × watchlist instruments (columns).
+// WR / PF toggle. Data source resolution order (first that yields cells):
+//   1. perf.byTemplate[t].byAsset[asset]  (if template-performance exposes it)
+//   2. perf.matrix / perf.byTemplateAsset (alternate shapes)
+//   3. fetched closed trades from /api/recognition-memory?action=recent
+// Degrades to a clean placeholder if no per-(template,asset) data exists.
+
+function cellFromStats(s) {
+  if (!s) return null;
+  const n  = s.sample ?? s.n ?? s.total ?? s.count ?? 0;
+  let wr   = s.winRate != null ? s.winRate : (s.wins != null && n ? s.wins / n : null);
+  if (wr != null && wr > 1) wr = wr / 100; // tolerate percent-form
+  const pf = s.profitFactor != null ? s.profitFactor : (s.pf != null ? s.pf : null);
+  return { n, wr, pf };
+}
+
+function matrixFromPerf(perf) {
+  const bt = perf?.byTemplate;
+  // Shape 1: nested byAsset under each template
+  if (bt && typeof bt === "object") {
+    const cells = {};
+    let any = false;
+    for (const t of TEMPLATE_ORDER) {
+      const node = bt[t];
+      const byAsset = node?.byAsset || node?.assets;
+      if (byAsset && typeof byAsset === "object") {
+        cells[t] = {};
+        for (const [asset, s] of Object.entries(byAsset)) {
+          const c = cellFromStats(s);
+          if (c) { cells[t][String(asset).toLowerCase()] = c; if (c.n > 0) any = true; }
+        }
+      }
+    }
+    if (any) return cells;
+  }
+  // Shape 2: explicit matrix object  perf.matrix[template][asset]
+  const m = perf?.matrix || perf?.byTemplateAsset;
+  if (m && typeof m === "object") {
+    const cells = {};
+    let any = false;
+    for (const [t, assets] of Object.entries(m)) {
+      if (!assets || typeof assets !== "object") continue;
+      cells[t] = {};
+      for (const [asset, s] of Object.entries(assets)) {
+        const c = cellFromStats(s);
+        if (c) { cells[t][String(asset).toLowerCase()] = c; if (c.n > 0) any = true; }
+      }
+    }
+    if (any) return cells;
+  }
+  return null;
+}
+
+function matrixFromTrades(trades) {
+  if (!Array.isArray(trades) || trades.length === 0) return null;
+  const acc = {};
+  for (const tr of trades) {
+    const template =
+      tr.template || tr.templateName ||
+      (Array.isArray(tr.contributingTactics) ? tr.contributingTactics[0] : null);
+    const assetRaw = tr.assetId || tr.asset || tr.symbol;
+    if (!template || !assetRaw) continue;
+    const asset = String(assetRaw).toLowerCase();
+
+    let pnl = tr.pnl;
+    if (pnl == null) pnl = tr.profit;
+    let r = tr.pnlR;
+    if (r == null) r = tr.rMultiple;
+    if (r == null) r = tr.rr;
+
+    let isWin = tr.win;
+    if (isWin == null && tr.outcome != null) isWin = tr.outcome === "win" || tr.outcome === "tp";
+    if (isWin == null && pnl != null) isWin = pnl > 0;
+    if (isWin == null && r != null) isWin = r > 0;
+
+    const metricVal = pnl != null ? pnl : (r != null ? r : null);
+
+    if (!acc[template]) acc[template] = {};
+    if (!acc[template][asset]) acc[template][asset] = { n: 0, wins: 0, gw: 0, gl: 0 };
+    const c = acc[template][asset];
+    c.n += 1;
+    if (isWin) c.wins += 1;
+    if (metricVal != null) {
+      if (metricVal >= 0) c.gw += metricVal;
+      else c.gl += Math.abs(metricVal);
+    }
+  }
+  const out = {};
+  let any = false;
+  for (const [t, assets] of Object.entries(acc)) {
+    out[t] = {};
+    for (const [a, c] of Object.entries(assets)) {
+      out[t][a] = {
+        n: c.n,
+        wr: c.n ? c.wins / c.n : null,
+        pf: c.gl > 0 ? c.gw / c.gl : (c.gw > 0 ? Infinity : null),
+      };
+      if (c.n > 0) any = true;
+    }
+  }
+  return any ? out : null;
+}
+
+function heatColor(metric, cell) {
+  if (!cell || !cell.n) return "var(--qb-text-faint)";
+  if (metric === "wr") {
+    if (cell.wr == null) return "var(--qb-text-lo)";
+    if (cell.wr >= 0.55) return "var(--qb-ok)";
+    if (cell.wr >= 0.40) return "var(--qb-warn)";
+    return "var(--qb-bad)";
+  }
+  if (cell.pf == null) return "var(--qb-text-lo)";
+  if (cell.pf >= 1.5) return "var(--qb-ok)";
+  if (cell.pf >= 1.0) return "var(--qb-warn)";
+  return "var(--qb-bad)";
+}
+
+function heatText(metric, cell) {
+  if (!cell || !cell.n) return "·";
+  if (metric === "wr") {
+    return cell.wr == null ? "·" : `${Math.round(cell.wr * 100)}`;
+  }
+  if (cell.pf == null) return "·";
+  if (!isFinite(cell.pf)) return "∞";
+  return cell.pf.toFixed(1);
+}
+
+function PerfHeatmapPanel({ perf, watchlist, gridColumn = "3 / 4" }) {
+  const [metric, setMetric] = useState("wr"); // "wr" | "pf"
+  const [trades, setTrades] = useState(null);
+  const [error, setError]   = useState(null);
+
+  const perfMatrix = useMemo(() => matrixFromPerf(perf), [perf]);
+  const needFetch  = !perfMatrix;
+
+  // Fallback fetch (one-shot, quiet) only if template-performance has no matrix
+  useEffect(() => {
+    if (!needFetch) return;
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
+        if (!alive) return;
+        const list = Array.isArray(r) ? r : (r?.trades || r?.recent || r?.list || r?.items || null);
+        if (list) { setTrades(list); setError(null); }
+        else setError(r?.error || "no per-instrument data");
+      } catch (e) { if (alive) setError(e.message); }
+    })();
+    return () => { alive = false; };
+  }, [needFetch]);
+
+  const matrix = perfMatrix || matrixFromTrades(trades);
+  const cols   = watchlist;
+
+  return (
+    <Panel title="Template × Instrument" subtitle={metric === "wr" ? "win rate %" : "profit factor"} style={{ gridColumn }}>
+      <div style={{ padding: 10, height: "100%", overflow: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+
+        {/* WR / PF toggle */}
+        <div style={{ display: "flex", gap: 4 }}>
+          {[{ id: "wr", label: "Win %" }, { id: "pf", label: "Profit factor" }].map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setMetric(opt.id)}
+              className="qb-mono"
+              style={{
+                flex: 1,
+                background: metric === opt.id ? "var(--qb-accent-soft)" : "transparent",
+                color: metric === opt.id ? "var(--qb-accent)" : "var(--qb-text-mid)",
+                border: `1px solid ${metric === opt.id ? "var(--qb-accent)" : "var(--qb-border)"}`,
+                borderRadius: 3, padding: "4px 6px", fontSize: 9, cursor: "pointer",
+                letterSpacing: 0.5, textTransform: "uppercase",
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {!matrix && error && <PlaceholderError msg={`Heatmap: ${error}`} />}
+        {!matrix && !error && <Placeholder msg="Aggregating closed trades..." />}
+
+        {matrix && (
+          <div style={{ overflow: "auto" }}>
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: `64px repeat(${cols.length}, minmax(30px, 1fr))`,
+              gap: 2, minWidth: 64 + cols.length * 32,
+            }}>
+              {/* header row */}
+              <div />
+              {cols.map((c) => (
+                <div key={`h-${c}`} className="qb-mono" style={{
+                  fontSize: 8, color: "var(--qb-text-faint)", textAlign: "center",
+                  letterSpacing: 0.3, padding: "2px 0", overflow: "hidden", textOverflow: "ellipsis",
+                }} title={c.toUpperCase()}>
+                  {c.toUpperCase()}
+                </div>
+              ))}
+
+              {/* template rows */}
+              {TEMPLATE_ORDER.map((t) => {
+                const meta = TEMPLATE_DISPLAY[t];
+                const row = matrix[t] || {};
+                return (
+                  <Fragment key={t}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, color: "var(--qb-text-mid)" }} title={meta?.label || t}>
+                      <span style={{ fontSize: 11 }}>{meta?.glyph || "·"}</span>
+                    </div>
+                    {cols.map((c) => {
+                      const cell = row[c] || null;
+                      const col = heatColor(metric, cell);
+                      return (
+                        <div
+                          key={`${t}-${c}`}
+                          className="qb-mono"
+                          title={cell && cell.n ? `${meta?.label || t} · ${c.toUpperCase()} · n=${cell.n}` : `${meta?.label || t} · ${c.toUpperCase()} · no trades`}
+                          style={{
+                            background: "var(--qb-bg-panel-hi)",
+                            border: `1px solid ${cell && cell.n ? col : "var(--qb-border)"}`,
+                            borderRadius: 3,
+                            padding: "5px 0",
+                            textAlign: "center",
+                            fontSize: 10,
+                            color: col,
+                            opacity: cell && cell.n && cell.n < 3 ? 0.55 : 1,
+                          }}
+                        >
+                          {heatText(metric, cell)}
+                        </div>
+                      );
+                    })}
+                  </Fragment>
+                );
+              })}
+            </div>
+
+            {/* legend */}
+            <div style={{ display: "flex", gap: 10, marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", flexWrap: "wrap" }}>
+              {metric === "wr" ? (
+                <>
+                  <LegendDot color="var(--qb-ok)"   label="≥55%" />
+                  <LegendDot color="var(--qb-warn)" label="40–55%" />
+                  <LegendDot color="var(--qb-bad)"  label="<40%" />
+                </>
+              ) : (
+                <>
+                  <LegendDot color="var(--qb-ok)"   label="PF ≥1.5" />
+                  <LegendDot color="var(--qb-warn)" label="1.0–1.5" />
+                  <LegendDot color="var(--qb-bad)"  label="<1.0" />
+                </>
+              )}
+              <span style={{ color: "var(--qb-text-faint)" }}>· faint = n&lt;3 · "·" = no data</span>
+            </div>
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function LegendDot({ color, label }) {
+  return (
+    <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
+      <span style={{ width: 7, height: 7, borderRadius: 2, background: color, display: "inline-block" }} />
+      {label}
+    </span>
+  );
+}
+
+// =====================================================================
+// 16 · ACTIVITY FEED  (v13.1 — collapsible)
 // =====================================================================
 
 function ActivityFeed({ activity }) {
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
     <div style={{
       borderTop: "1px solid var(--qb-border)",
-      padding: "8px 18px",
+      padding: collapsed ? "6px 18px" : "8px 18px",
       background: "var(--qb-bg-void)",
-      maxHeight: 110,
+      maxHeight: collapsed ? 30 : 110,
       overflow: "hidden",
       display: "flex",
       flexDirection: "column",
+      transition: "max-height 160ms ease, padding 160ms ease",
     }}>
-      <div style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 4 }}>
-        Activity feed · server log
-      </div>
-      <div style={{ flex: 1, overflowY: "auto" }}>
-        {activity.length === 0 ? (
-          <span style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No recent activity. Rule changes and trade events will appear here.
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        marginBottom: collapsed ? 0 : 4,
+      }}>
+        <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
+          Activity feed · server log
+        </span>
+        {activity.length > 0 && (
+          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)" }}>
+            ({activity.length})
           </span>
-        ) : (
-          activity.slice(0, 12).map((a, i) => (
-            <ActivityRow key={i} entry={a} />
-          ))
         )}
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          title={collapsed ? "Show activity feed" : "Hide activity feed"}
+          className="qb-mono"
+          style={{
+            background: "transparent",
+            border: "1px solid var(--qb-border)",
+            borderRadius: 3,
+            color: "var(--qb-text-mid)",
+            cursor: "pointer",
+            fontSize: 10,
+            lineHeight: 1,
+            padding: "3px 8px",
+          }}
+        >
+          {collapsed ? "▲" : "▼"}
+        </button>
       </div>
+      {!collapsed && (
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {activity.length === 0 ? (
+            <span style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+              No recent activity. Rule changes and trade events will appear here.
+            </span>
+          ) : (
+            activity.slice(0, 12).map((a, i) => (
+              <ActivityRow key={i} entry={a} />
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1410,9 +1936,9 @@ function ActivityRow({ entry }) {
 // 17 · PANEL FRAME + PLACEHOLDERS
 // =====================================================================
 
-function Panel({ title, subtitle, children }) {
+function Panel({ title, subtitle, children, style }) {
   return (
-    <div className="qb-panel" style={{ display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
+    <div className="qb-panel" style={{ display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0, ...(style || {}) }}>
       <div style={{
         padding: "10px 14px",
         borderBottom: "1px solid var(--qb-border)",
@@ -1704,16 +2230,319 @@ function ThemeTab({ theme, setTheme }) {
 function AboutTab() {
   return (
     <div className="qb-mono" style={{ fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 1.6 }}>
-      <div>Quantum Bot · v13 Pilot Dashboard</div>
-      <div>Algorithmic SMC trading · Pine v2.1 (6 templates incl. AM IFVG)</div>
+      <div>Quantum Bot · v13.1 Pilot Dashboard</div>
+      <div>Algorithmic SMC trading · Pine v2.2 (6 templates incl. AM IFVG)</div>
       <div style={{ marginTop: 8, color: "var(--qb-text-lo)" }}>
         Backend endpoints:<br/>
         · <span style={{ color: "var(--qb-text-mid)" }}>/api/rules</span> — pilot rules R/W<br/>
         · <span style={{ color: "var(--qb-text-mid)" }}>/api/template-performance</span> — closed-trade stats<br/>
+        · <span style={{ color: "var(--qb-text-mid)" }}>/api/recognition-memory</span> — KNN memory<br/>
         · <span style={{ color: "var(--qb-text-mid)" }}>/api/watched-setups</span> — manual-mode watches<br/>
         · <span style={{ color: "var(--qb-text-mid)" }}>/api/broker</span> — account + positions<br/>
         · <span style={{ color: "var(--qb-text-mid)" }}>/api/pivots</span> — H1 pivots (optional)
       </div>
     </div>
+  );
+}
+
+// =====================================================================
+// 19 · MOBILE LAYOUT  [v13.2]
+// =====================================================================
+// A phone-native layout that reuses every existing panel component.
+// Activated by useIsMobile() (<768px). The desktop layout is untouched.
+// Structure: sticky top bar (stats + always-reachable E-STOP) · tab strip
+// · scrollable content with one or two full-width panel cards per tab.
+// Panels are wrapped in single-cell CSS grids so they stretch exactly the
+// way they do inside the desktop grid — no panel internals are modified.
+
+function MobileLayout({
+  equity, balance, floatingPnL, dailyPnL, positions,
+  rules, rulesError, perf, perfError, activity, resolver,
+  prefs, setPrefs, theme, setTheme,
+  activeMode, tradingMode, estopActive, callRulesAction,
+}) {
+  const [tab, setTab]                   = useState("home");
+  const [estopOpen, setEstopOpen]       = useState(false);
+  const [assetModalOpen, setAssetModalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const setActiveModeAction  = (mode) => callRulesAction("set-active-mode",  { mode });
+  const setTradingModeAction = (mode) => callRulesAction("set-trading-mode", { mode });
+  const triggerEStop = () => { callRulesAction("emergency-stop", { enable: true }); setEstopOpen(false); };
+  const clearEStop   = () => callRulesAction("emergency-stop", { enable: false });
+
+  const TABS = [
+    { id: "home",   label: "Home",   glyph: "⌂" },
+    { id: "trades", label: "Trades", glyph: "≡" },
+    { id: "stats",  label: "Stats",  glyph: "▦" },
+    { id: "rules",  label: "Rules",  glyph: "⚙" },
+    { id: "feed",   label: "Feed",   glyph: "☰" },
+  ];
+
+  // Wrap a desktop panel so it stretches to a fixed-height card (same
+  // stretch mechanic as a desktop grid cell).
+  const card = (height, node) => (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr", height, flexShrink: 0 }}>{node}</div>
+  );
+
+  return (
+    <div style={{
+      width: "100vw", height: "100vh",
+      display: "flex", flexDirection: "column",
+      background: "var(--qb-bg-void)", overflow: "hidden",
+    }}>
+
+      <MobileTopBar
+        equity={equity} balance={balance}
+        floatingPnL={floatingPnL} dailyPnL={dailyPnL}
+        positions={positions}
+        rulesError={rulesError}
+        estopActive={estopActive}
+        onOpenEstop={() => setEstopOpen(true)}
+        onClearEstop={clearEStop}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+
+      {/* TAB STRIP */}
+      <div style={{ display: "flex", borderBottom: "1px solid var(--qb-border)", background: "var(--qb-bg-panel)", flexShrink: 0 }}>
+        {TABS.map((t) => {
+          const on = tab === t.id;
+          return (
+            <button key={t.id} onClick={() => setTab(t.id)} className="qb-mono" style={{
+              flex: 1,
+              background: on ? "var(--qb-accent-soft)" : "transparent",
+              color: on ? "var(--qb-accent)" : "var(--qb-text-mid)",
+              border: "none",
+              borderBottom: `2px solid ${on ? "var(--qb-accent)" : "transparent"}`,
+              padding: "9px 0", fontSize: 9, cursor: "pointer",
+              letterSpacing: 0.5, textTransform: "uppercase",
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            }}>
+              <span style={{ fontSize: 15 }}>{t.glyph}</span>
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* CONTENT */}
+      <div style={{
+        flex: 1, minHeight: 0, overflowY: "auto",
+        WebkitOverflowScrolling: "touch",
+        padding: 10, display: "flex", flexDirection: "column", gap: 10,
+      }}>
+
+        {tab === "home" && (
+          <>
+            <MobileModes
+              activeMode={activeMode} tradingMode={tradingMode}
+              onSetActiveMode={setActiveModeAction} onSetTradingMode={setTradingModeAction}
+              disabled={!rules || estopActive}
+            />
+            {card("min(60vh, 420px)",
+              <AccountSafetyPanel
+                balance={balance} equity={equity}
+                floatingPnL={floatingPnL} dailyPnL={dailyPnL}
+                rules={rules} callRulesAction={callRulesAction}
+              />
+            )}
+          </>
+        )}
+
+        {tab === "trades" && (
+          <>
+            {card("min(52vh, 400px)", <OpenPositionsPanel positions={positions} />)}
+            {card("min(48vh, 360px)", <WatchesPanel tradingMode={tradingMode} callRulesAction={callRulesAction} />)}
+          </>
+        )}
+
+        {tab === "stats" && (
+          <>
+            {card("min(50vh, 380px)",
+              <TemplatesPanel rules={rules} perf={perf} perfError={perfError} callRulesAction={callRulesAction} />
+            )}
+            {card("min(54vh, 420px)",
+              <PerfHeatmapPanel perf={perf} watchlist={prefs.watchlist} gridColumn="auto" />
+            )}
+            {card("min(60vh, 480px)",
+              <RecognitionPanel perf={perf} gridColumn="auto" />
+            )}
+          </>
+        )}
+
+        {tab === "rules" && (
+          <>
+            {card("min(64vh, 540px)",
+              <RulesPanel
+                rules={rules} rulesError={rulesError} callRulesAction={callRulesAction}
+                watchlist={prefs.watchlist}
+                onAddInstrument={() => setAssetModalOpen(true)}
+                onRemoveInstrument={(id) => setPrefs((p) => ({ ...p, watchlist: p.watchlist.filter((a) => a !== id) }))}
+              />
+            )}
+            {card("min(48vh, 360px)", <PivotsPanel watchlist={prefs.watchlist} />)}
+          </>
+        )}
+
+        {tab === "feed" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", minHeight: "72vh", flexShrink: 0 }}>
+            <MobileActivity activity={activity} />
+          </div>
+        )}
+      </div>
+
+      {/* MODALS (reuse desktop modal components) */}
+      {assetModalOpen && (
+        <AssetPicker
+          watchlist={prefs.watchlist} resolver={resolver}
+          onAdd={(id) => {
+            setPrefs((p) => ({ ...p, watchlist: p.watchlist.includes(id) ? p.watchlist : [...p.watchlist, id] }));
+            setAssetModalOpen(false);
+          }}
+          onClose={() => setAssetModalOpen(false)}
+        />
+      )}
+      {estopOpen && <EstopModal onConfirm={triggerEStop} onCancel={() => setEstopOpen(false)} />}
+      {settingsOpen && (
+        <SettingsModal theme={theme} setTheme={setTheme} resolver={resolver} onClose={() => setSettingsOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function MobileTopBar({
+  equity, balance, floatingPnL, dailyPnL, positions,
+  rulesError, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
+}) {
+  const openCount  = positions?.length || 0;
+  const floatColor = floatingPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
+  const dailyColor = dailyPnL   >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
+
+  return (
+    <div style={{
+      borderBottom: "1px solid var(--qb-border)",
+      background: "var(--qb-bg-void)",
+      padding: "10px 12px",
+      display: "flex", flexDirection: "column", gap: 8, flexShrink: 0,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span className="qb-serif" style={{ fontSize: 17, color: "var(--qb-text-hi)", letterSpacing: -0.5 }}>
+          Quantum<span style={{ color: "var(--qb-accent)" }}>·</span>Bot
+        </span>
+        {rulesError ? (
+          <span className="qb-mono" title={rulesError} style={{
+            fontSize: 8, padding: "2px 6px",
+            background: "var(--qb-warn-soft)", color: "var(--qb-warn)",
+            border: "1px solid var(--qb-warn)", borderRadius: 3, textTransform: "uppercase",
+          }}>▲ off</span>
+        ) : (
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--qb-ok)", display: "inline-block" }} title="online" />
+        )}
+        <div style={{ flex: 1 }} />
+        <TimeDisplay />
+        <button onClick={onOpenSettings} style={{
+          background: "transparent", color: "var(--qb-text-mid)",
+          border: "1px solid var(--qb-border)", borderRadius: 4,
+          padding: "4px 8px", fontSize: 13, cursor: "pointer",
+        }} title="Settings">⚙</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 6 }}>
+        <MobileStat label="Equity" value={fmtUSD(equity)} />
+        <MobileStat label="Float"  value={fmtUSD(floatingPnL, true)} color={floatColor} />
+        <MobileStat label="Today"  value={fmtUSD(dailyPnL, true)} color={dailyColor} />
+        <MobileStat label="Open"   value={openCount} />
+      </div>
+
+      {estopActive ? (
+        <button onClick={onClearEstop} className="qb-mono qb-pulse" style={{
+          width: "100%", background: "var(--qb-bad)", color: "white",
+          border: "1px solid var(--qb-bad)", borderRadius: 6,
+          padding: "12px 0", fontSize: 13, fontWeight: 700, letterSpacing: 1,
+          cursor: "pointer", textTransform: "uppercase",
+        }}>⛔ E-STOP ACTIVE — TAP TO CLEAR</button>
+      ) : (
+        <button onClick={onOpenEstop} className="qb-mono" style={{
+          width: "100%", background: "var(--qb-bad-soft)", color: "var(--qb-bad)",
+          border: "1px solid var(--qb-bad)", borderRadius: 6,
+          padding: "11px 0", fontSize: 13, fontWeight: 700, letterSpacing: 1,
+          cursor: "pointer", textTransform: "uppercase",
+        }}>⛔ EMERGENCY STOP</button>
+      )}
+    </div>
+  );
+}
+
+function MobileStat({ label, value, color }) {
+  return (
+    <div className="qb-cell" style={{ flex: 1, padding: "6px 8px", display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+      <span style={{ fontSize: 8, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
+      <span className="qb-mono" style={{ fontSize: 13, color: color || "var(--qb-text-hi)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{value}</span>
+    </div>
+  );
+}
+
+function MobileModes({ activeMode, tradingMode, onSetActiveMode, onSetTradingMode, disabled }) {
+  const pill = (active, c) => ({
+    flex: "1 1 40%", minWidth: 0,
+    background: active ? c.soft : "transparent",
+    color: active ? c.fg : "var(--qb-text-mid)",
+    border: `1px solid ${active ? c.fg : "var(--qb-border)"}`,
+    borderRadius: 6, padding: "11px 8px",
+    fontSize: 11, fontWeight: 600,
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.4 : 1,
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+    textTransform: "uppercase", letterSpacing: 0.4,
+  });
+  const cur = ACTIVE_MODES.find((m) => m.id === activeMode);
+
+  return (
+    <div className="qb-panel" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10, flexShrink: 0 }}>
+      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>Setup mode</span>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {ACTIVE_MODES.map((m) => (
+          <button key={m.id} disabled={disabled} title={m.hint}
+            onClick={() => !disabled && onSetActiveMode(m.id)} className="qb-mono"
+            style={pill(m.id === activeMode, { soft: "var(--qb-accent-soft)", fg: "var(--qb-accent)" })}>
+            <span style={{ fontSize: 14 }}>{m.glyph}</span>{m.label}
+          </button>
+        ))}
+      </div>
+
+      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>Execution</span>
+      <div style={{ display: "flex", gap: 6 }}>
+        {TRADING_MODES.map((m) => {
+          const on = m.id === tradingMode;
+          const c = m.id === "auto"
+            ? { soft: "var(--qb-ok-soft)", fg: "var(--qb-ok)" }
+            : { soft: "var(--qb-warn-soft)", fg: "var(--qb-warn)" };
+          return (
+            <button key={m.id} disabled={disabled} title={m.hint}
+              onClick={() => !disabled && onSetTradingMode(m.id)} className="qb-mono" style={pill(on, c)}>
+              <span style={{ fontSize: 14 }}>{m.glyph}</span>{m.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {cur && (
+        <span style={{ fontSize: 10, color: "var(--qb-text-lo)", fontStyle: "italic" }}>{cur.hint}</span>
+      )}
+    </div>
+  );
+}
+
+function MobileActivity({ activity }) {
+  return (
+    <Panel title="Activity" subtitle="server log">
+      <div style={{ padding: 10, height: "100%", overflowY: "auto" }}>
+        {(!activity || activity.length === 0) ? (
+          <Placeholder msg="No recent activity yet. Rule changes and trade events appear here." />
+        ) : (
+          activity.map((a, i) => <ActivityRow key={i} entry={a} />)
+        )}
+      </div>
+    </Panel>
   );
 }
