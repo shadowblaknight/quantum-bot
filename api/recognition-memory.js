@@ -315,7 +315,9 @@ module.exports = async (req, res) => {
   try {
     const action = String(req.query.action || 'list');
 
-    if (action === 'list') {
+    // 'recent' is the dashboard's name for 'list' (most-recent closed trades first).
+    // Aliased so the RecognitionPanel's recognition-memory?action=recent stops 400'ing.
+    if (action === 'list' || action === 'recent') {
       const limit = parseInt(req.query.limit || '50', 10);
       const trades = await getAllTrades(limit);
       return res.status(200).json({ count: trades.length, trades });
@@ -349,7 +351,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    return res.status(400).json({ error: 'unknown action', validActions: ['list', 'similar', 'stats'] });
+    return res.status(400).json({ error: 'unknown action', validActions: ['list', 'recent', 'similar', 'stats'] });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
