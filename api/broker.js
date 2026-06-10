@@ -1,5 +1,5 @@
 /* eslint-disable */
-// V12 — api/broker.js
+// V12.1 — api/broker.js
 //
 // Thin wrapper over MetaAPI (PU Prime / any MT5 broker via MetaAPI).
 //
@@ -10,6 +10,28 @@
 // BACKWARD COMPAT: If caller passes something that looks like a broker symbol
 // (uppercase, contains digits/dots/hashes), we treat it as already-resolved and
 // pass it through. This eases the migration from V11.
+//
+// ── V12.1 HARDENING PASS (additive — no contract changes) ───────────────────
+//   ROOT CAUSE of the /api/broker 5xx emails: the MetaAPI fetch calls had NO
+//   timeout. When MetaAPI is slow/unreachable, fetch() hangs, the Vercel
+//   function runs past its max duration, and the PLATFORM kills it with a 504
+//   (which never appears in your own logs because your code never returns).
+//
+//   FIX: every MetaAPI call now goes through metaapiFetch(), which:
+//     • aborts after BROKER_TIMEOUT_MS (default 3500ms) so the function always
+//       returns inside Vercel's budget instead of timing out,
+//     • retries once (BROKER_MAX_ATTEMPTS, default 2) on transient failures
+//       (network error, abort/timeout, and 408/425/429/500/502/503/504),
+//       with a short linear backoff — does NOT retry 4xx (won't self-heal).
+//
+//   CONTRACTS UNCHANGED: fetchAccount → data | {error}; fetchPositions →
+//   array | null (null still SIGNALS a broker miss so manage-trades skips the
+//   tick and preserves state); fetchPrice → {price,...} | {error,price:null}.
+//   fetchPositions symbol annotation is now time-bounded so resolveAsset can
+//   never hang the whole call (falls back to un-annotated positions).
+//
+//   Tunable via env (optional, sane defaults): BROKER_TIMEOUT_MS,
+//   BROKER_MAX_ATTEMPTS, BROKER_BACKOFF_MS.
 // ----------------------------------------------------------------------------
 
 const { Redis } = require('@upstash/redis');
@@ -30,6 +52,54 @@ const TF_CACHE_TTL = {
   '1w':   24 * 60 * 60,
   '1mn':  3 * 24 * 60 * 60,
 };
+
+// =================================================================
+// RESILIENCE CONFIG (V12.1)
+// =================================================================
+
+// Per-attempt timeout. Worst case wall time with 2 attempts + backoff:
+//   3500 + 500 + 3500 = 7.5s  → comfortably under Vercel's 10s Hobby limit.
+const BROKER_TIMEOUT_MS   = parseInt(process.env.BROKER_TIMEOUT_MS, 10)   || 3500;
+const BROKER_MAX_ATTEMPTS = parseInt(process.env.BROKER_MAX_ATTEMPTS, 10) || 2;
+const BROKER_BACKOFF_MS   = parseInt(process.env.BROKER_BACKOFF_MS, 10)   || 500;
+const RETRYABLE_STATUS    = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// Single choke point for every MetaAPI REST call.
+// Returns { resp } on a completed HTTP exchange (ok OR non-retryable non-ok),
+// or { error } when all attempts failed (timeout / network / exhausted retries).
+async function metaapiFetch(url, label) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= BROKER_MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BROKER_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, { headers: metaapiHeaders(), signal: controller.signal });
+      clearTimeout(timer);
+      if (resp.ok) return { resp };
+      // Non-OK response.
+      if (RETRYABLE_STATUS.has(resp.status) && attempt < BROKER_MAX_ATTEMPTS) {
+        const txt = await resp.text().catch(() => '');
+        console.warn(`[broker] ${label} ${resp.status} (attempt ${attempt}/${BROKER_MAX_ATTEMPTS}) retrying: ${txt.slice(0, 120)}`);
+        await sleep(BROKER_BACKOFF_MS * attempt);
+        continue;
+      }
+      return { resp }; // non-retryable non-OK (e.g. 401/404) — let caller read it
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+      const reason = e && e.name === 'AbortError' ? `timeout>${BROKER_TIMEOUT_MS}ms` : (e && e.message) || 'network error';
+      if (attempt < BROKER_MAX_ATTEMPTS) {
+        console.warn(`[broker] ${label} ${reason} (attempt ${attempt}/${BROKER_MAX_ATTEMPTS}) retrying`);
+        await sleep(BROKER_BACKOFF_MS * attempt);
+        continue;
+      }
+      return { error: reason };
+    }
+  }
+  return { error: lastErr ? (lastErr.message || 'unknown') : 'exhausted' };
+}
 
 // =================================================================
 // REDIS / ENV
@@ -91,15 +161,16 @@ async function toBrokerSymbol(assetIdOrSym, userId) {
 
 async function fetchAccount() {
   const url = `${metaapiBase()}/users/current/accounts/${accountId()}/account-information`;
+  const { resp, error } = await metaapiFetch(url, 'fetchAccount');
+  if (error) return { error };
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    return { error: `account ${resp.status}: ${txt.slice(0, 200)}` };
+  }
   try {
-    const resp = await fetch(url, { headers: metaapiHeaders() });
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => '');
-      return { error: `account ${resp.status}: ${txt.slice(0, 200)}` };
-    }
     return await resp.json();
   } catch (e) {
-    return { error: e.message };
+    return { error: `account parse: ${e.message}` };
   }
 }
 
@@ -109,23 +180,38 @@ async function fetchAccount() {
 
 async function fetchPositions() {
   const url = `${metaapiBase()}/users/current/accounts/${accountId()}/positions`;
+  const { resp, error } = await metaapiFetch(url, 'fetchPositions');
+  if (error) {
+    console.warn(`[broker] fetchPositions failed: ${error}`);
+    return null; // SIGNAL: broker error, NOT a confirmed empty positions list
+  }
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    console.warn(`[broker] fetchPositions ${resp.status}: ${txt.slice(0, 200)}`);
+    return null; // SIGNAL: broker error
+  }
+
+  let positions = [];
   try {
-    const resp = await fetch(url, { headers: metaapiHeaders() });
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => '');
-      console.warn(`[broker] fetchPositions ${resp.status}: ${txt.slice(0, 200)}`);
-      return null; // SIGNAL: broker error, NOT a confirmed empty positions list
-    }
-    const positions = await resp.json();
-    // Annotate each with assetId if we can resolve it
-    const annotated = await Promise.all((positions || []).map(async (p) => {
+    positions = await resp.json();
+  } catch (e) {
+    console.warn(`[broker] fetchPositions parse: ${e.message}`);
+    return null;
+  }
+
+  // Annotate each with assetId if we can resolve it — but time-bound it so a
+  // slow symbol-resolver can never hang the whole request. Fall back to the
+  // un-annotated positions (correct, just missing the convenience field).
+  try {
+    const annotate = Promise.all((positions || []).map(async (p) => {
       const assetId = await resolveAsset(p.symbol).catch(() => null);
       return { ...p, assetId };
     }));
-    return annotated;
-  } catch (e) {
-    console.warn(`[broker] fetchPositions exception: ${e.message}`);
-    return null; // SIGNAL: broker error
+    const cap = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
+    const annotated = await Promise.race([annotate, cap]);
+    return annotated || positions;
+  } catch (_) {
+    return positions;
   }
 }
 
@@ -138,12 +224,13 @@ async function fetchPrice(assetIdOrSym, userId) {
   const sym = await toBrokerSymbol(assetIdOrSym, userId);
   if (!sym) return { error: 'symbol unresolved', price: null };
   const url = `${metaapiBase()}/users/current/accounts/${accountId()}/symbols/${sym}/current-price`;
+  const { resp, error } = await metaapiFetch(url, `fetchPrice ${sym}`);
+  if (error) return { error, symbol: sym, price: null };
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    return { error: `price ${resp.status}: ${txt.slice(0, 200)}`, symbol: sym, price: null };
+  }
   try {
-    const resp = await fetch(url, { headers: metaapiHeaders() });
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => '');
-      return { error: `price ${resp.status}: ${txt.slice(0, 200)}`, symbol: sym, price: null };
-    }
     const data = await resp.json();
     // Use mid price; bid/ask available as well
     const bid = data.bid;
@@ -238,6 +325,12 @@ async function fetchMultiTF(assetIdOrSym, userId) {
 // =================================================================
 // HTTP HANDLER (debug / forced fetch)
 // =================================================================
+//
+// V12.1: broker failures are now handled INSIDE the fetch functions (they
+// return {error} / null), so a flaky MetaAPI no longer produces a platform
+// 5xx here. The 500 in the catch is reserved for genuine unexpected bugs.
+// For positions, a broker miss (null) is returned as [] so the dashboard
+// shows "no data" rather than crashing — matches App.jsx's Array.isArray guard.
 
 module.exports = async (req, res) => {
   try {
@@ -247,7 +340,9 @@ module.exports = async (req, res) => {
       return res.status(200).json(await fetchAccount());
     }
     if (action === 'positions') {
-      return res.status(200).json(await fetchPositions());
+      const positions = await fetchPositions();
+      // null = broker miss; return [] so the UI degrades gracefully, no 5xx.
+      return res.status(200).json(Array.isArray(positions) ? positions : []);
     }
     if (action === 'price') {
       const asset = String(req.query.asset || req.query.symbol || '');
