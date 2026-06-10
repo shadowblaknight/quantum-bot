@@ -1,5 +1,5 @@
 /* eslint-disable */
-// V12.1 — api/broker.js
+// V12.1.2 — api/broker.js
 //
 // Thin wrapper over MetaAPI (PU Prime / any MT5 broker via MetaAPI).
 //
@@ -57,10 +57,18 @@ const TF_CACHE_TTL = {
 // RESILIENCE CONFIG (V12.1)
 // =================================================================
 
-// Per-attempt timeout. Worst case wall time with 2 attempts + backoff:
-//   3500 + 500 + 3500 = 7.5s  → comfortably under Vercel's 10s Hobby limit.
-const BROKER_TIMEOUT_MS   = parseInt(process.env.BROKER_TIMEOUT_MS, 10)   || 3500;
-const BROKER_MAX_ATTEMPTS = parseInt(process.env.BROKER_MAX_ATTEMPTS, 10) || 2;
+// V12.1.2 CORRECTION: single attempt + GENEROUS timeout.
+//   History: the original had NO timeout (could hang -> platform 504). V12.1
+//   added a 3.5s/2-attempt retry, which (a) aborted slow-but-ALIVE MetaAPI
+//   responses early and blanked the dashboard, and (b) doubled request volume.
+//   This version keeps a single attempt (no load doubling) but raises the
+//   timeout to 8s so a slow-but-healthy MetaAPI gets time to answer instead of
+//   being killed at 3.5s. Still caps under Vercel's 10s limit, so it cannot
+//   reintroduce the original hang-to-504. If MetaAPI returns a fast error
+//   (e.g. 503 nginx page, region mismatch), that comes back immediately and is
+//   reported as-is — the timeout only matters for genuinely slow responses.
+const BROKER_TIMEOUT_MS   = parseInt(process.env.BROKER_TIMEOUT_MS, 10)   || 8000;
+const BROKER_MAX_ATTEMPTS = parseInt(process.env.BROKER_MAX_ATTEMPTS, 10) || 1;
 const BROKER_BACKOFF_MS   = parseInt(process.env.BROKER_BACKOFF_MS, 10)   || 500;
 const RETRYABLE_STATUS    = new Set([408, 425, 429, 500, 502, 503, 504]);
 
