@@ -17,7 +17,12 @@ const { addWatchedSetup } = require('./watched-setups');
 
 const PINE_TO_ASSET = {
   XAUUSD: 'gold', EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy',
-  NAS100: 'nas100', SP500: 'us500', US500: 'us500', BTCUSD: 'btc', BTCUSDT: 'btc',
+  // NAS100 aliases — data feeds label this instrument differently. Your feed
+  // sends "NDQ" (visible in the alert), which had no mapping → 400 unknown symbol.
+  NAS100: 'nas100', NDQ: 'nas100', US100: 'nas100', USTEC: 'nas100', NDX: 'nas100', USTECH: 'nas100',
+  // SP500 aliases
+  SP500: 'us500', US500: 'us500', SPX500: 'us500', SPX: 'us500',
+  BTCUSD: 'btc', BTCUSDT: 'btc', BTCUSDC: 'btc',
 };
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
@@ -97,41 +102,43 @@ async function skipWithReason({ res, dedupeKey, pineTicker, template, reason, ex
   return res.status(200).json({ ok: true, executed: false, reason, ...extras });
 }
 
-module.exports = async (req, res) => {
-  if (applyCors(req, res)) return;
-  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'method-not-allowed' });
-  const t0 = Date.now();
+// =====================================================================
+// FAST-ACK REFACTOR (v1.2)
+//   TradingView's webhook waits only a few seconds and does NOT retry. The
+//   old flow placed the MetaAPI order INLINE before responding, so a slow
+//   broker round-trip blew that budget -> "request took too long and timed
+//   out", even though the order usually still placed late. Fix: validate just
+//   enough to ACK TradingView instantly (sub-second), then run the heavy
+//   pipeline (fetch, rules, place, notify) AFTER the response via waitUntil.
+//   The broker latency no longer has TradingView waiting on it.
+//   Behaviour (auto place, manual watch, skips, dedupe, Telegram) is identical
+//   to v1.1 — only the response timing changed.
+// =====================================================================
 
-  // 1-2. Parse + auth
-  const parsed = parseDualFormat(req.body);
-  if (!parsed.ok) return res.status(400).json({ ok: false, error: parsed.error });
-  const p = parsed.payload;
+// Vercel's waitUntil keeps the function alive for post-response work. Optional:
+// if '@vercel/functions' isn't installed we fall back to awaiting the pipeline
+// (the async handler stays pending, so Node serverless keeps it alive anyway).
+let _waitUntil = null;
+try { ({ waitUntil: _waitUntil } = require('@vercel/functions')); } catch (_) {}
 
-  const expectedKey = process.env.WEBHOOK_API_KEY || '';
-  if (!expectedKey) return res.status(500).json({ ok: false, error: 'WEBHOOK_API_KEY not set' });
-  if (p.apiKey !== expectedKey) return res.status(401).json({ ok: false, error: 'invalid-api-key' });
-
-  // 3. Master kill switch
-  if (!isTradingEnabled()) {
-    return skipWithReason({
-      res, dedupeKey: null, pineTicker: p.symbol, template: p.template,
-      reason: 'trading-disabled (QB_TRADING_ENABLED != true)', notify: false,
-    });
+// Background skip = skipWithReason without res (used after the ACK).
+async function bgSkip({ dedupeKey, pineTicker, template, reason, extras = {}, notify = true }) {
+  await logActivity({
+    type: 'skip', asset: extras.assetId || null, template,
+    direction: extras.direction || null, reason, ...extras,
+  });
+  if (notify) {
+    try {
+      await sendOnce(`skip:${dedupeKey || reason}`,
+        `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker || extras.assetId || ''}</b>\n\n` +
+        (template ? `Template: ${template}\n` : '') +
+        `Reason: <code>${reason}</code>`);
+    } catch (_) {}
   }
+}
 
-  // 4. Resolve ticker
-  const rawSymbol = (p.symbol || '').toUpperCase();
-  const colonIdx = rawSymbol.lastIndexOf(':');
-  const pineTicker = (colonIdx >= 0 ? rawSymbol.slice(colonIdx + 1) : rawSymbol).replace(/[^A-Z0-9]/g, '');
-  const assetId = PINE_TO_ASSET[pineTicker];
-  if (!assetId) return res.status(400).json({ ok: false, error: `unknown symbol: ${p.symbol}` });
-
-  // 5. Dedupe
-  const dedupeKey = `${assetId}:${p.template}:${p.direction}:${p.timestamp}`;
-  if (await alreadyExecuted(dedupeKey)) {
-    return res.status(200).json({ ok: true, executed: false, reason: 'duplicate-signal', dedupeKey });
-  }
-
+// The heavy pipeline. Runs AFTER TradingView has been acked. NEVER touches res.
+async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 }) {
   // 6. Bounded fetch
   const [positions, capital] = await Promise.all([
     withTimeout(fetchPositions(), 1500, []),
@@ -144,32 +151,26 @@ module.exports = async (req, res) => {
            (pos.symbol && pineTicker && pos.symbol.toUpperCase().includes(pineTicker));
   });
   if (existing) {
-    return skipWithReason({
-      res, dedupeKey, pineTicker, template: p.template,
+    return bgSkip({
+      dedupeKey, pineTicker, template: p.template,
       reason: 'position-already-open',
       extras: { assetId, positionTicket: existing.id }, notify: false,
     });
   }
 
-  // 8. Resolve broker symbol (only needed for auto mode but cheap to do anyway)
+  // 8. Resolve broker symbol
   const brokerSymbol = await resolveSymbol(assetId);
   if (!brokerSymbol) {
-    return res.status(500).json({ ok: false, error: `cannot resolve broker symbol for ${assetId}` });
-  }
-
-  // 9. Parse numerics
-  const entry = parseFloat(p.entry);
-  const sl    = parseFloat(p.sl);
-  const tp1   = parseFloat(p.tp1);
-  const tp2   = parseFloat(p.tp2);
-  const tp3   = parseFloat(p.tp3);
-  if (!isFinite(entry) || !isFinite(sl) || !isFinite(tp1)) {
-    return res.status(400).json({ ok: false, error: 'invalid entry/sl/tp1 in payload' });
+    await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: `cannot resolve broker symbol for ${assetId}` });
+    return;
   }
 
   // 10. Asset meta
   const assetMeta = getAssetById(assetId);
-  if (!assetMeta) return res.status(500).json({ ok: false, error: `no asset registry for ${assetId}` });
+  if (!assetMeta) {
+    await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: `no asset registry for ${assetId}` });
+    return;
+  }
 
   // 11. RULES ENGINE
   const todaysPnL = await getTodaysPnL();
@@ -183,17 +184,16 @@ module.exports = async (req, res) => {
   });
 
   if (!decision.allow) {
-    return skipWithReason({
-      res, dedupeKey, pineTicker, template: p.template,
+    return bgSkip({
+      dedupeKey, pineTicker, template: p.template,
       reason: decision.reason,
       extras: { assetId, direction: p.direction, pineSL: sl, pineTP1: tp1 },
       notify: true,
     });
   }
 
-  // ═══════ NEW IN v1.1: MANUAL MODE BRANCH ═══════
+  // \u2550\u2550\u2550\u2550\u2550\u2550\u2550 MANUAL MODE \u2550\u2550\u2550\u2550\u2550\u2550\u2550
   if (decision.tradingMode === 'manual') {
-    // Don't place order. Store as watching, let cron alert when price enters zone.
     const watchId = `watch_${assetId}_${p.timestamp}_${Date.now()}`;
     await addWatchedSetup({
       id: watchId,
@@ -214,14 +214,12 @@ module.exports = async (req, res) => {
       timeframe: p.timeframe,
       status: 'watching',
       createdAt: Date.now(),
-      expiresAt: Date.now() + 90 * 60 * 1000, // 90 minutes
+      expiresAt: Date.now() + 90 * 60 * 1000,
       rulesApplied: decision.rulesApplied,
     });
 
-    // Mark dedupe so we don't double-watch
     await markExecuted(dedupeKey, { watchId, mode: 'manual', placedAt: Date.now() });
 
-    // Activity log
     await logActivity({
       type: 'manual-watching',
       asset: assetId, template: p.template, direction: p.direction,
@@ -229,42 +227,28 @@ module.exports = async (req, res) => {
       watchId,
     });
 
-    // Telegram: setup-watching notification
     try {
       const templateLabels = {
-        'silver-bullet':'🥈 Silver Bullet','unicorn':'🦄 Unicorn','turtle-soup':'🐢 Turtle Soup',
-        'judas-swing':'🎭 Judas Swing','ote-continuation':'🎯 OTE Continuation',
+        'silver-bullet':'\ud83e\udd48 Silver Bullet','unicorn':'\ud83e\udd84 Unicorn','turtle-soup':'\ud83d\udc22 Turtle Soup',
+        'judas-swing':'\ud83c\udfad Judas Swing','ote-continuation':'\ud83c\udfaf OTE Continuation',
       };
       const tmplLabel = templateLabels[p.template] || p.template;
-      const dirEmoji = p.direction === 'LONG' ? '🟢' : '🔴';
+      const dirEmoji = p.direction === 'LONG' ? '\ud83d\udfe2' : '\ud83d\udd34';
       await sendOnce(`watching:${watchId}`,
-        `🔔 <b>SETUP FORMING — ${pineTicker}</b>\n\n` +
+        `\ud83d\udd14 <b>SETUP FORMING \u2014 ${pineTicker}</b>\n\n` +
         `Setup: ${tmplLabel}\n` +
-        `${dirEmoji} ${p.direction}  •  Lot to place: ${decision.finalLot}\n` +
+        `${dirEmoji} ${p.direction}  \u2022  Lot to place: ${decision.finalLot}\n` +
         `Entry: <code>${entry}</code>\n` +
         `SL: <code>${decision.finalSL}</code>\n` +
         `TP1: <code>${decision.finalTP1}</code>\n\n` +
-        `⏳ Watching for price to enter the zone. You'll get a "TIME TO ENTER" alert when it does.\n` +
+        `\u23f3 Watching for price to enter the zone. You'll get a "TIME TO ENTER" alert when it does.\n` +
         `<i>Manual mode: bot will not auto-place this trade.</i>`
       );
     } catch (_) {}
-
-    return res.status(200).json({
-      ok: true,
-      executed: false,
-      mode: 'manual',
-      reason: 'manual-mode-watching',
-      watchId,
-      assetId, direction: p.direction,
-      entry, sl: decision.finalSL,
-      tp1: decision.finalTP1, tp2: decision.finalTP2, tp3: decision.finalTP3,
-      lotToPlace: decision.finalLot,
-      rulesApplied: decision.rulesApplied,
-      durationMs: Date.now() - t0,
-    });
+    return;
   }
 
-  // ═══════ AUTO MODE (unchanged from v1) ═══════
+  // \u2550\u2550\u2550\u2550\u2550\u2550\u2550 AUTO MODE \u2550\u2550\u2550\u2550\u2550\u2550\u2550
   const finalLot = decision.finalLot;
   const finalSL = decision.finalSL;
   const finalTP1 = decision.finalTP1 != null ? decision.finalTP1 : tp1;
@@ -276,16 +260,15 @@ module.exports = async (req, res) => {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: placement.error });
     try {
       await sendOnce(`webhook-fail:${dedupeKey}`,
-        `⚠️ <b>Order REJECTED by broker — ${pineTicker}</b>\n\n` +
+        `\u26a0\ufe0f <b>Order REJECTED by broker \u2014 ${pineTicker}</b>\n\n` +
         `Template: ${p.template}\nDirection: ${p.direction}\nLot: ${finalLot}\n` +
         `Error: <code>${(placement.error || 'unknown').slice(0, 200)}</code>`);
     } catch (_) {}
-    return res.status(500).json({ ok: false, error: placement.error, dedupeKey });
+    return;
   }
 
   await markExecuted(dedupeKey, { brokerOrderId: placement.orderId, template: p.template, placedAt: Date.now() });
 
-  // Write pending-setup for manage-trades
   try {
     const { addPendingSetup } = require('./watcher');
     const finalTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
@@ -333,9 +316,8 @@ module.exports = async (req, res) => {
     brokerOrderId: placement.orderId,
   });
 
-  let telegramResult;
   try {
-    telegramResult = await notifyTradePlaced({
+    await notifyTradePlaced({
       asset: assetId, direction: p.direction,
       lot: finalLot, entry, sl: finalSL,
       tpLevels: [
@@ -346,21 +328,63 @@ module.exports = async (req, res) => {
       riskDollars: Math.abs(entry - finalSL) * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot,
       brokerOrderId: placement.orderId, template: p.template,
     });
-  } catch (e) { telegramResult = { sent: false, error: e.message }; }
+  } catch (_) {}
+}
 
-  return res.status(200).json({
-    ok: true, executed: true, mode: 'auto',
-    brokerOrderId: placement.orderId,
-    assetId, brokerSymbol, direction: p.direction,
-    lot: finalLot, entry, sl: finalSL,
-    tp1: decision.finalTP1, tp2: decision.finalTP2, tp3: decision.finalTP3,
-    pineSuggested: { sl, tp1, tp2, tp3 },
-    activeMode: decision.activeMode,
-    rulesApplied: decision.rulesApplied,
-    template: p.template,
-    telegram: telegramResult,
-    durationMs: Date.now() - t0,
-  });
+module.exports = async (req, res) => {
+  if (applyCors(req, res)) return;
+  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'method-not-allowed' });
+  const t0 = Date.now();
+
+  // ---- FAST PATH: only sub-second work, then ACK so TradingView never times out ----
+
+  // 1-2. Parse + auth
+  const parsed = parseDualFormat(req.body);
+  if (!parsed.ok) return res.status(400).json({ ok: false, error: parsed.error });
+  const p = parsed.payload;
+
+  const expectedKey = process.env.WEBHOOK_API_KEY || '';
+  if (!expectedKey) return res.status(500).json({ ok: false, error: 'WEBHOOK_API_KEY not set' });
+  if (p.apiKey !== expectedKey) return res.status(401).json({ ok: false, error: 'invalid-api-key' });
+
+  // 3. Master kill switch (fast skip, no order)
+  if (!isTradingEnabled()) {
+    return skipWithReason({
+      res, dedupeKey: null, pineTicker: p.symbol, template: p.template,
+      reason: 'trading-disabled (QB_TRADING_ENABLED != true)', notify: false,
+    });
+  }
+
+  // 4. Resolve ticker (in-memory, fast)
+  const rawSymbol = (p.symbol || '').toUpperCase();
+  const colonIdx = rawSymbol.lastIndexOf(':');
+  const pineTicker = (colonIdx >= 0 ? rawSymbol.slice(colonIdx + 1) : rawSymbol).replace(/[^A-Z0-9]/g, '');
+  const assetId = PINE_TO_ASSET[pineTicker];
+  if (!assetId) return res.status(400).json({ ok: false, error: `unknown symbol: ${p.symbol}` });
+
+  // 9. Parse numerics (fast) — fail fast on a malformed payload
+  const entry = parseFloat(p.entry);
+  const sl    = parseFloat(p.sl);
+  const tp1   = parseFloat(p.tp1);
+  const tp2   = parseFloat(p.tp2);
+  const tp3   = parseFloat(p.tp3);
+  if (!isFinite(entry) || !isFinite(sl) || !isFinite(tp1)) {
+    return res.status(400).json({ ok: false, error: 'invalid entry/sl/tp1 in payload' });
+  }
+
+  // 5. Dedupe (fast Redis read)
+  const dedupeKey = `${assetId}:${p.template}:${p.direction}:${p.timestamp}`;
+  if (await alreadyExecuted(dedupeKey)) {
+    return res.status(200).json({ ok: true, executed: false, reason: 'duplicate-signal', dedupeKey });
+  }
+
+  // ---- ACK TradingView NOW: fast 2xx, never "took too long" ----
+  res.status(202).json({ ok: true, accepted: true, dedupeKey, ackMs: Date.now() - t0 });
+
+  // ---- Heavy pipeline runs AFTER the response (broker latency no longer blocks TV) ----
+  const work = processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 })
+    .catch((e) => { try { console.error('[webhook bg] error:', e && e.message); } catch (_) {} });
+  if (typeof _waitUntil === 'function') _waitUntil(work); else await work;
 };
 
 module.exports.parseDualFormat = parseDualFormat;
