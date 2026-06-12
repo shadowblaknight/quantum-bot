@@ -378,13 +378,28 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true, executed: false, reason: 'duplicate-signal', dedupeKey });
   }
 
-  // ---- ACK TradingView NOW: fast 2xx, never "took too long" ----
-  res.status(202).json({ ok: true, accepted: true, dedupeKey, ackMs: Date.now() - t0 });
-
-  // ---- Heavy pipeline runs AFTER the response (broker latency no longer blocks TV) ----
-  const work = processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 })
-    .catch((e) => { try { console.error('[webhook bg] error:', e && e.message); } catch (_) {} });
-  if (typeof _waitUntil === 'function') _waitUntil(work); else await work;
+  // ---- Run the heavy pipeline. Placement MUST survive the response. ----
+  // Vercel FREEZES a serverless function the moment its response is flushed,
+  // UNLESS post-response work is registered via waitUntil. So branch on it:
+  //   • waitUntil present  → fast-ACK now, place in background (clean TV log).
+  //   • waitUntil ABSENT   → place INLINE first, THEN respond. Guaranteed
+  //     placement. The TV log may occasionally read "took too long", which is
+  //     cosmetic: Vercel still completes the function and the order IS placed.
+  if (typeof _waitUntil === 'function') {
+    res.status(202).json({ ok: true, accepted: true, dedupeKey, ackMs: Date.now() - t0 });
+    _waitUntil(
+      processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 })
+        .catch((e) => { try { console.error('[webhook bg] error:', e && e.message); } catch (_) {} })
+    );
+  } else {
+    try {
+      await processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 });
+      if (!res.headersSent) res.status(200).json({ ok: true, dedupeKey, ms: Date.now() - t0 });
+    } catch (e) {
+      try { console.error('[webhook] inline pipeline error:', e && e.message); } catch (_) {}
+      if (!res.headersSent) res.status(200).json({ ok: false, error: (e && e.message) || 'pipeline-error', dedupeKey });
+    }
+  }
 };
 
 module.exports.parseDualFormat = parseDualFormat;
