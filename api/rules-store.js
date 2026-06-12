@@ -1,20 +1,19 @@
 /* eslint-disable */
-// api/rules-store.js  (Pilot Dashboard v1.4)
+// api/rules-store.js  (Pilot Dashboard v1.5)
 //
-// v1.4 CHANGE (the float-precision fix):
-//   v1.3 used `tp1RR < effectiveMinRR` for the RR gate. JavaScript float
-//   arithmetic on Pine-supplied prices can produce 0.99999999... when the
-//   true ratio is exactly 1.0, causing valid trades to be skipped with the
-//   nonsensical reason "rr-below-threshold (1.00 < 1.00)".
-//   Fix: tolerance of 0.001 (one-tenth of a pip of R precision).
-//   Below 0.999R is still rejected; anything from 0.999 upward passes.
+// v1.5 CHANGE (the "my inputs are ignored" fix):
+//   The backend only honored slMode === 'fixed-pips' / 'fixed-dollars' and
+//   lotMode === 'fixed'. If the App.jsx settings panel saves the toggle under a
+//   different spelling (e.g. slMode:'fixed', lotMode:'fixed-lot'), the mode
+//   never matched, the code silently fell back to the Pine SL / risk-based lot,
+//   and the user's entered values looked ignored even after flipping the toggle.
+//   Fix: accept the common aliases so a fixed SL/lot is honored regardless of
+//   which spelling the UI persists. Pine/risk-based behavior is unchanged when
+//   no fixed mode is set.
 //
-// v1.3 changes (kept):
-//   • TP recompute now triggers when (slWasOverridden OR effectiveMinRR > 1.0).
-//
-// v1.2 changes (kept):
-//   • 'am-ifvg' template in defaults + active + defensive acceptedTemplates
-//   • TP recompute when SL is overridden, with TP1 honoring effectiveMinRR
+// v1.4 (kept): RR float tolerance (0.001) so exact-1.0R trades aren't rejected.
+// v1.3 (kept): TP recompute when (slWasOverridden OR effectiveMinRR > 1.0).
+// v1.2 (kept): 'am-ifvg' in defaults/active/defensive; TP recompute on SL override.
 //
 // DEPENDS ONLY ON: ./_lib
 // ----------------------------------------------------------------------------
@@ -26,18 +25,20 @@ const ACTIVITY_LOG_KEY = 'v13:pilot:activity';
 const DAILY_PNL_KEY = (date) => `v13:pilot:daily-pnl:${date}`;
 const RULES_TTL_DAYS = 365;
 
-// v1.4: tolerance for RR comparison to defeat float precision errors.
-// Pine sends TP1 = entry + 1.0 * slDist exactly, but JS arithmetic can
-// land at 0.9999999998 — strict "<" then trips. 0.001 = 0.1% tolerance.
 const RR_FLOAT_TOLERANCE = 0.001;
+
+// v1.5: accepted spellings for the "fixed" modes, so a value the user entered
+// in the app is honored no matter which string the settings panel saved.
+const SL_FIXED_PIPS_MODES    = new Set(['fixed-pips', 'fixed', 'pips', 'fixed_pips']);
+const SL_FIXED_DOLLARS_MODES = new Set(['fixed-dollars', 'dollars', 'fixed_dollars', 'fixed-usd']);
+const LOT_FIXED_MODES        = new Set(['fixed', 'fixed-lot', 'fixed_lot', 'manual']);
 
 // ───── Defaults ──────────────────────────────────────────────────────
 
 const DEFAULT_RULES = {
-  version: 1.4,
+  version: 1.5,
 
-  // Trading mode (independent of activeMode preset)
-  tradingMode: 'auto', // 'auto' = place orders; 'manual' = notify only
+  tradingMode: 'auto',
 
   account: {
     maxDailyLossPct: 5.0,
@@ -58,14 +59,14 @@ const DEFAULT_RULES = {
     },
     active: {
       lotMultiplier: 1.00, minRR: 0,
-      acceptedTemplates: ['silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'],
+      acceptedTemplates: ['silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','orb'],
       maxConcurrent: 5,
       label: '🐻 Active',
       description: 'All templates, full lot, full management',
     },
     defensive: {
       lotMultiplier: 0.50, minRR: 2.0,
-      acceptedTemplates: ['silver-bullet','unicorn','ote-continuation','am-ifvg'],
+      acceptedTemplates: ['silver-bullet','unicorn','ote-continuation','am-ifvg','orb'],
       maxConcurrent: 2,
       label: '🛡 Defensive',
       description: 'High-confidence templates only, half lot, min 2R required',
@@ -96,6 +97,7 @@ const DEFAULT_RULES = {
     'judas-swing':      { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🎭 Judas Swing' },
     'ote-continuation': { enabled: true, tradingStyle: 'swing',    lotMultiplier: 1.0, label: '🎯 OTE Continuation' },
     'am-ifvg':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🌅 AM IFVG Reversal' },
+    'orb':              { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🚀 ORB Breakout' },
   },
 
   lastModified: null,
@@ -215,7 +217,6 @@ async function applyRulesToSignal({
 }) {
   const rules = await getRules();
 
-  // Account safety gates
   if (rules.account.emergencyStop) return { allow: false, reason: 'emergency-stop-active' };
   if (todaysPnL != null && capital > 0) {
     const dailyLossPct = (todaysPnL / capital) * -100;
@@ -228,7 +229,6 @@ async function applyRulesToSignal({
     return { allow: false, reason: `max-concurrent-positions (${openCount} >= ${rules.account.maxConcurrentPositions})` };
   }
 
-  // Active mode gates
   const preset = rules.modePresets[rules.activeMode];
   if (!preset) return { allow: false, reason: `unknown-mode: ${rules.activeMode}` };
   if (preset.lotMultiplier === 0) return { allow: false, reason: `mode-blocks-trades (${rules.activeMode})` };
@@ -239,22 +239,26 @@ async function applyRulesToSignal({
     return { allow: false, reason: `mode-max-concurrent (${openCount} >= ${preset.maxConcurrent})` };
   }
 
-  // Template override gates
   const tmplOverride = rules.templateOverrides[template];
   if (!tmplOverride || !tmplOverride.enabled) return { allow: false, reason: `template-disabled (${template})` };
 
-  // Per-instrument gates
   const inst = rules.instruments[assetId];
   if (!inst) return { allow: false, reason: `no-rules-for-asset (${assetId})` };
   if (!inst.enabled) return { allow: false, reason: `instrument-disabled (${assetId})` };
 
   // ─── Compute final SL ─────
+  // v1.5: tolerate alias spellings for the fixed SL mode so the value the user
+  // typed in the app is actually applied (previously only 'fixed-pips' matched).
+  const slModeRaw        = String(inst.slMode || 'pine').toLowerCase();
+  const slIsFixedPips    = SL_FIXED_PIPS_MODES.has(slModeRaw);
+  const slIsFixedDollars = SL_FIXED_DOLLARS_MODES.has(slModeRaw);
+  const slWasOverridden  = slIsFixedPips || slIsFixedDollars;
+
   let finalSL = sl;
-  const slWasOverridden = inst.slMode === 'fixed-pips' || inst.slMode === 'fixed-dollars';
-  if (inst.slMode === 'fixed-pips' && assetMeta && assetMeta.pipSize) {
+  if (slIsFixedPips && assetMeta && assetMeta.pipSize) {
     const distance = inst.fixedSLPips * assetMeta.pipSize;
     finalSL = direction === 'LONG' ? entry - distance : entry + distance;
-  } else if (inst.slMode === 'fixed-dollars' && assetMeta && assetMeta.pipSize && assetMeta.dollarPerPipPerLot) {
+  } else if (slIsFixedDollars && assetMeta && assetMeta.pipSize && assetMeta.dollarPerPipPerLot) {
     const pips = inst.fixedSLDollars / assetMeta.dollarPerPipPerLot;
     const distance = pips * assetMeta.pipSize;
     finalSL = direction === 'LONG' ? entry - distance : entry + distance;
@@ -263,7 +267,6 @@ async function applyRulesToSignal({
   const finalSLDistance = Math.abs(entry - finalSL);
   if (finalSLDistance <= 0) return { allow: false, reason: 'invalid-sl-distance' };
 
-  // Compute effective minRR (used by recompute AND by RR gate)
   const effectiveMinRR = Math.max(inst.minRR || 0, preset.minRR || 0);
 
   // ─── Compute final TPs ─────
@@ -272,10 +275,6 @@ async function applyRulesToSignal({
   if (inst.tpMode === 'trail-only') {
     finalTP1 = null; finalTP2 = null; finalTP3 = null;
   } else if (slWasOverridden || effectiveMinRR > 1.0) {
-    // v1.3: recompute TPs whenever SL was overridden OR mode requires >1R.
-    // Pine sends 1R/2R/3R TPs by default — in Sleep/Defensive (minRR=2.0)
-    // those would always fail the RR gate without this promotion.
-    // TP1 = max(1R, effectiveMinRR), TP2 = TP1+1R, TP3 = TP1+2R.
     const tp1R = Math.max(1.0, effectiveMinRR);
     finalTP1 = direction === 'LONG' ? entry + finalSLDistance * tp1R       : entry - finalSLDistance * tp1R;
     finalTP2 = direction === 'LONG' ? entry + finalSLDistance * (tp1R + 1) : entry - finalSLDistance * (tp1R + 1);
@@ -283,9 +282,6 @@ async function applyRulesToSignal({
     tpsAutoPromoted = true;
   }
 
-  // RR filter — v1.4: tolerance applied to defeat float precision errors.
-  // Without this, valid 1.0R trades were rejected with "rr-below-threshold
-  // (1.00 < 1.00)" — mathematically impossible but observed in practice.
   if (finalTP1 != null) {
     const tp1Distance = Math.abs(finalTP1 - entry);
     const tp1RR = tp1Distance / finalSLDistance;
@@ -295,8 +291,10 @@ async function applyRulesToSignal({
   }
 
   // ─── Compute final lot ─────
+  // v1.5: tolerate alias spellings for the fixed lot mode.
+  const lotModeRaw = String(inst.lotMode || 'risk-based').toLowerCase();
   let finalLot;
-  if (inst.lotMode === 'fixed') {
+  if (LOT_FIXED_MODES.has(lotModeRaw)) {
     finalLot = inst.fixedLot;
   } else {
     const riskPct = Math.min(rules.account.maxRiskPerTradePct, 2.0) / 100;
@@ -312,7 +310,6 @@ async function applyRulesToSignal({
   if (finalLot > inst.maxLot) finalLot = inst.maxLot;
   finalLot = Math.max(0.01, Math.round(finalLot * 100) / 100);
 
-  // Final risk check
   if (assetMeta && assetMeta.pipSize && assetMeta.dollarPerPipPerLot) {
     const pips = finalSLDistance / assetMeta.pipSize;
     const actualRisk = pips * assetMeta.dollarPerPipPerLot * finalLot;
@@ -336,7 +333,9 @@ async function applyRulesToSignal({
     instrument: inst,
     template: tmplOverride,
     rulesApplied: {
-      slMode: inst.slMode, tpMode: inst.tpMode, lotMode: inst.lotMode,
+      slMode: inst.slMode, slModeResolved: slIsFixedPips ? 'fixed-pips' : slIsFixedDollars ? 'fixed-dollars' : 'pine',
+      tpMode: inst.tpMode,
+      lotMode: inst.lotMode, lotModeResolved: LOT_FIXED_MODES.has(lotModeRaw) ? 'fixed' : 'risk-based',
       slWasOverridden,
       tpsAutoPromoted,
       effectiveMinRR,

@@ -52,10 +52,11 @@ const TEMPLATE_DISPLAY = {
   "judas-swing":      { glyph: "🎭", label: "Judas Swing" },
   "ote-continuation": { glyph: "🎯", label: "OTE Continuation" },
   "am-ifvg":          { glyph: "🌅", label: "AM IFVG Reversal" },
+  "orb":              { glyph: "🚀", label: "ORB Breakout" },
 };
 
 const TEMPLATE_ORDER = [
-  "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg",
+  "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg", "orb",
 ];
 
 const ASSET_CATALOG = [
