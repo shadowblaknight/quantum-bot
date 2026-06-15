@@ -53,11 +53,22 @@ const TEMPLATE_DISPLAY = {
   "ote-continuation": { glyph: "🎯", label: "OTE Continuation" },
   "am-ifvg":          { glyph: "🌅", label: "AM IFVG Reversal" },
   "orb":              { glyph: "🚀", label: "ORB Breakout" },
+  "reaction":         { glyph: "🎯", label: "Reaction (coil break)" },
+  "reaction-fvg":     { glyph: "🌀", label: "Reaction (FVG)" },
+  "reaction-ifvg":    { glyph: "🔄", label: "Reaction (IFVG)" },
 };
 
 const TEMPLATE_ORDER = [
-  "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg", "orb",
+  "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg",
+  "orb", "reaction", "reaction-fvg", "reaction-ifvg",
 ];
+
+// v14: the five ICT templates are grouped under one collapsible "ICT" header in
+// the UI, but stay separately measured so you can see which sub-setup actually
+// works and prune the losers.
+const ICT_TEMPLATES = ["silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg"];
+// The three reaction confirmation paths — separately measured, grouped in the UI.
+const REACTION_TEMPLATES = ["reaction", "reaction-fvg", "reaction-ifvg"];
 
 const ASSET_CATALOG = [
   { id: "eurusd",   name: "EUR/USD",     category: "forex"     },
@@ -476,6 +487,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         <RecognitionPanel perf={perf} />
 
         <PerfHeatmapPanel perf={perf} watchlist={prefs.watchlist} />
+
+        {/* ─── v14 · Day-vs-Swing comparison (full width) ─── */}
+        <StyleComparisonPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -1089,12 +1103,31 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
   }
 
   const enabled    = rule.enabled !== false;
-  const lotMode    = rule.lotMode || "risk-based";
-  const slMode     = rule.slMode || "pine";
-  const tpMode     = rule.tpMode || "pine-three";
+  const liveStyle  = rule.style === "swing" ? "swing" : "day";
+  const [editStyle, setEditStyle] = useState(liveStyle);
 
-  const slLabel = slMode === "pine" ? "Pine SL" : slMode === "fixed-pips" ? `${rule.fixedSLPips || "?"}p` : `$${rule.fixedSLDollars || "?"}`;
-  const lotLabel = lotMode === "fixed" ? `${(rule.fixedLot || 0).toFixed(2)} fixed` : `risk-based ≤${(rule.maxLot || 0).toFixed(2)}`;
+  // Read a field from a style's profile, falling back to the legacy flat field
+  // (migration-safe), then a default.
+  const readField = (style, field, dflt) => {
+    const prof = rule[style + "Profile"];
+    if (prof && prof[field] != null) return prof[field];
+    if (rule[field] != null) return rule[field];
+    return dflt;
+  };
+  // Patch a field inside the profile currently being EDITED. Deep-merged server-side.
+  const setField = (field, v) => onChange({ [editStyle + "Profile"]: { [field]: v } });
+
+  // Collapsed-row summary reflects the LIVE profile (what actually trades).
+  const lvLotMode = readField(liveStyle, "lotMode", "risk-based");
+  const lvSlMode  = readField(liveStyle, "slMode", "pine");
+  const lvTpMode  = readField(liveStyle, "tpMode", "pine-three");
+  const slLabel  = lvSlMode === "pine" ? "Pine SL" : lvSlMode === "fixed-pips" ? `${readField(liveStyle,"fixedSLPips","?")}p` : `$${readField(liveStyle,"fixedSLDollars","?")}`;
+  const lotLabel = lvLotMode === "fixed" ? `${Number(readField(liveStyle,"fixedLot",0)).toFixed(2)} fixed` : `risk ≤${Number(readField(liveStyle,"maxLot",0)).toFixed(2)}`;
+
+  // Fields for the profile being EDITED.
+  const lotMode = readField(editStyle, "lotMode", "risk-based");
+  const slMode  = readField(editStyle, "slMode", "pine");
+  const tpMode  = readField(editStyle, "tpMode", "pine-three");
 
   return (
     <div className="qb-cell" style={{ opacity: enabled ? 1 : 0.5 }}>
@@ -1103,7 +1136,7 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
         style={{
           padding: "8px 10px",
           display: "grid",
-          gridTemplateColumns: "20px 70px 1fr 70px 50px 20px",
+          gridTemplateColumns: "20px 60px 1fr 62px 44px 30px 16px",
           gap: 6, alignItems: "center",
           cursor: "pointer",
         }}
@@ -1114,7 +1147,13 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
         </span>
         <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)" }}>{lotLabel}</span>
         <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", textAlign: "right" }}>SL: {slLabel}</span>
-        <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", textAlign: "right" }}>{tpMode}</span>
+        <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", textAlign: "right" }}>{lvTpMode}</span>
+        <span className="qb-mono" style={{
+          fontSize: 8, fontWeight: 700, textAlign: "center", padding: "1px 0", borderRadius: 3,
+          color: liveStyle === "swing" ? "#08080a" : "var(--qb-accent)",
+          background: liveStyle === "swing" ? "var(--qb-accent)" : "transparent",
+          border: "1px solid var(--qb-accent)",
+        }}>{liveStyle === "swing" ? "SW" : "DAY"}</span>
         <span style={{ fontSize: 10, color: "var(--qb-text-faint)", textAlign: "right" }}>
           {expanded ? "▾" : "▸"}
         </span>
@@ -1126,28 +1165,53 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
           borderTop: "1px solid var(--qb-border)",
           display: "flex", flexDirection: "column", gap: 10,
         }}>
+          {/* LIVE PROFILE — which profile actually trades this instrument */}
+          <ConfigGroup label="Live profile (what trades)">
+            <SegmentControl
+              options={[{id: "day", label: "Day"}, {id: "swing", label: "Swing"}]}
+              value={liveStyle}
+              onChange={(v) => { onChange({ style: v }); setEditStyle(v); }}
+            />
+          </ConfigGroup>
+
+          {/* EDIT TABS — configure either profile without changing the live one */}
+          <div style={{ display: "flex", borderBottom: "1px solid var(--qb-border)" }}>
+            {["day", "swing"].map((s) => (
+              <button key={s} onClick={() => setEditStyle(s)} style={{
+                flex: 1, background: "transparent", border: "none", cursor: "pointer",
+                padding: "6px 4px", fontFamily: "var(--qb-font-mono)", fontSize: 10,
+                letterSpacing: 0.5, textTransform: "uppercase",
+                color: editStyle === s ? "var(--qb-accent)" : "var(--qb-text-faint)",
+                borderBottom: editStyle === s ? "2px solid var(--qb-accent)" : "2px solid transparent",
+                fontWeight: editStyle === s ? 700 : 400,
+              }}>
+                {s === "day" ? "Day" : "Swing"} profile{s === liveStyle ? " ●" : ""}
+              </button>
+            ))}
+          </div>
+
           {/* LOT MODE */}
           <ConfigGroup label="Lot mode">
             <SegmentControl
               options={[{id: "risk-based", label: "Risk-based"}, {id: "fixed", label: "Fixed lot"}]}
               value={lotMode}
-              onChange={(v) => onChange({ lotMode: v })}
+              onChange={(v) => setField("lotMode", v)}
             />
           </ConfigGroup>
 
           {lotMode === "fixed" && (
             <SmallNumberField
               label="Fixed lot"
-              value={rule.fixedLot || 0.01}
+              value={readField(editStyle, "fixedLot", 0.01)}
               step="0.01"
-              onChange={(v) => onChange({ fixedLot: v })}
+              onChange={(v) => setField("fixedLot", v)}
             />
           )}
           <SmallNumberField
             label="Max lot"
-            value={rule.maxLot || 1}
+            value={readField(editStyle, "maxLot", 1)}
             step="0.01"
-            onChange={(v) => onChange({ maxLot: v })}
+            onChange={(v) => setField("maxLot", v)}
           />
 
           {/* SL MODE */}
@@ -1159,23 +1223,23 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
                 {id: "fixed-dollars", label: "Dollars"},
               ]}
               value={slMode}
-              onChange={(v) => onChange({ slMode: v })}
+              onChange={(v) => setField("slMode", v)}
             />
           </ConfigGroup>
           {slMode === "fixed-pips" && (
             <SmallNumberField
               label="SL (pips)"
-              value={rule.fixedSLPips || 15}
+              value={readField(editStyle, "fixedSLPips", 15)}
               step="1"
-              onChange={(v) => onChange({ fixedSLPips: v })}
+              onChange={(v) => setField("fixedSLPips", v)}
             />
           )}
           {slMode === "fixed-dollars" && (
             <SmallNumberField
               label="SL ($/lot)"
-              value={rule.fixedSLDollars || 25}
+              value={readField(editStyle, "fixedSLDollars", 25)}
               step="1"
-              onChange={(v) => onChange({ fixedSLDollars: v })}
+              onChange={(v) => setField("fixedSLDollars", v)}
             />
           )}
 
@@ -1187,16 +1251,16 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
                 {id: "trail-only", label: "Trail only"},
               ]}
               value={tpMode}
-              onChange={(v) => onChange({ tpMode: v })}
+              onChange={(v) => setField("tpMode", v)}
             />
           </ConfigGroup>
 
           {/* MIN RR */}
           <SmallNumberField
             label="Min RR"
-            value={rule.minRR || 1.0}
+            value={readField(editStyle, "minRR", 1.0)}
             step="0.1"
-            onChange={(v) => onChange({ minRR: v })}
+            onChange={(v) => setField("minRR", v)}
           />
 
           {canRemove && (
@@ -1443,6 +1507,190 @@ function WatchRow({ watch, onCancel }) {
         Cancel watch
       </button>
     </div>
+  );
+}
+
+// =====================================================================
+// 15a · DAY vs SWING COMPARISON PANEL  [v14]
+// =====================================================================
+// Reads /api/recognition-memory?action=recent — each closed trade now carries
+// `style` (day|swing) and `template`. Groups them so you can see which risk
+// profile is actually working. Two views: Overall (Day vs Swing) and a
+// per-template breakdown. This is the measurement tool behind the dual-profile
+// config — and the reason the ICT templates stay separately tracked.
+
+function aggTrades(trades) {
+  let wins = 0, losses = 0, be = 0, net = 0, grossWin = 0, grossLoss = 0, rSum = 0, rN = 0;
+  for (const t of trades) {
+    const pnl = Number(t.pnl) || 0;
+    net += pnl;
+    if (t.outcome === "WIN" || pnl > 0.5) { wins++; grossWin += pnl; }
+    else if (t.outcome === "LOSS" || pnl < -0.5) { losses++; grossLoss += Math.abs(pnl); }
+    else be++;
+    if (t.pnlR != null && isFinite(t.pnlR)) { rSum += t.pnlR; rN++; }
+  }
+  const decided = wins + losses;
+  return {
+    count: trades.length, wins, losses, be,
+    winRate: decided > 0 ? wins / decided : null,
+    net,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
+    avgR: rN > 0 ? rSum / rN : null,
+  };
+}
+
+function wrColorOf(wr) {
+  if (wr == null) return "var(--qb-text-lo)";
+  return wr >= 0.55 ? "var(--qb-ok)" : wr >= 0.45 ? "var(--qb-warn)" : "var(--qb-bad)";
+}
+function netColorOf(net) {
+  if (!net) return "var(--qb-text-lo)";
+  return net > 0 ? "var(--qb-ok)" : net < 0 ? "var(--qb-bad)" : "var(--qb-text-lo)";
+}
+function fmtWR(wr) { return wr == null ? "·" : `${Math.round(wr * 100)}%`; }
+function fmtNet(net, count) { return count ? `${net >= 0 ? "+" : ""}${net.toFixed(0)}` : "·"; }
+
+function Stat({ label, value, color, big }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      <span style={{ fontSize: 8, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
+      <span className="qb-mono" style={{ fontSize: big ? 24 : 13, fontWeight: big ? 300 : 500, color, lineHeight: 1.2 }}>{value}</span>
+    </div>
+  );
+}
+
+function StyleStatCard({ title, agg }) {
+  return (
+    <div className="qb-cell" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontFamily: "var(--qb-font-mono)", fontSize: 12, fontWeight: 700, letterSpacing: 1, color: "var(--qb-accent)" }}>{title}</span>
+        <span style={{ fontSize: 10, color: "var(--qb-text-faint)" }}>{agg.count} trade{agg.count === 1 ? "" : "s"}</span>
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Stat label="Win rate" value={fmtWR(agg.winRate)} color={wrColorOf(agg.winRate)} big />
+        <Stat label="Net $" value={agg.count ? `${agg.net >= 0 ? "+" : ""}${agg.net.toFixed(0)}` : "·"} color={netColorOf(agg.net)} big />
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Stat label="Profit factor" value={agg.profitFactor == null ? "·" : agg.profitFactor === Infinity ? "∞" : agg.profitFactor.toFixed(2)} color="var(--qb-text-mid)" />
+        <Stat label="Avg R" value={agg.avgR == null ? "·" : `${agg.avgR >= 0 ? "+" : ""}${agg.avgR.toFixed(2)}R`} color={netColorOf(agg.avgR)} />
+        <Stat label="W / L" value={`${agg.wins} / ${agg.losses}`} color="var(--qb-text-mid)" />
+      </div>
+    </div>
+  );
+}
+
+function StyleComparisonPanel({ gridColumn = "1 / 4" }) {
+  const [trades, setTrades] = useState(null);
+  const [error, setError]   = useState(null);
+  const [view, setView]     = useState("overall");   // "overall" | "template"
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
+        if (alive) {
+          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
+          else setError(r?.error || "no trade data");
+        }
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const all      = trades || [];
+  const dayAgg   = aggTrades(all.filter((t) => (t.style || "day") === "day"));
+  const swingAgg = aggTrades(all.filter((t) => t.style === "swing"));
+  const unclassified = all.filter((t) => t.style !== "day" && t.style !== "swing").length;
+
+  const byTemplate = {};
+  for (const t of all) {
+    const tmpl = t.template || (t.contributingTactics || [])[0] || "—";
+    if (!byTemplate[tmpl]) byTemplate[tmpl] = { day: [], swing: [] };
+    byTemplate[tmpl][t.style === "swing" ? "swing" : "day"].push(t);
+  }
+  const templateRows = Object.keys(byTemplate).sort();
+
+  return (
+    <Panel title="Day vs Swing" subtitle="which profile is working" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
+        {error && <PlaceholderError msg={`Comparison: ${error}`} />}
+        {!error && all.length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            No closed trades yet. Day vs Swing stats appear here once trades close and get tagged with their profile.
+          </div>
+        )}
+
+        {all.length > 0 && (
+          <>
+            <div style={{ display: "flex", marginBottom: 12, borderBottom: "1px solid var(--qb-border)" }}>
+              {[["overall", "Overall"], ["template", "By template"]].map(([id, label]) => (
+                <button key={id} onClick={() => setView(id)} style={{
+                  padding: "5px 14px", background: "transparent", border: "none", cursor: "pointer",
+                  fontFamily: "var(--qb-font-mono)", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase",
+                  color: view === id ? "var(--qb-accent)" : "var(--qb-text-faint)",
+                  borderBottom: view === id ? "2px solid var(--qb-accent)" : "2px solid transparent",
+                  fontWeight: view === id ? 700 : 400,
+                }}>{label}</button>
+              ))}
+            </div>
+
+            {view === "overall" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <StyleStatCard title="DAY" agg={dayAgg} />
+                <StyleStatCard title="SWING" agg={swingAgg} />
+              </div>
+            )}
+
+            {view === "template" && (
+              <div style={{ overflow: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+                  <thead>
+                    <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
+                      <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
+                      <th style={{ padding: "4px 6px" }}>Day n</th>
+                      <th style={{ padding: "4px 6px" }}>Day WR</th>
+                      <th style={{ padding: "4px 6px" }}>Day net</th>
+                      <th style={{ padding: "4px 6px" }}>Sw n</th>
+                      <th style={{ padding: "4px 6px" }}>Sw WR</th>
+                      <th style={{ padding: "4px 6px" }}>Sw net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {templateRows.map((tmpl) => {
+                      const d = aggTrades(byTemplate[tmpl].day);
+                      const s = aggTrades(byTemplate[tmpl].swing);
+                      const meta = TEMPLATE_DISPLAY[tmpl];
+                      return (
+                        <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
+                          <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>
+                            {meta ? `${meta.glyph} ${meta.label}` : tmpl}
+                          </td>
+                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{d.count || "·"}</td>
+                          <td style={{ padding: "4px 6px", color: wrColorOf(d.winRate) }}>{fmtWR(d.winRate)}</td>
+                          <td style={{ padding: "4px 6px", color: netColorOf(d.net) }}>{fmtNet(d.net, d.count)}</td>
+                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{s.count || "·"}</td>
+                          <td style={{ padding: "4px 6px", color: wrColorOf(s.winRate) }}>{fmtWR(s.winRate)}</td>
+                          <td style={{ padding: "4px 6px", color: netColorOf(s.net) }}>{fmtNet(s.net, s.count)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {unclassified > 0 && (
+              <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+                {unclassified} older trade{unclassified === 1 ? "" : "s"} predate profile tagging and aren't counted by style.
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Panel>
   );
 }
 

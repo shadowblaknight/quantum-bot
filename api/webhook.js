@@ -14,6 +14,8 @@ const { notifyTradePlaced, sendOnce } = require('./telegram');
 const { getAssetById } = require('./asset-registry');
 const { applyRulesToSignal, logActivity, getTodaysPnL } = require('./rules-store');
 const { addWatchedSetup } = require('./watched-setups');
+const { templateLabelMap } = require('./_templates');
+const TEMPLATE_LABELS = templateLabelMap();
 
 const PINE_TO_ASSET = {
   XAUUSD: 'gold', EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy',
@@ -180,6 +182,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const decision = await applyRulesToSignal({
     assetId, template: p.template, direction: p.direction,
     entry, sl, tp1, tp2, tp3,
+    htfTier: p.htfTier || null, htfBiasAlign: p.htfBiasAlign,
     capital, openPositions: managedOpen, todaysPnL, assetMeta,
   });
 
@@ -228,11 +231,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     });
 
     try {
-      const templateLabels = {
-        'silver-bullet':'\ud83e\udd48 Silver Bullet','unicorn':'\ud83e\udd84 Unicorn','turtle-soup':'\ud83d\udc22 Turtle Soup',
-        'judas-swing':'\ud83c\udfad Judas Swing','ote-continuation':'\ud83c\udfaf OTE Continuation',
-      };
-      const tmplLabel = templateLabels[p.template] || p.template;
+      const tmplLabel = TEMPLATE_LABELS[p.template] || p.template;
       const dirEmoji = p.direction === 'LONG' ? '\ud83d\udfe2' : '\ud83d\udd34';
       await sendOnce(`watching:${watchId}`,
         `\ud83d\udd14 <b>SETUP FORMING \u2014 ${pineTicker}</b>\n\n` +
@@ -269,6 +268,12 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
 
   await markExecuted(dedupeKey, { brokerOrderId: placement.orderId, template: p.template, placedAt: Date.now() });
 
+  // v2.3: real R-multiples from actual prices — the SL/minRR recompute can put
+  // TP1 at 2R (etc.), so the old hardcoded 1/2/3 labels misreported the trade
+  // AND corrupted recognition-memory R-data. Compute the truth from prices.
+  const _slDist = Math.abs(entry - finalSL);
+  const rOf = (tp) => (tp == null || _slDist <= 0) ? null : Math.round(Math.abs(tp - entry) / _slDist * 10) / 10;
+
   try {
     const { addPendingSetup } = require('./watcher');
     const finalTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
@@ -284,10 +289,11 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         contributingTactics: [p.template], timeframesInPlay: [p.timeframe],
         slDistance, slDistanceATR: parseFloat(p.impulseATR) || null,
         entry, sl: finalSL,
+        style: decision.rulesApplied ? decision.rulesApplied.style : null,
         targets: [
-          { price: finalTP1, rMultiple: 1.0 },
-          { price: finalTP2, rMultiple: 2.0 },
-          { price: finalTP3, rMultiple: 3.0 },
+          { price: finalTP1, rMultiple: rOf(finalTP1) },
+          { price: finalTP2, rMultiple: rOf(finalTP2) },
+          { price: finalTP3, rMultiple: rOf(finalTP3) },
         ].filter((t) => t.price != null),
         template: p.template,
       },
@@ -295,9 +301,9 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       sizing: { baseLot: finalLot, recommendedLot: finalLot, baseRisk: slDistance * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot },
       plannedEntry: entry, slPrice: finalSL,
       tpLevels: [
-        { price: finalTP1, rMultiple: 1.0, source: decision.rulesApplied.tpMode },
-        { price: finalTP2, rMultiple: 2.0, source: decision.rulesApplied.tpMode },
-        { price: finalTP3, rMultiple: 3.0, source: decision.rulesApplied.tpMode },
+        { price: finalTP1, rMultiple: rOf(finalTP1), source: decision.rulesApplied.tpMode },
+        { price: finalTP2, rMultiple: rOf(finalTP2), source: decision.rulesApplied.tpMode },
+        { price: finalTP3, rMultiple: rOf(finalTP3), source: decision.rulesApplied.tpMode },
       ].filter((t) => t.price != null),
       newsFeature: { newsState: 'none', highImpactWithin60min: false },
       createdAt: Date.now(),
@@ -321,9 +327,9 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       asset: assetId, direction: p.direction,
       lot: finalLot, entry, sl: finalSL,
       tpLevels: [
-        { price: decision.finalTP1, rMultiple: 1.0, source: decision.rulesApplied.tpMode },
-        { price: decision.finalTP2, rMultiple: 2.0, source: decision.rulesApplied.tpMode },
-        { price: decision.finalTP3, rMultiple: 3.0, source: decision.rulesApplied.tpMode },
+        { price: decision.finalTP1, rMultiple: rOf(decision.finalTP1), source: decision.rulesApplied.tpMode },
+        { price: decision.finalTP2, rMultiple: rOf(decision.finalTP2), source: decision.rulesApplied.tpMode },
+        { price: decision.finalTP3, rMultiple: rOf(decision.finalTP3), source: decision.rulesApplied.tpMode },
       ].filter((t) => t.price != null),
       riskDollars: Math.abs(entry - finalSL) * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot,
       brokerOrderId: placement.orderId, template: p.template,
@@ -361,6 +367,21 @@ module.exports = async (req, res) => {
   const pineTicker = (colonIdx >= 0 ? rawSymbol.slice(colonIdx + 1) : rawSymbol).replace(/[^A-Z0-9]/g, '');
   const assetId = PINE_TO_ASSET[pineTicker];
   if (!assetId) return res.status(400).json({ ok: false, error: `unknown symbol: ${p.symbol}` });
+
+  // 4b. v14 — Pine SKIP alert (tier-C open-space, or ORB width filter). This is
+  // NOT a trade: it has no entry/sl/tp. Notify Telegram so the user SEES what the
+  // filter rejected, log it, and stop. Fast/inline — no broker, no background.
+  if ((p.action || 'trade') === 'skip') {
+    const reason = p.reason || 'filtered';
+    const note   = p.note || 'setup formed but filtered';
+    const extra  = (p.htfTier ? `\nTier: ${p.htfTier}` : '') + (p.widthATR != null ? `\nWidth: ${p.widthATR}× ATR` : '') + (p.session ? `\nSession: ${p.session}` : '');
+    try {
+      await sendOnce(`pineskip:${assetId}:${p.template}:${reason}:${p.timestamp || ''}`,
+        `⚪ ${assetId.toUpperCase()} · ${p.template} · SKIPPED\n${note}${extra}`);
+    } catch (_) {}
+    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: `pine-skip: ${reason}` }); } catch (_) {}
+    return res.status(200).json({ ok: true, skipped: true, reason });
+  }
 
   // 9. Parse numerics (fast) — fail fast on a malformed payload
   const entry = parseFloat(p.entry);

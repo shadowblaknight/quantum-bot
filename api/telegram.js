@@ -1,7 +1,10 @@
 /* eslint-disable */
-// V12.2 — api/telegram.js
+// V14 — api/telegram.js
 //
 // Telegram notification service. One central place for formatting and dispatch.
+//
+// v14 CHANGE: added 'orb' and 'reaction' to the trade-placed label map so those
+// templates render with a friendly name instead of the raw slug. No other change.
 //
 // Core principles:
 //   1. Idempotent — won't double-send the same event (Redis dedupe)
@@ -20,6 +23,8 @@
 // ----------------------------------------------------------------------------
 
 const { getRedis } = require('./_lib');
+const { templateLabelMap } = require('./_templates');
+const TEMPLATE_LABELS = templateLabelMap();
 
 const TG_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN';
 const TG_CHAT_ID_ENV = 'TELEGRAM_CHAT_ID';
@@ -207,15 +212,7 @@ async function notifyTradePlaced({ asset, direction, lot, entry, sl, tpLevels, r
     `TP${i + 1}: <code>${formatPrice(tp.price, asset)}</code> (${tp.rMultiple?.toFixed(1) || '?'}R) — ${tp.source || ''}`
   ).join('\n');
 
-  const templateLabels = {
-    'silver-bullet': '🥈 Silver Bullet',
-    'unicorn': '🦄 Unicorn',
-    'turtle-soup': '🐢 Turtle Soup',
-    'judas-swing': '🎭 Judas Swing',
-    'ote-continuation': '🎯 OTE Continuation',
-    'am-ifvg':          '🌅 AM IFVG Reversal',
-  };
-  const tmplLine = template ? `Setup: <b>${templateLabels[template] || template}</b>\n` : '';
+  const tmplLine = template ? `Setup: <b>${TEMPLATE_LABELS[template] || template}</b>\n` : '';
 
   const text =
     `📤 <b>Order Placed — ${assetLabel(asset)}</b>\n\n` +

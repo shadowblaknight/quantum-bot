@@ -19,6 +19,7 @@
 // ----------------------------------------------------------------------------
 
 const { getRedis, safeParse } = require('./_lib');
+const { ACCEPTED_ACTIVE, ACCEPTED_DEFENSIVE, templateLabel } = require('./_templates');
 
 const RULES_KEY = 'v13:pilot:rules';
 const ACTIVITY_LOG_KEY = 'v13:pilot:activity';
@@ -36,9 +37,13 @@ const LOT_FIXED_MODES        = new Set(['fixed', 'fixed-lot', 'fixed_lot', 'manu
 // ───── Defaults ──────────────────────────────────────────────────────
 
 const DEFAULT_RULES = {
-  version: 1.5,
+  version: 14.0,
 
   tradingMode: 'auto',
+
+  // v14: tier-B lot multiplier. 1.0 = OFF (your lot input is used as-is for
+  // counter-bias / retest "tier B" signals). Set below 1.0 to size B trades down.
+  tierBLotMultiplier: 1.0,
 
   account: {
     maxDailyLossPct: 5.0,
@@ -59,14 +64,14 @@ const DEFAULT_RULES = {
     },
     active: {
       lotMultiplier: 1.00, minRR: 0,
-      acceptedTemplates: ['silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','orb'],
+      acceptedTemplates: [...ACCEPTED_ACTIVE],
       maxConcurrent: 5,
       label: '🐻 Active',
       description: 'All templates, full lot, full management',
     },
     defensive: {
       lotMultiplier: 0.50, minRR: 2.0,
-      acceptedTemplates: ['silver-bullet','unicorn','ote-continuation','am-ifvg','orb'],
+      acceptedTemplates: [...ACCEPTED_DEFENSIVE],
       maxConcurrent: 2,
       label: '🛡 Defensive',
       description: 'High-confidence templates only, half lot, min 2R required',
@@ -98,6 +103,9 @@ const DEFAULT_RULES = {
     'ote-continuation': { enabled: true, tradingStyle: 'swing',    lotMultiplier: 1.0, label: '🎯 OTE Continuation' },
     'am-ifvg':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🌅 AM IFVG Reversal' },
     'orb':              { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🚀 ORB Breakout' },
+    'reaction':         { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction') },
+    'reaction-fvg':     { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-fvg') },
+    'reaction-ifvg':    { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-ifvg') },
   },
 
   lastModified: null,
@@ -107,6 +115,11 @@ const DEFAULT_RULES = {
 function makeInstrumentDefault(assetId, overrides) {
   return {
     enabled: true,
+    // v14: which risk profile is live for this instrument — 'day' | 'swing'.
+    style: 'day',
+    // Flat fields below stay as the fallback / legacy values. They are also what
+    // the Day and Swing profiles inherit from until you split them in the UI, so
+    // nothing you've already saved is lost.
     lotMode: 'risk-based',
     fixedLot: 0.10,
     maxLot: 1.0,
@@ -116,7 +129,40 @@ function makeInstrumentDefault(assetId, overrides) {
     tpMode: 'pine-three',
     minRR: 1.0,
     label: assetId.toUpperCase(),
+    // dayProfile / swingProfile are created lazily by the app the first time you
+    // edit one. Absent profile => that style falls back to the flat fields above.
     ...overrides,
+  };
+}
+
+// v14: resolve the ACTIVE risk profile for an instrument based on its style.
+// Migration-safe: if the chosen style's profile hasn't been configured yet, fall
+// back to the instrument's flat fields (your existing settings). A configured but
+// partial profile fills its gaps from the flat fields too.
+function resolveProfile(inst) {
+  const style = inst.style === 'swing' ? 'swing' : 'day';
+  const flat = {
+    slMode:         inst.slMode || 'pine',
+    fixedSLPips:    inst.fixedSLPips != null ? inst.fixedSLPips : 15,
+    fixedSLDollars: inst.fixedSLDollars != null ? inst.fixedSLDollars : 5.0,
+    tpMode:         inst.tpMode || 'pine-three',
+    lotMode:        inst.lotMode || 'risk-based',
+    fixedLot:       inst.fixedLot != null ? inst.fixedLot : 0.10,
+    maxLot:         inst.maxLot != null ? inst.maxLot : 1.0,
+    minRR:          inst.minRR != null ? inst.minRR : 1.0,
+  };
+  const p = inst[style + 'Profile'];
+  if (!p || typeof p !== 'object') return { style, ...flat };
+  return {
+    style,
+    slMode:         p.slMode || flat.slMode,
+    fixedSLPips:    p.fixedSLPips != null ? p.fixedSLPips : flat.fixedSLPips,
+    fixedSLDollars: p.fixedSLDollars != null ? p.fixedSLDollars : flat.fixedSLDollars,
+    tpMode:         p.tpMode || flat.tpMode,
+    lotMode:        p.lotMode || flat.lotMode,
+    fixedLot:       p.fixedLot != null ? p.fixedLot : flat.fixedLot,
+    maxLot:         p.maxLot != null ? p.maxLot : flat.maxLot,
+    minRR:          p.minRR != null ? p.minRR : flat.minRR,
   };
 }
 
@@ -168,7 +214,9 @@ async function setRules(rules) {
 async function updateInstrumentRule(assetId, patch) {
   const current = await getRules();
   if (!current.instruments[assetId]) return { ok: false, error: `unknown asset: ${assetId}` };
-  current.instruments[assetId] = { ...current.instruments[assetId], ...patch };
+  // v14: deep-merge so a partial { dayProfile:{ fixedLot:0.2 } } patch updates just
+  // that field instead of replacing the whole profile object.
+  current.instruments[assetId] = deepMerge(current.instruments[assetId], patch);
   return setRules(current);
 }
 
@@ -213,6 +261,7 @@ async function emergencyStopAll(enable) {
 
 async function applyRulesToSignal({
   assetId, template, direction, entry, sl, tp1, tp2, tp3,
+  htfTier, htfBiasAlign,
   capital, openPositions, todaysPnL, assetMeta,
 }) {
   const rules = await getRules();
@@ -246,20 +295,24 @@ async function applyRulesToSignal({
   if (!inst) return { allow: false, reason: `no-rules-for-asset (${assetId})` };
   if (!inst.enabled) return { allow: false, reason: `instrument-disabled (${assetId})` };
 
+  // v14: resolve the active Day/Swing risk profile for this instrument. All SL/TP/
+  // lot reads below come from `prof` (which falls back to the flat fields).
+  const prof = resolveProfile(inst);
+
   // ─── Compute final SL ─────
   // v1.5: tolerate alias spellings for the fixed SL mode so the value the user
   // typed in the app is actually applied (previously only 'fixed-pips' matched).
-  const slModeRaw        = String(inst.slMode || 'pine').toLowerCase();
+  const slModeRaw        = String(prof.slMode || 'pine').toLowerCase();
   const slIsFixedPips    = SL_FIXED_PIPS_MODES.has(slModeRaw);
   const slIsFixedDollars = SL_FIXED_DOLLARS_MODES.has(slModeRaw);
   const slWasOverridden  = slIsFixedPips || slIsFixedDollars;
 
   let finalSL = sl;
   if (slIsFixedPips && assetMeta && assetMeta.pipSize) {
-    const distance = inst.fixedSLPips * assetMeta.pipSize;
+    const distance = prof.fixedSLPips * assetMeta.pipSize;
     finalSL = direction === 'LONG' ? entry - distance : entry + distance;
   } else if (slIsFixedDollars && assetMeta && assetMeta.pipSize && assetMeta.dollarPerPipPerLot) {
-    const pips = inst.fixedSLDollars / assetMeta.dollarPerPipPerLot;
+    const pips = prof.fixedSLDollars / assetMeta.dollarPerPipPerLot;
     const distance = pips * assetMeta.pipSize;
     finalSL = direction === 'LONG' ? entry - distance : entry + distance;
   }
@@ -267,12 +320,12 @@ async function applyRulesToSignal({
   const finalSLDistance = Math.abs(entry - finalSL);
   if (finalSLDistance <= 0) return { allow: false, reason: 'invalid-sl-distance' };
 
-  const effectiveMinRR = Math.max(inst.minRR || 0, preset.minRR || 0);
+  const effectiveMinRR = Math.max(prof.minRR || 0, preset.minRR || 0);
 
   // ─── Compute final TPs ─────
   let finalTP1 = tp1, finalTP2 = tp2, finalTP3 = tp3;
   let tpsAutoPromoted = false;
-  if (inst.tpMode === 'trail-only') {
+  if (prof.tpMode === 'trail-only') {
     finalTP1 = null; finalTP2 = null; finalTP3 = null;
   } else if (slWasOverridden || effectiveMinRR > 1.0) {
     const tp1R = Math.max(1.0, effectiveMinRR);
@@ -292,10 +345,10 @@ async function applyRulesToSignal({
 
   // ─── Compute final lot ─────
   // v1.5: tolerate alias spellings for the fixed lot mode.
-  const lotModeRaw = String(inst.lotMode || 'risk-based').toLowerCase();
+  const lotModeRaw = String(prof.lotMode || 'risk-based').toLowerCase();
   let finalLot;
   if (LOT_FIXED_MODES.has(lotModeRaw)) {
-    finalLot = inst.fixedLot;
+    finalLot = prof.fixedLot;
   } else {
     const riskPct = Math.min(rules.account.maxRiskPerTradePct, 2.0) / 100;
     const riskDollars = capital * riskPct;
@@ -303,11 +356,15 @@ async function applyRulesToSignal({
       const pips = finalSLDistance / assetMeta.pipSize;
       finalLot = riskDollars / (pips * assetMeta.dollarPerPipPerLot);
     } else {
-      finalLot = inst.fixedLot;
+      finalLot = prof.fixedLot;
     }
   }
-  finalLot = finalLot * (preset.lotMultiplier || 1.0) * (tmplOverride.lotMultiplier || 1.0);
-  if (finalLot > inst.maxLot) finalLot = inst.maxLot;
+  // v14: tier multiplier. Tier B (counter-bias / retest) can be sized down via
+  // rules.tierBLotMultiplier. DEFAULT 1.0 = NO change — your lot input is honored
+  // untouched unless you deliberately set this below 1.0 in settings.
+  const tierMult = (htfTier === 'B') ? (rules.tierBLotMultiplier != null ? rules.tierBLotMultiplier : 1.0) : 1.0;
+  finalLot = finalLot * (preset.lotMultiplier || 1.0) * (tmplOverride.lotMultiplier || 1.0) * tierMult;
+  if (finalLot > prof.maxLot) finalLot = prof.maxLot;
   finalLot = Math.max(0.01, Math.round(finalLot * 100) / 100);
 
   if (assetMeta && assetMeta.pipSize && assetMeta.dollarPerPipPerLot) {
@@ -333,13 +390,15 @@ async function applyRulesToSignal({
     instrument: inst,
     template: tmplOverride,
     rulesApplied: {
-      slMode: inst.slMode, slModeResolved: slIsFixedPips ? 'fixed-pips' : slIsFixedDollars ? 'fixed-dollars' : 'pine',
-      tpMode: inst.tpMode,
-      lotMode: inst.lotMode, lotModeResolved: LOT_FIXED_MODES.has(lotModeRaw) ? 'fixed' : 'risk-based',
+      style: prof.style,
+      slMode: prof.slMode, slModeResolved: slIsFixedPips ? 'fixed-pips' : slIsFixedDollars ? 'fixed-dollars' : 'pine',
+      tpMode: prof.tpMode,
+      lotMode: prof.lotMode, lotModeResolved: LOT_FIXED_MODES.has(lotModeRaw) ? 'fixed' : 'risk-based',
       slWasOverridden,
       tpsAutoPromoted,
       effectiveMinRR,
       modeLotMultiplier: preset.lotMultiplier, templateLotMultiplier: tmplOverride.lotMultiplier,
+      htfTier: htfTier || null, htfBiasAlign: htfBiasAlign != null ? htfBiasAlign : null, tierLotMultiplier: tierMult,
       tradingMode: rules.tradingMode || 'auto',
     },
   };

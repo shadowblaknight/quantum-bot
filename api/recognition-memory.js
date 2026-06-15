@@ -74,7 +74,7 @@ function buildFeatureVector(trade) {
   const tactics = (trade.contributingTactics || []).slice().sort();   // sorted for stable comparison
   const tfs = (trade.timeframesInPlay || []).slice().sort();
 
-  const pnlR = trade.slDistance && trade.pnl != null
+  const pnlR = trade.riskDollars && trade.pnl != null
     ? trade.pnl / trade.riskDollars
     : null;
 
@@ -92,6 +92,10 @@ function buildFeatureVector(trade) {
     asset: trade.asset,
     direction: trade.direction,
     mode: trade.mode,
+    // v14: day/swing risk-profile style + explicit template, so the dashboard's
+    // Day-vs-Swing comparison chart can group closed trades.
+    style: trade.style || null,
+    template: trade.template || (trade.contributingTactics || [])[0] || null,
     session: trade.session,
     contributingTactics: tactics,
     timeframesInPlay: tfs,

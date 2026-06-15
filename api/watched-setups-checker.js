@@ -1,17 +1,11 @@
 /* eslint-disable */
-// api/watched-setups-checker.js  (Pilot Dashboard v1.1)
+// api/watched-setups-checker.js  (Pilot Dashboard v1.2 — v14 template labels)
 const { getActiveWatched, updateWatchedSetup, pruneExpired, priceInZone } = require('./watched-setups');
 const { fetchCandles } = require('./broker');
 const { sendOnce } = require('./telegram');
+const { templateLabelMap } = require('./_templates');
 
-const TEMPLATE_LABELS = {
-  'silver-bullet':    '🥈 Silver Bullet',
-  'unicorn':          '🦄 Unicorn',
-  'turtle-soup':      '🐢 Turtle Soup',
-  'judas-swing':      '🎭 Judas Swing',
-  'ote-continuation': '🎯 OTE Continuation',
-  'am-ifvg':          '🌅 AM IFVG Reversal',
-};
+const TEMPLATE_LABELS = templateLabelMap();
 
 async function getCurrentPrice(assetId) {
   try {
