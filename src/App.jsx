@@ -1082,6 +1082,10 @@ function RulesPanel({ rules, rulesError, callRulesAction, watchlist, onAddInstru
 
 function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
   const [expanded, setExpanded] = useState(false);
+  // Hooks must run unconditionally on every render — keep this ABOVE the
+  // `!rule` early return below. rule?.style is null-safe for the stub case.
+  const liveStyle  = rule?.style === "swing" ? "swing" : "day";
+  const [editStyle, setEditStyle] = useState(liveStyle);
 
   if (!rule) {
     // Asset in watchlist but no rules record yet — show a "needs configuration" stub
@@ -1103,8 +1107,6 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
   }
 
   const enabled    = rule.enabled !== false;
-  const liveStyle  = rule.style === "swing" ? "swing" : "day";
-  const [editStyle, setEditStyle] = useState(liveStyle);
 
   // Read a field from a style's profile, falling back to the legacy flat field
   // (migration-safe), then a default.
