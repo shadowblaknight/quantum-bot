@@ -181,6 +181,24 @@ function deepMerge(target, source) {
   return out;
 }
 
+// `acceptedTemplates` per mode is CODE-OWNED config (derived from _templates),
+// not user-editable — the dashboard only toggles individual templates via
+// templateOverrides.enabled. deepMerge replaces arrays wholesale, so a list
+// frozen in Redis from before a new template existed would silently block it
+// ("template-not-in-mode"). Always refresh these lists from the canonical
+// default after merge, so adding a template needs no Redis reset.
+function applySystemConfig(merged) {
+  if (merged && merged.modePresets) {
+    for (const mode of Object.keys(DEFAULT_RULES.modePresets)) {
+      if (merged.modePresets[mode] && DEFAULT_RULES.modePresets[mode]) {
+        merged.modePresets[mode].acceptedTemplates =
+          [...DEFAULT_RULES.modePresets[mode].acceptedTemplates];
+      }
+    }
+  }
+  return merged;
+}
+
 // ───── Get / set rules ───────────────────────────────────────────────
 
 async function getRules() {
@@ -190,7 +208,7 @@ async function getRules() {
     const raw = await r.get(RULES_KEY);
     const stored = safeParse(raw);
     if (!stored || typeof stored !== 'object') return DEFAULT_RULES;
-    return deepMerge(DEFAULT_RULES, stored);
+    return applySystemConfig(deepMerge(DEFAULT_RULES, stored));
   } catch (e) {
     console.error('[rules-store] getRules error:', e.message);
     return DEFAULT_RULES;
@@ -201,7 +219,7 @@ async function setRules(rules) {
   const r = getRedis();
   if (!r) return { ok: false, error: 'redis-unavailable' };
   try {
-    const merged = deepMerge(DEFAULT_RULES, rules || {});
+    const merged = applySystemConfig(deepMerge(DEFAULT_RULES, rules || {}));
     merged.lastModified = Date.now();
     merged.modifiedBy = rules.modifiedBy || 'user';
     await r.set(RULES_KEY, JSON.stringify(merged), { ex: RULES_TTL_DAYS * 86400 });
