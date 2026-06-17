@@ -251,9 +251,14 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const finalLot = decision.finalLot;
   const finalSL = decision.finalSL;
   const finalTP1 = decision.finalTP1 != null ? decision.finalTP1 : tp1;
+  // v14 all-or-nothing: broker TP parks at the LAST configured target so the full
+  // position rides there. SL ratchets to TP1/TP2 in manage-trades (no partials).
+  const _bTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
+  const _bTP3 = decision.finalTP3 != null ? decision.finalTP3 : tp3;
+  const brokerTP = _bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1);
   const comment = `QB-V13-${p.template}-${(p.window || p.swept || '').slice(0, 12)}`.slice(0, 64);
 
-  const placement = await placeLimitOrder(brokerSymbol, p.direction, finalLot, entry, finalSL, finalTP1, comment);
+  const placement = await placeLimitOrder(brokerSymbol, p.direction, finalLot, entry, finalSL, brokerTP, comment);
 
   if (!placement.ok) {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: placement.error });

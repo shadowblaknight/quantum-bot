@@ -1,5 +1,11 @@
 /* eslint-disable */
-// V13 — api/manage-trades.js  (v1.3 — adds missing addDailyPnL call)
+// V14 — api/manage-trades.js  (v1.4 — tags closed trades with day/swing style)
+//
+// v1.4 CHANGE (v14 backend coherence):
+//   The closed-trade record now carries `style` (day|swing) and an explicit
+//   `template`, pulled from the matched pending setup (which the webhook stamps
+//   from rules-store's decision). This is what feeds the dashboard's
+//   Day-vs-Swing comparison chart. No behavior change to position management.
 //
 // v1.3 CHANGE (one-line fix that unbroke daily P&L):
 //   v1.2 stored closed trades into recognition memory via storeClosedTrade()
@@ -24,6 +30,11 @@ const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
 const { notifyTPHit, notifySLHit, notifyTradeClosed } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
+
+// v14: all-or-nothing exits. The full position rides to the FINAL TP (parked as
+// the broker TP at placement). At TP1/TP2 touches we ONLY ratchet the SL up to
+// that TP — no partial closes. Set to true to restore the legacy 33/33/34 scale-out.
+const USE_PARTIALS = false;
 
 // ===== Position management state =====
 const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
@@ -237,6 +248,9 @@ async function managePosition(position) {
   }
 
   const tpLevels = matchedPending.tpLevels || [];
+  // v14: the broker TP sits here; SL ratchets toward earlier TPs but the broker
+  // TP must stay parked at the final target on every modify (null would clear it).
+  const finalTPPrice = tpLevels.length ? tpLevels[tpLevels.length - 1].price : null;
   if (tpLevels.length === 0) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
@@ -260,64 +274,55 @@ async function managePosition(position) {
     const hit = isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice;
     if (!hit) continue;
 
-    const closingFinalTP = (i === 2) || (i === tpLevels.length - 1);
-    let lotToClose;
+    const closingFinalTP = (i === tpLevels.length - 1);
+
     if (closingFinalTP) {
-      lotToClose = position.volume;
-    } else {
-      lotToClose = Math.max(0.01, Math.round(state.originalLot * 0.33 * 100) / 100);
-      if (lotToClose > position.volume) lotToClose = position.volume;
+      // Final target reached — close whatever remains. The broker TP normally
+      // does this first; this is a backstop in case it was cleared/rejected.
+      const lotToClose = position.volume;
+      const closeResult = await partialClose(position.id, lotToClose);
+      if (closeResult.ok) {
+        state.tpsHit.push(tpName);
+        state.partialCloses.push({ tpName, lotClosed: lotToClose, atPrice: tpPrice, ts: Date.now() });
+        actions.push({ action: 'final-tp-close', tpName, lotClosed: lotToClose, ok: true });
+        await pushCommentary(asset, 'tp-hit',
+          `${tpName} (final) hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed full ${lotToClose} lot`);
+      } else {
+        actions.push({ action: 'final-tp-close', tpName, error: closeResult.error });
+      }
+      await setPositionState(position.id, state);
+      break;
     }
 
-    const closeResult = await partialClose(position.id, lotToClose);
-    if (closeResult.ok) {
-      state.tpsHit.push(tpName);
+    // ── Non-final TP touched ──
+    if (USE_PARTIALS) {
+      // Legacy scale-out (disabled by default): close 33% here.
+      let lotToClose = Math.max(0.01, Math.round(state.originalLot * 0.33 * 100) / 100);
+      if (lotToClose > position.volume) lotToClose = position.volume;
+      const closeResult = await partialClose(position.id, lotToClose);
+      if (!closeResult.ok) {
+        actions.push({ action: 'partial-close', tpName, error: closeResult.error });
+        await setPositionState(position.id, state);
+        break;
+      }
       state.partialCloses.push({ tpName, lotClosed: lotToClose, atPrice: tpPrice, ts: Date.now() });
       actions.push({ action: 'partial-close', tpName, lotClosed: lotToClose, ok: true });
+    }
 
-      await pushCommentary(asset, 'tp-hit',
-        `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed ${lotToClose} lot (33% of ${state.originalLot})`);
-
-      const dollarsThisLeg = signedDollarsForLeg(asset, state.entry, tpPrice, direction, lotToClose);
-      const cumulativeDollars = (state.partialCloses || []).reduce((sum, pc) => {
-        const d = signedDollarsForLeg(asset, state.entry, pc.atPrice, direction, pc.lotClosed) || 0;
-        return sum + d;
-      }, 0);
-
-      let newSL = null;
-      if (!closingFinalTP) {
-        newSL = tpPrice;
-        const nextTPPrice = tpLevels[i + 1] ? tpLevels[i + 1].price : null;
-        const modifyResult = await modifyPosition(position.id, newSL, nextTPPrice, asset);
-        if (modifyResult.ok) {
-          state.slMoves.push({ atTP: tpName, newSL, ts: Date.now() });
-          actions.push({ action: 'sl-move', newSL, ok: true });
-          await pushCommentary(asset, 'sl-moved',
-            `SL moved to ${tpName} @ ${newSL.toFixed(newSL > 100 ? 2 : 5)} (locks in ${tpName} profit on remaining)`);
-        } else {
-          actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: newSL });
-          await pushCommentary(asset, 'sl-move-rejected',
-            `SL move to ${tpName} rejected by broker: ${modifyResult.error.slice(0, 80)}`);
-        }
-      }
-
-      if (!closingFinalTP) {
-        try {
-          await notifyTPHit({
-            asset,
-            direction,
-            tpName,
-            tpPrice,
-            lotClosed: lotToClose,
-            dollarsSecured: dollarsThisLeg,
-            cumulativeDollars,
-            slMovedTo: newSL,
-            dedupeKey: `tphit:${position.id}:${tpName}`,
-          });
-        } catch (_) {}
-      }
+    // All-or-nothing: do NOT close — only ratchet the SL up to this TP, keeping
+    // the broker TP parked at the final target.
+    state.tpsHit.push(tpName);
+    const newSL = tpPrice;
+    const modifyResult = await modifyPosition(position.id, newSL, finalTPPrice, asset);
+    if (modifyResult.ok) {
+      state.slMoves.push({ atTP: tpName, newSL, ts: Date.now() });
+      actions.push({ action: 'sl-move', newSL, ok: true });
+      await pushCommentary(asset, 'sl-moved',
+        `SL ratcheted to ${tpName} @ ${newSL.toFixed(newSL > 100 ? 2 : 5)} (locked on full position)`);
     } else {
-      actions.push({ action: 'partial-close', tpName, error: closeResult.error });
+      actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: newSL });
+      await pushCommentary(asset, 'sl-move-rejected',
+        `SL ratchet to ${tpName} rejected by broker: ${modifyResult.error.slice(0, 80)}`);
     }
 
     await setPositionState(position.id, state);
@@ -342,10 +347,7 @@ async function managePosition(position) {
       const lastMoveAge = lastMove ? Date.now() - lastMove.ts : Infinity;
 
       if (wouldImprove && lastMoveAge > 15 * 60 * 1000) {
-        const nextTPPrice = tpLevels.find((tp) => {
-          return isLong ? tp.price > currentPrice : tp.price < currentPrice;
-        });
-        const modifyResult = await modifyPosition(position.id, trailSL, nextTPPrice ? nextTPPrice.price : null, asset);
+        const modifyResult = await modifyPosition(position.id, trailSL, finalTPPrice, asset);
         if (modifyResult.ok) {
           state.slMoves.push({ trailing: true, newSL: trailSL, atProfitR: profitR, ts: Date.now() });
           actions.push({ action: 'trail-sl', newSL: trailSL });
@@ -401,6 +403,15 @@ async function detectAndProcessClosed(currentOpenIds) {
       asset: state.asset,
       direction: state.direction,
       mode: matchedPending.setup.mode,
+      // v14: day/swing style + explicit template, for the Day-vs-Swing chart.
+      // style comes from the webhook decision (rules-store), carried on the
+      // pending setup. Falls back to pilotRulesApplied for in-flight setups.
+      style: matchedPending.setup.style
+             || (matchedPending.pilotRulesApplied && matchedPending.pilotRulesApplied.style)
+             || null,
+      template: matchedPending.setup.template
+             || (matchedPending.setup.contributingTactics || [])[0]
+             || null,
       session: matchedPending.setup.session || getCurrentSession(),
       contributingTactics: matchedPending.setup.contributingTactics,
       timeframesInPlay: matchedPending.setup.timeframesInPlay,

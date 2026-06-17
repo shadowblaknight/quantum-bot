@@ -1149,7 +1149,7 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
         </span>
         <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)" }}>{lotLabel}</span>
         <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", textAlign: "right" }}>SL: {slLabel}</span>
-        <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", textAlign: "right" }}>{lvTpMode}</span>
+        <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", textAlign: "right" }}>{lvTpMode === "rr" ? `RR ${readField(liveStyle, "numTPs", 3)}×` : lvTpMode === "pine-three" ? "pine" : lvTpMode}</span>
         <span className="qb-mono" style={{
           fontSize: 8, fontWeight: 700, textAlign: "center", padding: "1px 0", borderRadius: 3,
           color: liveStyle === "swing" ? "#08080a" : "var(--qb-accent)",
@@ -1249,6 +1249,7 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
           <ConfigGroup label="TP mode">
             <SegmentControl
               options={[
+                {id: "rr", label: "By RR"},
                 {id: "pine-three", label: "Pine TPs"},
                 {id: "trail-only", label: "Trail only"},
               ]}
@@ -1256,6 +1257,52 @@ function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
               onChange={(v) => setField("tpMode", v)}
             />
           </ConfigGroup>
+
+          {tpMode === "rr" && (
+            <>
+              <ConfigGroup label="Number of TPs">
+                <SegmentControl
+                  options={[{id: "1", label: "1"}, {id: "2", label: "2"}, {id: "3", label: "3"}]}
+                  value={String(readField(editStyle, "numTPs", 3))}
+                  onChange={(v) => setField("numTPs", Number(v))}
+                />
+              </ConfigGroup>
+              <SmallNumberField
+                label="TP1 (×R)"
+                value={readField(editStyle, "tp1RR", 1.5)}
+                step="0.1"
+                onChange={(v) => setField("tp1RR", v)}
+              />
+              {Number(readField(editStyle, "numTPs", 3)) >= 2 && (
+                <SmallNumberField
+                  label="TP2 (×R)"
+                  value={readField(editStyle, "tp2RR", 3)}
+                  step="0.1"
+                  onChange={(v) => setField("tp2RR", v)}
+                />
+              )}
+              {Number(readField(editStyle, "numTPs", 3)) >= 3 && (
+                <SmallNumberField
+                  label="TP3 (×R)"
+                  value={readField(editStyle, "tp3RR", 5)}
+                  step="0.1"
+                  onChange={(v) => setField("tp3RR", v)}
+                />
+              )}
+              <div style={{
+                fontSize: 11,
+                color: "var(--qb-text-faint)",
+                lineHeight: 1.5,
+                marginTop: 2,
+                padding: "6px 8px",
+                background: "rgba(255,255,255,0.03)",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.07)",
+              }}>
+                Full position rides to the last TP. SL ratchets up to each TP as price touches it — no partial closes.
+              </div>
+            </>
+          )}
 
           {/* MIN RR */}
           <SmallNumberField

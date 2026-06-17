@@ -270,7 +270,9 @@ async function tryPlace(pending, brokerSymbol) {
     // If candle fetch fails, fall through and let MT5 reject if entry is bad.
   }
 
-  let tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[0].price : null;
+  // v14 all-or-nothing: broker TP parks at the LAST configured target so the full
+  // position rides there; SL ratchets to earlier TPs in manage-trades (no partials).
+  let tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[tpLevels.length - 1].price : null;
 
   // CHECK 6: TP1 must be a meaningful distance from entry.
   if (tpPrice != null) {

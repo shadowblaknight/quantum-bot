@@ -128,6 +128,10 @@ function makeInstrumentDefault(assetId, overrides) {
     fixedSLDollars: 5.0,
     tpMode: 'pine-three',
     minRR: 1.0,
+    tp1RR: 1.5,
+    tp2RR: 3.0,
+    tp3RR: 5.0,
+    numTPs: 3,
     label: assetId.toUpperCase(),
     // dayProfile / swingProfile are created lazily by the app the first time you
     // edit one. Absent profile => that style falls back to the flat fields above.
@@ -150,6 +154,10 @@ function resolveProfile(inst) {
     fixedLot:       inst.fixedLot != null ? inst.fixedLot : 0.10,
     maxLot:         inst.maxLot != null ? inst.maxLot : 1.0,
     minRR:          inst.minRR != null ? inst.minRR : 1.0,
+    tp1RR:          inst.tp1RR != null ? inst.tp1RR : 1.5,
+    tp2RR:          inst.tp2RR != null ? inst.tp2RR : 3.0,
+    tp3RR:          inst.tp3RR != null ? inst.tp3RR : 5.0,
+    numTPs:         inst.numTPs != null ? inst.numTPs : 3,
   };
   const p = inst[style + 'Profile'];
   if (!p || typeof p !== 'object') return { style, ...flat };
@@ -163,6 +171,10 @@ function resolveProfile(inst) {
     fixedLot:       p.fixedLot != null ? p.fixedLot : flat.fixedLot,
     maxLot:         p.maxLot != null ? p.maxLot : flat.maxLot,
     minRR:          p.minRR != null ? p.minRR : flat.minRR,
+    tp1RR:          p.tp1RR != null ? p.tp1RR : flat.tp1RR,
+    tp2RR:          p.tp2RR != null ? p.tp2RR : flat.tp2RR,
+    tp3RR:          p.tp3RR != null ? p.tp3RR : flat.tp3RR,
+    numTPs:         p.numTPs != null ? p.numTPs : flat.numTPs,
   };
 }
 
@@ -345,6 +357,20 @@ async function applyRulesToSignal({
   let tpsAutoPromoted = false;
   if (prof.tpMode === 'trail-only') {
     finalTP1 = null; finalTP2 = null; finalTP3 = null;
+  } else if (prof.tpMode === 'rr') {
+    // v14: TPs placed by RR multiple, per-instrument (default 1.5R / 3R / 5R).
+    // All-or-nothing: the full position rides to the LAST configured TP; the
+    // earlier TPs are SL-ratchet checkpoints (manage-trades moves SL to each as
+    // it's touched, no partial closes).
+    const n = Math.max(1, Math.min(3, Math.round(prof.numTPs || 3)));
+    const r1 = prof.tp1RR > 0 ? prof.tp1RR : 1.5;
+    const r2 = prof.tp2RR > 0 ? prof.tp2RR : 3.0;
+    const r3 = prof.tp3RR > 0 ? prof.tp3RR : 5.0;
+    const mk = (r) => direction === 'LONG' ? entry + finalSLDistance * r : entry - finalSLDistance * r;
+    finalTP1 = mk(r1);
+    finalTP2 = n >= 2 ? mk(r2) : null;
+    finalTP3 = n >= 3 ? mk(r3) : null;
+    tpsAutoPromoted = true;
   } else if (slWasOverridden || effectiveMinRR > 1.0) {
     const tp1R = Math.max(1.0, effectiveMinRR);
     finalTP1 = direction === 'LONG' ? entry + finalSLDistance * tp1R       : entry - finalSLDistance * tp1R;
