@@ -6,7 +6,7 @@
 // Auto mode flow is unchanged.
 // ----------------------------------------------------------------------------
 
-const { getRedis, applyCors } = require('./_lib');
+const { getRedis, applyCors, roundToPipSize } = require('./_lib');
 const { resolveSymbol } = require('./symbol-resolver');
 const { fetchAccount, fetchPositions } = require('./broker');
 const { placeLimitOrder } = require('./execute');
@@ -258,7 +258,39 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const brokerTP = _bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1);
   const comment = `QB-V13-${p.template}-${(p.window || p.swept || '').slice(0, 12)}`.slice(0, 64);
 
-  const placement = await placeLimitOrder(brokerSymbol, p.direction, finalLot, entry, finalSL, brokerTP, comment);
+  // v14: round to the broker's tick increment. Raw Pine prices can carry more
+  // decimals than the symbol allows, which the broker rejects as INVALID_PRICE.
+  const isLong = p.direction === 'LONG';
+  const pipSz = assetMeta.pipSize || 0.0001;
+  const rEntry = roundToPipSize(entry, pipSz, 'nearest');
+  const rSL = roundToPipSize(finalSL, pipSz, isLong ? 'down' : 'up');
+  const rTP = brokerTP != null ? roundToPipSize(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
+
+  // v14: a limit must sit on the correct side of the live market — a SELL_LIMIT
+  // above price, a BUY_LIMIT below it — or the broker rejects it as INVALID_PRICE.
+  // If the market has already moved past the entry, skip cleanly instead.
+  try {
+    const { fetchCandles: _fcSrc } = require('./candle-source');
+    const _cr = await _fcSrc(assetId, '5m', 3);
+    const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
+    const _cur = _last && _last.close;
+    if (_cur && isFinite(_cur)) {
+      const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
+      const _wrongSide = isLong ? rEntry > _cur + _tol : rEntry < _cur - _tol;
+      if (_wrongSide) {
+        await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'entry-wrong-side-of-market' });
+        try {
+          await sendOnce(`webhook-wrongside:${dedupeKey}`,
+            `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
+            `Template: ${p.template}\nDirection: ${p.direction}\n` +
+            `Reason: market moved past entry (${isLong ? 'BUY_LIMIT needs entry \u2264 price' : 'SELL_LIMIT needs entry \u2265 price'})`);
+        } catch (_) {}
+        return;
+      }
+    }
+  } catch (_) { /* candle fetch failed — proceed; broker remains the final guard */ }
+
+  const placement = await placeLimitOrder(brokerSymbol, p.direction, finalLot, rEntry, rSL, rTP, comment);
 
   if (!placement.ok) {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: placement.error });
