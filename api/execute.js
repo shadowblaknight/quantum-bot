@@ -99,7 +99,58 @@ async function placeLimitOrder(brokerSymbol, direction, lot, entryPrice, slPrice
   }
 }
 
-// ===== Process pending setups for one asset =====
+// v14: MARKET order — used for "immediate" entries where a limit can't sit on the
+// correct side (price is already at/through the signal). Fills now at market; SL/TP
+// attached. No openPrice field (market fill).
+async function placeMarketOrder(brokerSymbol, direction, lot, slPrice, tpPrice, comment) {
+  const token = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  const region = process.env.METAAPI_REGION || 'london';
+  if (!token || !accountId) {
+    return { ok: false, error: 'MetaAPI credentials missing' };
+  }
+
+  const actionType = direction === 'LONG' ? 'ORDER_TYPE_BUY' : 'ORDER_TYPE_SELL';
+
+  const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/trade`;
+  const payload = {
+    actionType,
+    symbol: brokerSymbol,
+    volume: lot,
+    stopLoss: slPrice,
+    takeProfit: tpPrice,
+    comment: comment || 'QB-V12',
+  };
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'auth-token': token,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return { ok: false, error: `MetaAPI ${resp.status}: ${txt.slice(0, 300)}` };
+    }
+    const data = await resp.json();
+    const okCode = data.numericCode === 10009 || data.numericCode === undefined;
+    const hasOrderId = !!(data.orderId || data.id);
+    if (!okCode || (!hasOrderId && data.numericCode !== undefined)) {
+      return {
+        ok: false,
+        error: `broker rejected order: ${data.stringCode || 'code ' + data.numericCode}: ${data.message || ''}`.slice(0, 300),
+        response: data,
+      };
+    }
+    return { ok: true, orderId: data.orderId || data.id || null, response: data };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
 async function processAsset(asset, openPositions) {
   const result = { asset, actions: [] };
 
@@ -444,5 +495,6 @@ module.exports.runExecuteTick = runExecuteTick;
 module.exports.processAsset = processAsset;
 module.exports.tryPlace = tryPlace;
 module.exports.placeLimitOrder = placeLimitOrder;
+module.exports.placeMarketOrder = placeMarketOrder;
 module.exports.isTradingEnabled = isTradingEnabled;
 module.exports.isAutonomousEnabled = isAutonomousEnabled;

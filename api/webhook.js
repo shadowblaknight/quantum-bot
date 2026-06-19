@@ -9,7 +9,7 @@
 const { getRedis, applyCors, roundToPipSize } = require('./_lib');
 const { resolveSymbol } = require('./symbol-resolver');
 const { fetchAccount, fetchPositions } = require('./broker');
-const { placeLimitOrder } = require('./execute');
+const { placeLimitOrder, placeMarketOrder } = require('./execute');
 const { notifyTradePlaced, sendOnce } = require('./telegram');
 const { getAssetById } = require('./asset-registry');
 const { applyRulesToSignal, logActivity, getTodaysPnL } = require('./rules-store');
@@ -266,31 +266,46 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const rSL = roundToPipSize(finalSL, pipSz, isLong ? 'down' : 'up');
   const rTP = brokerTP != null ? roundToPipSize(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
 
-  // v14: a limit must sit on the correct side of the live market — a SELL_LIMIT
-  // above price, a BUY_LIMIT below it — or the broker rejects it as INVALID_PRICE.
-  // If the market has already moved past the entry, skip cleanly instead.
+  // v14: decide MARKET vs LIMIT by whether a valid limit can be placed.
+  //  - retest entries sit away from price on the correct side  → LIMIT (as before)
+  //  - immediate entries sit at/through the market (the only way in) → MARKET fill,
+  //    UNLESS the market has drifted past the entry by more than the slippage budget
+  //    (stale / runaway signal) → skip, don't chase. Pine's blow-off cap already
+  //    keeps parabolic candles out of the immediate path upstream.
+  let entryType = 'retest';
+  let useMarket = false;
   try {
     const { fetchCandles: _fcSrc } = require('./candle-source');
-    const _cr = await _fcSrc(assetId, '5m', 3);
+    const _cr = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
     const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
     const _cur = _last && _last.close;
     if (_cur && isFinite(_cur)) {
       const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
       const _wrongSide = isLong ? rEntry > _cur + _tol : rEntry < _cur - _tol;
       if (_wrongSide) {
-        await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'entry-wrong-side-of-market' });
-        try {
-          await sendOnce(`webhook-wrongside:${dedupeKey}`,
-            `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
-            `Template: ${p.template}\nDirection: ${p.direction}\n` +
-            `Reason: market moved past entry (${isLong ? 'BUY_LIMIT needs entry \u2264 price' : 'SELL_LIMIT needs entry \u2265 price'})`);
-        } catch (_) {}
-        return;
+        // Limit can't sit on the correct side → this is an immediate entry.
+        const _slDist = Math.abs(rEntry - rSL);
+        const _budget = Math.max(_slDist * 0.25, pipSz * 10); // 25% of stop, min 10 pips
+        const _drift = Math.abs(_cur - rEntry);
+        if (_drift > _budget) {
+          await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget' });
+          try {
+            await sendOnce(`webhook-stale:${dedupeKey}`,
+              `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
+              `Template: ${p.template}\nDirection: ${p.direction}\n` +
+              `Reason: market moved past entry beyond slippage budget \u2014 not chasing`);
+          } catch (_) {}
+          return;
+        }
+        useMarket = true;
+        entryType = 'immediate';
       }
     }
-  } catch (_) { /* candle fetch failed — proceed; broker remains the final guard */ }
+  } catch (_) { /* candle fetch failed — fall through to limit; broker is final guard */ }
 
-  const placement = await placeLimitOrder(brokerSymbol, p.direction, finalLot, rEntry, rSL, rTP, comment);
+  const placement = useMarket
+    ? await placeMarketOrder(brokerSymbol, p.direction, finalLot, rSL, rTP, comment)
+    : await placeLimitOrder(brokerSymbol, p.direction, finalLot, rEntry, rSL, rTP, comment);
 
   if (!placement.ok) {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: placement.error });
@@ -347,6 +362,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       expiresAt: Date.now() + 4 * 60 * 60 * 1000,
       status: 'placed',
       brokerOrderId: placement.orderId, comment, positionId: null,
+      entryType, execKind: useMarket ? 'market' : 'limit',
       v13: true, pilotRulesApplied: decision.rulesApplied,
     };
     await addPendingSetup(assetId, pendingRecord);
@@ -355,6 +371,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   await logActivity({
     type: 'trade-placed', asset: assetId, template: p.template, direction: p.direction,
     lot: finalLot, entry, sl: finalSL, tp1: decision.finalTP1,
+    entryType, execKind: useMarket ? 'market' : 'limit',
     activeMode: decision.activeMode, rulesApplied: decision.rulesApplied,
     brokerOrderId: placement.orderId,
   });
