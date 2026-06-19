@@ -17,6 +17,21 @@ const { addWatchedSetup } = require('./watched-setups');
 const { templateLabelMap } = require('./_templates');
 const TEMPLATE_LABELS = templateLabelMap();
 
+// v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
+// import is ever undefined, calling it would throw mid-placement and silently
+// drop EVERY auto-mode trade (skips bypass this path), which looks exactly like
+// "signals deliver but never trade". Use the import when it's a real function,
+// otherwise fall back to an identical local implementation.
+const _roundTick = (typeof roundToPipSize === 'function')
+  ? roundToPipSize
+  : (value, step, mode) => {
+      const s = (step && isFinite(step) && step > 0) ? step : 0.0001;
+      const q = value / s;
+      const r = mode === 'down' ? Math.floor(q) : mode === 'up' ? Math.ceil(q) : Math.round(q);
+      const dec = Math.max(0, Math.min(10, ((String(s).split('.')[1]) || '').length));
+      return parseFloat((r * s).toFixed(dec));
+    };
+
 const PINE_TO_ASSET = {
   XAUUSD: 'gold', EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy',
   // NAS100 aliases — data feeds label this instrument differently. Your feed
@@ -156,7 +171,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     return bgSkip({
       dedupeKey, pineTicker, template: p.template,
       reason: 'position-already-open',
-      extras: { assetId, positionTicket: existing.id }, notify: false,
+      extras: { assetId, positionTicket: existing.id }, notify: true, // QB-DIAG: was false
     });
   }
 
@@ -164,6 +179,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const brokerSymbol = await resolveSymbol(assetId);
   if (!brokerSymbol) {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: `cannot resolve broker symbol for ${assetId}` });
+    try { await sendOnce(`diag-nosym:${dedupeKey}`, `\u26a0\ufe0f DIAG \u2014 ${assetId} \u00b7 ${p.template}: cannot resolve broker symbol`); } catch (_) {}
     return;
   }
 
@@ -171,6 +187,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const assetMeta = getAssetById(assetId);
   if (!assetMeta) {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: `no asset registry for ${assetId}` });
+    try { await sendOnce(`diag-noreg:${dedupeKey}`, `\u26a0\ufe0f DIAG \u2014 ${assetId} \u00b7 ${p.template}: no asset registry entry`); } catch (_) {}
     return;
   }
 
@@ -262,9 +279,9 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // decimals than the symbol allows, which the broker rejects as INVALID_PRICE.
   const isLong = p.direction === 'LONG';
   const pipSz = assetMeta.pipSize || 0.0001;
-  const rEntry = roundToPipSize(entry, pipSz, 'nearest');
-  const rSL = roundToPipSize(finalSL, pipSz, isLong ? 'down' : 'up');
-  const rTP = brokerTP != null ? roundToPipSize(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
+  const rEntry = _roundTick(entry, pipSz, 'nearest');
+  const rSL = _roundTick(finalSL, pipSz, isLong ? 'down' : 'up');
+  const rTP = brokerTP != null ? _roundTick(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
 
   // v14: decide MARKET vs LIMIT by whether a valid limit can be placed.
   //  - retest entries sit away from price on the correct side  → LIMIT (as before)
@@ -281,12 +298,19 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     const _cur = _last && _last.close;
     if (_cur && isFinite(_cur)) {
       const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
-      const _wrongSide = isLong ? rEntry > _cur + _tol : rEntry < _cur - _tol;
-      if (_wrongSide) {
-        // Limit can't sit on the correct side → this is an immediate entry.
+      // A LIMIT is only valid when the entry sits AWAY from price on the correct
+      // side: a LONG buy-limit must be BELOW market, a SHORT sell-limit ABOVE it.
+      // Anything else — entry at/through the market (immediate), or so close the
+      // broker won't accept it — must go in as a MARKET order, otherwise MT5
+      // rejects the limit with TRADE_RETCODE_INVALID_PRICE.
+      const _canLimit = isLong ? (rEntry < _cur - _tol) : (rEntry > _cur + _tol);
+      if (!_canLimit) {
         const _slDist = Math.abs(rEntry - rSL);
         const _budget = Math.max(_slDist * 0.25, pipSz * 10); // 25% of stop, min 10 pips
-        const _drift = Math.abs(_cur - rEntry);
+        // Adverse drift only: skip just when a MARKET fill would be WORSE than the
+        // signalled entry by more than budget (don't chase a runaway). A favorable
+        // gap (market better than entry) still fills.
+        const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
         if (_drift > _budget) {
           await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget' });
           try {
@@ -464,7 +488,11 @@ module.exports = async (req, res) => {
     res.status(202).json({ ok: true, accepted: true, dedupeKey, ackMs: Date.now() - t0 });
     _waitUntil(
       processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 })
-        .catch((e) => { try { console.error('[webhook bg] error:', e && e.message); } catch (_) {} })
+        .catch((e) => {
+          try { console.error('[webhook bg] error:', e && e.message); } catch (_) {}
+          // QB-DIAG: surface swallowed background throws over Telegram.
+          try { sendOnce(`diag-throw:${dedupeKey}`, `\ud83d\udca5 DIAG THROW \u2014 ${assetId} \u00b7 ${p.template}\n${(e && (e.stack || e.message)) ? String(e.stack || e.message).slice(0, 400) : 'unknown error'}`); } catch (_) {}
+        })
     );
   } else {
     try {
@@ -472,6 +500,8 @@ module.exports = async (req, res) => {
       if (!res.headersSent) res.status(200).json({ ok: true, dedupeKey, ms: Date.now() - t0 });
     } catch (e) {
       try { console.error('[webhook] inline pipeline error:', e && e.message); } catch (_) {}
+      // QB-DIAG: surface swallowed inline throws over Telegram.
+      try { await sendOnce(`diag-throw:${dedupeKey}`, `\ud83d\udca5 DIAG THROW (inline) \u2014 ${assetId} \u00b7 ${p.template}\n${(e && (e.stack || e.message)) ? String(e.stack || e.message).slice(0, 400) : 'unknown error'}`); } catch (_) {}
       if (!res.headersSent) res.status(200).json({ ok: false, error: (e && e.message) || 'pipeline-error', dedupeKey });
     }
   }
