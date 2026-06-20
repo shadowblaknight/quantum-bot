@@ -96,6 +96,9 @@ function buildFeatureVector(trade) {
     // Day-vs-Swing comparison chart can group closed trades.
     style: trade.style || null,
     template: trade.template || (trade.contributingTactics || [])[0] || null,
+    // v14: entry-style label for the Immediate-vs-Retest comparison panel.
+    entryType: trade.entryType || null,
+    execKind: trade.execKind || null,
     session: trade.session,
     contributingTactics: tactics,
     timeframesInPlay: tfs,

@@ -412,6 +412,11 @@ async function detectAndProcessClosed(currentOpenIds) {
       template: matchedPending.setup.template
              || (matchedPending.setup.contributingTactics || [])[0]
              || null,
+      // v14: carry the entry-style label through to closed trades so the
+      // Immediate-vs-Retest comparison can aggregate win-rate / count / P&L.
+      // Only trades placed after this ships will have it (older ones = null).
+      entryType: matchedPending.entryType || null,
+      execKind: matchedPending.execKind || null,
       session: matchedPending.setup.session || getCurrentSession(),
       contributingTactics: matchedPending.setup.contributingTactics,
       timeframesInPlay: matchedPending.setup.timeframesInPlay,

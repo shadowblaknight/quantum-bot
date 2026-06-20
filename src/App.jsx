@@ -490,6 +490,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         {/* ─── v14 · Day-vs-Swing comparison (full width) ─── */}
         <StyleComparisonPanel />
+
+        {/* ─── v14 · Immediate-vs-Retest entry-style comparison (full width) ─── */}
+        <EntryStyleComparisonPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -1625,6 +1628,127 @@ function StyleStatCard({ title, agg }) {
         <Stat label="W / L" value={`${agg.wins} / ${agg.losses}`} color="var(--qb-text-mid)" />
       </div>
     </div>
+  );
+}
+
+// ─── v14 · Immediate vs Retest entry-style comparison (full width) ──────
+// Mirrors the Day-vs-Swing panel. Aggregates closed trades tagged with an
+// entryType: "immediate" (market fill) vs "retest" (resting limit). Only
+// trades placed after the v14 entry-routing update carry the label, so the
+// table fills with fresh, clean data going forward. Each cell shows win-rate,
+// trade count, and net P&L via the shared aggTrades() helper.
+function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
+  const [trades, setTrades] = useState(null);
+  const [error, setError]   = useState(null);
+  const [view, setView]     = useState("overall");   // "overall" | "template"
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
+        if (alive) {
+          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
+          else setError(r?.error || "no trade data");
+        }
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const all      = (trades || []).filter((t) => t.entryType === "immediate" || t.entryType === "retest");
+  const immAgg   = aggTrades(all.filter((t) => t.entryType === "immediate"));
+  const retAgg   = aggTrades(all.filter((t) => t.entryType === "retest"));
+  const untagged = (trades || []).filter((t) => t.entryType !== "immediate" && t.entryType !== "retest").length;
+
+  const byTemplate = {};
+  for (const t of all) {
+    const tmpl = t.template || (t.contributingTactics || [])[0] || "—";
+    if (!byTemplate[tmpl]) byTemplate[tmpl] = { immediate: [], retest: [] };
+    byTemplate[tmpl][t.entryType].push(t);
+  }
+  const templateRows = Object.keys(byTemplate).sort();
+
+  return (
+    <Panel title="Immediate vs Retest" subtitle="which entry style is working" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
+        {error && <PlaceholderError msg={`Comparison: ${error}`} />}
+        {!error && all.length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            No labeled trades yet. Immediate vs Retest stats appear here as new trades close — only trades placed since the v14 entry-routing update are tagged.
+          </div>
+        )}
+
+        {all.length > 0 && (
+          <>
+            <div style={{ display: "flex", marginBottom: 12, borderBottom: "1px solid var(--qb-border)" }}>
+              {[["overall", "Overall"], ["template", "By template"]].map(([id, label]) => (
+                <button key={id} onClick={() => setView(id)} style={{
+                  padding: "5px 14px", background: "transparent", border: "none", cursor: "pointer",
+                  fontFamily: "var(--qb-font-mono)", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase",
+                  color: view === id ? "var(--qb-accent)" : "var(--qb-text-faint)",
+                  borderBottom: view === id ? "2px solid var(--qb-accent)" : "2px solid transparent",
+                  fontWeight: view === id ? 700 : 400,
+                }}>{label}</button>
+              ))}
+            </div>
+
+            {view === "overall" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <StyleStatCard title="IMMEDIATE" agg={immAgg} />
+                <StyleStatCard title="RETEST" agg={retAgg} />
+              </div>
+            )}
+
+            {view === "template" && (
+              <div style={{ overflow: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+                  <thead>
+                    <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
+                      <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
+                      <th style={{ padding: "4px 6px" }}>Imm n</th>
+                      <th style={{ padding: "4px 6px" }}>Imm WR</th>
+                      <th style={{ padding: "4px 6px" }}>Imm net</th>
+                      <th style={{ padding: "4px 6px" }}>Ret n</th>
+                      <th style={{ padding: "4px 6px" }}>Ret WR</th>
+                      <th style={{ padding: "4px 6px" }}>Ret net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {templateRows.map((tmpl) => {
+                      const i = aggTrades(byTemplate[tmpl].immediate);
+                      const s = aggTrades(byTemplate[tmpl].retest);
+                      const meta = TEMPLATE_DISPLAY[tmpl];
+                      return (
+                        <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
+                          <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>
+                            {meta ? `${meta.glyph} ${meta.label}` : tmpl}
+                          </td>
+                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{i.count || "·"}</td>
+                          <td style={{ padding: "4px 6px", color: wrColorOf(i.winRate) }}>{fmtWR(i.winRate)}</td>
+                          <td style={{ padding: "4px 6px", color: netColorOf(i.net) }}>{fmtNet(i.net, i.count)}</td>
+                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{s.count || "·"}</td>
+                          <td style={{ padding: "4px 6px", color: wrColorOf(s.winRate) }}>{fmtWR(s.winRate)}</td>
+                          <td style={{ padding: "4px 6px", color: netColorOf(s.net) }}>{fmtNet(s.net, s.count)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {untagged > 0 && (
+              <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+                {untagged} older trade{untagged === 1 ? "" : "s"} predate entry-style tagging and aren't counted here.
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Panel>
   );
 }
 

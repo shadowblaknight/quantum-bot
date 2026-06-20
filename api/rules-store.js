@@ -207,6 +207,16 @@ function applySystemConfig(merged) {
           [...DEFAULT_RULES.modePresets[mode].acceptedTemplates];
       }
     }
+    // v14: the Active mode must not impose its own concurrent-position cap below
+    // the account-level setting the user controls in the app. Keep it in lock-step
+    // with account.maxConcurrentPositions so changing "max positions" in the app
+    // actually takes effect (otherwise a stale stored mode cap of 5 silently wins).
+    // The throttled modes (sleep / defensive / vacation) keep their own lower caps
+    // as intentional safety limits.
+    if (merged.modePresets.active && merged.account &&
+        merged.account.maxConcurrentPositions != null) {
+      merged.modePresets.active.maxConcurrent = merged.account.maxConcurrentPositions;
+    }
   }
   return merged;
 }
@@ -371,7 +381,12 @@ async function applyRulesToSignal({
     finalTP2 = n >= 2 ? mk(r2) : null;
     finalTP3 = n >= 3 ? mk(r3) : null;
     tpsAutoPromoted = true;
-  } else if (slWasOverridden || effectiveMinRR > 1.0) {
+  } else if (slWasOverridden || effectiveMinRR >= 1.0) {
+    // v14 fix: was `> 1.0`, which skipped the exact 1.0 boundary — the default
+    // instrument minRR. Immediate reaction entries (entry=close, TPs measured
+    // from the zone) often arrive sub-1R; at minRR=1.0 they were neither
+    // promoted nor passed, so they got rejected as rr-below-threshold and never
+    // traded. `>= 1.0` promotes their TPs to 1R/2R/3R so they trade as intended.
     const tp1R = Math.max(1.0, effectiveMinRR);
     finalTP1 = direction === 'LONG' ? entry + finalSLDistance * tp1R       : entry - finalSLDistance * tp1R;
     finalTP2 = direction === 'LONG' ? entry + finalSLDistance * (tp1R + 1) : entry - finalSLDistance * (tp1R + 1);
