@@ -450,6 +450,11 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         display: "grid",
         gridTemplateColumns: "1fr 1fr 1fr",
         gridTemplateRows: "minmax(240px, auto) minmax(240px, 1fr) minmax(240px, auto)",
+        // v14: full-width panels (Day-vs-Swing, Immediate-vs-Retest) flow into
+        // implicit rows 4+. Without an auto-row size they collapse to zero height
+        // (their inner content is height:100% of an undefined row). Give every
+        // implicit row a real minimum so added panels actually render.
+        gridAutoRows: "minmax(240px, auto)",
         gap: 10, overflow: "auto",
       }}>
         <AccountSafetyPanel
