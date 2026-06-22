@@ -371,6 +371,30 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
+  // ── v14 · Macro regime (news + volatility + manual override) ────────
+  const [regime, setRegime] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("market-regime")).then((res) => res.json());
+        if (alive && r && r.regime) setRegime(r.regime);
+      } catch (_) {}
+    };
+    tick();
+    const id = setInterval(tick, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  const setRegimeOverride = useCallback(async (mode) => {
+    try {
+      const r = await fetch(API("market-regime?action=set-override"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      }).then((res) => res.json());
+      if (r && r.regime) setRegime(r.regime);
+    } catch (e) { console.error("[regime] override error:", e); }
+  }, []);
+
   // ── Symbol resolver ────────────────────────────────────────────────
   const [resolver, setResolver] = useState(null);
   useEffect(() => {
@@ -412,6 +436,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         theme={theme} setTheme={setTheme}
         activeMode={activeMode} tradingMode={tradingMode}
         estopActive={estopActive}
+        regime={regime} setRegimeOverride={setRegimeOverride}
         callRulesAction={callRulesAction}
       />
     );
@@ -431,6 +456,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         floatingPnL={floatingPnL} dailyPnL={dailyPnL}
         positions={positions}
         rulesError={rulesError}
+        regime={regime}
         estopActive={estopActive}
         onOpenEstop={() => setEstopOpen(true)}
         onClearEstop={clearEStop}
@@ -493,11 +519,17 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         <PerfHeatmapPanel perf={perf} watchlist={prefs.watchlist} />
 
+        {/* ─── v14 · Macro regime risk dial (full width) ─── */}
+        <RegimePanel regime={regime} onSetOverride={setRegimeOverride} />
+
         {/* ─── v14 · Day-vs-Swing comparison (full width) ─── */}
         <StyleComparisonPanel />
 
         {/* ─── v14 · Immediate-vs-Retest entry-style comparison (full width) ─── */}
         <EntryStyleComparisonPanel />
+
+        {/* ─── v14.1 · TP reach by template (full width) ─── */}
+        <TpHitPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -533,7 +565,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
 function DashboardHeader({
   equity, balance, floatingPnL, dailyPnL, positions,
-  rulesError, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
+  rulesError, regime, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
 }) {
   const openCount = positions?.length || 0;
   const floatColor = floatingPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
@@ -556,6 +588,39 @@ function DashboardHeader({
           v13 PILOT
         </span>
       </div>
+
+      {/* v14 — blinking news / regime warning dot */}
+      {regime && (regime.newsActive || regime.eventImminent || regime.level === "elevated" || regime.level === "crisis") && (() => {
+        const hot = regime.level === "crisis" || regime.newsActive || regime.eventImminent;
+        const c = hot ? "var(--qb-bad)" : "var(--qb-warn)";
+        let label;
+        if (regime.eventImminent && regime.nextEvent) {
+          const m = regime.nextEvent.minutesUntil;
+          const tag = m > 0 ? ` ${m}m` : m === 0 ? " NOW" : ` ${-m}m`;
+          label = `${regime.nextEvent.country} ${regime.nextEvent.title}`.slice(0, 22) + tag;
+        } else if (regime.newsActive) {
+          label = regime.level === "crisis" ? "NEWS · CRISIS" : regime.level === "elevated" ? "NEWS · ELEVATED" : "NEWS";
+        } else {
+          label = regime.level.toUpperCase();
+        }
+        const tip = (regime.reasons || []).join("  •  ")
+          || (regime.headlines || []).map((h) => h.title).slice(0, 3).join("  |  ")
+          || "Elevated market risk";
+        return (
+          <div title={tip} style={{
+            display: "flex", alignItems: "center", gap: 7,
+            padding: "3px 11px", borderRadius: 3,
+            background: "var(--qb-bg-panel-hi)", border: `1px solid ${c}`,
+          }}>
+            <span className="qb-pulse" style={{
+              width: 9, height: 9, borderRadius: "50%", background: c, boxShadow: `0 0 8px ${c}`,
+            }} />
+            <span className="qb-mono" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.8, color: c, textTransform: "uppercase" }}>
+              {label}
+            </span>
+          </div>
+        );
+      })()}
 
       <div style={{ width: 1, height: 22, background: "var(--qb-border)" }} />
 
@@ -1636,12 +1701,207 @@ function StyleStatCard({ title, agg }) {
   );
 }
 
+// ─── v14 · Macro Regime panel (status + manual override) ────────────────
+function RegimePanel({ regime, onSetOverride, gridColumn = "1 / 4", compact = false }) {
+  const r = regime || { level: "normal", sizeMult: 1, slWiden: 1, reasons: [], headlines: [], manualOverride: "auto", newsActive: false, volRatio: null, upcomingEvents: [], nextEvent: null, eventImminent: false };
+  const level = r.level || "normal";
+  const COLORS = { normal: "var(--qb-ok)", elevated: "var(--qb-warn)", crisis: "var(--qb-bad)" };
+  const col = COLORS[level] || "var(--qb-text-mid)";
+  const pct = (m) => `${Math.round((m != null ? m : 1) * 100)}%`;
+  const modes = ["auto", "normal", "elevated", "crisis"];
+  const cur = r.manualOverride || "auto";
+  const evWhen = (m) => (m > 0 ? `in ${m}m` : m === 0 ? "now" : `${-m}m ago`);
+
+  return (
+    <Panel title="Macro Regime" subtitle="risk dial — news + volatility + calendar" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto", display: "grid", gridTemplateColumns: compact ? "1fr" : "1fr 1fr", gap: 16 }}>
+        {/* left — current state */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <span className={level !== "normal" ? "qb-pulse" : ""} style={{ width: 13, height: 13, borderRadius: "50%", background: col, boxShadow: `0 0 8px ${col}` }} />
+            <span className="qb-serif" style={{ fontSize: 22, color: col, letterSpacing: 0.5 }}>{level.toUpperCase()}</span>
+            {cur !== "auto" && (
+              <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", border: "1px solid var(--qb-border)", borderRadius: 3, padding: "1px 6px", letterSpacing: 0.5 }}>MANUAL</span>
+            )}
+          </div>
+          <div className="qb-mono" style={{ fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 2 }}>
+            <div>Position size&nbsp;→&nbsp;<span style={{ color: r.sizeMult < 1 ? "var(--qb-warn)" : "var(--qb-text-hi)" }}>{pct(r.sizeMult)}</span> <span style={{ color: "var(--qb-text-faint)" }}>of your input</span></div>
+            <div>Stop width&nbsp;→&nbsp;<span style={{ color: r.slWiden > 1 ? "var(--qb-warn)" : "var(--qb-text-hi)" }}>{pct(r.slWiden)}</span> <span style={{ color: "var(--qb-text-faint)" }}>of your input</span></div>
+            {r.volRatio != null && <div>Volatility&nbsp;→&nbsp;<span style={{ color: "var(--qb-text-hi)" }}>{r.volRatio}×</span> <span style={{ color: "var(--qb-text-faint)" }}>baseline</span></div>}
+          </div>
+          {(r.reasons || []).length > 0 && (
+            <div style={{ marginTop: 10, fontSize: 10, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
+              {r.reasons.map((x, i) => <div key={i}>• {x}</div>)}
+            </div>
+          )}
+        </div>
+
+        {/* right — manual override + live news + scheduled events */}
+        <div>
+          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 7 }}>Manual override</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+            {modes.map((m) => (
+              <button key={m} onClick={() => onSetOverride && onSetOverride(m)} className="qb-mono" style={{
+                fontSize: 10, padding: "5px 11px", borderRadius: 3, cursor: "pointer",
+                textTransform: "uppercase", letterSpacing: 0.5,
+                background: cur === m ? (COLORS[m] || "var(--qb-accent)") : "transparent",
+                color: cur === m ? "var(--qb-bg-void)" : "var(--qb-text-mid)",
+                border: `1px solid ${cur === m ? (COLORS[m] || "var(--qb-accent)") : "var(--qb-border)"}`,
+                fontWeight: cur === m ? 700 : 400,
+              }}>{m}</button>
+            ))}
+          </div>
+
+          {r.newsActive && (r.headlines || []).length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="qb-mono qb-pulse" style={{ fontSize: 9, color: "var(--qb-bad)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>● Live high-impact news</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {r.headlines.slice(0, 3).map((h, i) => (
+                  <div key={i} style={{ fontSize: 10, color: "var(--qb-text-mid)", lineHeight: 1.35 }}>
+                    <span style={{ color: "var(--qb-text-faint)" }}>{h.source ? h.source + " — " : ""}</span>{h.title}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>Scheduled events · Forex Factory</div>
+          {(r.upcomingEvents || []).length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {r.upcomingEvents.slice(0, 5).map((e, i) => {
+                const imm = e.minutesUntil <= 30 && e.minutesUntil >= -15;
+                return (
+                  <div key={i} style={{ fontSize: 10, color: imm ? "var(--qb-bad)" : "var(--qb-text-mid)", lineHeight: 1.35, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <span><span style={{ color: "var(--qb-text-faint)" }}>{e.country} </span>{e.title}</span>
+                    <span className="qb-mono" style={{ color: imm ? "var(--qb-bad)" : "var(--qb-text-faint)", whiteSpace: "nowrap" }}>{evWhen(e.minutesUntil)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>No high-impact events queued this week (or calendar still loading).</div>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 // ─── v14 · Immediate vs Retest entry-style comparison (full width) ──────
 // Mirrors the Day-vs-Swing panel. Aggregates closed trades tagged with an
 // entryType: "immediate" (market fill) vs "retest" (resting limit). Only
 // trades placed after the v14 entry-routing update carry the label, so the
 // table fills with fresh, clean data going forward. Each cell shows win-rate,
 // trade count, and net P&L via the shared aggTrades() helper.
+// ─── v14.1 · Per-template TP reach (how deep each template runs) ─────────
+function tpAgg(trades) {
+  const n = trades.length;
+  if (!n) return { n: 0, tp1: 0, tp2: 0, tp3: 0, avg: 0 };
+  let tp1 = 0, tp2 = 0, tp3 = 0, sum = 0;
+  for (const t of trades) {
+    const m = t.maxTP || 0;
+    if (m >= 1) tp1++;
+    if (m >= 2) tp2++;
+    if (m >= 3) tp3++;
+    sum += m;
+  }
+  return { n, tp1, tp2, tp3, avg: sum / n };
+}
+function pctOf(c, n) { return n ? Math.round((c / n) * 100) : 0; }
+
+function TpHitPanel({ gridColumn = "1 / 4" }) {
+  const [trades, setTrades] = useState(null);
+  const [error, setError]   = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
+        if (alive) {
+          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
+          else setError(r?.error || "no trade data");
+        }
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const labeled  = (trades || []).filter((t) => t.maxTP != null);
+  const overall  = tpAgg(labeled);
+  const untagged = (trades || []).length - labeled.length;
+
+  const byTemplate = {};
+  for (const t of labeled) {
+    const tmpl = t.template || (t.contributingTactics || [])[0] || "—";
+    (byTemplate[tmpl] = byTemplate[tmpl] || []).push(t);
+  }
+  const rows = Object.keys(byTemplate)
+    .map((tmpl) => ({ tmpl, agg: tpAgg(byTemplate[tmpl]) }))
+    .sort((a, b) => b.agg.avg - a.agg.avg);
+
+  const cell    = (c, n) => (n ? `${c} (${pctOf(c, n)}%)` : "·");
+  const tpColor = (pct) => (pct >= 50 ? "var(--qb-ok)" : pct >= 25 ? "var(--qb-warn)" : "var(--qb-text-mid)");
+
+  return (
+    <Panel title="TP Reach by Template" subtitle="how deep each template runs" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
+        {error && <PlaceholderError msg={`TP reach: ${error}`} />}
+        {!error && labeled.length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            No TP-reach data yet. Each trade's reached rungs are recorded as it closes — stats appear here for trades closing after the v14.1 ratchet update.
+          </div>
+        )}
+        {labeled.length > 0 && (
+          <>
+            <div style={{ display: "flex", gap: 18, marginBottom: 12, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
+              <span style={{ color: "var(--qb-text-faint)" }}>{overall.n} trades</span>
+              <span>TP1 <b style={{ color: tpColor(pctOf(overall.tp1, overall.n)) }}>{pctOf(overall.tp1, overall.n)}%</b></span>
+              <span>TP2 <b style={{ color: tpColor(pctOf(overall.tp2, overall.n)) }}>{pctOf(overall.tp2, overall.n)}%</b></span>
+              <span>TP3 <b style={{ color: tpColor(pctOf(overall.tp3, overall.n)) }}>{pctOf(overall.tp3, overall.n)}%</b></span>
+              <span style={{ color: "var(--qb-text-faint)" }}>avg {overall.avg.toFixed(2)} rungs/trade</span>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+              <thead>
+                <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
+                  <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
+                  <th style={{ padding: "4px 6px" }}>n</th>
+                  <th style={{ padding: "4px 6px" }}>TP1</th>
+                  <th style={{ padding: "4px 6px" }}>TP2</th>
+                  <th style={{ padding: "4px 6px" }}>TP3</th>
+                  <th style={{ padding: "4px 6px" }}>avg</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(({ tmpl, agg }) => {
+                  const meta = TEMPLATE_DISPLAY[tmpl];
+                  return (
+                    <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
+                      <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>{meta ? `${meta.glyph} ${meta.label}` : tmpl}</td>
+                      <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{agg.n}</td>
+                      <td style={{ padding: "4px 6px", color: tpColor(pctOf(agg.tp1, agg.n)) }}>{cell(agg.tp1, agg.n)}</td>
+                      <td style={{ padding: "4px 6px", color: tpColor(pctOf(agg.tp2, agg.n)) }}>{cell(agg.tp2, agg.n)}</td>
+                      <td style={{ padding: "4px 6px", color: tpColor(pctOf(agg.tp3, agg.n)) }}>{cell(agg.tp3, agg.n)}</td>
+                      <td style={{ padding: "4px 6px", color: "var(--qb-text-hi)" }}>{agg.avg.toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {untagged > 0 && (
+              <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+                {untagged} older trade{untagged === 1 ? "" : "s"} predate TP-reach tracking and aren't counted here.
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// ─── v14 · Immediate vs Retest entry-style comparison (full width) ──────
 function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
   const [trades, setTrades] = useState(null);
   const [error, setError]   = useState(null);
@@ -2686,7 +2946,7 @@ function MobileLayout({
   equity, balance, floatingPnL, dailyPnL, positions,
   rules, rulesError, perf, perfError, activity, resolver,
   prefs, setPrefs, theme, setTheme,
-  activeMode, tradingMode, estopActive, callRulesAction,
+  activeMode, tradingMode, estopActive, regime, setRegimeOverride, callRulesAction,
 }) {
   const [tab, setTab]                   = useState("home");
   const [estopOpen, setEstopOpen]       = useState(false);
@@ -2724,6 +2984,7 @@ function MobileLayout({
         floatingPnL={floatingPnL} dailyPnL={dailyPnL}
         positions={positions}
         rulesError={rulesError}
+        regime={regime}
         estopActive={estopActive}
         onOpenEstop={() => setEstopOpen(true)}
         onClearEstop={clearEStop}
@@ -2773,6 +3034,9 @@ function MobileLayout({
                 rules={rules} callRulesAction={callRulesAction}
               />
             )}
+            {card("min(64vh, 480px)",
+              <RegimePanel regime={regime} onSetOverride={setRegimeOverride} gridColumn="auto" compact />
+            )}
           </>
         )}
 
@@ -2793,6 +3057,9 @@ function MobileLayout({
             )}
             {card("min(60vh, 480px)",
               <RecognitionPanel perf={perf} gridColumn="auto" />
+            )}
+            {card("min(56vh, 440px)",
+              <TpHitPanel gridColumn="auto" />
             )}
           </>
         )}
@@ -2839,7 +3106,7 @@ function MobileLayout({
 
 function MobileTopBar({
   equity, balance, floatingPnL, dailyPnL, positions,
-  rulesError, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
+  rulesError, regime, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
 }) {
   const openCount  = positions?.length || 0;
   const floatColor = floatingPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
@@ -2865,6 +3132,27 @@ function MobileTopBar({
         ) : (
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--qb-ok)", display: "inline-block" }} title="online" />
         )}
+        {regime && (regime.newsActive || regime.eventImminent || regime.level === "elevated" || regime.level === "crisis") && (() => {
+          const hot = regime.level === "crisis" || regime.newsActive || regime.eventImminent;
+          const c = hot ? "var(--qb-bad)" : "var(--qb-warn)";
+          let label;
+          if (regime.eventImminent && regime.nextEvent) {
+            const m = regime.nextEvent.minutesUntil;
+            label = `${regime.nextEvent.country} ${m > 0 ? m + "m" : m === 0 ? "NOW" : -m + "m"}`;
+          } else if (regime.newsActive) { label = "NEWS"; }
+          else { label = regime.level.toUpperCase(); }
+          const tip = (regime.reasons || []).join("  •  ") || "Elevated market risk";
+          return (
+            <span title={tip} className="qb-mono" style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              fontSize: 8, fontWeight: 700, letterSpacing: 0.5, color: c,
+              padding: "2px 7px", borderRadius: 3, border: `1px solid ${c}`, textTransform: "uppercase",
+            }}>
+              <span className="qb-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: c, boxShadow: `0 0 6px ${c}` }} />
+              {label}
+            </span>
+          );
+        })()}
         <div style={{ flex: 1 }} />
         <TimeDisplay />
         <button onClick={onOpenSettings} style={{

@@ -20,6 +20,8 @@
 
 const { getRedis, safeParse } = require('./_lib');
 const { ACCEPTED_ACTIVE, ACCEPTED_DEFENSIVE, templateLabel } = require('./_templates');
+// v14: cache-only regime read (never blocks the live path). Lazy-required inside
+// applyRulesToSignal to avoid any load-order coupling.
 
 const RULES_KEY = 'v13:pilot:rules';
 const ACTIVITY_LOG_KEY = 'v13:pilot:activity';
@@ -357,6 +359,20 @@ async function applyRulesToSignal({
     finalSL = direction === 'LONG' ? entry - distance : entry + distance;
   }
 
+  // v14 regime modulation: read the cached macro regime. This is cache-only and
+  // NEVER blocks (falls back to NORMAL = no change), so it can't stall placement.
+  // In elevated/crisis we WIDEN the stop (room for volatility) and SHRINK size
+  // (below). It multiplies the user's SL/lot — it never replaces them. Applied
+  // before the SL distance so RR-based TPs and risk-sizing stay consistent.
+  let _regime = { level: 'normal', sizeMult: 1.0, slWiden: 1.0 };
+  try { _regime = await require('./market-regime').getRegimeFast(); } catch (_) {}
+  const regimeSizeMult = (_regime && Number(_regime.sizeMult)) || 1.0;
+  const regimeSlWiden  = (_regime && Number(_regime.slWiden))  || 1.0;
+  if (regimeSlWiden && regimeSlWiden !== 1.0) {
+    const widened = Math.abs(entry - finalSL) * regimeSlWiden;
+    finalSL = direction === 'LONG' ? entry - widened : entry + widened;
+  }
+
   const finalSLDistance = Math.abs(entry - finalSL);
   if (finalSLDistance <= 0) return { allow: false, reason: 'invalid-sl-distance' };
 
@@ -423,6 +439,8 @@ async function applyRulesToSignal({
   // untouched unless you deliberately set this below 1.0 in settings.
   const tierMult = (htfTier === 'B') ? (rules.tierBLotMultiplier != null ? rules.tierBLotMultiplier : 1.0) : 1.0;
   finalLot = finalLot * (preset.lotMultiplier || 1.0) * (tmplOverride.lotMultiplier || 1.0) * tierMult;
+  // v14 regime: shrink size in elevated/crisis (1.0 = no change in NORMAL).
+  finalLot = finalLot * regimeSizeMult;
   if (finalLot > prof.maxLot) finalLot = prof.maxLot;
   finalLot = Math.max(0.01, Math.round(finalLot * 100) / 100);
 
@@ -446,6 +464,9 @@ async function applyRulesToSignal({
     finalTP1, finalTP2, finalTP3,
     finalSLDistance,
     activeMode: rules.activeMode,
+    // v14 macro regime that was applied to this trade (normal = no change).
+    regime: (_regime && _regime.level) || 'normal',
+    regimeSizeMult, regimeSlWiden,
     instrument: inst,
     template: tmplOverride,
     rulesApplied: {

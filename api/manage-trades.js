@@ -28,7 +28,7 @@ const { fetchPositions, fetchCandles } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
-const { notifyTPHit, notifySLHit, notifyTradeClosed } = require('./telegram');
+const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
 
 // v14: all-or-nothing exits. The full position rides to the FINAL TP (parked as
@@ -255,79 +255,130 @@ async function managePosition(position) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
 
-  const currentPrice = position.currentPrice || position.openPrice;
+  // v14.1: derive a RELIABLE current price + the favorable EXTREME since open.
+  // TP-touch detection must use the candle WICK extreme, not a point-in-time
+  // price — otherwise a spike that pierces a TP and pulls back between polls is
+  // never seen and the SL never ratchets. We persist the extreme so a missed
+  // poll can't lose a touch.
+  const assetMeta = getAssetById(asset);
+  let livePrice = (isFinite(position.currentPrice) && position.currentPrice > 0) ? position.currentPrice : null;
+  let candleExtreme = null;
+  try {
+    const cr = await fetchCandles(asset, '1m', 90); // ~1.5h of wicks
+    const cs = (cr && cr.candles) || [];
+    if (cs.length) {
+      const last = cs[cs.length - 1];
+      if (last && isFinite(last.close) && livePrice == null) livePrice = last.close;
+      candleExtreme = isLong ? Math.max(...cs.map((c) => c.high)) : Math.min(...cs.map((c) => c.low));
+    }
+  } catch (_) {}
+  if (livePrice == null) livePrice = position.openPrice;
+
+  const priorExtreme = (typeof state.extreme === 'number' && isFinite(state.extreme)) ? state.extreme : state.entry;
+  const extreme = isLong
+    ? Math.max(priorExtreme, livePrice, candleExtreme != null ? candleExtreme : -Infinity)
+    : Math.min(priorExtreme, livePrice, candleExtreme != null ? candleExtreme :  Infinity);
+  state.extreme = extreme;
+
+  const currentPrice = livePrice;   // used by the trailing block below
   const actions = [];
 
-  // ─── TP HIT DETECTION ────────────────────────────────────────────
+  const initialSLForR = Math.abs(state.entry - matchedPending.slPrice) || 1;
+  const finalIdx = tpLevels.length - 1;
+
+  // ─── TP TOUCH DETECTION (wick-aware) ─────────────────────────────
+  // Record every non-final TP the price has TOUCHED since open, firing a
+  // Telegram for each newly-touched rung. The SL ratchet happens once, after.
+  let finalTouched = false;
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
-    if (state.tpsHit.includes(tpName)) continue;
-
     const tpPrice = tpLevels[i].price;
-
     const tpOnProfitSide = isLong ? tpPrice > state.entry : tpPrice < state.entry;
-    if (!tpOnProfitSide) {
-      actions.push({ action: 'tp-skipped', tpName, reason: 'tp-on-loss-side', tpPrice, entry: state.entry });
-      continue;
+    if (!tpOnProfitSide) continue;
+
+    const touched = isLong ? extreme >= tpPrice : extreme <= tpPrice;
+    if (!touched) continue;
+
+    if (i === finalIdx) { finalTouched = true; continue; }
+
+    if (!state.tpsHit.includes(tpName)) {
+      state.tpsHit.push(tpName);
+      actions.push({ action: 'tp-touched', tpName, tpPrice });
+      const rMult = Math.abs(tpPrice - state.entry) / initialSLForR;
+      const secured = signedDollarsForLeg(asset, state.entry, tpPrice, direction, position.volume);
+      await pushCommentary(asset, 'tp-hit',
+        `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} (${rMult.toFixed(1)}R) — locking in on full position`);
+      try {
+        const ridingTo = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
+        await sendOnce(`tphit:${position.id}:${tpName}`,
+          `\u{1F3AF} <b>${tpName} HIT \u2014 ${asset.toUpperCase()}</b>\n\n` +
+          `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} \u2022 locked in on full position\n` +
+          `${tpName}: <code>${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)\n` +
+          (secured != null ? `Protected: <b>${secured >= 0 ? '+' : ''}$${secured.toFixed(2)}</b> if stopped now\n` : '') +
+          (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
+      } catch (_) {}
     }
-
-    const hit = isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice;
-    if (!hit) continue;
-
-    const closingFinalTP = (i === tpLevels.length - 1);
-
-    if (closingFinalTP) {
-      // Final target reached — close whatever remains. The broker TP normally
-      // does this first; this is a backstop in case it was cleared/rejected.
-      const lotToClose = position.volume;
-      const closeResult = await partialClose(position.id, lotToClose);
-      if (closeResult.ok) {
-        state.tpsHit.push(tpName);
-        state.partialCloses.push({ tpName, lotClosed: lotToClose, atPrice: tpPrice, ts: Date.now() });
-        actions.push({ action: 'final-tp-close', tpName, lotClosed: lotToClose, ok: true });
-        await pushCommentary(asset, 'tp-hit',
-          `${tpName} (final) hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed full ${lotToClose} lot`);
-      } else {
-        actions.push({ action: 'final-tp-close', tpName, error: closeResult.error });
-      }
-      await setPositionState(position.id, state);
-      break;
-    }
-
-    // ── Non-final TP touched ──
-    if (USE_PARTIALS) {
-      // Legacy scale-out (disabled by default): close 33% here.
-      let lotToClose = Math.max(0.01, Math.round(state.originalLot * 0.33 * 100) / 100);
-      if (lotToClose > position.volume) lotToClose = position.volume;
-      const closeResult = await partialClose(position.id, lotToClose);
-      if (!closeResult.ok) {
-        actions.push({ action: 'partial-close', tpName, error: closeResult.error });
-        await setPositionState(position.id, state);
-        break;
-      }
-      state.partialCloses.push({ tpName, lotClosed: lotToClose, atPrice: tpPrice, ts: Date.now() });
-      actions.push({ action: 'partial-close', tpName, lotClosed: lotToClose, ok: true });
-    }
-
-    // All-or-nothing: do NOT close — only ratchet the SL up to this TP, keeping
-    // the broker TP parked at the final target.
-    state.tpsHit.push(tpName);
-    const newSL = tpPrice;
-    const modifyResult = await modifyPosition(position.id, newSL, finalTPPrice, asset);
-    if (modifyResult.ok) {
-      state.slMoves.push({ atTP: tpName, newSL, ts: Date.now() });
-      actions.push({ action: 'sl-move', newSL, ok: true });
-      await pushCommentary(asset, 'sl-moved',
-        `SL ratcheted to ${tpName} @ ${newSL.toFixed(newSL > 100 ? 2 : 5)} (locked on full position)`);
-    } else {
-      actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: newSL });
-      await pushCommentary(asset, 'sl-move-rejected',
-        `SL ratchet to ${tpName} rejected by broker: ${modifyResult.error.slice(0, 80)}`);
-    }
-
-    await setPositionState(position.id, state);
-    break;
   }
+
+  // ─── FINAL TP backstop close ─────────────────────────────────────
+  const finalName = `TP${finalIdx + 1}`;
+  if (finalTouched && !state.tpsHit.includes(finalName)) {
+    const tpPrice = tpLevels[finalIdx].price;
+    const closeResult = await partialClose(position.id, position.volume);
+    if (closeResult.ok) {
+      state.tpsHit.push(finalName);
+      state.partialCloses.push({ tpName: finalName, lotClosed: position.volume, atPrice: tpPrice, ts: Date.now() });
+      actions.push({ action: 'final-tp-close', tpName: finalName, ok: true });
+      await pushCommentary(asset, 'tp-hit',
+        `${finalName} (final) hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} — closed full ${position.volume} lot`);
+    } else {
+      actions.push({ action: 'final-tp-close', tpName: finalName, error: closeResult.error });
+    }
+    await setPositionState(position.id, state);
+  }
+
+  // ─── SL RATCHET (clamped to a broker-valid level) ────────────────
+  // Move the SL to the HIGHEST touched TP that is still a VALID stop — strictly
+  // below (long) / above (short) the live price by the min-stop buffer. If a wick
+  // touched TP2 but price fell back below it, we lock the best still-valid rung
+  // (e.g. TP1, else breakeven) instead of getting rejected for an invalid stop.
+  const pipSz = (assetMeta && assetMeta.pipSize) || (currentPrice > 100 ? 0.01 : 0.0001);
+  const stopBuffer = Math.max(pipSz * 8, initialSLForR * 0.05);
+  const curSL = (typeof position.stopLoss === 'number' && position.stopLoss > 0) ? position.stopLoss : null;
+
+  const labeled = [];
+  for (const n of state.tpsHit) {
+    if (n === finalName) continue;
+    const idx = parseInt(n.slice(2), 10) - 1;
+    if (tpLevels[idx]) labeled.push({ name: n, price: tpLevels[idx].price });
+  }
+  labeled.sort((a, b) => isLong ? b.price - a.price : a.price - b.price);
+  // breakeven floor only applies once a TP has actually been hit (so a trade is
+  // never stopped at BE on noise before it has reached its first target).
+  if (state.tpsHit.some((n) => n !== finalName)) labeled.push({ name: 'breakeven', price: state.entry });
+
+  let chosen = null;
+  for (const c of labeled) {
+    const valid    = isLong ? c.price <= currentPrice - stopBuffer : c.price >= currentPrice + stopBuffer;
+    const improves = curSL == null ? true : (isLong ? c.price > curSL : c.price < curSL);
+    if (valid && improves) { chosen = c; break; }
+  }
+
+  if (chosen) {
+    const modifyResult = await modifyPosition(position.id, chosen.price, finalTPPrice, asset);
+    if (modifyResult.ok) {
+      state.slMoves.push({ atTP: chosen.name, newSL: chosen.price, ts: Date.now() });
+      actions.push({ action: 'sl-move', newSL: chosen.price, at: chosen.name, ok: true });
+      await pushCommentary(asset, 'sl-moved',
+        `SL ratcheted to ${chosen.name} @ ${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)} (locked on full position)`);
+    } else {
+      actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: chosen.price });
+      await pushCommentary(asset, 'sl-move-rejected',
+        `SL ratchet to ${chosen.name} rejected: ${modifyResult.error.slice(0, 80)}`);
+    }
+  }
+
+  await setPositionState(position.id, state);
 
   // ─── TRAILING STOP ──────────────
   const initialSLDistance = Math.abs(state.entry - matchedPending.slPrice);
@@ -417,6 +468,9 @@ async function detectAndProcessClosed(currentOpenIds) {
       // Only trades placed after this ships will have it (older ones = null).
       entryType: matchedPending.entryType || null,
       execKind: matchedPending.execKind || null,
+      // v14.1: which TP rungs the trade reached (for per-template TP-hit stats)
+      tpsHit: state.tpsHit || [],
+      maxTP: (state.tpsHit || []).reduce((m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0),
       session: matchedPending.setup.session || getCurrentSession(),
       contributingTactics: matchedPending.setup.contributingTactics,
       timeframesInPlay: matchedPending.setup.timeframesInPlay,
