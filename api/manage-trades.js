@@ -195,24 +195,31 @@ async function managePosition(position) {
   );
 
   if (!matchedPending) {
-    const isGold = position.openPrice > 100;
-    const priceTolerance = isGold ? 2.0 : position.openPrice * 0.0005;
-
-    matchedPending = pendingList.find((p) => {
+    // Candidate setups for THIS asset: placed/filled, same direction, TPs on the
+    // correct side of the ACTUAL fill, and not already linked to a different
+    // position. Entry-price proximity is NOT required — market-order slippage
+    // routinely moves the fill a few points off the plan (e.g. gold planned 4183,
+    // filled 4180.70 = 2.30 off, which used to exceed the 2.0 tolerance and orphan
+    // the trade so it was never managed). Only one position per asset is allowed,
+    // so an asset+direction match is unambiguous.
+    const entry = position.openPrice;
+    const candidates = pendingList.filter((p) => {
       if (p.status !== 'placed' && p.status !== 'filled') return false;
-      if (p.setup.direction !== direction) return false;
-      if (Math.abs(p.plannedEntry - position.openPrice) > priceTolerance) return false;
-
-      const entry = position.openPrice;
+      if (p.positionId && p.positionId !== position.id) return false; // belongs to another position
+      if (!p.setup || p.setup.direction !== direction) return false;
       const tps = p.tpLevels || [];
       if (tps.length === 0) return false;
-      const tpsCorrectSide = tps.every((tp) =>
-        isLong ? tp.price > entry : tp.price < entry
-      );
-      if (!tpsCorrectSide) return false;
-
-      return true;
+      return tps.every((tp) => (isLong ? tp.price > entry : tp.price < entry));
     });
+
+    if (candidates.length === 1) {
+      matchedPending = candidates[0];
+    } else if (candidates.length > 1) {
+      // tie-break by the setup whose planned entry is closest to the actual fill
+      matchedPending = candidates.reduce((best, p) =>
+        Math.abs(p.plannedEntry - entry) < Math.abs(best.plannedEntry - entry) ? p : best
+      );
+    }
   }
 
   if (matchedPending && matchedPending.status === 'placed') {
