@@ -169,14 +169,14 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // (Judas, AM IFVG, Reaction IFVG, Unicorn, Turtle Soup) finally get tested.
   // NOTE: requires a HEDGING account (multiple positions per symbol). On a NETTING
   // account a 2nd order on the same symbol nets against the first.
-  const _known = Object.keys(templateLabelMap || {}).sort((a, b) => b.length - a.length);
+  const _known = Object.keys(TEMPLATE_LABELS).sort((a, b) => b.length - a.length);
   const _tmplFromComment = (c) => {
     if (!c) return null;
     const m = c.match(/^QB-V1[23]-(.+)$/);
     if (!m) return null;
     const rest = m[1];
     for (const t of _known) { if (rest === t || rest.startsWith(t + '-')) return t; }
-    return null;
+    return rest.split('-')[0]; // fallback: first segment, so an unknown template still dedups
   };
   const existing = (Array.isArray(positions) ? positions : []).find((pos) => {
     const sameInstrument = (pos.assetId === assetId) ||
