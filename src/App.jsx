@@ -1098,9 +1098,17 @@ function PositionRow({ pos }) {
     }}>
       <div>
         <span style={{ color: "var(--qb-text-hi)", fontWeight: 600 }}>{(pos.assetId || pos.symbol || "?").toUpperCase()}</span>
-        <span style={{ color: pos.type === 0 ? "var(--qb-ok)" : "var(--qb-bad)", marginLeft: 6, fontSize: 10 }}>
-          {pos.type === 0 ? "BUY" : "SELL"}
-        </span>
+        {(() => {
+          // MetaAPI sends type as the string 'POSITION_TYPE_BUY' / '..._SELL'
+          // (not the number 0/1). Handle both forms + a direction fallback.
+          const isBuy = pos.type === 0 || pos.type === "POSITION_TYPE_BUY" ||
+                        String(pos.type).toUpperCase().includes("BUY") || pos.direction === "LONG";
+          return (
+            <span style={{ color: isBuy ? "var(--qb-ok)" : "var(--qb-bad)", marginLeft: 6, fontSize: 10 }}>
+              {isBuy ? "BUY" : "SELL"}
+            </span>
+          );
+        })()}
       </div>
       <span style={{ color: "var(--qb-text-mid)", textAlign: "right" }}>{(pos.volume || 0).toFixed(2)}</span>
       <span style={{ color: "var(--qb-text-mid)", textAlign: "right" }}>@ {fmtPrice(pos.openPrice, pos.assetId)}</span>
