@@ -147,6 +147,38 @@ async function fetchClosedTradesRecent() {
   }
 }
 
+// v14.1: REAL today realized P&L straight from the broker's closed deals — so
+// the dashboard can never diverge from MT5 again. Sums profit+commission+swap of
+// today's deals, excluding balance/credit entries (deposits).
+async function getTodayRealized() {
+  const token = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  const region = process.env.METAAPI_REGION || 'london';
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+  const since = start.toISOString();
+  const until = now.toISOString();
+  const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/history-deals/time/${since}/${until}`;
+  try {
+    const resp = await fetch(url, { headers: { 'auth-token': token, 'Accept': 'application/json' } });
+    if (!resp.ok) return { ok: false, error: `deals ${resp.status}` };
+    const deals = await resp.json();
+    const list = Array.isArray(deals) ? deals : [];
+    let realized = 0, trades = 0, wins = 0, losses = 0;
+    for (const d of list) {
+      if (d.type === 'DEAL_TYPE_BALANCE' || d.type === 'DEAL_TYPE_CREDIT') continue; // skip deposits
+      realized += (d.profit || 0) + (d.commission || 0) + (d.swap || 0);
+      if (d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT') {
+        trades += 1;
+        if ((d.profit || 0) > 0) wins += 1; else if ((d.profit || 0) < 0) losses += 1;
+      }
+    }
+    return { ok: true, pnl: Math.round(realized * 100) / 100, trades, wins, losses, since, source: 'broker-deals' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // =================================================================
 // POSITION STATE TRACKING
 // =================================================================
@@ -293,37 +325,32 @@ async function managePosition(position) {
   const initialSLForR = Math.abs(state.entry - matchedPending.slPrice) || 1;
   const finalIdx = tpLevels.length - 1;
 
-  // ─── TP TOUCH DETECTION (wick-aware) ─────────────────────────────
-  // Record every non-final TP the price has TOUCHED since open, firing a
-  // Telegram for each newly-touched rung. The SL ratchet happens once, after.
+  // ─── TP TOUCH DETECTION (wick-aware, CONFIRMED) ──────────────────
+  // A TP counts as hit only when price trades a confirmation buffer BEYOND it —
+  // not a bare wick that instantly reverses. (A 1-tick stab that bounces used to
+  // record a "hit" and yank the stop to breakeven, strangling a winner.) The
+  // notification is DEFERRED until after the ratchet so it reports the REAL stop.
+  const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || 0.10); // 0.1R beyond the TP
   let finalTouched = false;
+  const newlyHit = [];
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
     const tpPrice = tpLevels[i].price;
     const tpOnProfitSide = isLong ? tpPrice > state.entry : tpPrice < state.entry;
     if (!tpOnProfitSide) continue;
 
-    const touched = isLong ? extreme >= tpPrice : extreme <= tpPrice;
-    if (!touched) continue;
+    const confirmed = isLong ? extreme >= tpPrice + confirmBuffer : extreme <= tpPrice - confirmBuffer;
+    if (!confirmed) continue;
 
     if (i === finalIdx) { finalTouched = true; continue; }
 
     if (!state.tpsHit.includes(tpName)) {
       state.tpsHit.push(tpName);
-      actions.push({ action: 'tp-touched', tpName, tpPrice });
+      actions.push({ action: 'tp-hit', tpName, tpPrice });
       const rMult = Math.abs(tpPrice - state.entry) / initialSLForR;
-      const secured = signedDollarsForLeg(asset, state.entry, tpPrice, direction, position.volume);
+      newlyHit.push({ tpName, tpPrice, rMult });
       await pushCommentary(asset, 'tp-hit',
-        `${tpName} hit @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} (${rMult.toFixed(1)}R) — locking in on full position`);
-      try {
-        const ridingTo = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
-        await sendOnce(`tphit:${position.id}:${tpName}`,
-          `\u{1F3AF} <b>${tpName} HIT \u2014 ${asset.toUpperCase()}</b>\n\n` +
-          `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} \u2022 locked in on full position\n` +
-          `${tpName}: <code>${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)\n` +
-          (secured != null ? `Protected: <b>${secured >= 0 ? '+' : ''}$${secured.toFixed(2)}</b> if stopped now\n` : '') +
-          (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
-      } catch (_) {}
+        `${tpName} confirmed @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} (${rMult.toFixed(1)}R)`);
     }
   }
 
@@ -346,9 +373,9 @@ async function managePosition(position) {
 
   // ─── SL RATCHET (clamped to a broker-valid level) ────────────────
   // Move the SL to the HIGHEST touched TP that is still a VALID stop — strictly
-  // below (long) / above (short) the live price by the min-stop buffer. If a wick
-  // touched TP2 but price fell back below it, we lock the best still-valid rung
-  // (e.g. TP1, else breakeven) instead of getting rejected for an invalid stop.
+  // below (long) / above (short) the live price by the min-stop buffer. If price
+  // pulled back past the touched TP, lock the best still-valid rung (TP1, else
+  // breakeven) instead of getting rejected for an invalid stop.
   const pipSz = (assetMeta && assetMeta.pipSize) || (currentPrice > 100 ? 0.01 : 0.0001);
   const stopBuffer = Math.max(pipSz * 8, initialSLForR * 0.05);
   const curSL = (typeof position.stopLoss === 'number' && position.stopLoss > 0) ? position.stopLoss : null;
@@ -360,8 +387,7 @@ async function managePosition(position) {
     if (tpLevels[idx]) labeled.push({ name: n, price: tpLevels[idx].price });
   }
   labeled.sort((a, b) => isLong ? b.price - a.price : a.price - b.price);
-  // breakeven floor only applies once a TP has actually been hit (so a trade is
-  // never stopped at BE on noise before it has reached its first target).
+  // breakeven floor only applies once a TP has actually been hit.
   if (state.tpsHit.some((n) => n !== finalName)) labeled.push({ name: 'breakeven', price: state.entry });
 
   let chosen = null;
@@ -370,6 +396,9 @@ async function managePosition(position) {
     const improves = curSL == null ? true : (isLong ? c.price > curSL : c.price < curSL);
     if (valid && improves) { chosen = c; break; }
   }
+
+  // the SL level actually protecting the position after this tick
+  const effectiveSL = chosen ? chosen.price : curSL;
 
   if (chosen) {
     const modifyResult = await modifyPosition(position.id, chosen.price, finalTPPrice, asset);
@@ -383,6 +412,30 @@ async function managePosition(position) {
       await pushCommentary(asset, 'sl-move-rejected',
         `SL ratchet to ${chosen.name} rejected: ${modifyResult.error.slice(0, 80)}`);
     }
+  }
+
+  // ─── HONEST TP-hit notification (AFTER the ratchet) ──────────────
+  // Reports where the stop ACTUALLY is now and the REAL protected $ from that
+  // level — never the ideal TP price. So "TP1 hit" can't claim +$73 while the
+  // stop sits at breakeven.
+  for (const h of newlyHit) {
+    try {
+      const ridingTo = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
+      const protectedAt = effectiveSL != null
+        ? signedDollarsForLeg(asset, state.entry, effectiveSL, direction, position.volume)
+        : null;
+      const lockMsg = chosen
+        ? (chosen.name === 'breakeven'
+            ? `Stop \u2192 <b>breakeven</b> (price pulled back past ${h.tpName})`
+            : `Stop locked at <b>${chosen.name}</b> <code>${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}</code>`)
+        : `Stop unchanged (no valid lock yet)`;
+      await sendOnce(`tphit:${position.id}:${h.tpName}`,
+        `\u{1F3AF} <b>${h.tpName} HIT \u2014 ${asset.toUpperCase()}</b>\n\n` +
+        `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} \u00b7 ${h.tpName} @ <code>${h.tpPrice.toFixed(h.tpPrice > 100 ? 2 : 5)}</code> (${h.rMult.toFixed(1)}R)\n` +
+        `${lockMsg}\n` +
+        (protectedAt != null ? `Protected now: <b>${protectedAt >= 0 ? '+' : ''}$${protectedAt.toFixed(2)}</b> if stopped\n` : '') +
+        (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
+    } catch (_) {}
   }
 
   await setPositionState(position.id, state);
@@ -588,6 +641,10 @@ async function runManageTick() {
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   try {
+    const action = (req.query && req.query.action) || '';
+    if (action === 'today-pnl') {
+      return res.status(200).json(await getTodayRealized());
+    }
     const result = await runManageTick();
     return res.status(200).json(result);
   } catch (e) {
@@ -596,4 +653,5 @@ module.exports = async (req, res) => {
 };
 
 module.exports.runManageTick = runManageTick;
+module.exports.getTodayRealized = getTodayRealized;
 module.exports.managePosition = managePosition;

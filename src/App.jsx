@@ -343,8 +343,12 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
     let alive = true;
     const tick = async () => {
       try {
-        const r = await fetch(API("rules?action=daily-pnl")).then((res) => res.json());
-        if (alive && r?.pnl != null) setDailyPnL(r.pnl);
+        // v14.1: source "Today" from the broker's actual closed deals (matches MT5).
+        const r = await fetch(API("manage-trades?action=today-pnl")).then((res) => res.json());
+        if (alive && r?.ok && typeof r.pnl === "number") { setDailyPnL(r.pnl); return; }
+        // fallback to the internal counter only if the broker fetch fails
+        const r2 = await fetch(API("rules?action=daily-pnl")).then((res) => res.json());
+        if (alive && r2?.pnl != null) setDailyPnL(r2.pnl);
       } catch (_) {}
     };
     tick();

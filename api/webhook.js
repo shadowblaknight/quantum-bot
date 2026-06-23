@@ -162,16 +162,33 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     getCapitalFast(),
   ]);
 
-  // 7. Position-already-open check
+  // 7. Position-already-open check — TEMPLATE-AWARE (v14 testing mode).
+  // Block only a SECOND position of the SAME template on the same instrument.
+  // A DIFFERENT template is allowed to fire even if the instrument already has an
+  // open position — so templates the old "any open position" block was starving
+  // (Judas, AM IFVG, Reaction IFVG, Unicorn, Turtle Soup) finally get tested.
+  // NOTE: requires a HEDGING account (multiple positions per symbol). On a NETTING
+  // account a 2nd order on the same symbol nets against the first.
+  const _known = Object.keys(templateLabelMap || {}).sort((a, b) => b.length - a.length);
+  const _tmplFromComment = (c) => {
+    if (!c) return null;
+    const m = c.match(/^QB-V1[23]-(.+)$/);
+    if (!m) return null;
+    const rest = m[1];
+    for (const t of _known) { if (rest === t || rest.startsWith(t + '-')) return t; }
+    return null;
+  };
   const existing = (Array.isArray(positions) ? positions : []).find((pos) => {
-    return (pos.assetId === assetId) ||
-           (pos.symbol && pineTicker && pos.symbol.toUpperCase().includes(pineTicker));
+    const sameInstrument = (pos.assetId === assetId) ||
+      (pos.symbol && pineTicker && pos.symbol.toUpperCase().includes(pineTicker));
+    if (!sameInstrument) return false;
+    return _tmplFromComment(pos.comment) === p.template; // only the SAME template blocks
   });
   if (existing) {
     return bgSkip({
       dedupeKey, pineTicker, template: p.template,
-      reason: 'position-already-open',
-      extras: { assetId, positionTicket: existing.id }, notify: true, // QB-DIAG: was false
+      reason: 'same-template-already-open',
+      extras: { assetId, positionTicket: existing.id }, notify: true,
     });
   }
 
