@@ -15,7 +15,7 @@ const { getAssetById } = require('./asset-registry');
 const { applyRulesToSignal, logActivity, getTodaysPnL } = require('./rules-store');
 const { addWatchedSetup } = require('./watched-setups');
 const { templateLabelMap, REACTION_TEMPLATES } = require('./_templates');
-const { evaluateReaction } = require('./reaction-filter');
+const { evaluateReactionMTF, tfSetForMode } = require('./reaction-filter');
 const TEMPLATE_LABELS = templateLabelMap();
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -209,39 +209,6 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     return;
   }
 
-  // 10b. v14.2 — REACTION confirmation filter. Reaction (coil break) is the
-  // highest-firing template; the old version entered on the blind zone tap. This
-  // gate requires the real entry model: a liquidity sweep, then a CHoCH/MSS on
-  // the entry timeframe, bias/location/session-gated. It can only SKIP — never
-  // place — so it just makes reactions more selective. Other templates untouched.
-  if (REACTION_TEMPLATES.includes(p.template)) {
-    let rxnCandles = [];
-    try {
-      const raw = String(p.timeframe || '');
-      const tf = /^\d+$/.test(raw)
-        ? (parseInt(raw, 10) >= 60 ? `${Math.round(parseInt(raw, 10) / 60)}h` : `${raw}m`)
-        : (raw || '5m');
-      const cr = await withTimeout(fetchCandles(assetId, tf, 60), 2000, { candles: [] });
-      rxnCandles = (cr && cr.candles) || [];
-    } catch (_) {}
-    const verdict = evaluateReaction({
-      template: p.template, direction: p.direction, entry,
-      session: p.session, htfBiasAlign: p.htfBiasAlign, swept: p.swept,
-    }, rxnCandles);
-    if (verdict.applies && !verdict.pass) {
-      await logActivity({
-        type: 'reaction-filtered', asset: assetId, template: p.template,
-        direction: p.direction, reason: verdict.reason, checks: verdict.checks,
-      });
-      return bgSkip({
-        dedupeKey, pineTicker, template: p.template,
-        reason: `reaction-filter:${verdict.reason}`,
-        extras: { assetId, direction: p.direction, checks: verdict.checks },
-        notify: true,
-      });
-    }
-  }
-
   // 11. RULES ENGINE
   const todaysPnL = await getTodaysPnL();
   const managedOpen = (positions || []).filter((pos) =>
@@ -316,6 +283,42 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   }
 
   // \u2550\u2550\u2550\u2550\u2550\u2550\u2550 AUTO MODE \u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  // 11b. v14.3 — REACTION multi-timeframe confirmation. Mode-aware: SWING uses
+  // [D1,H4] bias + [H1,M15] trigger; DAY uses [H4,H1] bias + [M15,M5] trigger.
+  // Each pair is OR-combined (no single timeframe blocks the other); bias is a
+  // vote, not a veto. Gate only SKIPS — never places. Runs here so the mode
+  // (decision.activeMode) is known.
+  if (REACTION_TEMPLATES.includes(p.template)) {
+    const rxnMode = decision.activeMode === 'sleep' ? 'swing' : 'day';
+    const TFS = tfSetForMode(rxnMode);
+    const grab = async (tf, n) => {
+      try {
+        const r = await withTimeout(fetchCandles(assetId, tf, n), 2500, { candles: [] });
+        return (r && r.candles) || [];
+      } catch (_) { return []; }
+    };
+    const [b0, b1, t0, t1] = await Promise.all([
+      grab(TFS.bias[0], 40), grab(TFS.bias[1], 40),
+      grab(TFS.trigger[0], 60), grab(TFS.trigger[1], 60),
+    ]);
+    const verdict = evaluateReactionMTF(
+      { template: p.template, direction: p.direction, entry, session: p.session, mode: rxnMode, htfBiasAlign: p.htfBiasAlign },
+      { biasCandles: [b0, b1], triggerCandles: [t0, t1], combine: 'or' }
+    );
+    if (verdict.applies && !verdict.pass) {
+      await logActivity({
+        type: 'reaction-filtered', asset: assetId, template: p.template,
+        direction: p.direction, reason: verdict.reason, mode: rxnMode, checks: verdict.checks,
+      });
+      return bgSkip({
+        dedupeKey, pineTicker, template: p.template,
+        reason: `reaction-filter:${verdict.reason}`,
+        extras: { assetId, direction: p.direction, mode: rxnMode, checks: verdict.checks },
+        notify: true,
+      });
+    }
+  }
+
   const finalLot = decision.finalLot;
   const finalSL = decision.finalSL;
   const finalTP1 = decision.finalTP1 != null ? decision.finalTP1 : tp1;

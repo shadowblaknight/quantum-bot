@@ -299,25 +299,25 @@ async function notifyTradeClosed({ asset, direction, totalPnL, tpsHit, positionI
     const label = tpCount >= 4 ? 'GRAND SLAM' : tpCount === 3 ? 'Strong Win' : tpCount === 2 ? 'Solid Win' : 'Win';
     const icon  = tpCount >= 4 ? '🎯💎' : tpCount === 3 ? '🏆' : tpCount === 2 ? '✅' : '💰';
     header = `${icon} <b>${label} — ${assetLabel(asset)}</b>`;
-    body = `${tpTag ? tpTag + '\\n' : ''}${dirArrow(direction)}\\n` +
-           `Total: <b>${formatMoney(totalPnL)}</b>\\n` +
+    body = `${tpTag ? tpTag + '\n' : ''}${dirArrow(direction)}\n` +
+           `Total: <b>${formatMoney(totalPnL)}</b>\n` +
            `Duration: ${durationStr}` +
-           (tpCount >= 4 ? `\\n\\nAlhamdulillah. 🤲` : '');
+           (tpCount >= 4 ? `\n\nAlhamdulillah. 🤲` : '');
   } else if (isLoss) {
     header = `❌ <b>Loss — ${assetLabel(asset)}</b>`;
-    body = (tpTag ? `${tpTag}, but price reversed past the stop\\n` : '') +
-           `${dirArrow(direction)}\\n` +
-           `Loss: <b>${formatMoney(totalPnL)}</b>\\n` +
-           `Duration: ${durationStr}\\n\\n` +
+    body = (tpTag ? `${tpTag}, but price reversed past the stop\n` : '') +
+           `${dirArrow(direction)}\n` +
+           `Loss: <b>${formatMoney(totalPnL)}</b>\n` +
+           `Duration: ${durationStr}\n\n` +
            `<i>Risk respected. Next setup.</i>`;
   } else {
     // scratch / breakeven (|pnl| <= 0.5)
     header = `⚖️ <b>Breakeven — ${assetLabel(asset)}</b>`;
-    body = (tpTag ? `${tpTag}, but price reversed before it could be banked\\n` : '') +
-           `${dirArrow(direction)}\\n` +
-           `Net: <b>${formatMoney(totalPnL)}</b>\\n` +
+    body = (tpTag ? `${tpTag}, but price reversed before it could be banked\n` : '') +
+           `${dirArrow(direction)}\n` +
+           `Net: <b>${formatMoney(totalPnL)}</b>\n` +
            `Duration: ${durationStr}` +
-           (tpCount > 0 ? `\\n\\n<i>Note: only partial scale-outs can bank a tagged TP that reverses.</i>` : '');
+           (tpCount > 0 ? `\n\n<i>Note: only partial scale-outs can bank a tagged TP that reverses.</i>` : '');
   }
 
   const text = `${header}\\n\\n${body}`;
