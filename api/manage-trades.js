@@ -332,7 +332,6 @@ async function managePosition(position) {
   // notification is DEFERRED until after the ratchet so it reports the REAL stop.
   const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || 0.10); // 0.1R beyond the TP
   let finalTouched = false;
-  const newlyHit = [];
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
     const tpPrice = tpLevels[i].price;
@@ -348,7 +347,6 @@ async function managePosition(position) {
       state.tpsHit.push(tpName);
       actions.push({ action: 'tp-hit', tpName, tpPrice });
       const rMult = Math.abs(tpPrice - state.entry) / initialSLForR;
-      newlyHit.push({ tpName, tpPrice, rMult });
       await pushCommentary(asset, 'tp-hit',
         `${tpName} confirmed @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} (${rMult.toFixed(1)}R)`);
     }
@@ -371,34 +369,32 @@ async function managePosition(position) {
     await setPositionState(position.id, state);
   }
 
-  // ─── SL RATCHET (clamped to a broker-valid level) ────────────────
-  // Move the SL to the HIGHEST touched TP that is still a VALID stop — strictly
-  // below (long) / above (short) the live price by the min-stop buffer. If price
-  // pulled back past the touched TP, lock the best still-valid rung (TP1, else
-  // breakeven) instead of getting rejected for an invalid stop.
+  // ─── SL RATCHET — lock the deepest TP price has actually reached ──
+  // "TP hit -> SL at that TP." NO entry-breakeven, ever: the stop only moves to a
+  // TP level price has genuinely traded through, and only when that level is a
+  // broker-valid stop (beyond market by the min-stop buffer). If price has retraced
+  // above every hit TP, the stop simply WAITS where it is — it never hands the win
+  // back to entry. A reversal into a locked TP is a real win at that TP.
   const pipSz = (assetMeta && assetMeta.pipSize) || (currentPrice > 100 ? 0.01 : 0.0001);
   const stopBuffer = Math.max(pipSz * 8, initialSLForR * 0.05);
   const curSL = (typeof position.stopLoss === 'number' && position.stopLoss > 0) ? position.stopLoss : null;
 
-  const labeled = [];
+  // hit TP rungs (exclude the final/close rung), deepest-profit first
+  const hitRungs = [];
   for (const n of state.tpsHit) {
     if (n === finalName) continue;
     const idx = parseInt(n.slice(2), 10) - 1;
-    if (tpLevels[idx]) labeled.push({ name: n, price: tpLevels[idx].price });
+    if (tpLevels[idx]) hitRungs.push({ name: n, price: tpLevels[idx].price });
   }
-  labeled.sort((a, b) => isLong ? b.price - a.price : a.price - b.price);
-  // breakeven floor only applies once a TP has actually been hit.
-  if (state.tpsHit.some((n) => n !== finalName)) labeled.push({ name: 'breakeven', price: state.entry });
+  hitRungs.sort((a, b) => (isLong ? b.price - a.price : a.price - b.price));
 
+  // deepest hit rung that is a valid stop right now AND improves the current SL
   let chosen = null;
-  for (const c of labeled) {
+  for (const c of hitRungs) {
     const valid    = isLong ? c.price <= currentPrice - stopBuffer : c.price >= currentPrice + stopBuffer;
     const improves = curSL == null ? true : (isLong ? c.price > curSL : c.price < curSL);
     if (valid && improves) { chosen = c; break; }
   }
-
-  // the SL level actually protecting the position after this tick
-  const effectiveSL = chosen ? chosen.price : curSL;
 
   if (chosen) {
     const modifyResult = await modifyPosition(position.id, chosen.price, finalTPPrice, asset);
@@ -406,36 +402,27 @@ async function managePosition(position) {
       state.slMoves.push({ atTP: chosen.name, newSL: chosen.price, ts: Date.now() });
       actions.push({ action: 'sl-move', newSL: chosen.price, at: chosen.name, ok: true });
       await pushCommentary(asset, 'sl-moved',
-        `SL ratcheted to ${chosen.name} @ ${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)} (locked on full position)`);
+        `SL locked at ${chosen.name} @ ${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}`);
+      // Telegram ONLY when the lock deepens to a NEW TP — reporting the REAL
+      // guaranteed dollars from that stop level (never an ideal/unrealized figure).
+      if (state.lockedTP !== chosen.name) {
+        state.lockedTP = chosen.name;
+        const rMult = Math.abs(chosen.price - state.entry) / initialSLForR;
+        const lockedDollars = signedDollarsForLeg(asset, state.entry, chosen.price, direction, position.volume);
+        const ridingTo = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
+        try {
+          await sendOnce(`tplock:${position.id}:${chosen.name}`,
+            `\u{1F3AF} <b>${chosen.name} LOCKED \u2014 ${asset.toUpperCase()}</b>\n\n` +
+            `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} \u00b7 stop now at ${chosen.name} <code>${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)\n` +
+            (lockedDollars != null ? `Locked in: <b>${lockedDollars >= 0 ? '+' : ''}$${lockedDollars.toFixed(2)}</b> guaranteed if stopped\n` : '') +
+            (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
+        } catch (_) {}
+      }
     } else {
       actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: chosen.price });
       await pushCommentary(asset, 'sl-move-rejected',
-        `SL ratchet to ${chosen.name} rejected: ${modifyResult.error.slice(0, 80)}`);
+        `SL lock to ${chosen.name} rejected (retries next tick): ${modifyResult.error.slice(0, 70)}`);
     }
-  }
-
-  // ─── HONEST TP-hit notification (AFTER the ratchet) ──────────────
-  // Reports where the stop ACTUALLY is now and the REAL protected $ from that
-  // level — never the ideal TP price. So "TP1 hit" can't claim +$73 while the
-  // stop sits at breakeven.
-  for (const h of newlyHit) {
-    try {
-      const ridingTo = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
-      const protectedAt = effectiveSL != null
-        ? signedDollarsForLeg(asset, state.entry, effectiveSL, direction, position.volume)
-        : null;
-      const lockMsg = chosen
-        ? (chosen.name === 'breakeven'
-            ? `Stop \u2192 <b>breakeven</b> (price pulled back past ${h.tpName})`
-            : `Stop locked at <b>${chosen.name}</b> <code>${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}</code>`)
-        : `Stop unchanged (no valid lock yet)`;
-      await sendOnce(`tphit:${position.id}:${h.tpName}`,
-        `\u{1F3AF} <b>${h.tpName} HIT \u2014 ${asset.toUpperCase()}</b>\n\n` +
-        `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} \u00b7 ${h.tpName} @ <code>${h.tpPrice.toFixed(h.tpPrice > 100 ? 2 : 5)}</code> (${h.rMult.toFixed(1)}R)\n` +
-        `${lockMsg}\n` +
-        (protectedAt != null ? `Protected now: <b>${protectedAt >= 0 ? '+' : ''}$${protectedAt.toFixed(2)}</b> if stopped\n` : '') +
-        (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
-    } catch (_) {}
   }
 
   await setPositionState(position.id, state);

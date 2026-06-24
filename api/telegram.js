@@ -290,59 +290,37 @@ async function notifyTradeClosed({ asset, direction, totalPnL, tpsHit, positionI
   let header;
   let body;
 
-  if (tpCount === 4) {
-    // Grand slam — all 4 TPs hit
-    header = `🎯💎 <b>GRAND SLAM — ${assetLabel(asset)}</b>`;
-    body = `All 4 TPs swept. Maximum extraction achieved.\n\n` +
-           `${dirArrow(direction)}\n` +
-           `Total: <b>${formatMoney(totalPnL)}</b>\n` +
-           `Duration: ${durationStr}\n\n` +
-           `Alhamdulillah. 🤲`;
-  } else if (tpCount === 3) {
-    header = `🏆 <b>Strong Win — ${assetLabel(asset)}</b>`;
-    body = `Three TPs hit, trail closed remainder.\n\n` +
-           `${dirArrow(direction)}\n` +
-           `Total: <b>${formatMoney(totalPnL)}</b>\n` +
-           `Duration: ${durationStr}`;
-  } else if (tpCount === 2) {
-    header = `✅ <b>Solid Win — ${assetLabel(asset)}</b>`;
-    body = `Two TPs secured.\n\n` +
-           `${dirArrow(direction)}\n` +
-           `Total: <b>${formatMoney(totalPnL)}</b>\n` +
-           `Duration: ${durationStr}`;
-  } else if (tpCount === 1) {
-    if (isWin) {
-      header = `💰 <b>TP1 Win — ${assetLabel(asset)}</b>`;
-      body = `TP1 secured, BE held remainder.\n\n` +
-             `${dirArrow(direction)}\n` +
-             `Total: <b>${formatMoney(totalPnL)}</b>\n` +
-             `Duration: ${durationStr}`;
-    } else {
-      // TP1 hit but ran into BE = breakeven
-      header = `⚖️ <b>Breakeven after TP1 — ${assetLabel(asset)}</b>`;
-      body = `TP1 secured, BE stop tagged on remainder.\n\n` +
-             `${dirArrow(direction)}\n` +
-             `Net: <b>${formatMoney(totalPnL)}</b>\n` +
-             `Duration: ${durationStr}\n\n` +
-             `<i>No loss. Capital preserved.</i>`;
-    }
+  // Outcome is decided by ACTUAL P&L — never by how many TPs were tagged. A trade
+  // can tag TP1/TP2 and still close flat or red when price reverses (all-or-nothing
+  // can't bank a level price pulled back from). TP count only colors a REAL win.
+  const tpTag = tpCount > 0 ? `Tagged ${(tpsHit || []).join(', ')}` : null;
+
+  if (isWin) {
+    const label = tpCount >= 4 ? 'GRAND SLAM' : tpCount === 3 ? 'Strong Win' : tpCount === 2 ? 'Solid Win' : 'Win';
+    const icon  = tpCount >= 4 ? '🎯💎' : tpCount === 3 ? '🏆' : tpCount === 2 ? '✅' : '💰';
+    header = `${icon} <b>${label} — ${assetLabel(asset)}</b>`;
+    body = `${tpTag ? tpTag + '\\n' : ''}${dirArrow(direction)}\\n` +
+           `Total: <b>${formatMoney(totalPnL)}</b>\\n` +
+           `Duration: ${durationStr}` +
+           (tpCount >= 4 ? `\\n\\nAlhamdulillah. 🤲` : '');
+  } else if (isLoss) {
+    header = `❌ <b>Loss — ${assetLabel(asset)}</b>`;
+    body = (tpTag ? `${tpTag}, but price reversed past the stop\\n` : '') +
+           `${dirArrow(direction)}\\n` +
+           `Loss: <b>${formatMoney(totalPnL)}</b>\\n` +
+           `Duration: ${durationStr}\\n\\n` +
+           `<i>Risk respected. Next setup.</i>`;
   } else {
-    // 0 TPs hit
-    if (isLoss) {
-      header = `❌ <b>Loss — ${assetLabel(asset)}</b>`;
-      body = `${dirArrow(direction)}\n` +
-             `Loss: <b>${formatMoney(totalPnL)}</b>\n` +
-             `Duration: ${durationStr}\n\n` +
-             `<i>Risk respected. Next setup.</i>`;
-    } else {
-      header = `— <b>Breakeven — ${assetLabel(asset)}</b>`;
-      body = `${dirArrow(direction)}\n` +
-             `Net: <b>${formatMoney(totalPnL)}</b>\n` +
-             `Duration: ${durationStr}`;
-    }
+    // scratch / breakeven (|pnl| <= 0.5)
+    header = `⚖️ <b>Breakeven — ${assetLabel(asset)}</b>`;
+    body = (tpTag ? `${tpTag}, but price reversed before it could be banked\\n` : '') +
+           `${dirArrow(direction)}\\n` +
+           `Net: <b>${formatMoney(totalPnL)}</b>\\n` +
+           `Duration: ${durationStr}` +
+           (tpCount > 0 ? `\\n\\n<i>Note: only partial scale-outs can bank a tagged TP that reverses.</i>` : '');
   }
 
-  const text = `${header}\n\n${body}`;
+  const text = `${header}\\n\\n${body}`;
   return sendOnce(dedupeKey, text);
 }
 

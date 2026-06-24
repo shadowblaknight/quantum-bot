@@ -8,13 +8,14 @@
 
 const { getRedis, applyCors, roundToPipSize } = require('./_lib');
 const { resolveSymbol } = require('./symbol-resolver');
-const { fetchAccount, fetchPositions } = require('./broker');
+const { fetchAccount, fetchPositions, fetchCandles } = require('./broker');
 const { placeLimitOrder, placeMarketOrder } = require('./execute');
 const { notifyTradePlaced, sendOnce } = require('./telegram');
 const { getAssetById } = require('./asset-registry');
 const { applyRulesToSignal, logActivity, getTodaysPnL } = require('./rules-store');
 const { addWatchedSetup } = require('./watched-setups');
-const { templateLabelMap } = require('./_templates');
+const { templateLabelMap, REACTION_TEMPLATES } = require('./_templates');
+const { evaluateReaction } = require('./reaction-filter');
 const TEMPLATE_LABELS = templateLabelMap();
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -206,6 +207,39 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: `no asset registry for ${assetId}` });
     try { await sendOnce(`diag-noreg:${dedupeKey}`, `\u26a0\ufe0f DIAG \u2014 ${assetId} \u00b7 ${p.template}: no asset registry entry`); } catch (_) {}
     return;
+  }
+
+  // 10b. v14.2 — REACTION confirmation filter. Reaction (coil break) is the
+  // highest-firing template; the old version entered on the blind zone tap. This
+  // gate requires the real entry model: a liquidity sweep, then a CHoCH/MSS on
+  // the entry timeframe, bias/location/session-gated. It can only SKIP — never
+  // place — so it just makes reactions more selective. Other templates untouched.
+  if (REACTION_TEMPLATES.includes(p.template)) {
+    let rxnCandles = [];
+    try {
+      const raw = String(p.timeframe || '');
+      const tf = /^\d+$/.test(raw)
+        ? (parseInt(raw, 10) >= 60 ? `${Math.round(parseInt(raw, 10) / 60)}h` : `${raw}m`)
+        : (raw || '5m');
+      const cr = await withTimeout(fetchCandles(assetId, tf, 60), 2000, { candles: [] });
+      rxnCandles = (cr && cr.candles) || [];
+    } catch (_) {}
+    const verdict = evaluateReaction({
+      template: p.template, direction: p.direction, entry,
+      session: p.session, htfBiasAlign: p.htfBiasAlign, swept: p.swept,
+    }, rxnCandles);
+    if (verdict.applies && !verdict.pass) {
+      await logActivity({
+        type: 'reaction-filtered', asset: assetId, template: p.template,
+        direction: p.direction, reason: verdict.reason, checks: verdict.checks,
+      });
+      return bgSkip({
+        dedupeKey, pineTicker, template: p.template,
+        reason: `reaction-filter:${verdict.reason}`,
+        extras: { assetId, direction: p.direction, checks: verdict.checks },
+        notify: true,
+      });
+    }
   }
 
   // 11. RULES ENGINE
