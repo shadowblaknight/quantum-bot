@@ -534,6 +534,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         {/* ─── v14.1 · TP reach by template (full width) ─── */}
         <TpHitPanel />
+        <TradeDataPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -1913,6 +1914,145 @@ function TpHitPanel({ gridColumn = "1 / 4" }) {
   );
 }
 
+// ─── v14.3 · Trade Data manager — view & purge recognition records ──────
+// Remove software-artifact trades (e.g. a position force-closed by a bug) so
+// they don't poison recognition memory / template stats. Delete is key-guarded
+// server-side; the admin key is entered once and kept on this device only.
+function TradeDataPanel({ gridColumn = "1 / 4" }) {
+  const [trades, setTrades] = useState(null);
+  const [error, setError]   = useState(null);
+  const [assetFilter, setAssetFilter] = useState("all");
+  const [busyId, setBusyId] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [suspectsOnly, setSuspectsOnly] = useState(false);
+  const [suspectCount, setSuspectCount] = useState(0);
+
+  const load = async () => {
+    try {
+      const r = await fetch(API("recognition-memory?action=find&limit=500")).then((res) => res.json());
+      if (r && Array.isArray(r.trades)) { setTrades(r.trades); setSuspectCount(r.suspectCount || 0); setError(null); }
+      else setError(r?.error || "no trade data");
+    } catch (e) { setError(e.message); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const getKey = () => {
+    let k = "";
+    try { k = window.localStorage.getItem("qb_admin_key") || ""; } catch (_) {}
+    if (!k) {
+      k = window.prompt("Enter admin key (WEBHOOK_API_KEY) to enable delete:") || "";
+      if (k) { try { window.localStorage.setItem("qb_admin_key", k); } catch (_) {} }
+    }
+    return k;
+  };
+
+  const del = async (t) => {
+    const money = t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${Number(t.pnl).toFixed(2)}` : "";
+    const label = `${t.asset} \u00b7 ${t.template || "\u2014"} \u00b7 ${t.direction || ""} \u00b7 ${money}`;
+    if (!window.confirm(`Delete this trade from recognition memory?\n\n${label}\n\nRemoves it from the KNN advisor and all template stats. Your broker balance/P&L is unaffected. Cannot be undone.`)) return;
+    const key = getKey();
+    if (!key) return;
+    setBusyId(t.id); setNotice(null);
+    try {
+      const r = await fetch(API(`recognition-memory?action=delete&id=${encodeURIComponent(t.id)}&key=${encodeURIComponent(key)}`)).then((res) => res.json());
+      if (r && r.ok) {
+        setTrades((prev) => (prev || []).filter((x) => x.id !== t.id));
+        setNotice({ kind: "ok", msg: `Removed ${t.asset} ${t.template || ""}` });
+      } else if (r && r.error === "unauthorized") {
+        try { window.localStorage.removeItem("qb_admin_key"); } catch (_) {}
+        setNotice({ kind: "err", msg: "Wrong admin key \u2014 cleared. Try the delete again." });
+      } else {
+        setNotice({ kind: "err", msg: r?.error || "delete failed" });
+      }
+    } catch (e) { setNotice({ kind: "err", msg: e.message }); }
+    finally { setBusyId(null); }
+  };
+
+  const all = trades || [];
+  const assets = Array.from(new Set(all.map((t) => t.asset).filter(Boolean))).sort();
+  const rows = all
+    .filter((t) => (assetFilter === "all" || t.asset === assetFilter) && (!suspectsOnly || t.suspect))
+    .sort((a, b) => (b.closedAt || 0) - (a.closedAt || 0));
+
+  const oc = (o) => (o === "WIN" ? "var(--qb-ok)" : o === "LOSS" ? "var(--qb-bad)" : "var(--qb-warn)");
+  const fmtDate = (iso) => {
+    if (!iso) return "\u2014";
+    const d = new Date(iso);
+    return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  const ctrlStyle = { background: "var(--qb-bg-panel-hi)", color: "var(--qb-text-hi)", border: "1px solid var(--qb-border)", borderRadius: 4, padding: "3px 6px", fontFamily: "var(--qb-font-mono)", fontSize: 11 };
+
+  return (
+    <Panel title="Trade Data" subtitle="view & purge recognition records" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
+        {error && <PlaceholderError msg={`trade data: ${error}`} />}
+        {!error && (
+          <>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
+              <span style={{ color: "var(--qb-text-faint)" }}>{rows.length} of {all.length}</span>
+              <select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)} style={ctrlStyle}>
+                <option value="all">all instruments</option>
+                {assets.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+              <button onClick={load} style={{ ...ctrlStyle, cursor: "pointer", color: "var(--qb-text-mid)", background: "transparent" }}>{"\u21bb refresh"}</button>
+              <button onClick={() => setSuspectsOnly((v) => !v)} title="Show only force-close artifacts (TP2+ reached in <=3 min)"
+                style={{ ...ctrlStyle, cursor: "pointer", color: suspectsOnly ? "var(--qb-bad)" : "var(--qb-text-mid)", background: suspectsOnly ? "var(--qb-bad-soft)" : "transparent", borderColor: suspectsOnly ? "var(--qb-bad)" : "var(--qb-border)" }}>
+                {`\u26a0 suspects${suspectCount ? ` (${suspectCount})` : ""}`}
+              </button>
+              {notice && <span style={{ color: notice.kind === "ok" ? "var(--qb-ok)" : "var(--qb-bad)" }}>{notice.msg}</span>}
+            </div>
+            {!trades && <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>loading\u2026</div>}
+            {trades && rows.length === 0 && <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>No trades.</div>}
+            {rows.length > 0 && (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+                <thead>
+                  <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
+                    <th style={{ textAlign: "left", padding: "4px 6px" }}>When</th>
+                    <th style={{ textAlign: "left", padding: "4px 6px" }}>Asset</th>
+                    <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
+                    <th style={{ padding: "4px 6px" }}>Dir</th>
+                    <th style={{ padding: "4px 6px" }}>Out</th>
+                    <th style={{ padding: "4px 6px" }}>P&amp;L</th>
+                    <th style={{ padding: "4px 6px" }}>TPs</th>
+                    <th style={{ padding: "4px 6px" }}>min</th>
+                    <th style={{ padding: "4px 6px" }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((t) => {
+                    const meta = TEMPLATE_DISPLAY[t.template];
+                    return (
+                      <tr key={t.id} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right", background: t.suspect ? "var(--qb-bad-soft)" : "transparent" }}>
+                        <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-mid)" }}>{t.suspect ? "\u26a0 " : ""}{fmtDate(t.closedAtISO)}</td>
+                        <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>{t.asset}</td>
+                        <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-mid)" }}>{meta ? `${meta.glyph} ${meta.label}` : (t.template || "\u2014")}</td>
+                        <td style={{ padding: "4px 6px", color: t.direction === "LONG" ? "var(--qb-ok)" : "var(--qb-bad)" }}>{t.direction === "LONG" ? "L" : "S"}</td>
+                        <td style={{ padding: "4px 6px", color: oc(t.outcome) }}>{t.outcome ? t.outcome[0] : "\u00b7"}</td>
+                        <td style={{ padding: "4px 6px", color: (t.pnl || 0) >= 0 ? "var(--qb-ok)" : "var(--qb-bad)" }}>{t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}${Number(t.pnl).toFixed(2)}` : "\u00b7"}</td>
+                        <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{Array.isArray(t.tpsHit) && t.tpsHit.length ? t.tpsHit.length : "\u00b7"}</td>
+                        <td style={{ padding: "4px 6px", color: "var(--qb-text-faint)" }}>{t.durationMin != null ? t.durationMin : "\u00b7"}</td>
+                        <td style={{ padding: "4px 6px" }}>
+                          <button onClick={() => del(t)} disabled={busyId === t.id} title="Delete from recognition memory"
+                            style={{ background: "transparent", color: busyId === t.id ? "var(--qb-text-faint)" : "var(--qb-bad)", border: "1px solid var(--qb-border)", borderRadius: 4, padding: "2px 7px", cursor: busyId === t.id ? "default" : "pointer", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+                            {busyId === t.id ? "\u2026" : "\u2715"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+            <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+              Deleting removes a trade from the KNN advisor and template stats only \u2014 broker balance and realized P&amp;L are unaffected. Use it to purge software-artifact trades (e.g. a bug-forced close). Admin key required, stored on this device.
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 // ─── v14 · Immediate vs Retest entry-style comparison (full width) ──────
 function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
   const [trades, setTrades] = useState(null);
@@ -3072,6 +3212,9 @@ function MobileLayout({
             )}
             {card("min(56vh, 440px)",
               <TpHitPanel gridColumn="auto" />
+            )}
+            {card("min(60vh, 480px)",
+              <TradeDataPanel gridColumn="auto" />
             )}
           </>
         )}

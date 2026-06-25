@@ -68,6 +68,32 @@ async function storeClosedTrade(trade) {
   }
 }
 
+// Surgically remove one trade from the data — used to purge software-artifact
+// trades (e.g. a position force-closed by a bug) that would otherwise poison
+// recognition memory and template performance with an outcome the strategy
+// never actually produced. Removing the id from the index is what purges it
+// everywhere, since getAllTrades reads the index; the per-trade key is deleted
+// best-effort as orphan cleanup.
+async function deleteTrade(id) {
+  if (!id) return { error: 'id required' };
+  const r = getRedis();
+  if (!r) return { error: 'redis unavailable' };
+  try {
+    const indexRaw = await r.get(TRADE_INDEX_KEY).catch(() => null);
+    const index = safeParse(indexRaw) || [];
+    const before = index.length;
+    const next = index.filter((e) => e.id !== id);
+    const removedFromIndex = before - next.length;
+    if (removedFromIndex > 0) await r.set(TRADE_INDEX_KEY, JSON.stringify(next));
+    let keyRemoved = false;
+    try { await r.del(TRADE_KEY(id)); keyRemoved = true; }
+    catch (_) { try { await r.set(TRADE_KEY(id), JSON.stringify({ deleted: true, id })); } catch (_) {} }
+    return { ok: true, id, removedFromIndex, keyRemoved };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 // Build feature vector from a closed trade record.
 // Trade record comes from execute.js (entry context) joined with manage-trades.js (exit).
 function buildFeatureVector(trade) {
@@ -362,13 +388,64 @@ module.exports = async (req, res) => {
       });
     }
 
-    return res.status(400).json({ error: 'unknown action', validActions: ['list', 'recent', 'similar', 'stats'] });
+    // 'find' — slim, scannable list (optionally filtered by asset) so you can
+    // identify a bad trade's id before deleting it. Flags force-close artifacts:
+    // a trade that "reached" TP2+ in <=3 min is physically impossible for a real
+    // multi-TP trade — it's the pre-open-candle force-close bug's fingerprint.
+    if (action === 'find') {
+      const asset = String(req.query.asset || '').toLowerCase();
+      const suspectOnly = req.query.suspect === '1' || req.query.suspect === 'true';
+      const all = await getAllTrades(parseInt(req.query.limit || '500', 10));
+      const slim = all
+        .filter((t) => !asset || String(t.asset || '').toLowerCase() === asset)
+        .map((t) => {
+          const tpsLen = Array.isArray(t.tpsHit) ? t.tpsHit.length : 0;
+          const deepTP = (t.maxTP || 0) >= 2 || tpsLen >= 2;
+          const durMin = (t.openedAt && t.closedAt) ? Math.round((t.closedAt - t.openedAt) / 60000) : null;
+          // artifact: claims a deep TP but closed almost instantly (and the money
+          // doesn't reflect a real 1.5R+ win)
+          const suspect = deepTP && durMin != null && durMin <= 3 && (t.pnlR == null || t.pnlR < 0.8);
+          return {
+            id: t.id,
+            asset: t.asset,
+            template: t.template || (t.contributingTactics || [])[0] || null,
+            direction: t.direction,
+            outcome: t.outcome || (t.pnl > 0.5 ? 'WIN' : t.pnl < -0.5 ? 'LOSS' : 'SCRATCH'),
+            pnl: t.pnl,
+            pnlR: t.pnlR != null ? t.pnlR : null,
+            tpsHit: t.tpsHit,
+            maxTP: t.maxTP,
+            durationMin: durMin,
+            closedAt: t.closedAt || null,
+            closedAtISO: t.closedAt ? new Date(t.closedAt).toISOString() : null,
+            suspect,
+          };
+        })
+        .filter((t) => !suspectOnly || t.suspect);
+      const suspectCount = slim.filter((t) => t.suspect).length;
+      return res.status(200).json({ count: slim.length, suspectCount, trades: slim });
+    }
+
+    // 'delete' — remove one trade by id. Key-guarded: requires ?key=<WEBHOOK_API_KEY>.
+    if (action === 'delete') {
+      const key = String(req.query.key || '');
+      if (!process.env.WEBHOOK_API_KEY || key !== process.env.WEBHOOK_API_KEY) {
+        return res.status(401).json({ error: 'unauthorized' });
+      }
+      const id = req.query.id;
+      if (!id) return res.status(400).json({ error: 'id required (get it from action=find)' });
+      const result = await deleteTrade(id);
+      return res.status(result.error ? 400 : 200).json(result);
+    }
+
+    return res.status(400).json({ error: 'unknown action', validActions: ['list', 'recent', 'find', 'similar', 'stats', 'delete'] });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 };
 
 module.exports.storeClosedTrade = storeClosedTrade;
+module.exports.deleteTrade = deleteTrade;
 module.exports.findSimilarTrades = findSimilarTrades;
 module.exports.getAllTrades = getAllTrades;
 module.exports.getSizeMultiplier = getSizeMultiplier;
