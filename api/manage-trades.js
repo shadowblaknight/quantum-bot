@@ -295,28 +295,33 @@ async function managePosition(position) {
   }
 
   // v14.1: derive a RELIABLE current price + the favorable EXTREME since open.
-  // TP-touch detection must use the candle WICK extreme, not a point-in-time
-  // price — otherwise a spike that pierces a TP and pulls back between polls is
-  // never seen and the SL never ratchets. We persist the extreme so a missed
-  // poll can't lose a touch.
+  // TP-touch detection uses the favorable extreme reached SINCE the position
+  // opened. CRITICAL: we build that extreme FORWARD from the entry using only
+  // current price data — never a historical candle window. Reading history (even
+  // a time-sliced one) let pre-fill price action — e.g. where price sat while a
+  // limit waited to fill — masquerade as TPs already hit, force-closing brand-new
+  // trades on their first tick. Seeding at the entry and only ever ratcheting
+  // forward makes this immune to fill timing, late limit fills, and anchor drift.
   const assetMeta = getAssetById(asset);
   let livePrice = (isFinite(position.currentPrice) && position.currentPrice > 0) ? position.currentPrice : null;
-  let candleExtreme = null;
+  let lastWick = null;
   try {
-    const cr = await fetchCandles(asset, '1m', 90); // ~1.5h of wicks
+    const cr = await fetchCandles(asset, '1m', 2); // only the current poll window
     const cs = (cr && cr.candles) || [];
-    if (cs.length) {
-      const last = cs[cs.length - 1];
-      if (last && isFinite(last.close) && livePrice == null) livePrice = last.close;
-      candleExtreme = isLong ? Math.max(...cs.map((c) => c.high)) : Math.min(...cs.map((c) => c.low));
+    const last = cs[cs.length - 1];
+    if (last) {
+      if (livePrice == null && isFinite(last.close)) livePrice = last.close;
+      lastWick = isLong ? last.high : last.low; // the in-progress candle's wick only
     }
   } catch (_) {}
   if (livePrice == null) livePrice = position.openPrice;
 
+  // priorExtreme seeds at the entry on the first tick and only moves forward in
+  // the favorable direction thereafter — it can never reach back to pre-fill lows.
   const priorExtreme = (typeof state.extreme === 'number' && isFinite(state.extreme)) ? state.extreme : state.entry;
   const extreme = isLong
-    ? Math.max(priorExtreme, livePrice, candleExtreme != null ? candleExtreme : -Infinity)
-    : Math.min(priorExtreme, livePrice, candleExtreme != null ? candleExtreme :  Infinity);
+    ? Math.max(priorExtreme, livePrice, lastWick != null ? lastWick : -Infinity)
+    : Math.min(priorExtreme, livePrice, lastWick != null ? lastWick :  Infinity);
   state.extreme = extreme;
 
   const currentPrice = livePrice;   // used by the trailing block below
