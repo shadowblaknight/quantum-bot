@@ -2011,24 +2011,41 @@ function AlexgHeartbeatPanel({ gridColumn = "1 / 4" }) {
 }
 
 function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
-  const [results, setResults] = useState(null);
+  const [results, setResults] = useState({});
   const [error, setError]     = useState(null);
   const [busy, setBusy]       = useState(false);
+  const [progress, setProgress] = useState(null);
   const [scannedAt, setScannedAt] = useState(null);
+  // Fetch one instrument at a time (?asset=X is light) instead of one big
+  // all-7 scan that can exceed the function timeout. Renders progressively.
   const scan = async (alive = { v: true }) => {
-    setBusy(true);
+    setBusy(true); setError(null);
+    const acc = {};
     try {
-      const r = await fetch(API("alexg-trade")).then((res) => res.json());
-      if (!alive.v) return;
-      if (r && r.results) { setResults(r.results); setError(null); setScannedAt(Date.now()); }
-      else setError(r?.error || "no scan data");
-    } catch (e) { if (alive.v) setError(e.message); }
-    finally { if (alive.v) setBusy(false); }
+      for (let i = 0; i < ALEXG_ORDER.length; i++) {
+        if (!alive.v) return;
+        const a = ALEXG_ORDER[i];
+        setProgress(`${i + 1}/${ALEXG_ORDER.length} · ${a.toUpperCase()}`);
+        try {
+          const r = await fetch(API("alexg-trade?asset=" + a)).then((res) => res.json());
+          if (!alive.v) return;
+          if (r && r.trade) acc[a] = r.trade;
+          else acc[a] = { asset: a, tradeable: false, reason: (r && r.error) || "no data" };
+        } catch (e) {
+          if (!alive.v) return;
+          acc[a] = { asset: a, tradeable: false, reason: "fetch failed" };
+        }
+        setResults({ ...acc }); // progressive — row appears as each returns
+      }
+      if (alive.v) setScannedAt(Date.now());
+    } finally {
+      if (alive.v) { setBusy(false); setProgress(null); }
+    }
   };
   useEffect(() => {
     const alive = { v: true };
     scan(alive);
-    const id = setInterval(() => scan(alive), 120000); // 120s — heavier than other panels
+    const id = setInterval(() => scan(alive), 180000); // 180s; per-instrument calls are light
     return () => { alive.v = false; clearInterval(id); };
   }, []);
 
@@ -2045,7 +2062,7 @@ function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
           <span style={{ color: "var(--qb-ok)" }}>{fireN} tradeable</span>
           <span style={{ color: "var(--qb-accent)" }}>{aoiN} at AOI</span>
           <span style={{ color: "var(--qb-text-faint)" }}>
-            {scannedAt ? `scanned ${new Date(scannedAt).toUTCString().slice(17, 25)} UTC` : "scanning…"}
+            {busy ? `scanning ${progress || ""}` : scannedAt ? `scanned ${new Date(scannedAt).toUTCString().slice(17, 25)} UTC` : "—"}
           </span>
           <button
             onClick={() => scan()}
@@ -2058,7 +2075,7 @@ function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
         {error && <PlaceholderError msg={`Alex G scan: ${error}`} />}
         {!error && rows.length === 0 && (
           <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            {busy ? "Running top-down analysis across all instruments…" : "No scan data yet."}
+            {busy ? `Analysing instruments… ${progress || ""}` : "No scan data yet."}
           </div>
         )}
         {rows.length > 0 && (

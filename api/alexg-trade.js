@@ -132,17 +132,37 @@ function sessionGate(now) {
 }
 
 // ─── main ───────────────────────────────────────────────────────────
+// Memoize candle fetches for the life of ONE evaluation so the same
+// (asset,tf,n) is fetched once instead of re-fetched by every layer
+// (eligibility→bias→aoi→entry→grade). Caches the in-flight promise to also
+// dedupe concurrent identical fetches; drops the entry on rejection so a
+// transient error can be retried on a later call.
+function makeMemoFetch(base) {
+  const cache = new Map();
+  return function (asset, tf, n) {
+    const key = asset + '|' + tf + '|' + n;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const p = Promise.resolve().then(() => base(asset, tf, n));
+    cache.set(key, p);
+    p.catch(() => cache.delete(key));
+    return p;
+  };
+}
+
 async function evaluateTrade(asset, opts = {}) {
-  const fc = opts.fetchCandlesFn || defaultFetchCandles();
+  const baseFc = opts.fetchCandlesFn || defaultFetchCandles();
+  const fc = makeMemoFetch(baseFc);            // one shared cache per evaluation
+  const subOpts = { ...opts, fetchCandlesFn: fc };
   const m = getAssetById(asset) || {};
   const pip = m.pipSize || 0.0001;
 
-  // chain (cached fetches make re-calls cheap); allow injection for tests
+  // chain (memoized fetches make re-calls free); allow injection for tests
   let bias = opts.bias, loc = opts.location, entry = opts.entry;
   try {
-    if (!bias) bias = await BIAS.evaluateBias(asset, opts);
-    if (!loc) loc = await AOI.evaluateLocation(asset, { ...opts, bias });
-    if (!entry) entry = await ENTRY.evaluateEntry(asset, { ...opts, location: loc });
+    if (!bias) bias = await BIAS.evaluateBias(asset, subOpts);
+    if (!loc) loc = await AOI.evaluateLocation(asset, { ...subOpts, bias });
+    if (!entry) entry = await ENTRY.evaluateEntry(asset, { ...subOpts, location: loc });
   } catch (e) { return plan(asset, { tradeable: false, reason: 'pipeline threw: ' + e.message }); }
 
   const session = sessionGate(opts.now);
