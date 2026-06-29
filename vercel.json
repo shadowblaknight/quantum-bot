@@ -32,12 +32,36 @@
     "api/diag.js": {
       "memory": 512,
       "maxDuration": 30
+    },
+    "api/alexg-run.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/alexg-trade.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/alexg-heartbeat.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/alexg-watchdog.js": {
+      "memory": 256,
+      "maxDuration": 10
     }
   },
   "crons": [
     {
       "path": "/api/manage-trades",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/alexg-run",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/alexg-watchdog",
+      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [

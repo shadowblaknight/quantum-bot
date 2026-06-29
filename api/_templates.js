@@ -24,6 +24,7 @@ const TEMPLATE_META = {
   'reaction':         { glyph: '🎯', label: 'Reaction (coil break)' },
   'reaction-fvg':     { glyph: '🌀', label: 'Reaction (FVG)' },
   'reaction-ifvg':    { glyph: '🔄', label: 'Reaction (IFVG)' },
+  'alexg':            { glyph: '📐', label: 'Alex G Set&Forget' },
 };
 
 // "🥈 Silver Bullet" for one id (falls back to the raw id if unknown).
@@ -43,7 +44,7 @@ function templateLabelMap() {
 // Display order (heatmaps, cards).
 const TEMPLATE_ORDER = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg',
+  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
 ];
 
 // UI groupings — separately MEASURED, grouped only for a tidy screen.
@@ -54,11 +55,11 @@ const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg'];
 // higher-conviction subset (drops the two most aggressive ICT setups).
 const ACCEPTED_ACTIVE = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg',
+  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
 ];
 const ACCEPTED_DEFENSIVE = [
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
-  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg',
+  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
 ];
 
 module.exports = {

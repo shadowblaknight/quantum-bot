@@ -108,6 +108,7 @@ const DEFAULT_RULES = {
     'reaction':         { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction') },
     'reaction-fvg':     { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-fvg') },
     'reaction-ifvg':    { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-ifvg') },
+    'alexg':            { enabled: true, tradingStyle: 'swing',    lotMultiplier: 1.0, label: '📐 Alex G Set&Forget' },
   },
 
   lastModified: null,
@@ -543,6 +544,7 @@ module.exports = {
   emergencyStopAll,
   DEFAULT_RULES,
   applyRulesToSignal,
+  resolveProfile,
   logActivity,
   getActivity,
   addDailyPnL,

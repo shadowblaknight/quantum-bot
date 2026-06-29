@@ -56,11 +56,12 @@ const TEMPLATE_DISPLAY = {
   "reaction":         { glyph: "🎯", label: "Reaction (coil break)" },
   "reaction-fvg":     { glyph: "🌀", label: "Reaction (FVG)" },
   "reaction-ifvg":    { glyph: "🔄", label: "Reaction (IFVG)" },
+  "alexg":            { glyph: "📐", label: "Alex G Set&Forget" },
 };
 
 const TEMPLATE_ORDER = [
   "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg",
-  "orb", "reaction", "reaction-fvg", "reaction-ifvg",
+  "orb", "reaction", "reaction-fvg", "reaction-ifvg", "alexg",
 ];
 
 // v14: the five ICT templates are grouped under one collapsible "ICT" header in
@@ -535,6 +536,10 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         {/* ─── v14.1 · TP reach by template (full width) ─── */}
         <TpHitPanel />
         <TradeDataPanel />
+
+        {/* ─── v14.4 · Alex G live-signal scanner (full width) ─── */}
+        <AlexgHeartbeatPanel />
+        <AlexgSignalsPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -1914,6 +1919,191 @@ function TpHitPanel({ gridColumn = "1 / 4" }) {
   );
 }
 
+// ─── v14.4 · Alex G live-signal scanner ─────────────────────────────────
+// Read-only funnel across all instruments straight from /api/alexg-trade
+// (no key — the endpoint only analyses, never places). Lets you eyeball the
+// bot's top-down reads against Alex's chart reads during validation: which
+// pair is filtered as chop, which is at an AOI awaiting a shift, which has a
+// gradeable setup, and which is actually tradeable. Refreshes gently (the
+// scan does a full multi-TF analysis per instrument).
+const ALEXG_ORDER = ["gold", "eurusd", "gbpusd", "usdjpy", "nas100", "us500", "btc"];
+function alexgStage(p) {
+  if (!p) return { label: "—", color: "var(--qb-text-faint)" };
+  if (p.tradeable) return { label: "● TRADEABLE", color: "var(--qb-ok)" };
+  const r = (p.reason || "").toLowerCase();
+  if (p.entry != null) return { label: `setup · graded ${p.grade ? p.grade.letter : "?"}`, color: "var(--qb-warn)" };
+  if (p.zone) return { label: "at AOI · awaiting shift", color: "var(--qb-accent)" };
+  if (p.direction) return { label: `bias ${p.direction === "long" ? "↑" : "↓"} · no AOI`, color: "var(--qb-text-mid)" };
+  if (r.includes("ineligib") || r.includes("consolidat") || r.includes("chop")) return { label: "filtered · chop", color: "var(--qb-text-faint)" };
+  return { label: "no setup", color: "var(--qb-text-faint)" };
+}
+// ─── v14.5 · Alex G cron heartbeat — makes a silent cron failure visible ──
+// Reads /api/alexg-heartbeat (the alexg-run cron stamps every execution). Green
+// = ran recently; amber = overdue (possible silent death); red = last run threw.
+function AlexgHeartbeatPanel({ gridColumn = "1 / 4" }) {
+  const [h, setH]       = useState(null);
+  const [error, setErr] = useState(null);
+  useEffect(() => {
+    const alive = { v: true };
+    const tick = async () => {
+      try {
+        const r = await fetch(API("alexg-heartbeat")).then((res) => res.json());
+        if (!alive.v) return;
+        if (r && r.health) { setH(r.health); setErr(null); } else setErr(r?.error || "no heartbeat");
+      } catch (e) { if (alive.v) setErr(e.message); }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive.v = false; clearInterval(id); };
+  }, []);
+
+  const status = error ? "error" : (h ? h.status : "loading");
+  const MAP = {
+    ok:      { dot: "var(--qb-ok)",         label: "running" },
+    stale:   { dot: "var(--qb-warn)",       label: "stale · no recent run" },
+    failed:  { dot: "var(--qb-bad)",        label: "last run failed" },
+    unknown: { dot: "var(--qb-text-faint)", label: "no runs recorded yet" },
+    error:   { dot: "var(--qb-bad)",        label: "heartbeat unreachable" },
+    loading: { dot: "var(--qb-text-faint)", label: "checking…" },
+  };
+  const m = MAP[status] || MAP.unknown;
+  const l = h && h.latest;
+  const ageMin = h && h.ageMs != null ? Math.round(h.ageMs / 60000) : null;
+  const staleMin = h && h.staleMs ? Math.round(h.staleMs / 60000) : 35;
+
+  return (
+    <Panel title="📐 Alex G · Cron Health" subtitle="alexg-run heartbeat" style={{ gridColumn }}>
+      <div style={{ padding: 12, fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <span style={{ width: 9, height: 9, borderRadius: "50%", background: m.dot, display: "inline-block", flexShrink: 0 }} />
+          <span style={{ color: "var(--qb-text-hi)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>{m.label}</span>
+          {ageMin != null && (
+            <span style={{ color: "var(--qb-text-faint)", marginLeft: "auto" }}>
+              {ageMin <= 0 ? "just now" : `${ageMin} min ago`}
+            </span>
+          )}
+        </div>
+        {error && <PlaceholderError msg={`Cron health: ${error}`} />}
+        {l && (
+          <div style={{ color: "var(--qb-text-mid)", lineHeight: 1.7 }}>
+            <div>last run {new Date(l.ts).toUTCString().slice(5, 25)} UTC{l.dryRun ? " · dry-run" : ""}</div>
+            <div>
+              evaluated <b style={{ color: "var(--qb-text-hi)" }}>{l.evaluated}</b>
+              {" · "}placed <b style={{ color: l.placed > 0 ? "var(--qb-ok)" : "var(--qb-text-hi)" }}>{l.placed}</b>
+              {" · "}skipped {l.skipped}
+              {l.durationMs != null ? ` · ${(l.durationMs / 1000).toFixed(1)}s` : ""}
+            </div>
+            {l.error   && <div style={{ color: "var(--qb-bad)" }}>error: {l.error}</div>}
+            {l.blocked && <div style={{ color: "var(--qb-warn)" }}>blocked: {l.blocked}</div>}
+          </div>
+        )}
+        {!l && !error && (
+          <div style={{ color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            No alexg-run executions recorded yet — the heartbeat appears after the cron's first run.
+          </div>
+        )}
+        <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+          Green = ran within {staleMin} min. Amber = overdue (possible silent cron failure). Red = last run threw.
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
+  const [results, setResults] = useState(null);
+  const [error, setError]     = useState(null);
+  const [busy, setBusy]       = useState(false);
+  const [scannedAt, setScannedAt] = useState(null);
+  const scan = async (alive = { v: true }) => {
+    setBusy(true);
+    try {
+      const r = await fetch(API("alexg-trade")).then((res) => res.json());
+      if (!alive.v) return;
+      if (r && r.results) { setResults(r.results); setError(null); setScannedAt(Date.now()); }
+      else setError(r?.error || "no scan data");
+    } catch (e) { if (alive.v) setError(e.message); }
+    finally { if (alive.v) setBusy(false); }
+  };
+  useEffect(() => {
+    const alive = { v: true };
+    scan(alive);
+    const id = setInterval(() => scan(alive), 120000); // 120s — heavier than other panels
+    return () => { alive.v = false; clearInterval(id); };
+  }, []);
+
+  const rows = ALEXG_ORDER.filter((a) => results && results[a]).map((a) => ({ a, p: results[a] }));
+  const fireN = rows.filter((r) => r.p.tradeable).length;
+  const aoiN  = rows.filter((r) => !r.p.tradeable && (r.p.entry != null || r.p.zone)).length;
+  const gradeColor = (pct) => (pct >= 70 ? "var(--qb-ok)" : pct >= 50 ? "var(--qb-warn)" : "var(--qb-text-faint)");
+  const fmt = (x) => (x == null ? "·" : String(x));
+
+  return (
+    <Panel title="📐 Alex G · Live Signals" subtitle="read-only top-down scan · all instruments" style={{ gridColumn }}>
+      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 10, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
+          <span style={{ color: "var(--qb-ok)" }}>{fireN} tradeable</span>
+          <span style={{ color: "var(--qb-accent)" }}>{aoiN} at AOI</span>
+          <span style={{ color: "var(--qb-text-faint)" }}>
+            {scannedAt ? `scanned ${new Date(scannedAt).toUTCString().slice(17, 25)} UTC` : "scanning…"}
+          </span>
+          <button
+            onClick={() => scan()}
+            disabled={busy}
+            style={{ marginLeft: "auto", fontFamily: "var(--qb-font-mono)", fontSize: 10, padding: "3px 10px", color: "var(--qb-text-hi)", background: "var(--qb-bg-panel-hi)", border: "1px solid var(--qb-border)", borderRadius: 4, cursor: busy ? "default" : "pointer", opacity: busy ? 0.5 : 1 }}
+          >
+            {busy ? "scanning…" : "↻ rescan"}
+          </button>
+        </div>
+        {error && <PlaceholderError msg={`Alex G scan: ${error}`} />}
+        {!error && rows.length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            {busy ? "Running top-down analysis across all instruments…" : "No scan data yet."}
+          </div>
+        )}
+        {rows.length > 0 && (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+            <thead>
+              <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
+                <th style={{ textAlign: "left", padding: "4px 6px" }}>Instrument</th>
+                <th style={{ textAlign: "left", padding: "4px 6px" }}>Status</th>
+                <th style={{ padding: "4px 6px" }}>Dir</th>
+                <th style={{ padding: "4px 6px" }}>TF</th>
+                <th style={{ padding: "4px 6px" }}>Entry</th>
+                <th style={{ padding: "4px 6px" }}>SL</th>
+                <th style={{ padding: "4px 6px" }}>TP</th>
+                <th style={{ padding: "4px 6px" }}>RR</th>
+                <th style={{ padding: "4px 6px" }}>Grade</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ a, p }) => {
+                const st = alexgStage(p);
+                return (
+                  <tr key={a} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
+                    <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>{a.toUpperCase()}</td>
+                    <td style={{ textAlign: "left", padding: "4px 6px", color: st.color }}>{st.label}</td>
+                    <td style={{ padding: "4px 6px", color: p.direction === "long" ? "var(--qb-ok)" : p.direction === "short" ? "var(--qb-bad)" : "var(--qb-text-faint)" }}>{p.direction ? (p.direction === "long" ? "L" : "S") : "·"}</td>
+                    <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{fmt(p.triggerTF)}</td>
+                    <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{fmt(p.entry)}</td>
+                    <td style={{ padding: "4px 6px", color: "var(--qb-text-faint)" }}>{fmt(p.sl)}</td>
+                    <td style={{ padding: "4px 6px", color: "var(--qb-text-faint)" }}>{fmt(p.tp)}</td>
+                    <td style={{ padding: "4px 6px", color: p.rr != null && p.rr >= 2 ? "var(--qb-ok)" : "var(--qb-text-mid)" }}>{p.rr != null ? p.rr + "R" : "·"}</td>
+                    <td style={{ padding: "4px 6px", color: p.grade ? gradeColor(p.grade.pct) : "var(--qb-text-faint)" }}>{p.grade ? `${p.grade.letter} ${p.grade.pct}%` : "·"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+          Read-only — this scan analyses but never places. Entry/SL/TP are the planned set-and-forget levels; the order only fires from the alexg-run cron when a setup grades ≥ 70%.
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 // ─── v14.3 · Trade Data manager — view & purge recognition records ──────
 // Remove software-artifact trades (e.g. a position force-closed by a bug) so
 // they don't poison recognition memory / template stats. Delete is key-guarded
@@ -3215,6 +3405,12 @@ function MobileLayout({
             )}
             {card("min(60vh, 480px)",
               <TradeDataPanel gridColumn="auto" />
+            )}
+            {card("min(40vh, 300px)",
+              <AlexgHeartbeatPanel gridColumn="auto" />
+            )}
+            {card("min(60vh, 480px)",
+              <AlexgSignalsPanel gridColumn="auto" />
             )}
           </>
         )}
