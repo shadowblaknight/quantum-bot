@@ -1,7 +1,17 @@
 /* eslint-disable */
-// V12.4 — api/candle-source.js
+// V12.5 — api/candle-source.js
 //
 // CANDLE DATA LAYER — MetaAPI broker-direct.
+//
+// V12.5 FIX (the stale high-timeframe bug):
+//   MetaAPI's historical-market-data endpoint loads candles BACKWARD from
+//   `startTime` — the returned batch ENDS at startTime. The previous code set
+//   startTime to (now − count×period×factor), i.e. a point in the PAST, so the
+//   newest candle returned was exactly that far back: 26-day-old 4h, 4.6-year-
+//   old 1w, etc. The freshness guard then (correctly) rejected them, so every
+//   high-TF read failed. Low TFs survived only because their offset was tiny.
+//   Fix: anchor startTime to NOW (the right edge); MetaAPI then returns the
+//   most-recent `limit` candles. (See fetchFromMetaAPI step 3.)
 //
 // V12.4 PIVOT (from V12.3 TwelveData-based):
 // We previously used TwelveData (free 800/day, with NAS100/S&P500 gaps) and
@@ -72,10 +82,10 @@ const TF_MS = {
   '1mn': 30 * 24 * 60 * 60 * 1000,
 };
 
-// V12.4.1: bumped namespace from `v12:candles:` so the deploy that fixes the
-// stale-startTime bug doesn't inherit any of the old broken entries. Old keys
-// will expire naturally per their TTLs.
-function CACHE_KEY(asset, tf) { return `v12:candles2:${asset}:${tf}`; }
+// V12.5: bumped namespace from `v12:candles2:` so the deploy that fixes the
+// stale-startTime bug doesn't inherit any of the old broken entries (some held
+// for up to 7 days under their TTL). Old keys expire naturally per their TTLs.
+function CACHE_KEY(asset, tf) { return `v12:candles3:${asset}:${tf}`; }
 
 // =================================================================
 // PROVIDER ROUTING
@@ -174,22 +184,18 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     return { ok: false, error: `Asset ${asset} not available on broker (no symbol after sync)` };
   }
 
-  // 3. Tight startTime — calibrated so the candles in [startTime, NOW] number
-  //    at most `limit`, with NOW as the right edge. Critical: too generous a
-  //    factor causes MetaAPI to return the FIRST-N (oldest) and miss recent.
+  // 3. startTime = NOW (the RIGHT edge).
+  //    MetaAPI's historical-market-data endpoint loads candles BACKWARD from
+  //    startTime (the returned batch ENDS at startTime), then we keep the tail.
+  //    So to get the most-recent `limit` candles we anchor startTime to now.
+  //    A one-period forward nudge guarantees the latest (possibly just-closed)
+  //    candle is included regardless of boundary handling; MetaAPI clamps to
+  //    the latest real candle, so no future/empty results.
+  //    (The old code set startTime to now − count×period×factor, which made
+  //    MetaAPI return candles ENDING that far in the past — the stale-data bug.)
   const cap = Math.min(limit, 1000);
-  let lookbackFactor;
-  if (tf === '1d' || tf === '1w' || tf === '1mn') {
-    lookbackFactor = 2.0;        // weekends + holidays don't compound much
-  } else {
-    // crypto trades 24/7 (1.0 just fits), forex/indices 24/5 (1.3 leaves margin)
-    const meta = require('./asset-registry').getAssetById(asset);
-    const isCrypto = meta?.category === 'crypto';
-    lookbackFactor = isCrypto ? 1.0 : 1.3;
-  }
   const nowMs = Date.now();
-  const startMs = nowMs - cap * TF_MS[tf] * lookbackFactor;
-  const startTimeIso = new Date(startMs).toISOString();
+  const startTimeIso = new Date(nowMs + TF_MS[tf]).toISOString();
 
   const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, cap);
 
@@ -239,7 +245,7 @@ async function fetchFromMetaAPI(asset, tf, limit) {
     // Defensive: ensure ascending order by time
     candles.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
-    // Keep only the most-recent `cap` candles (we asked for endTime=NOW, so the
+    // Keep only the most-recent `cap` candles (we anchored startTime=NOW, so the
     // tail IS the most recent — but slice defensively in case MetaAPI returns
     // more than requested).
     if (candles.length > cap) candles = candles.slice(-cap);
