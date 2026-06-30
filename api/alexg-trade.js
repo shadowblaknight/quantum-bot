@@ -157,6 +157,21 @@ async function evaluateTrade(asset, opts = {}) {
   const m = getAssetById(asset) || {};
   const pip = m.pipSize || 0.0001;
 
+  // resolution / data probe — distinguishes "symbol didn't resolve / no history"
+  // from "resolved but no setup", so the dashboard shows a clear status. Uses the
+  // memoized fetcher, so this daily pull is shared with the chain (no extra cost).
+  try {
+    const probe = await fc(asset, '1d', 50);
+    const nD = (probe && probe.candles && probe.candles.length) || 0;
+    if (nD < 40) {
+      return plan(asset, { tradeable: false, reason: nD === 0
+        ? 'no candle data — symbol may be unresolved on broker'
+        : `insufficient history (${nD} daily candles)` });
+    }
+  } catch (e) {
+    return plan(asset, { tradeable: false, reason: 'data fetch failed — symbol may be unresolved: ' + e.message });
+  }
+
   // chain (memoized fetches make re-calls free); allow injection for tests
   let bias = opts.bias, loc = opts.location, entry = opts.entry;
   try {
@@ -306,7 +321,7 @@ function prevStructAtZone(pivots, zone, kind) {
 }
 
 async function evaluateUniverse(assets, opts = {}) {
-  const list = (assets && assets.length) ? assets : ['gold', 'eurusd', 'gbpusd', 'usdjpy', 'nas100', 'us500', 'btc'];
+  const list = (assets && assets.length) ? assets : ['eurusd', 'gbpusd', 'usdjpy', 'usdchf', 'audusd', 'nzdusd', 'usdcad', 'eurjpy', 'gbpjpy', 'gold', 'nas100', 'us500', 'btc'];
   const settled = await Promise.all(list.map(async (a) => {
     try { return [a, await evaluateTrade(a, opts)]; }
     catch (e) { return [a, plan(a, { tradeable: false, reason: 'threw: ' + e.message })]; }

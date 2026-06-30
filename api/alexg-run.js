@@ -37,7 +37,7 @@
 const { getAssetById } = require('./asset-registry');
 const TRADE = require('./alexg-trade');
 
-const INSTRUMENTS = ['gold', 'eurusd', 'gbpusd', 'usdjpy', 'nas100', 'us500', 'btc'];
+const INSTRUMENTS = ['eurusd', 'gbpusd', 'usdjpy', 'usdchf', 'audusd', 'nzdusd', 'usdcad', 'eurjpy', 'gbpjpy', 'gold', 'nas100', 'us500', 'btc'];
 const CFG = {
   rrFloor:      2.0,                 // re-checked against the retest entry
   minGradePct:  70,                  // C or better

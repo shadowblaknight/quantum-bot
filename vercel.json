@@ -35,11 +35,11 @@
     },
     "api/alexg-run.js": {
       "memory": 1024,
-      "maxDuration": 60
+      "maxDuration": 180
     },
     "api/alexg-trade.js": {
       "memory": 1024,
-      "maxDuration": 60
+      "maxDuration": 180
     },
     "api/alexg-heartbeat.js": {
       "memory": 256,

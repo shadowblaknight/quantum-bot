@@ -1926,7 +1926,7 @@ function TpHitPanel({ gridColumn = "1 / 4" }) {
 // pair is filtered as chop, which is at an AOI awaiting a shift, which has a
 // gradeable setup, and which is actually tradeable. Refreshes gently (the
 // scan does a full multi-TF analysis per instrument).
-const ALEXG_ORDER = ["gold", "eurusd", "gbpusd", "usdjpy", "nas100", "us500", "btc"];
+const ALEXG_ORDER = ["eurusd", "gbpusd", "usdjpy", "usdchf", "audusd", "nzdusd", "usdcad", "eurjpy", "gbpjpy", "gold", "nas100", "us500", "btc"];
 function alexgStage(p) {
   if (!p) return { label: "—", color: "var(--qb-text-faint)" };
   if (p.tradeable) return { label: "● TRADEABLE", color: "var(--qb-ok)" };
