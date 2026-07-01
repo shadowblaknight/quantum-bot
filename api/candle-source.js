@@ -209,45 +209,22 @@ async function fetchFromMetaAPI(asset, tf, limit) {
   //    MetaAPI return candles ENDING that far in the past — the stale-data bug.)
   const cap = Math.min(limit, 1000);
   const nowMs = Date.now();
-  const startTimeIso = new Date(nowMs + TF_MS[tf]).toISOString();
 
-  const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startTimeIso, cap);
-
-  // V12.4.1: throttle through semaphore so we never exceed MetaAPI's
-  // 5-concurrent cap. Without this, 18 parallel requests trigger 429s.
-  await _metaapiAcquire();
-
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        'auth-token': token,
-        'Accept': 'application/json',
-      },
-    });
-
+  // Fetch ONE window of candles ENDING at startIso (MetaAPI loads backward from
+  // startIso). Returns ascending, parsed candles. No freshness/dedup here — the
+  // caller handles those so the freshness guard only ever applies to page 1.
+  async function fetchWindow(startIso, windowLimit) {
+    const url = metaapiCandlesUrl(accountId, brokerSymbol, tf, startIso, Math.min(windowLimit, 1000));
+    const resp = await fetch(url, { headers: { 'auth-token': token, 'Accept': 'application/json' } });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      // 404 typically means symbol unknown OR account not provisioned
-      // 401 means token wrong
-      // 429 means rate limited
-      return {
-        ok: false,
-        error: `MetaAPI ${resp.status}: ${text.slice(0, 200)}`,
-        status: resp.status,
-      };
+      // 404 = symbol unknown / not provisioned · 401 = bad token · 429 = rate limited
+      return { ok: false, error: `MetaAPI ${resp.status}: ${text.slice(0, 200)}`, status: resp.status };
     }
-
     const data = await resp.json();
-    if (!Array.isArray(data)) {
-      return { ok: false, error: 'MetaAPI: malformed response (not an array)' };
-    }
-    if (data.length === 0) {
-      return { ok: false, error: 'MetaAPI: empty candle array (market closed or no data)' };
-    }
-
-    // Convert MetaAPI candle → V12 candle format.
+    if (!Array.isArray(data)) return { ok: false, error: 'MetaAPI: malformed response (not an array)' };
     // tickVolume preferred over volume for forex (real volume often 0 on MT5).
-    let candles = data.map((c) => ({
+    const batch = data.map((c) => ({
       time: c.time,
       open: parseFloat(c.open),
       high: parseFloat(c.high),
@@ -255,20 +232,30 @@ async function fetchFromMetaAPI(asset, tf, limit) {
       close: parseFloat(c.close),
       volume: parseFloat(c.tickVolume != null ? c.tickVolume : (c.volume || 0)),
     }));
+    batch.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+    return { ok: true, candles: batch };
+  }
 
-    // Defensive: ensure ascending order by time
-    candles.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+  // V12.4.1: throttle through semaphore so we never exceed MetaAPI's 5-concurrent
+  // cap. One slot held for the whole paginated sequence (serial calls within it).
+  await _metaapiAcquire();
 
-    // Keep only the most-recent `cap` candles (we anchored startTime=NOW, so the
-    // tail IS the most recent — but slice defensively in case MetaAPI returns
-    // more than requested).
-    if (candles.length > cap) candles = candles.slice(-cap);
+  try {
+    // ── PAGE 1 — newest window, anchored at NOW (the RIGHT edge). ──────────────
+    //    MetaAPI's historical endpoint loads candles BACKWARD from startTime (the
+    //    returned batch ENDS at startTime). Anchoring at now+1period guarantees
+    //    the latest (possibly just-closed) candle is included; MetaAPI clamps to
+    //    the latest real candle, so no future/empty results. This is the Bug-1
+    //    stale-data fix and it is left exactly as-is: the freshness-critical page.
+    const first = await fetchWindow(new Date(nowMs + TF_MS[tf]).toISOString(), cap);
+    if (!first.ok) return first;
+    if (first.candles.length === 0) {
+      return { ok: false, error: 'MetaAPI: empty candle array (market closed or no data)' };
+    }
 
-    // FRESHNESS GUARD — V12.4.1: weekend-tolerant.
-    //
-    // All sub-daily TFs get 72-hour limit so Friday close → Monday open
-    // doesn't trigger false rejections. Only multi-day stale data (broker
-    // truly dead) gets blocked.
+    // FRESHNESS GUARD — V12.4.1, weekend-tolerant — applied to the NEWEST candle.
+    // Sub-daily TFs get 72h+ so Friday→Monday doesn't false-trip; only truly stale
+    // (broker dead) data is blocked.
     const FRESHNESS_LIMIT_MS = {
       '1m':  4  * 60 * 60 * 1000,           // 4 hours
       '5m':  72 * 60 * 60 * 1000,           // 72 hours (weekend tolerance)
@@ -279,7 +266,8 @@ async function fetchFromMetaAPI(asset, tf, limit) {
       '1w':  60 * 24 * 60 * 60 * 1000,      // 60 days
       '1mn': 365 * 24 * 60 * 60 * 1000,     // 1 year
     };
-    const lastCandleAgeMs = nowMs - new Date(candles[candles.length - 1].time).getTime();
+    const newest = first.candles[first.candles.length - 1];
+    const lastCandleAgeMs = nowMs - new Date(newest.time).getTime();
     const maxStaleMs = FRESHNESS_LIMIT_MS[tf] || (TF_MS[tf] * 100);
     if (lastCandleAgeMs > maxStaleMs) {
       return {
@@ -288,7 +276,34 @@ async function fetchFromMetaAPI(asset, tf, limit) {
       };
     }
 
-    return { ok: true, candles, source: `metaapi(${brokerSymbol})` };
+    // ── PAGES 2..N — walk BACKWARD to backfill the requested depth. ────────────
+    //    MetaAPI returns only one window per call (~50 daily bars on this account),
+    //    silently truncating a 240-bar request. Each older window is anchored one
+    //    period before our current oldest candle and PREPENDED; it can only extend
+    //    history backward and never touches the newest data or its freshness.
+    //    Fails safe: any error / empty / no-older-data just stops with what we have
+    //    (page 1 = today's behavior), so pagination can never regress the feed.
+    const MAX_PAGES = 6;
+    let all = first.candles.slice();
+    let pages = 1;
+    while (all.length < cap && pages < MAX_PAGES) {
+      const oldestMs = new Date(all[0].time).getTime();
+      const older = await fetchWindow(new Date(oldestMs - TF_MS[tf]).toISOString(), (cap - all.length) + 5);
+      pages++;
+      if (!older.ok || older.candles.length === 0) break;         // error / empty → stop
+      const olderOnly = older.candles.filter((c) => new Date(c.time).getTime() < oldestMs);
+      if (olderOnly.length === 0) break;                          // broker has nothing older → exhausted
+      all = olderOnly.concat(all);
+    }
+
+    // De-dup by timestamp (defensive against window overlap), keep ascending, cap.
+    const seen = new Set();
+    const deduped = [];
+    for (const c of all) { if (!seen.has(c.time)) { seen.add(c.time); deduped.push(c); } }
+    deduped.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+    const out = deduped.length > cap ? deduped.slice(-cap) : deduped;
+
+    return { ok: true, candles: out, source: `metaapi(${brokerSymbol})`, pages };
   } catch (e) {
     return { ok: false, error: 'MetaAPI: ' + e.message };
   } finally {
