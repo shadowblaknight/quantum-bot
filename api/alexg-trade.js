@@ -361,6 +361,14 @@ function buildFunnel(bias, loc, entry, session, grade, gates) {
         d: (bias.timeframes.d && (bias.timeframes.d.reason || bias.timeframes.d.shift)) || null,
         h4: (bias.timeframes.h4 && (bias.timeframes.h4.reason || bias.timeframes.h4.shift)) || null,
       } : null,
+      // the actual swing labels that DECIDED each trend, e.g. "LH/HL·8p" means the
+      // last high was a Lower-High and last low a Higher-Low over 8 pivots — a
+      // mixed (contracting) structure, which is why the trend reads "unclear".
+      tfStruct: bias.timeframes ? {
+        w: bias.timeframes.w ? `${bias.timeframes.w.hiLabel || '·'}/${bias.timeframes.w.loLabel || '·'}·${bias.timeframes.w.piv != null ? bias.timeframes.w.piv : '?'}p` : null,
+        d: bias.timeframes.d ? `${bias.timeframes.d.hiLabel || '·'}/${bias.timeframes.d.loLabel || '·'}·${bias.timeframes.d.piv != null ? bias.timeframes.d.piv : '?'}p` : null,
+        h4: bias.timeframes.h4 ? `${bias.timeframes.h4.hiLabel || '·'}/${bias.timeframes.h4.loLabel || '·'}·${bias.timeframes.h4.piv != null ? bias.timeframes.h4.piv : '?'}p` : null,
+      } : null,
     } : null,
     aoi: loc ? {
       atAOI: !!loc.atAOI, locationOK: !!loc.locationOK, broken: !!loc.broken,

@@ -170,6 +170,11 @@ function buildStructure(candles, label, opts = {}) {
     ok: true, label, trend, shift, atr: atrVal,
     lastClose,
     pivots,
+    // diagnostics: the labels that DECIDED the trend (why bull/bear/unclear) and
+    // how many swings the zigzag found at the current threshold.
+    lastHighLabel: lastHigh ? lastHigh.label : null,
+    lastLowLabel: lastLow ? lastLow.label : null,
+    pivotCount: pivots.length,
     points: {
       lastHH: lastHH ? pick(lastHH) : null,
       lastHL: lastHL ? pick(lastHL) : null,
@@ -249,9 +254,9 @@ async function evaluateBias(asset, opts = {}) {
     counterHigherTF,      // day trade against the weekly (retracement)
     awaitingPullback,     // swing bias waiting on the 4hr pullback into the AOI
     timeframes: {
-      w:  { trend: tw, shift: sw.shift || null, ok: sw.ok, reason: sw.reason || null },
-      d:  { trend: td, shift: sd.shift || null, ok: sd.ok, reason: sd.reason || null },
-      h4: { trend: th4, shift: sh4.shift || null, ok: sh4.ok, reason: sh4.reason || null },
+      w:  { trend: tw, shift: sw.shift || null, ok: sw.ok, reason: sw.reason || null, hiLabel: sw.lastHighLabel || null, loLabel: sw.lastLowLabel || null, piv: sw.pivotCount != null ? sw.pivotCount : null },
+      d:  { trend: td, shift: sd.shift || null, ok: sd.ok, reason: sd.reason || null, hiLabel: sd.lastHighLabel || null, loLabel: sd.lastLowLabel || null, piv: sd.pivotCount != null ? sd.pivotCount : null },
+      h4: { trend: th4, shift: sh4.shift || null, ok: sh4.ok, reason: sh4.reason || null, hiLabel: sh4.lastHighLabel || null, loLabel: sh4.lastLowLabel || null, piv: sh4.pivotCount != null ? sh4.pivotCount : null },
     },
     structure: {          // consumed by Layer 2 (AOI) + Layer 4 (TP)
       w: sw.ok ? sw.points : null,
