@@ -361,6 +361,14 @@ function buildFunnel(bias, loc, entry, session, grade, gates) {
         d: (bias.timeframes.d && (bias.timeframes.d.reason || bias.timeframes.d.shift)) || null,
         h4: (bias.timeframes.h4 && (bias.timeframes.h4.reason || bias.timeframes.h4.shift)) || null,
       } : null,
+      // candle count fed to each timeframe — separates "not enough data" (a fetch
+      // problem, low n) from "enough data but genuinely no trend" (healthy n, mixed
+      // labels). A daily with FEWER bars than the weekly means the daily fetch is short.
+      tfBars: bias.timeframes ? {
+        w: bias.timeframes.w ? (bias.timeframes.w.n != null ? bias.timeframes.w.n : null) : null,
+        d: bias.timeframes.d ? (bias.timeframes.d.n != null ? bias.timeframes.d.n : null) : null,
+        h4: bias.timeframes.h4 ? (bias.timeframes.h4.n != null ? bias.timeframes.h4.n : null) : null,
+      } : null,
       // the actual swing labels that DECIDED each trend, e.g. "LH/HL·8p" means the
       // last high was a Lower-High and last low a Higher-Low over 8 pivots — a
       // mixed (contracting) structure, which is why the trend reads "unclear".

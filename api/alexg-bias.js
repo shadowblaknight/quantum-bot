@@ -123,8 +123,9 @@ function zigzagPivots(values, threshold) {
 // with the candle's high/low/body so Layer 2 can build AOI zones from them.
 function buildStructure(candles, label, opts = {}) {
   const minPivots = opts.minPivots != null ? opts.minPivots : CFG.minPivots;
+  const n = Array.isArray(candles) ? candles.length : 0;
   if (!Array.isArray(candles) || candles.length < minPivots + 2) {
-    return { ok: false, label, reason: `insufficient ${label} data (${candles ? candles.length : 0})`, trend: 'unclear' };
+    return { ok: false, label, n, reason: `insufficient ${label} data (${candles ? candles.length : 0})`, trend: 'unclear' };
   }
   const closes = candles.map((c) => c.close);
   const atrVal = atr(candles);
@@ -136,11 +137,11 @@ function buildStructure(candles, label, opts = {}) {
     ? (opts.atrMultLTF != null ? opts.atrMultLTF : (opts.atrMult != null ? opts.atrMult : CFG.atrMultLTF))
     : (opts.atrMult != null ? opts.atrMult : CFG.atrMult);
   const threshold = (atrVal && isFinite(atrVal)) ? atrMult * atrVal : null;
-  if (!threshold) return { ok: false, label, reason: `no ATR for ${label}`, trend: 'unclear' };
+  if (!threshold) return { ok: false, label, n, reason: `no ATR for ${label}`, trend: 'unclear' };
 
   const rawPiv = zigzagPivots(closes, threshold);
   if (rawPiv.length < minPivots) {
-    return { ok: false, label, reason: `too few swing points on ${label} (${rawPiv.length})`, trend: 'unclear', atr: atrVal };
+    return { ok: false, label, n, reason: `too few swing points on ${label} (${rawPiv.length})`, trend: 'unclear', atr: atrVal };
   }
 
   // Label HH/HL/LH/LL relative to the previous same-type pivot; enrich.
@@ -180,6 +181,7 @@ function buildStructure(candles, label, opts = {}) {
 
   return {
     ok: true, label, trend, shift, atr: atrVal,
+    n,
     lastClose,
     pivots,
     // diagnostics: the labels that DECIDED the trend (why bull/bear/unclear) and
@@ -266,9 +268,9 @@ async function evaluateBias(asset, opts = {}) {
     counterHigherTF,      // day trade against the weekly (retracement)
     awaitingPullback,     // swing bias waiting on the 4hr pullback into the AOI
     timeframes: {
-      w:  { trend: tw, shift: sw.shift || null, ok: sw.ok, reason: sw.reason || null, hiLabel: sw.lastHighLabel || null, loLabel: sw.lastLowLabel || null, piv: sw.pivotCount != null ? sw.pivotCount : null },
-      d:  { trend: td, shift: sd.shift || null, ok: sd.ok, reason: sd.reason || null, hiLabel: sd.lastHighLabel || null, loLabel: sd.lastLowLabel || null, piv: sd.pivotCount != null ? sd.pivotCount : null },
-      h4: { trend: th4, shift: sh4.shift || null, ok: sh4.ok, reason: sh4.reason || null, hiLabel: sh4.lastHighLabel || null, loLabel: sh4.lastLowLabel || null, piv: sh4.pivotCount != null ? sh4.pivotCount : null },
+      w:  { trend: tw, shift: sw.shift || null, ok: sw.ok, reason: sw.reason || null, hiLabel: sw.lastHighLabel || null, loLabel: sw.lastLowLabel || null, piv: sw.pivotCount != null ? sw.pivotCount : null, n: sw.n != null ? sw.n : null },
+      d:  { trend: td, shift: sd.shift || null, ok: sd.ok, reason: sd.reason || null, hiLabel: sd.lastHighLabel || null, loLabel: sd.lastLowLabel || null, piv: sd.pivotCount != null ? sd.pivotCount : null, n: sd.n != null ? sd.n : null },
+      h4: { trend: th4, shift: sh4.shift || null, ok: sh4.ok, reason: sh4.reason || null, hiLabel: sh4.lastHighLabel || null, loLabel: sh4.lastLowLabel || null, piv: sh4.pivotCount != null ? sh4.pivotCount : null, n: sh4.n != null ? sh4.n : null },
     },
     structure: {          // consumed by Layer 2 (AOI) + Layer 4 (TP)
       w: sw.ok ? sw.points : null,
