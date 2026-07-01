@@ -54,10 +54,17 @@ function bodyHighOf(c) { return Math.max(c.open, c.close); }
 function bodyOverlap(c, lo, hi) { return bodyHighOf(c) >= lo && bodyLowOf(c) <= hi; }
 
 function ema(values, period) {
-  if (!values.length) return null;
+  // A real N-EMA needs at least N samples. On fewer, return null (honest "not
+  // measurable") rather than a seed-dominated garbage number — every caller
+  // null-guards, so this simply drops the EMA confluence instead of faking it.
+  if (!Array.isArray(values) || !(period > 0) || values.length < period) return null;
   const k = 2 / (period + 1);
-  let e = values[0];
-  for (let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
+  // Seed with the SMA of the first `period` closes (textbook EMA seed) so the
+  // result isn't biased toward the oldest close on shorter series.
+  let e = 0;
+  for (let i = 0; i < period; i++) e += values[i];
+  e /= period;
+  for (let i = period; i < values.length; i++) e = values[i] * k + e * (1 - k);
   return e;
 }
 

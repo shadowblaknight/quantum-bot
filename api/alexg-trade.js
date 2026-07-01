@@ -354,6 +354,13 @@ function buildFunnel(bias, loc, entry, session, grade, gates) {
         d: bias.timeframes.d && bias.timeframes.d.trend,
         h4: bias.timeframes.h4 && bias.timeframes.h4.trend,
       } : null,
+      // why each timeframe reads the way it does — makes "unclear" legible
+      // (e.g. "too few swing points on D (3)" vs genuinely mixed structure).
+      tfReason: bias.timeframes ? {
+        w: (bias.timeframes.w && (bias.timeframes.w.reason || bias.timeframes.w.shift)) || null,
+        d: (bias.timeframes.d && (bias.timeframes.d.reason || bias.timeframes.d.shift)) || null,
+        h4: (bias.timeframes.h4 && (bias.timeframes.h4.reason || bias.timeframes.h4.shift)) || null,
+      } : null,
     } : null,
     aoi: loc ? {
       atAOI: !!loc.atAOI, locationOK: !!loc.locationOK, broken: !!loc.broken,
@@ -414,12 +421,19 @@ function buildFunnel(bias, loc, entry, session, grade, gates) {
 module.exports = async (req, res) => {
   try {
     const q = req.query || {};
+    // Optional tuning knobs (read-only, diagnostic): let you dial the bias swing
+    // sensitivity live and compare against your chart before committing a value.
+    //   ?atrMult=1.0   → finer zigzag (more swings detected → more decisive trend)
+    //   ?minPivots=3   → accept a trend on fewer swing points
+    const tuneOpts = {};
+    if (q.atrMult != null && isFinite(parseFloat(q.atrMult))) tuneOpts.atrMult = parseFloat(q.atrMult);
+    if (q.minPivots != null && isFinite(parseInt(q.minPivots, 10))) tuneOpts.minPivots = parseInt(q.minPivots, 10);
     if (q.asset) {
       if (!getAssetById(q.asset)) return res.status(400).json({ ok: false, error: 'unknown asset' });
-      return res.status(200).json({ ok: true, trade: await evaluateTrade(q.asset) });
+      return res.status(200).json({ ok: true, tuning: Object.keys(tuneOpts).length ? tuneOpts : null, trade: await evaluateTrade(q.asset, tuneOpts) });
     }
     const assets = q.assets ? String(q.assets).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : null;
-    return res.status(200).json(await evaluateUniverse(assets));
+    return res.status(200).json(await evaluateUniverse(assets, tuneOpts));
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }

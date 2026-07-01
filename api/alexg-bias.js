@@ -109,7 +109,8 @@ function zigzagPivots(values, threshold) {
 // Pivots are taken on CLOSES (body) per the strategy. Each pivot is enriched
 // with the candle's high/low/body so Layer 2 can build AOI zones from them.
 function buildStructure(candles, label, opts = {}) {
-  if (!Array.isArray(candles) || candles.length < CFG.minPivots + 2) {
+  const minPivots = opts.minPivots != null ? opts.minPivots : CFG.minPivots;
+  if (!Array.isArray(candles) || candles.length < minPivots + 2) {
     return { ok: false, label, reason: `insufficient ${label} data (${candles ? candles.length : 0})`, trend: 'unclear' };
   }
   const closes = candles.map((c) => c.close);
@@ -119,7 +120,7 @@ function buildStructure(candles, label, opts = {}) {
   if (!threshold) return { ok: false, label, reason: `no ATR for ${label}`, trend: 'unclear' };
 
   const rawPiv = zigzagPivots(closes, threshold);
-  if (rawPiv.length < CFG.minPivots) {
+  if (rawPiv.length < minPivots) {
     return { ok: false, label, reason: `too few swing points on ${label} (${rawPiv.length})`, trend: 'unclear', atr: atrVal };
   }
 

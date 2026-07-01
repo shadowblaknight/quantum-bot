@@ -87,6 +87,20 @@ const TF_MS = {
 // for up to 7 days under their TTL). Old keys expire naturally per their TTLs.
 function CACHE_KEY(asset, tf) { return `v12:candles3:${asset}:${tf}`; }
 
+// Minimum plausible candle count per high timeframe. MetaAPI can hand back a
+// THIN partial batch while it back-syncs a symbol's deep history (e.g. only 5
+// dailies). Caching that partial under the full TF TTL (24h/7d) then starves the
+// strategy for a whole day even though ?fresh=1 proves the broker has the full
+// history. So: never serve a high-TF partial from cache (re-fetch instead), and
+// only short-cache a fresh partial so the next tick retries and lands the full
+// series. Low TFs aren't listed — their small counts are always legitimate.
+const PARTIAL_MIN_CANDLES = { '4h': 40, '1d': 30, '1w': 18, '1mn': 8 };
+const PARTIAL_SHORT_TTL_SEC = 120;
+function isPartialBatch(tf, count) {
+  const min = PARTIAL_MIN_CANDLES[tf];
+  return !!(min && count < min);
+}
+
 // =================================================================
 // PROVIDER ROUTING
 // =================================================================
@@ -338,10 +352,15 @@ async function fetchCandles(asset, tf, limit = 200, opts = {}) {
       if (cached && cached.candles && cached.fetchedAt) {
         const ttl = (TF_CACHE_TTL_SEC[tf] || 300) * 1000;
         if (Date.now() - cached.fetchedAt < ttl) {
-          return {
-            candles: cached.candles.slice(-limit),
-            source: cached.source + '-cached',
-          };
+          // Don't serve a thin high-TF partial (a back-sync artifact) even if it
+          // is "fresh" by time — fall through to a real fetch, which self-heals
+          // any 5-candle entry left over from a partial sync.
+          if (!isPartialBatch(tf, cached.candles.length)) {
+            return {
+              candles: cached.candles.slice(-limit),
+              source: cached.source + '-cached',
+            };
+          }
         }
       }
     } catch (_) {}
@@ -388,11 +407,17 @@ async function fetchCandles(asset, tf, limit = 200, opts = {}) {
   // 5. Cache
   if (r) {
     try {
+      // A thin high-TF batch is likely a mid-sync partial — cache it only briefly
+      // so the next tick re-fetches the full history instead of serving 5 candles
+      // for the next 24h/7d.
+      const ttlSec = isPartialBatch(tf, result.candles.length)
+        ? PARTIAL_SHORT_TTL_SEC
+        : (TF_CACHE_TTL_SEC[tf] || 300);
       await r.set(cacheKey, JSON.stringify({
         candles: result.candles,
         source: result.source,
         fetchedAt: Date.now(),
-      }), { ex: TF_CACHE_TTL_SEC[tf] || 300 });
+      }), { ex: ttlSec });
     } catch (_) {}
   }
 
