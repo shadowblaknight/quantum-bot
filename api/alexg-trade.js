@@ -247,9 +247,9 @@ async function evaluateTrade(asset, opts = {}) {
   const emaW = AOI.ema(w.map((c) => c.close), 50), emaD = AOI.ema(d.map((c) => c.close), 50), ema4 = AOI.ema(h4.map((c) => c.close), 50);
   const nearZone = (v, z, a) => !!(z && v != null && v >= z.lo - 0.2 * a && v <= z.hi + 0.2 * a);
 
-  const rejD = P.detectCandleRejection(d, dir, { zone: dZone });
-  const rejW = P.detectCandleRejection(w, dir, { zone: wZone });
-  const rej4 = P.detectCandleRejection(h4, dir, { zone: h4Zone });
+  const rejD = dZone ? P.detectCandleRejection(d, dir, { zone: dZone }) : { found: false };
+  const rejW = wZone ? P.detectCandleRejection(w, dir, { zone: wZone }) : { found: false };
+  const rej4 = h4Zone ? P.detectCandleRejection(h4, dir, { zone: h4Zone }) : { found: false };
   const patD = P.detectChartPattern(sd.ok ? sd.pivots : [], dir, dClose, atrD);
   const patW = P.detectChartPattern(sw.ok ? sw.pivots : [], dir, wClose, atrW);
   const pat4 = P.detectChartPattern(s4.ok ? s4.pivots : [], dir, h4Close, atr4);

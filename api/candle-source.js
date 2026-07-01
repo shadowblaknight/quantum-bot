@@ -260,6 +260,7 @@ async function fetchFromMetaAPI(asset, tf, limit) {
       '1m':  4  * 60 * 60 * 1000,           // 4 hours
       '5m':  72 * 60 * 60 * 1000,           // 72 hours (weekend tolerance)
       '15m': 72 * 60 * 60 * 1000,           // 72 hours
+      '30m': 72 * 60 * 60 * 1000,           // 72 hours — forex weekend is ~50h; fallback was TF_MS*100=50h which fails Monday open
       '1h':  72 * 60 * 60 * 1000,           // 72 hours
       '4h':  7  * 24 * 60 * 60 * 1000,      // 7 days
       '1d':  14 * 24 * 60 * 60 * 1000,      // 14 days
