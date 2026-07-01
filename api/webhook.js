@@ -345,12 +345,17 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   //    keeps parabolic candles out of the immediate path upstream.
   let entryType = 'retest';
   let useMarket = false;
+  // v14.1 diagnostic: capture the routing inputs so a mis-routed immediate/retest
+  // can be read back from the activity log — the probed market price, whether a
+  // valid limit could be placed, and how far the market had drifted past entry.
+  let _dbgProbed = null, _dbgProbeOk = false, _dbgCanLimit = null, _dbgDriftPips = null;
   try {
     const { fetchCandles: _fcSrc } = require('./candle-source');
     const _cr = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
     const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
     const _cur = _last && _last.close;
     if (_cur && isFinite(_cur)) {
+      _dbgProbeOk = true; _dbgProbed = _cur;
       const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
       // A LIMIT is only valid when the entry sits AWAY from price on the correct
       // side: a LONG buy-limit must be BELOW market, a SHORT sell-limit ABOVE it.
@@ -358,6 +363,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       // broker won't accept it — must go in as a MARKET order, otherwise MT5
       // rejects the limit with TRADE_RETCODE_INVALID_PRICE.
       const _canLimit = isLong ? (rEntry < _cur - _tol) : (rEntry > _cur + _tol);
+      _dbgCanLimit = _canLimit;
       if (!_canLimit) {
         const _slDist = Math.abs(rEntry - rSL);
         const _budget = Math.max(_slDist * 0.25, pipSz * 10); // 25% of stop, min 10 pips
@@ -365,8 +371,9 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         // signalled entry by more than budget (don't chase a runaway). A favorable
         // gap (market better than entry) still fills.
         const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
+        _dbgDriftPips = +(_drift / pipSz).toFixed(1);
         if (_drift > _budget) {
-          await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget' });
+          await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget', signalEntry: rEntry, marketPrice: _cur, driftPips: _dbgDriftPips });
           try {
             await sendOnce(`webhook-stale:${dedupeKey}`,
               `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
@@ -381,9 +388,36 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
   } catch (_) { /* candle fetch failed — fall through to limit; broker is final guard */ }
 
-  const placement = useMarket
+  // v14.1: one-line record of HOW this signal was routed and WHY, so a suspected
+  // immediate/retest mis-route can be diagnosed straight from the activity log.
+  try {
+    await logActivity({
+      type: 'entry-routing', asset: assetId, template: p.template, direction: p.direction,
+      signalEntry: rEntry, marketPrice: _dbgProbed, probeOk: _dbgProbeOk,
+      canLimit: _dbgCanLimit, driftPips: _dbgDriftPips,
+      decided: useMarket ? 'immediate(market)' : 'retest(limit)',
+    });
+  } catch (_) {}
+
+  let placement = useMarket
     ? await placeMarketOrder(brokerSymbol, p.direction, finalLot, rSL, rTP, comment)
     : await placeLimitOrder(brokerSymbol, p.direction, finalLot, rEntry, rSL, rTP, comment);
+
+  // Catch-all for the last INVALID_PRICE causes. A limit can still be rejected
+  // when the price probe failed (blind, possibly wrong-side limit) or when a
+  // correct-side limit lands inside the broker's minimum stop distance. Rather
+  // than drop the trade, retry once as MARKET — a market fill is always
+  // price-valid and, for these near-market cases, lands at the intended entry.
+  // SL/TP/lot are unchanged, so risk is preserved.
+  if (!placement.ok && !useMarket && /INVALID_PRICE/i.test(placement.error || '')) {
+    await logActivity({
+      type: 'limit-invalid-retry-market', asset: assetId, template: p.template,
+      direction: p.direction, attemptedEntry: rEntry, error: (placement.error || '').slice(0, 120),
+    });
+    const _mkt = await placeMarketOrder(brokerSymbol, p.direction, finalLot, rSL, rTP, comment);
+    placement = _mkt;
+    if (_mkt.ok) { useMarket = true; entryType = 'immediate'; }
+  }
 
   if (!placement.ok) {
     await logActivity({ type: 'placement-failed', asset: assetId, template: p.template, direction: p.direction, reason: placement.error });

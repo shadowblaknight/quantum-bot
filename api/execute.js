@@ -99,9 +99,12 @@ async function placeLimitOrder(brokerSymbol, direction, lot, entryPrice, slPrice
   }
 }
 
-// v14: MARKET order — used for "immediate" entries where a limit can't sit on the
-// correct side (price is already at/through the signal). Fills now at market; SL/TP
-// attached. No openPrice field (market fill).
+// Market order — fills immediately at the current price. Mirrors placeLimitOrder
+// but uses ORDER_TYPE_BUY/SELL (no _LIMIT) and omits openPrice (the broker fills
+// at market). Signature has NO entryPrice — market needs none. Used by the
+// webhook's immediate path + INVALID_PRICE retry, and by alexg-run's inside-zone
+// fallback. (This function was imported by webhook.js but never existed, so every
+// immediate/market order silently threw "not a function" — that was the bug.)
 async function placeMarketOrder(brokerSymbol, direction, lot, slPrice, tpPrice, comment) {
   const token = process.env.METAAPI_TOKEN;
   const accountId = process.env.METAAPI_ACCOUNT_ID;
@@ -137,20 +140,27 @@ async function placeMarketOrder(brokerSymbol, direction, lot, slPrice, tpPrice, 
       return { ok: false, error: `MetaAPI ${resp.status}: ${txt.slice(0, 300)}` };
     }
     const data = await resp.json();
+
+    // A market order opens a position immediately, so MetaAPI may return a
+    // positionId (with or without an orderId). Accept ANY of the three as proof
+    // of a fill — otherwise a genuine market success that reports only positionId
+    // would be misread as a rejection.
     const okCode = data.numericCode === 10009 || data.numericCode === undefined;
-    const hasOrderId = !!(data.orderId || data.id);
-    if (!okCode || (!hasOrderId && data.numericCode !== undefined)) {
+    const fillId = data.orderId || data.id || data.positionId || null;
+    const hasFillId = !!fillId;
+    if (!okCode || (!hasFillId && data.numericCode !== undefined)) {
       return {
         ok: false,
         error: `broker rejected order: ${data.stringCode || 'code ' + data.numericCode}: ${data.message || ''}`.slice(0, 300),
         response: data,
       };
     }
-    return { ok: true, orderId: data.orderId || data.id || null, response: data };
+    return { ok: true, orderId: fillId, positionId: data.positionId || null, response: data };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 }
+// ===== Process pending setups for one asset =====
 async function processAsset(asset, openPositions) {
   const result = { asset, actions: [] };
 
@@ -321,9 +331,7 @@ async function tryPlace(pending, brokerSymbol) {
     // If candle fetch fails, fall through and let MT5 reject if entry is bad.
   }
 
-  // v14 all-or-nothing: broker TP parks at the LAST configured target so the full
-  // position rides there; SL ratchets to earlier TPs in manage-trades (no partials).
-  let tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[tpLevels.length - 1].price : null;
+  let tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[0].price : null;
 
   // CHECK 6: TP1 must be a meaningful distance from entry.
   if (tpPrice != null) {

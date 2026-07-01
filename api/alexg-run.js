@@ -190,10 +190,22 @@ async function runAlexg(opts = {}) {
       continue;
     }
 
-    // ── place the limit ──
-    let placement;
+    // ── place the limit (set-and-forget retest at the AOI edge) ──
+    let placement, entryTypeFinal = 'retest', execKindFinal = 'limit';
     try { placement = await D.execute.placeLimitOrder(brokerSymbol, dir, lot, rEntry, rSL, rTP, comment); }
     catch (e) { placement = { ok: false, error: e.message }; }
+
+    // Inside-zone fallback: if price is already at/through the AOI, a retest limit
+    // sits on the wrong side of market and the broker rejects it INVALID_PRICE.
+    // Enter at MARKET instead — for a long the fill is at/below zone.hi, for a
+    // short at/above zone.lo, so RR can only improve vs the planned retest. SL/TP
+    // are unchanged, so risk is preserved. (Needs placeMarketOrder, now in execute.)
+    if (!placement.ok && /INVALID_PRICE/i.test(String(placement.error || '')) && D.execute.placeMarketOrder) {
+      try { placement = await D.execute.placeMarketOrder(brokerSymbol, dir, lot, rSL, rTP, comment); }
+      catch (e) { placement = { ok: false, error: e.message }; }
+      if (placement.ok) { entryTypeFinal = 'immediate'; execKindFinal = 'market'; }
+    }
+
     if (!placement.ok) {
       summary.skipped.push({ asset, reason: 'place-failed: ' + String(placement.error || '').slice(0, 120) });
       try { await D.rules.logActivity({ type: 'placement-failed', asset, template: 'alexg', direction: dir, reason: placement.error }); } catch (_) {}
@@ -218,10 +230,10 @@ async function runAlexg(opts = {}) {
       tpConfirmR: CFG.tpConfirmR,
       createdAt: ts, expiresAt: ts + CFG.expiryMs, status: 'placed',
       brokerOrderId: placement.orderId, comment, positionId: null,
-      entryType: 'retest', execKind: 'limit', v13: true,
+      entryType: entryTypeFinal, execKind: execKindFinal, v13: true,
     };
     try { await D.watcher.addPendingSetup(asset, pendingRecord); } catch (e) { /* non-fatal */ }
-    try { await D.rules.logActivity({ type: 'trade-placed', asset, template: 'alexg', direction: dir, lot, entry: rEntry, sl: rSL, tp1: rTP, entryType: 'retest', execKind: 'limit', activeMode: rules.activeMode, brokerOrderId: placement.orderId }); } catch (_) {}
+    try { await D.rules.logActivity({ type: 'trade-placed', asset, template: 'alexg', direction: dir, lot, entry: rEntry, sl: rSL, tp1: rTP, entryType: entryTypeFinal, execKind: execKindFinal, activeMode: rules.activeMode, brokerOrderId: placement.orderId }); } catch (_) {}
     try {
       if (D.telegram && D.telegram.notifyTradePlaced) {
         await D.telegram.notifyTradePlaced({
