@@ -164,12 +164,13 @@ async function evaluateTrade(asset, opts = {}) {
     const probe = await fc(asset, '1d', 50);
     const nD = (probe && probe.candles && probe.candles.length) || 0;
     if (nD < 40) {
-      return plan(asset, { tradeable: false, reason: nD === 0
-        ? 'no candle data — symbol may be unresolved on broker'
-        : `insufficient history (${nD} daily candles)` });
+      const dReason = nD === 0 ? 'no candle data — symbol may be unresolved on broker' : `insufficient history (${nD} daily candles)`;
+      return plan(asset, { tradeable: false, reason: dReason,
+        funnel: { stage: 'data', reached: [], waitingFor: dReason, direction: null, bias: null, aoi: null, entry: null, session: null, grade: null } });
     }
   } catch (e) {
-    return plan(asset, { tradeable: false, reason: 'data fetch failed — symbol may be unresolved: ' + e.message });
+    return plan(asset, { tradeable: false, reason: 'data fetch failed — symbol may be unresolved: ' + e.message,
+      funnel: { stage: 'data', reached: [], waitingFor: 'data fetch failed — ' + e.message, direction: null, bias: null, aoi: null, entry: null, session: null, grade: null } });
   }
 
   // chain (memoized fetches make re-calls free); allow injection for tests
@@ -178,17 +179,17 @@ async function evaluateTrade(asset, opts = {}) {
     if (!bias) bias = await BIAS.evaluateBias(asset, subOpts);
     if (!loc) loc = await AOI.evaluateLocation(asset, { ...subOpts, bias });
     if (!entry) entry = await ENTRY.evaluateEntry(asset, { ...subOpts, location: loc });
-  } catch (e) { return plan(asset, { tradeable: false, reason: 'pipeline threw: ' + e.message }); }
+  } catch (e) { return plan(asset, { tradeable: false, reason: 'pipeline threw: ' + e.message, funnel: { stage: 'error', reached: ['data'], waitingFor: 'pipeline error — ' + e.message, direction: null, bias: null, aoi: null, entry: null, session: null, grade: null } }); }
 
   const session = sessionGate(opts.now);
 
   if (!entry || !entry.entrySignal) {
-    return plan(asset, { direction: entry && entry.direction, tradeType: entry && entry.tradeType, tradeable: false, reason: 'no entry signal', session });
+    return plan(asset, { direction: entry && entry.direction, tradeType: entry && entry.tradeType, tradeable: false, reason: 'no entry signal', session, funnel: buildFunnel(bias, loc, entry, session, null, null) });
   }
 
   const dir = entry.direction, zone = entry.activeZone;
   const price = (loc && loc.price) || null;
-  if (!zone || price == null) return plan(asset, { direction: dir, tradeType: entry.tradeType, tradeable: false, reason: 'missing zone/price', session });
+  if (!zone || price == null) return plan(asset, { direction: dir, tradeType: entry.tradeType, tradeable: false, reason: 'missing zone/price', session, funnel: buildFunnel(bias, loc, entry, session, null, null) });
 
   // candles across all relevant TFs for ATR, TP structure, and confluences
   let d = [], w = [], h4 = [], trig = [];
@@ -297,6 +298,7 @@ async function evaluateTrade(asset, opts = {}) {
     session,
     confluences: entry.confluences,
     notes,
+    funnel: buildFunnel(bias, loc, entry, session, grade, { tradeable, notes }),
   });
 }
 
@@ -333,7 +335,80 @@ async function evaluateUniverse(assets, opts = {}) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 function round(x, pip) { if (x == null || !isFinite(x)) return null; const dec = pip < 0.01 ? 5 : pip < 1 ? 3 : 2; return Math.round(x * 10 ** dec) / 10 ** dec; }
-function plan(asset, o) { return { asset, direction: o.direction || null, tradeType: o.tradeType || null, triggerTF: o.triggerTF || null, tradeable: !!o.tradeable, reason: o.reason || null, entry: o.entry != null ? o.entry : null, sl: o.sl != null ? o.sl : null, tp: o.tp != null ? o.tp : null, rr: o.rr != null ? o.rr : null, riskPips: o.riskPips != null ? o.riskPips : null, rewardPips: o.rewardPips != null ? o.rewardPips : null, tpSource: o.tpSource || null, zone: o.zone || null, grade: o.grade || null, patterns: o.patterns || [], session: o.session || null, confluences: o.confluences || null, notes: o.notes || [], evaluatedAt: Date.now() }; }
+function plan(asset, o) { return { asset, direction: o.direction || null, tradeType: o.tradeType || null, triggerTF: o.triggerTF || null, tradeable: !!o.tradeable, reason: o.reason || null, entry: o.entry != null ? o.entry : null, sl: o.sl != null ? o.sl : null, tp: o.tp != null ? o.tp : null, rr: o.rr != null ? o.rr : null, riskPips: o.riskPips != null ? o.riskPips : null, rewardPips: o.rewardPips != null ? o.rewardPips : null, tpSource: o.tpSource || null, zone: o.zone || null, grade: o.grade || null, patterns: o.patterns || [], session: o.session || null, confluences: o.confluences || null, notes: o.notes || [], funnel: o.funnel || null, evaluatedAt: Date.now() }; }
+
+// ─── FUNNEL: read-only progress trace for the dashboard ─────────────
+// Purely diagnostic. Turns the discarded bias/AOI/entry objects into a
+// per-pair "how far did this pair get, and what is it waiting for next"
+// summary so the scanner is legible instead of a silent "no setup".
+function buildFunnel(bias, loc, entry, session, grade, gates) {
+  const dir = (entry && entry.direction) || (loc && loc.direction) || (bias && bias.direction) || null;
+  const f = {
+    stage: 'bias', reached: ['data'], waitingFor: null, direction: dir,
+    bias: bias ? {
+      direction: bias.direction || null, tradeType: bias.tradeType || null,
+      fullStack: !!bias.fullStack, inSync: bias.inSync || [],
+      awaitingPullback: !!bias.awaitingPullback, counterHigherTF: !!bias.counterHigherTF,
+      trends: bias.timeframes ? {
+        w: bias.timeframes.w && bias.timeframes.w.trend,
+        d: bias.timeframes.d && bias.timeframes.d.trend,
+        h4: bias.timeframes.h4 && bias.timeframes.h4.trend,
+      } : null,
+    } : null,
+    aoi: loc ? {
+      atAOI: !!loc.atAOI, locationOK: !!loc.locationOK, broken: !!loc.broken,
+      activeZone: loc.activeZone || null,
+      conflict: (loc.conflict && loc.conflict.blocked) ? (loc.conflict.reason || 'HTF conflict') : null,
+      confluences: loc.confluences || null,
+      zoneCounts: (loc.zones) ? {
+        dDemand: (loc.zones.dDemand || []).length, dSupply: (loc.zones.dSupply || []).length,
+        wDemand: (loc.zones.wDemand || []).length, wSupply: (loc.zones.wSupply || []).length,
+      } : null,
+    } : null,
+    entry: entry ? {
+      signal: !!entry.entrySignal, triggerTF: entry.triggerTF || null,
+      shift: entry.shift ? entry.shift.tf : null,
+      engulf: entry.engulfing ? entry.engulfing.tf : null,
+      candidates: entry.candidates || [],
+    } : null,
+    session: session ? { ok: !!session.ok, hourUTC: session.hourUTC, window: session.window } : null,
+    grade: grade ? { letter: grade.letter, pct: grade.pct } : null,
+  };
+
+  if (!bias || !dir) { f.stage = 'bias'; f.waitingFor = 'HTF bias unclear — waiting for a daily/weekly trend to form'; return f; }
+  f.reached.push('bias');
+  const dirWord = dir === 'long' ? 'demand' : 'supply';
+
+  if (!(loc && (loc.atAOI || loc.activeZone))) {
+    f.stage = 'aoi';
+    if (loc && loc.conflict && loc.conflict.blocked) f.waitingFor = `blocked — ${loc.conflict.reason || 'HTF conflict'}`;
+    else if (loc && loc.broken) f.waitingFor = `${dir} bias, but the ${dirWord} zone was broken — waiting for a fresh AOI`;
+    else f.waitingFor = `bias ${dir}, price not at a ${dirWord} AOI yet — waiting for price to reach a zone`;
+    return f;
+  }
+  f.reached.push('aoi');
+
+  const cands = (entry && entry.candidates) || [];
+  const anyShift = cands.some((c) => c.shift);
+  const shiftNoEngulf = cands.find((c) => c.shift && !c.engulfing);
+  const falseShift = cands.find((c) => c.falseShift);
+
+  if (entry && entry.entrySignal) {
+    f.reached.push('entry');
+    if (gates && gates.tradeable) { f.stage = 'ready'; f.reached.push('ready'); f.waitingFor = 'SETUP READY — all gates passed'; return f; }
+    f.stage = 'gates';
+    if (session && !session.ok) f.waitingFor = `entry confirmed — outside session (now ${session.hourUTC}:00 UTC)`;
+    else f.waitingFor = (gates && gates.notes && gates.notes.length) ? gates.notes.join('; ') : 'entry confirmed — checking gates';
+    return f;
+  }
+
+  f.stage = 'entry';
+  if (!anyShift) f.waitingFor = `at ${dirWord} AOI — waiting for an LTF shift of structure (CHoCH)`;
+  else if (shiftNoEngulf) f.waitingFor = `shift on ${shiftNoEngulf.tf} — waiting for an engulfing candle to confirm`;
+  else if (falseShift) f.waitingFor = `shift on ${falseShift.tf} was a mimic (one big candle) — waiting for a clean shift`;
+  else f.waitingFor = `at ${dirWord} AOI — waiting for entry confirmation`;
+  return f;
+}
 
 // ─── HTTP handler (read-only) ───────────────────────────────────────
 module.exports = async (req, res) => {

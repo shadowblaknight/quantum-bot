@@ -1927,16 +1927,31 @@ function TpHitPanel({ gridColumn = "1 / 4" }) {
 // gradeable setup, and which is actually tradeable. Refreshes gently (the
 // scan does a full multi-TF analysis per instrument).
 const ALEXG_ORDER = ["eurusd", "gbpusd", "usdjpy", "usdchf", "audusd", "nzdusd", "usdcad", "eurjpy", "gbpjpy", "gold", "nas100", "us500", "btc"];
+// Funnel stage metadata — rank drives "focus" ordering (deepest first).
+const ALEXG_STAGE_META = {
+  ready: { rank: 6, label: "● READY", color: "var(--qb-ok)" },
+  gates: { rank: 5, label: "◕ entry · gating", color: "var(--qb-warn)" },
+  entry: { rank: 4, label: "◑ at AOI · confirming", color: "var(--qb-accent)" },
+  aoi:   { rank: 3, label: "◔ bias · seeking AOI", color: "var(--qb-text-mid)" },
+  bias:  { rank: 2, label: "○ forming bias", color: "var(--qb-text-faint)" },
+  error: { rank: 1, label: "⚠ error", color: "var(--qb-bad)" },
+  data:  { rank: 0, label: "· no data", color: "var(--qb-text-faint)" },
+};
 function alexgStage(p) {
-  if (!p) return { label: "—", color: "var(--qb-text-faint)" };
-  if (p.tradeable) return { label: "● TRADEABLE", color: "var(--qb-ok)" };
+  if (!p) return { label: "—", color: "var(--qb-text-faint)", rank: -1 };
+  if (p.tradeable) return ALEXG_STAGE_META.ready;
+  const st = p.funnel && p.funnel.stage;
+  if (st && ALEXG_STAGE_META[st]) return ALEXG_STAGE_META[st];
+  // fallback when funnel is absent (older cached response)
   const r = (p.reason || "").toLowerCase();
-  if (p.entry != null) return { label: `setup · graded ${p.grade ? p.grade.letter : "?"}`, color: "var(--qb-warn)" };
-  if (p.zone) return { label: "at AOI · awaiting shift", color: "var(--qb-accent)" };
-  if (p.direction) return { label: `bias ${p.direction === "long" ? "↑" : "↓"} · no AOI`, color: "var(--qb-text-mid)" };
-  if (r.includes("ineligib") || r.includes("consolidat") || r.includes("chop")) return { label: "filtered · chop", color: "var(--qb-text-faint)" };
-  return { label: "no setup", color: "var(--qb-text-faint)" };
+  if (p.entry != null) return { label: `setup · graded ${p.grade ? p.grade.letter : "?"}`, color: "var(--qb-warn)", rank: 5 };
+  if (p.zone) return { label: "at AOI · awaiting shift", color: "var(--qb-accent)", rank: 4 };
+  if (p.direction) return { label: `bias ${p.direction === "long" ? "↑" : "↓"} · no AOI`, color: "var(--qb-text-mid)", rank: 3 };
+  if (r.includes("ineligib") || r.includes("consolidat") || r.includes("chop")) return { label: "filtered · chop", color: "var(--qb-text-faint)", rank: 1 };
+  return { label: "no setup", color: "var(--qb-text-faint)", rank: 0 };
 }
+const alexgTrend = (t) => (t === "up" ? "↑" : t === "down" ? "↓" : "·");
+const alexgTrendColor = (t) => (t === "up" ? "var(--qb-ok)" : t === "down" ? "var(--qb-bad)" : "var(--qb-text-faint)");
 // ─── v14.5 · Alex G cron heartbeat — makes a silent cron failure visible ──
 // Reads /api/alexg-heartbeat (the alexg-run cron stamps every execution). Green
 // = ran recently; amber = overdue (possible silent death); red = last run threw.
@@ -2049,18 +2064,25 @@ function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
     return () => { alive.v = false; clearInterval(id); };
   }, []);
 
-  const rows = ALEXG_ORDER.filter((a) => results && results[a]).map((a) => ({ a, p: results[a] }));
-  const fireN = rows.filter((r) => r.p.tradeable).length;
-  const aoiN  = rows.filter((r) => !r.p.tradeable && (r.p.entry != null || r.p.zone)).length;
+  const rows = ALEXG_ORDER
+    .filter((a) => results && results[a])
+    .map((a) => ({ a, p: results[a], st: alexgStage(results[a]) }))
+    .sort((x, y) => (y.st.rank - x.st.rank) || x.a.localeCompare(y.a));
+  const fireN  = rows.filter((r) => r.p.tradeable).length;
+  const entryN = rows.filter((r) => !r.p.tradeable && r.st.rank === 4).length;
+  const aoiN   = rows.filter((r) => r.st.rank === 3).length;
+  const biasN  = rows.filter((r) => r.st.rank === 2).length;
   const gradeColor = (pct) => (pct >= 70 ? "var(--qb-ok)" : pct >= 50 ? "var(--qb-warn)" : "var(--qb-text-faint)");
   const fmt = (x) => (x == null ? "·" : String(x));
 
   return (
-    <Panel title="📐 Alex G · Live Signals" subtitle="read-only top-down scan · all instruments" style={{ gridColumn }}>
+    <Panel title="📐 Alex G · Live Signals" subtitle="read-only funnel · ranked by how close each pair is to firing" style={{ gridColumn }}>
       <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
-        <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 10, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
-          <span style={{ color: "var(--qb-ok)" }}>{fireN} tradeable</span>
-          <span style={{ color: "var(--qb-accent)" }}>{aoiN} at AOI</span>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
+          <span style={{ color: "var(--qb-ok)" }}>{fireN} ready</span>
+          <span style={{ color: "var(--qb-accent)" }}>{entryN} confirming</span>
+          <span style={{ color: "var(--qb-text-mid)" }}>{aoiN} seeking AOI</span>
+          <span style={{ color: "var(--qb-text-faint)" }}>{biasN} bias</span>
           <span style={{ color: "var(--qb-text-faint)" }}>
             {busy ? `scanning ${progress || ""}` : scannedAt ? `scanned ${new Date(scannedAt).toUTCString().slice(17, 25)} UTC` : "—"}
           </span>
@@ -2078,43 +2100,43 @@ function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
             {busy ? `Analysing instruments… ${progress || ""}` : "No scan data yet."}
           </div>
         )}
-        {rows.length > 0 && (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
-            <thead>
-              <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
-                <th style={{ textAlign: "left", padding: "4px 6px" }}>Instrument</th>
-                <th style={{ textAlign: "left", padding: "4px 6px" }}>Status</th>
-                <th style={{ padding: "4px 6px" }}>Dir</th>
-                <th style={{ padding: "4px 6px" }}>TF</th>
-                <th style={{ padding: "4px 6px" }}>Entry</th>
-                <th style={{ padding: "4px 6px" }}>SL</th>
-                <th style={{ padding: "4px 6px" }}>TP</th>
-                <th style={{ padding: "4px 6px" }}>RR</th>
-                <th style={{ padding: "4px 6px" }}>Grade</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(({ a, p }) => {
-                const st = alexgStage(p);
-                return (
-                  <tr key={a} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
-                    <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>{a.toUpperCase()}</td>
-                    <td style={{ textAlign: "left", padding: "4px 6px", color: st.color }}>{st.label}</td>
-                    <td style={{ padding: "4px 6px", color: p.direction === "long" ? "var(--qb-ok)" : p.direction === "short" ? "var(--qb-bad)" : "var(--qb-text-faint)" }}>{p.direction ? (p.direction === "long" ? "L" : "S") : "·"}</td>
-                    <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{fmt(p.triggerTF)}</td>
-                    <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{fmt(p.entry)}</td>
-                    <td style={{ padding: "4px 6px", color: "var(--qb-text-faint)" }}>{fmt(p.sl)}</td>
-                    <td style={{ padding: "4px 6px", color: "var(--qb-text-faint)" }}>{fmt(p.tp)}</td>
-                    <td style={{ padding: "4px 6px", color: p.rr != null && p.rr >= 2 ? "var(--qb-ok)" : "var(--qb-text-mid)" }}>{p.rr != null ? p.rr + "R" : "·"}</td>
-                    <td style={{ padding: "4px 6px", color: p.grade ? gradeColor(p.grade.pct) : "var(--qb-text-faint)" }}>{p.grade ? `${p.grade.letter} ${p.grade.pct}%` : "·"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+        {rows.map(({ a, p, st }) => {
+          const f = p.funnel || {};
+          const tr = f.bias && f.bias.trends;
+          const dirColor = p.direction === "long" ? "var(--qb-ok)" : p.direction === "short" ? "var(--qb-bad)" : "var(--qb-text-faint)";
+          const graded = p.entry != null;
+          return (
+            <div key={a} style={{ borderTop: "1px solid var(--qb-border)", padding: "7px 2px", fontFamily: "var(--qb-font-mono)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, flexWrap: "wrap" }}>
+                <span style={{ color: "var(--qb-text-hi)", fontWeight: 600, minWidth: 60 }}>{a.toUpperCase()}</span>
+                <span style={{ color: st.color }}>{st.label}</span>
+                {p.direction && <span style={{ color: dirColor }}>{p.direction === "long" ? "↑ long" : "↓ short"}</span>}
+                {tr && (
+                  <span style={{ marginLeft: "auto", fontSize: 10, letterSpacing: 0.5 }}>
+                    <span style={{ color: "var(--qb-text-faint)" }}>W</span><span style={{ color: alexgTrendColor(tr.w) }}>{alexgTrend(tr.w)}</span>{" "}
+                    <span style={{ color: "var(--qb-text-faint)" }}>D</span><span style={{ color: alexgTrendColor(tr.d) }}>{alexgTrend(tr.d)}</span>{" "}
+                    <span style={{ color: "var(--qb-text-faint)" }}>4h</span><span style={{ color: alexgTrendColor(tr.h4) }}>{alexgTrend(tr.h4)}</span>
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--qb-text-mid)", marginTop: 3, lineHeight: 1.4 }}>
+                {f.waitingFor || p.reason || "—"}
+              </div>
+              {graded && (
+                <div style={{ fontSize: 10, color: "var(--qb-text-faint)", marginTop: 3, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <span>entry <span style={{ color: "var(--qb-text-mid)" }}>{fmt(p.entry)}</span></span>
+                  <span>SL <span style={{ color: "var(--qb-text-mid)" }}>{fmt(p.sl)}</span></span>
+                  <span>TP <span style={{ color: "var(--qb-text-mid)" }}>{fmt(p.tp)}</span></span>
+                  <span style={{ color: p.rr != null && p.rr >= 2 ? "var(--qb-ok)" : "var(--qb-text-mid)" }}>{p.rr != null ? p.rr + "R" : "·"}</span>
+                  {p.grade && <span style={{ color: gradeColor(p.grade.pct) }}>{p.grade.letter} {p.grade.pct}%</span>}
+                  {p.triggerTF && <span>TF {p.triggerTF}</span>}
+                </div>
+              )}
+            </div>
+          );
+        })}
         <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-          Read-only — this scan analyses but never places. Entry/SL/TP are the planned set-and-forget levels; the order only fires from the alexg-run cron when a setup grades ≥ 70%.
+          Read-only — analyses but never places. Rows are ranked by how far each pair has advanced through the funnel (bias → AOI → shift → engulfing → gates). The order only fires from the alexg-run cron when a setup reaches grade ≥ 70% inside session hours.
         </div>
       </div>
     </Panel>
