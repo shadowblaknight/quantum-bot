@@ -61,6 +61,12 @@ const CFG = {
                      // gates (AOI >=3 touches, shift+engulf, RR>=2, grade>=70%)
                      // still filter actual trades — this only unblocks the read.
   minPivots:  4,     // need at least this many swing points to judge a trend
+  atrMultLTF: 1.5,   // COARSER zigzag threshold for intraday TFs (4h and below).
+                     // A single multiplier can't serve daily and 4h: at 1.0 the
+                     // 4h fragments into 40+ noise pivots (mixed labels -> false
+                     // "unclear"), breaking D+4h day-trade sync even when the
+                     // daily is a clean trend. Daily/weekly keep atrMult (1.0);
+                     // intraday uses this. TUNABLE via ?atrMultLTF=.
 };
 
 // ─── ATR (local, simple) ────────────────────────────────────────────
@@ -122,7 +128,13 @@ function buildStructure(candles, label, opts = {}) {
   }
   const closes = candles.map((c) => c.close);
   const atrVal = atr(candles);
-  const atrMult = opts.atrMult != null ? opts.atrMult : CFG.atrMult;
+  // Per-timeframe threshold: daily/weekly use atrMult; intraday (4h and below)
+  // use the coarser atrMultLTF so a finer daily setting doesn't shred the 4h into
+  // noise. Explicit opts win (URL knobs / entry's own ltfAtrMult via opts.atrMult).
+  const isLTF = /^(4h|1h|30m|15m|5m|1m)$/.test(label);
+  const atrMult = isLTF
+    ? (opts.atrMultLTF != null ? opts.atrMultLTF : (opts.atrMult != null ? opts.atrMult : CFG.atrMultLTF))
+    : (opts.atrMult != null ? opts.atrMult : CFG.atrMult);
   const threshold = (atrVal && isFinite(atrVal)) ? atrMult * atrVal : null;
   if (!threshold) return { ok: false, label, reason: `no ATR for ${label}`, trend: 'unclear' };
 

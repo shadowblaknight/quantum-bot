@@ -435,6 +435,7 @@ module.exports = async (req, res) => {
     //   ?minPivots=3   → accept a trend on fewer swing points
     const tuneOpts = {};
     if (q.atrMult != null && isFinite(parseFloat(q.atrMult))) tuneOpts.atrMult = parseFloat(q.atrMult);
+    if (q.atrMultLTF != null && isFinite(parseFloat(q.atrMultLTF))) tuneOpts.atrMultLTF = parseFloat(q.atrMultLTF);
     if (q.minPivots != null && isFinite(parseInt(q.minPivots, 10))) tuneOpts.minPivots = parseInt(q.minPivots, 10);
     if (q.asset) {
       if (!getAssetById(q.asset)) return res.status(400).json({ ok: false, error: 'unknown asset' });
