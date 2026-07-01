@@ -51,8 +51,15 @@ const CFG = {
   dLookback:  240,   // Daily candles
   h4Lookback: 300,   // 4hr candles
   atrPeriod:  14,
-  atrMult:    1.5,   // zigzag reversal threshold = atrMult x ATR (TUNABLE — sets
-                     // how "significant" a swing must be to count as structure)
+  atrMult:    1.0,   // zigzag reversal threshold = atrMult x ATR (TUNABLE — sets
+                     // how "significant" a swing must be to count as structure).
+                     // Lowered 1.5 -> 1.0 after live validation: at 1.5 the daily
+                     // read "unclear" on pairs whose weekly was clearly trending
+                     // (incoherent). At 1.0 the daily resolves the real structure
+                     // and agrees with the weekly; 1.0 and 0.7 give the SAME read,
+                     // so the trend is robust, not threshold-noise. Downstream
+                     // gates (AOI >=3 touches, shift+engulf, RR>=2, grade>=70%)
+                     // still filter actual trades — this only unblocks the read.
   minPivots:  4,     // need at least this many swing points to judge a trend
 };
 
