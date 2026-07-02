@@ -35,6 +35,8 @@ const { checkAllWatchedSetups } = require('./watched-setups-checker');
 // the broker TP at placement). At TP1/TP2 touches we ONLY ratchet the SL up to
 // that TP — no partial closes. Set to true to restore the legacy 33/33/34 scale-out.
 const USE_PARTIALS = false;
+const USE_SL_RATCHET = true;     // ratchet SL to each confirmed TP level
+const USE_TRAILING_STOP = true;  // trail at 1×ATR once 2R+ profit and 2 TPs hit
 
 // ===== Position management state =====
 const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
@@ -401,7 +403,7 @@ async function managePosition(position) {
     if (valid && improves) { chosen = c; break; }
   }
 
-  if (chosen) {
+  if (USE_SL_RATCHET && chosen) {
     const modifyResult = await modifyPosition(position.id, chosen.price, finalTPPrice, asset);
     if (modifyResult.ok) {
       state.slMoves.push({ atTP: chosen.name, newSL: chosen.price, ts: Date.now() });
@@ -437,7 +439,7 @@ async function managePosition(position) {
   const profitDistance = isLong ? currentPrice - state.entry : state.entry - currentPrice;
   const profitR = initialSLDistance > 0 ? profitDistance / initialSLDistance : 0;
 
-  if (profitR >= 2.0 && state.tpsHit.length >= 2) {
+  if (USE_TRAILING_STOP && profitR >= 2.0 && state.tpsHit.length >= 2) {
     const candles = await fetchCandles(asset, '1h', 30);
     const atrValue = atr(candles.candles || [], 14);
     if (atrValue) {

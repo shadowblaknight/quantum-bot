@@ -45,6 +45,8 @@ const PINE_TO_ASSET = {
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60;
+const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'];
+function _escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function withTimeout(promise, ms, fallback) {
   return Promise.race([
@@ -94,7 +96,7 @@ async function alreadyExecuted(dedupeKey) {
   const r = getRedis();
   if (!r) return false;
   try { return (await r.get(DEDUPE_PREFIX + dedupeKey)) != null; }
-  catch (_) { return false; }
+  catch (e) { console.warn('[webhook] Redis dedupe check failed — dedupe disabled for this request:', e && e.message); return false; }
 }
 
 async function markExecuted(dedupeKey, info) {
@@ -540,23 +542,45 @@ module.exports = async (req, res) => {
   if ((p.action || 'trade') === 'skip') {
     const reason = p.reason || 'filtered';
     const note   = p.note || 'setup formed but filtered';
-    const extra  = (p.htfTier ? `\nTier: ${p.htfTier}` : '') + (p.widthATR != null ? `\nWidth: ${p.widthATR}× ATR` : '') + (p.session ? `\nSession: ${p.session}` : '');
+    const extra  = (p.htfTier ? `\nTier: ${_escHtml(p.htfTier)}` : '') + (p.widthATR != null ? `\nWidth: ${p.widthATR}× ATR` : '') + (p.session ? `\nSession: ${_escHtml(p.session)}` : '');
     try {
       await sendOnce(`pineskip:${assetId}:${p.template}:${reason}:${p.timestamp || ''}`,
-        `⚪ ${assetId.toUpperCase()} · ${p.template} · SKIPPED\n${note}${extra}`);
+        `⚪ ${assetId.toUpperCase()} · ${p.template} · SKIPPED\n${_escHtml(note)}${extra}`);
     } catch (_) {}
     try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: `pine-skip: ${reason}` }); } catch (_) {}
     return res.status(200).json({ ok: true, skipped: true, reason });
+  }
+
+  if (!ACCEPTED_TEMPLATES.includes(p.template)) {
+    return res.status(400).json({ ok: false, error: `unknown template: ${p.template}` });
   }
 
   // 9. Parse numerics (fast) — fail fast on a malformed payload
   const entry = parseFloat(p.entry);
   const sl    = parseFloat(p.sl);
   const tp1   = parseFloat(p.tp1);
-  const tp2   = parseFloat(p.tp2);
-  const tp3   = parseFloat(p.tp3);
+  const _tp2r = parseFloat(p.tp2);
+  const _tp3r = parseFloat(p.tp3);
+  const tp2   = isFinite(_tp2r) ? _tp2r : null;
+  const tp3   = isFinite(_tp3r) ? _tp3r : null;
   if (!isFinite(entry) || !isFinite(sl) || !isFinite(tp1)) {
     return res.status(400).json({ ok: false, error: 'invalid entry/sl/tp1 in payload' });
+  }
+  if (Math.abs(entry - sl) === 0) {
+    return res.status(400).json({ ok: false, error: 'zero-risk payload: sl equals entry' });
+  }
+  if (p.direction !== 'LONG' && p.direction !== 'SHORT') {
+    return res.status(400).json({ ok: false, error: 'invalid direction' });
+  }
+  const _isLong = p.direction === 'LONG';
+  if (_isLong ? (sl >= entry || tp1 <= entry) : (sl <= entry || tp1 >= entry)) {
+    return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
+  }
+  if (tp2 !== null && (_isLong ? tp2 <= entry : tp2 >= entry)) {
+    return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
+  }
+  if (tp3 !== null && (_isLong ? tp3 <= entry : tp3 >= entry)) {
+    return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
   }
 
   // 5. Dedupe (fast Redis read)

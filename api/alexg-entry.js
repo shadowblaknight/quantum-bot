@@ -47,7 +47,7 @@ const CFG = {
                            // ATRs of the AOI for the shift to count "at the AOI"
   maxSingleFrac:   0.80,   // if one candle is >80% of the breaking leg => mimic
   minLegCandles:   2,      // a leg of <2 candles is too abrupt to be real structure
-  engulfScan:      3,      // scan the last N candles for the engulfing
+  engulfScan:      8,      // scan the last N candles for the engulfing
 };
 
 // ─── candlestick + leg helpers ──────────────────────────────────────
@@ -58,9 +58,9 @@ function isBearEngulf(c, p) {
   return c.close < c.open && p.close > p.open && c.close <= p.open && c.open >= p.close;
 }
 // find an engulfing in `direction` within the last `scan` candles; return the most recent
-function findEngulfing(candles, direction, scan) {
+function findEngulfing(candles, direction, scan, afterIdx = 0) {
   const n = candles.length;
-  for (let i = n - 1; i >= Math.max(1, n - scan); i--) {
+  for (let i = n - 1; i >= Math.max(1, n - scan, afterIdx + 1); i--) {
     const c = candles[i], p = candles[i - 1];
     if (direction === 'long' && isBullEngulf(c, p)) return { found: true, idx: i, kind: 'bullish' };
     if (direction === 'short' && isBearEngulf(c, p)) return { found: true, idx: i, kind: 'bearish' };
@@ -140,7 +140,7 @@ async function evaluateEntry(asset, opts = {}) {
     return { ...entryShell(asset, loc), entrySignal: false, notes: ['not at a valid AOI / location blocked — ' + (loc.notes || []).join('; ')] };
   }
 
-  // evaluate each LTF; collect candidates that have a real shift, then require engulfing
+  // evaluate each LTF; collect candidates with shift + engulfing data
   const candidates = [];
   for (const tf of LTFS) {
     let candles;
@@ -149,13 +149,20 @@ async function evaluateEntry(asset, opts = {}) {
     if (candles.length < 10) continue;
     const atrVal = BIAS.atr(candles) || 0;
     const shift = detectShiftOnTF(candles, direction, zone, atrVal, opts);
-    const eng = findEngulfing(candles, direction, CFG.engulfScan);
-    candidates.push({ tf, shift, engulfing: eng, hasShift: !!shift.found, hasEngulf: eng.found });
+    const originIdx = (shift.found && shift.origin) ? shift.origin.idx : 0;
+    // only count engulfing that formed AFTER the shift's origin candle
+    const eng = findEngulfing(candles, direction, CFG.engulfScan, shift.found ? originIdx : 0);
+    candidates.push({ tf, candles, shift, engulfing: eng, hasShift: !!shift.found, hasEngulf: eng.found });
   }
 
-  // cleanest = highest-ranked TF with BOTH a valid shift and an engulfing
-  const valid = candidates.filter((c) => c.hasShift && c.hasEngulf).sort((a, b) => TF_RANK[b.tf] - TF_RANK[a.tf]);
-  const chosen = valid[0] || null;
+  // cleanest = highest-ranked TF with a valid shift; engulfing can be on the same
+  // OR any lower TF (e.g. shift on 1h + engulf on 15m is a valid real-world sequence).
+  const shiftByRank = candidates.filter((c) => c.hasShift).sort((a, b) => TF_RANK[b.tf] - TF_RANK[a.tf]);
+  let chosen = null;
+  for (const sc of shiftByRank) {
+    const engulfMatch = candidates.find((ec) => TF_RANK[ec.tf] <= TF_RANK[sc.tf] && ec.hasEngulf);
+    if (engulfMatch) { chosen = { ...sc, engulfTF: engulfMatch.tf, engulfing: engulfMatch.engulfing }; break; }
+  }
 
   const notes = [];
   // surface why near-misses failed (helps calibration)
@@ -174,7 +181,7 @@ async function evaluateEntry(asset, opts = {}) {
     entrySignal: !!chosen,
     triggerTF: chosen ? chosen.tf : null,
     shift: chosen ? { tf: chosen.tf, brokenLevel: chosen.shift.brokenLevel, origin: chosen.shift.origin } : null,
-    engulfing: chosen ? { tf: chosen.tf, idx: chosen.engulfing.idx, kind: chosen.engulfing.kind } : null,
+    engulfing: chosen ? { tf: chosen.engulfTF || chosen.tf, idx: chosen.engulfing.idx, kind: chosen.engulfing.kind } : null,
     candidates: candidates.map((c) => ({ tf: c.tf, shift: c.hasShift, engulfing: c.hasEngulf, falseShift: !!(c.shift && c.shift.falseShift) })),
     confluences: loc.confluences,
     notes,

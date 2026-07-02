@@ -44,7 +44,7 @@ const CFG = {
   zoneMinWidthAtr: 0.10,  // floor so a zone is a band, not a line
   minTouches:      3,     // PDF: a valid AOI needs >=3 touches (TUNABLE)
   gateAtr:         0.15,  // price within this many ATRs of a zone edge = "at AOI"
-  conflictAtr:     1.00,  // opposing Weekly zone within this distance = conflict
+  conflictAtr:     0.50,  // opposing Weekly zone within this distance = conflict
   emaPeriod:       50,    // the 50 EMA confluence
 };
 
@@ -148,10 +148,15 @@ async function evaluateLocation(asset, opts = {}) {
   let bias = opts.bias;
   if (!bias) { try { bias = await BIAS.evaluateBias(asset, opts); } catch (e) { return locFail(asset, 'bias threw: ' + e.message); } }
 
-  let w, d;
+  let w, d, recent1h = [];
   try {
-    const [wr, dr] = await Promise.all([fc(asset, '1w', CFG.wLookback), fc(asset, '1d', CFG.dLookback)]);
+    const [wr, dr, r1h] = await Promise.all([
+      fc(asset, '1w', CFG.wLookback),
+      fc(asset, '1d', CFG.dLookback),
+      fc(asset, '1h', 3).catch(() => null),
+    ]);
     w = (wr && wr.candles) || []; d = (dr && dr.candles) || [];
+    recent1h = (r1h && r1h.candles) || [];
   } catch (e) { return locFail(asset, 'candle fetch threw: ' + e.message, bias); }
 
   const sd = BIAS.buildStructure(d, 'D', opts);
@@ -167,7 +172,11 @@ async function evaluateLocation(asset, opts = {}) {
     wSupply: sw.ok ? buildZones(w, sw.pivots, 'supply', BIAS.atr(w) || atrD, opts) : [],
   };
 
-  const price = d[d.length - 1].close;
+  // Use the most recent 1h close as live price — the daily close is yesterday's
+  // bar and misses all intraday zone touches; 1h is current enough without noise.
+  const price = recent1h.length
+    ? recent1h[recent1h.length - 1].close
+    : d[d.length - 1].close;
   const gate = CFG.gateAtr * atrD;
   const conflictDist = CFG.conflictAtr * atrD;
   const dir = bias.direction;            // 'long' | 'short' | null
@@ -182,24 +191,23 @@ async function evaluateLocation(asset, opts = {}) {
 
   // nearest directional zone to price = the retracement target we'd trade.
   let activeZone = null, distancePips = null, broken = false;
-  let nearest = null;
-  for (const z of candidates) {
-    if (!nearest || Math.abs(price - z.mid) < Math.abs(price - nearest.mid)) nearest = z;
-  }
-  if (nearest) {
-    const within = price >= nearest.lo - gate && price <= nearest.hi + gate;
-    if (within) {
-      activeZone = nearest;
-    } else if (dirKind === 'demand' && price < nearest.lo - gate) {
-      broken = true;                       // closed through the demand we'd buy
-    } else if (dirKind === 'supply' && price > nearest.hi + gate) {
-      broken = true;                       // closed through the supply we'd sell
-    }
+  let nearest = null; // closest zone by price distance (for messaging)
+  // Walk zones closest-first; skip zones price has broken through and try the next
+  // rather than stopping — a broken upper demand often has a valid lower demand below.
+  const byProximity = [...candidates].sort((a, b) => Math.abs(price - a.mid) - Math.abs(price - b.mid));
+  for (const z of byProximity) {
+    if (!nearest) nearest = z;
+    const within = price >= z.lo - gate && price <= z.hi + gate;
+    if (within) { activeZone = z; break; }
+    const throughBelow = dirKind === 'demand' && price < z.lo - gate;
+    const throughAbove = dirKind === 'supply' && price > z.hi + gate;
+    if (throughBelow || throughAbove) { broken = true; continue; } // price broke this zone, try next
   }
   if (activeZone) {
+    broken = false; // found a valid zone further down — not unrecoverably broken
     distancePips = priceToPips(asset, Math.max(0, activeZone.lo - price, price - activeZone.hi));
   }
-  if (broken) notes.push(`price closed through the ${nearest.source} ${nearest.kind} AOI — needs break & retest before entry`);
+  if (broken && !activeZone && nearest) notes.push(`price closed through the ${nearest.source} ${nearest.kind} AOI — needs break & retest before entry`);
 
   // conflict-zone rule: opposing WEEKLY zone too close in the danger direction.
   // long  -> a W SUPPLY just above will reject price down into the long's SL.

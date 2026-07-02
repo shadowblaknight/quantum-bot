@@ -242,7 +242,7 @@ async function evaluateTrade(asset, opts = {}) {
   const wZone = dirZoneAt(loc, dir, 'W', price);
   const dZone = dirZoneAt(loc, dir, 'D', price) || (zone.source === 'D' ? zone : null);
   let h4Zone = null;
-  if (s4.ok) { const z4 = AOI.buildZones(h4, s4.pivots, dirKind, atr4, opts); h4Zone = z4.find((z) => price >= z.lo && price <= z.hi) || null; }
+  if (s4.ok) { const z4 = AOI.buildZones(h4, s4.pivots, dirKind, atr4, { ...opts, minTouches: 2 }); h4Zone = z4.find((z) => price >= z.lo && price <= z.hi) || null; }
 
   const emaW = AOI.ema(w.map((c) => c.close), 50), emaD = AOI.ema(d.map((c) => c.close), 50), ema4 = AOI.ema(h4.map((c) => c.close), 50);
   const nearZone = (v, z, a) => !!(z && v != null && v >= z.lo - 0.2 * a && v <= z.hi + 0.2 * a);

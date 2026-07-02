@@ -1,0 +1,370 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════
+//   QUANTUM BOT — REACTION ENGINE  (tap → coil → break)
+//   Pine Script v6  •  v1.0  •  run on a 5m (or 3m) chart
+//
+//   THE MECHANIC (Wyckoff accumulation → distribution, on HTF zones):
+//     1. TAP        price reaches an HTF reaction zone (M15/H1/H4 OB or FVG).
+//                   Works at SUPPORT and RESISTANCE — symmetric. Direction is
+//                   decided by the BREAK, not the zone type.
+//     2. ACCUMULATE price coils — holds a tight range — measured on the HTF,
+//                   NOT the entry chart. Low-timeframe coiling is just noise;
+//                   real accumulation forms over several H1/H4/Daily candles.
+//                   (a single spike never counts — this is the fakeout filter.)
+//     3. ARM        once the HTF coil is confirmed tight, watch for the break.
+//     4. BREAK      entry-chart close breaks the coil → ENTER in break direction:
+//                     break UP   = LONG  (reject up off support / continuation up off resistance)
+//                     break DOWN = SHORT (reject down off resistance / continuation down off support)
+//
+//   TIMEFRAME PAIRINGS (accumulation → trigger):
+//     • Day-trade:  H1 coil  → 5m  break   (load on a 5m chart,  accumTF = 60)
+//     • Swing:      H4/D coil → 15m break   (load on a 15m chart, accumTF = 240 or D)
+//   HTF decides WHETHER there's a setup; the entry chart decides WHEN to fire.
+//
+//   No coil, no trade. Setups where price taps and runs without coiling never
+//   fire — not skipped by a filter, they simply never reach the break event.
+//
+//   Emits the standard QB payload (template "reaction") → same webhook/rules/
+//   execute pipeline. Backend acceptedTemplates must include "reaction".
+//
+//   SPEED NOTE: TradingView fires on BAR CLOSE + webhook/broker latency. On 5m
+//   that is "within minutes", which is fast enough for a coil break. True
+//   tick-speed entry needs the streaming backend (path two) — not TradingView.
+// ═══════════════════════════════════════════════════════════════════════
+
+indicator(title="Quantum Bot — Reaction Engine", shorttitle="QB REACT", overlay=true, max_bars_back=500, max_labels_count=100, max_lines_count=100, max_boxes_count=60)
+
+// ─── INPUTS ──────────────────────────────────────────────────────────
+G_CORE = "Core"
+atrLength = input.int(14, "ATR length", group=G_CORE)
+emaLength = input.int(50, "HTF EMA length (bias)", group=G_CORE)
+
+G_HTF = "HTF zones (pulled up from the entry chart)"
+htfSwingN     = input.int(20,  "HTF swing lookback", group=G_HTF)
+htfFvgBodyATR = input.float(0.5, "HTF FVG/OB min body (× ATR)", step=0.1, group=G_HTF)
+useM15 = input.bool(true, "Tap M15 zones", group=G_HTF)
+useH1  = input.bool(true, "Tap H1 zones",  group=G_HTF)
+useH4  = input.bool(true, "Tap H4 zones",  group=G_HTF)
+
+G_COIL = "Accumulation (coil) — measured on the HTF, not the entry chart"
+accumTF        = input.string("60", "Accumulation timeframe", options=["60","240","D"], group=G_COIL, tooltip="WHERE the coil is measured. Day-trade: 60 (H1) on a 5m chart. Swing: 240 (H4) or D (Daily) on a 15m chart. Higher = more reliable, fewer setups. Low-TF coiling is just noise.")
+coilWindow     = input.int(6,   "Coil window (HTF bars)", minval=3, group=G_COIL, tooltip="How many HTF candles the coil spans. More candles = more reliable accumulation. 6 H1 bars = 6h of coiling.")
+coilMaxATR     = input.float(1.5, "Coil MAX width (× HTF ATR)", step=0.1, group=G_COIL, tooltip="The coil is 'tight' only if its HTF range is below this. Your accumulation / fakeout filter.")
+coilZoneTolATR = input.float(1.0, "Stay-in-zone tolerance (× ATR)", step=0.1, group=G_COIL, tooltip="Price may stray this far beyond the zone while coiling before the setup is abandoned.")
+maxWatchBars   = input.int(48,  "Give up after (entry-chart bars)", minval=4, group=G_COIL)
+cooldownBars   = input.int(6,   "Cooldown after a fire (bars)", minval=0, group=G_COIL)
+
+G_ENTRY = "Entry / risk"
+entryStyle  = input.string("auto", "Entry on confirmation", options=["auto","retest","immediate"], group=G_ENTRY, tooltip="auto = skip the retest when the confirmation is strong (FVG/IFVG always; coil-break only when the break candle is a real displacement), else wait for the retest. retest = always limit at the level (fills on the pullback, misses strong runs). immediate = always at the confirming close.")
+immediateBodyATR = input.float(1.2, "Auto: min break body ×ATR to skip retest", minval=0.3, step=0.1, group=G_ENTRY, tooltip="In 'auto', the coil-break enters immediately only if the break candle's body is at least this ×ATR (a genuine displacement). Below it, the retest filter still applies. FVG/IFVG ignore this — their gap is the displacement.")
+immediateMaxBodyATR = input.float(2.5, "Auto: max body ×ATR (skip blow-off spikes)", minval=1.0, step=0.1, group=G_ENTRY, tooltip="In 'auto', if the firing candle's body is LARGER than this ×ATR it's treated as a parabolic blow-off spike (likely to snap back) and falls back to the retest instead of filling at market — applies to coil, FVG and IFVG so none of them chase the top of a vertical candle. Only affects 'auto'.")
+slMinH1ATR  = input.float(0.20, "SL min (× accum-TF ATR)", step=0.05, group=G_ENTRY)
+slMaxH1ATR  = input.float(3.00, "SL max (× accum-TF ATR)", step=0.10, group=G_ENTRY)
+requireHTFalign = input.bool(false, "Only trade WITH H1/H4 bias", group=G_ENTRY, tooltip="If on, only fire when the break direction agrees with the higher-timeframe bias (tier A only).")
+
+G_CONF = "FVG / IFVG confirmation — parallel paths that fire on HTF displacement (no coil needed)"
+useFvgConfirm  = input.bool(true,  "FVG confirm (reaction-fvg)",     group=G_CONF, tooltip="Fire when a FRESH accum-TF FVG forms while price is at the zone. The displacement gap replaces the coil as the 'they're committed' proof. Direction = the FVG's direction.")
+useIfvgConfirm = input.bool(false, "IFVG inversion (reaction-ifvg)", group=G_CONF, tooltip="Fire when price CLOSES THROUGH the opposing accum-TF FVG frozen at the tap, inverting it. Staged OFF — enable after the FVG path proves out on a real sample.")
+
+G_ALR = "Alerts"
+alertApiKey = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API key", group=G_ALR)
+
+G_VIZ = "Visuals"
+showZones = input.bool(true, "Show tapped zone + coil", group=G_VIZ)
+showPosBox = input.bool(true, "Position box (entry / SL / TP3)", group=G_VIZ, tooltip="Draws the trade box on every fired signal: green zone entry→TP3, red zone entry→SL, dashed entry line. Pure visual — no effect on trade logic.")
+posBoxBars = input.int(40, "Position box width (bars)", minval=5, maxval=300, group=G_VIZ)
+
+// ─── POSITION BOX helper — green entry→TP3, red entry→SL, dashed entry ──
+f_drawPosBox(float e, float sl, float tp3) =>
+    l = bar_index
+    r = bar_index + posBoxBars
+    box.new(l, math.max(e, tp3), r, math.min(e, tp3), border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+    box.new(l, math.max(e, sl),  r, math.min(e, sl),  border_color=color.new(color.red, 55),  bgcolor=color.new(color.red, 90))
+    line.new(l, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+// ─── HTF PACK (reused verbatim from v2.3) ────────────────────────────
+f_htfPack(int emaLen, int atrLen, int swingN, float bodyMult) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    midBody = math.abs(close[2] - open[2])
+    bullFVG = high[3] < low[1] and midBody >= a * bodyMult
+    bearFVG = low[3] > high[1] and midBody >= a * bodyMult
+    float fU = na
+    float fL = na
+    int   fD = 0
+    if bullFVG
+        fU := low[1]
+        fL := high[3]
+        fD := 1
+    else if bearFVG
+        fU := low[3]
+        fL := high[1]
+        fD := -1
+    impBody = math.abs(close[1] - open[1])
+    bullOB = close[2] < open[2] and close[1] > open[1] and impBody >= a * bodyMult
+    bearOB = close[2] > open[2] and close[1] < open[1] and impBody >= a * bodyMult
+    float oU = na
+    float oL = na
+    int   oD = 0
+    if bullOB
+        oU := math.max(open[2], close[2])
+        oL := math.min(open[2], close[2])
+        oD := 1
+    else if bearOB
+        oU := math.max(open[2], close[2])
+        oL := math.min(open[2], close[2])
+        oD := -1
+    rHi = ta.highest(high[1], swingN)
+    rLo = ta.lowest(low[1], swingN)
+    [b, a, fU, fL, fD, oU, oL, oD, rHi, rLo]
+
+// ─── CORE DATA ───────────────────────────────────────────────────────
+atrVal = ta.atr(atrLength)
+h1ATR  = request.security(syminfo.tickerid, "60", ta.atr(atrLength), lookahead=barmerge.lookahead_off)
+
+// Accumulation pulled from the HTF (the coil lives here, not on the entry chart)
+accumATR    = request.security(syminfo.tickerid, accumTF, ta.atr(atrLength),            lookahead=barmerge.lookahead_off)
+accumCoilHi = request.security(syminfo.tickerid, accumTF, ta.highest(high, coilWindow), lookahead=barmerge.lookahead_off)
+accumCoilLo = request.security(syminfo.tickerid, accumTF, ta.lowest(low,  coilWindow),  lookahead=barmerge.lookahead_off)
+
+[m15B, m15A, m15fU, m15fL, m15fD, m15oU, m15oL, m15oD, m15rHi, m15rLo] = request.security(syminfo.tickerid, "15",  f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+[h1B,  h1A,  h1fU,  h1fL,  h1fD,  h1oU,  h1oL,  h1oD,  h1rHi,  h1rLo]  = request.security(syminfo.tickerid, "60",  f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+[h4B,  h4A,  h4fU,  h4fL,  h4fD,  h4oU,  h4oL,  h4oD,  h4rHi,  h4rLo]  = request.security(syminfo.tickerid, "240", f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+[hdB,  hdA,  hdfU,  hdfL,  hdfD,  hdoU,  hdoL,  hdoD,  hdrHi,  hdrLo]  = request.security(syminfo.tickerid, "D",   f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+
+// accum-TF-matched FVG (the confirmation pack): 60→H1, 240→H4, D→Daily.
+// This keeps the FVG/IFVG confirmation on the SAME timeframe as the coil.
+accFvgU  = accumTF == "60" ? h1fU : accumTF == "240" ? h4fU : hdfU
+accFvgL  = accumTF == "60" ? h1fL : accumTF == "240" ? h4fL : hdfL
+accFvgD  = accumTF == "60" ? h1fD : accumTF == "240" ? h4fD : hdfD
+accClose = request.security(syminfo.tickerid, accumTF, close, lookahead=barmerge.lookahead_off)
+
+// ─── ALERT PAYLOAD (reaction) ────────────────────────────────────────
+f_buildAlertR(string template, string direction, float entry, float sl, float tp1, float tp2, float tp3, float zoneU, float zoneL, string tier, int biasAlign, string conf) =>
+    dEmoji = direction == "LONG" ? "🟢" : "🔴"
+    dWord  = direction == "LONG" ? "BUY" : "SELL"
+    label2 = template == "reaction-fvg" ? "FVG displacement off HTF zone: " : template == "reaction-ifvg" ? "IFVG inversion off HTF zone: " : "Coil break off HTF zone: "
+    h1 = dEmoji + " " + syminfo.ticker + " · " + dWord + " REACTION · " + timeframe.period + " · Tier " + tier
+    h2 = label2 + str.tostring(zoneL, format.mintick) + " - " + str.tostring(zoneU, format.mintick)
+    h3 = "Bias M15/H1/H4: " + str.tostring(m15B) + "/" + str.tostring(h1B) + "/" + str.tostring(h4B) + "  [" + conf + "]"
+    readable = h1 + "\n" + h2 + "\n" + h3 + "\n---\n"
+    head   = "{\"version\":\"react-1.0\",\"action\":\"trade\",\"template\":\"" + template + "\",\"direction\":\"" + direction + "\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"timestamp\":" + str.tostring(time)
+    slRisk = math.abs(entry - sl)
+    rr1 = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2 = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3 = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    prices = ",\"entry\":\"" + str.tostring(entry, format.mintick) + "\",\"sl\":\"" + str.tostring(sl, format.mintick) + "\",\"tp1\":\"" + str.tostring(tp1, format.mintick) + "\",\"tp2\":\"" + str.tostring(tp2, format.mintick) + "\",\"tp3\":\"" + str.tostring(tp3, format.mintick) + "\",\"rr1\":" + str.tostring(rr1, "0.00") + ",\"rr2\":" + str.tostring(rr2, "0.00") + ",\"rr3\":" + str.tostring(rr3, "0.00")
+    zone   = ",\"zoneUpper\":\"" + str.tostring(zoneU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zoneL, format.mintick) + "\",\"zoneType\":\"REACTION\""
+    htf    = ",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(m15B) + "/" + str.tostring(h1B) + "/" + str.tostring(h4B) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
+    ctx    = ",\"window\":\"reaction\",\"impulseATR\":0.00,\"apiKey\":\"" + alertApiKey + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+// ─── ZONE TAP DETECTION ──────────────────────────────────────────────
+// Is price currently inside any active HTF OB/FVG zone? Capture its bounds.
+// H4 checked last so the highest-TF zone wins when several overlap.
+float zU = na
+float zL = na
+f_in(u, l) => not na(u) and not na(l) and close <= math.max(u, l) and close >= math.min(u, l)
+
+if useM15 and f_in(m15fU, m15fL)
+    zU := math.max(m15fU, m15fL)
+    zL := math.min(m15fU, m15fL)
+if useM15 and f_in(m15oU, m15oL)
+    zU := math.max(m15oU, m15oL)
+    zL := math.min(m15oU, m15oL)
+if useH1 and f_in(h1fU, h1fL)
+    zU := math.max(h1fU, h1fL)
+    zL := math.min(h1fU, h1fL)
+if useH1 and f_in(h1oU, h1oL)
+    zU := math.max(h1oU, h1oL)
+    zL := math.min(h1oU, h1oL)
+if useH4 and f_in(h4fU, h4fL)
+    zU := math.max(h4fU, h4fL)
+    zL := math.min(h4fU, h4fL)
+if useH4 and f_in(h4oU, h4oL)
+    zU := math.max(h4oU, h4oL)
+    zL := math.min(h4oU, h4oL)
+
+inZone = not na(zU)
+
+// ─── HTF COIL (accumulation measured on the higher timeframe) ────────
+// The coil is the rolling range of the last coilWindow HTF candles. Tightness
+// is judged against the HTF ATR — so a few quiet entry-chart bars never count
+// as accumulation; only genuine HTF coiling does.
+coilRange = accumCoilHi - accumCoilLo
+coilTight = not na(accumCoilHi) and not na(accumCoilLo) and accumATR > 0 and coilRange <= accumATR * coilMaxATR
+
+// ─── STATE MACHINE ───────────────────────────────────────────────────
+// 0 = idle (watch for tap) | 1 = accumulating | 2 = armed (watch for break)
+var int   rState   = 0
+var float rZU      = na
+var float rZL      = na
+var float rCoilHi  = na
+var float rCoilLo  = na
+var int   rWatch   = 0
+var int   rCool    = 0
+// v14 — IFVG inversion: opposing accum-TF FVG frozen at the tap
+var float rOppHi   = na
+var float rOppLo   = na
+var int   rOppDir  = 0
+// v14 — FVG freshness baseline (only FVGs forming AFTER the tap count as fresh)
+var float rPrevFvgU = na
+var float rPrevFvgL = na
+// v14 — fire markers (chart visuals)
+var bool sigFvgL  = false
+var bool sigFvgS  = false
+var bool sigIfvgL = false
+var bool sigIfvgS = false
+
+if barstate.isconfirmed
+    sigFvgL  := false
+    sigFvgS  := false
+    sigIfvgL := false
+    sigIfvgS := false
+    if rCool > 0
+        rCool := rCool - 1
+
+    if rState == 0
+        if inZone and rCool == 0
+            rState := 1
+            rZU := zU
+            rZL := zL
+            rWatch := 0
+            // freeze the opposing FVG present at the tap (IFVG candidate)
+            rOppHi  := accFvgU
+            rOppLo  := accFvgL
+            rOppDir := accFvgD
+            // baseline so only FVGs forming AFTER the tap read as 'fresh'
+            rPrevFvgU := accFvgU
+            rPrevFvgL := accFvgL
+
+    else if rState == 1
+        rWatch := rWatch + 1
+        nearZone = close <= rZU + atrVal * coilZoneTolATR and close >= rZL - atrVal * coilZoneTolATR
+        guardOK  = not na(accumATR) and accumATR > 0 and atrVal > 0
+        buf      = math.max(0.3 * atrVal, 0.05 * accumATR)
+        bool fired = false
+
+        // ── PATH A — FVG confirmation (fresh accum-TF FVG in a direction) ──
+        freshFvg = accFvgD != 0 and (accFvgU != nz(rPrevFvgU, -1e10) or accFvgL != nz(rPrevFvgL, -1e10))
+        if useFvgConfirm and nearZone and guardOK and freshFvg and not fired
+            sDir = accFvgD
+            dir  = sDir == 1 ? "LONG" : "SHORT"
+            biasAlign = (h1B == sDir or h4B == sDir) ? 1 : 0
+            htfOk = not requireHTFalign or biasAlign == 1
+            proximal = sDir == 1 ? accFvgU : accFvgL
+            notBlowoff = math.abs(close - open) <= atrVal * immediateMaxBodyATR
+            emitEntry = (entryStyle == "immediate" or (entryStyle == "auto" and notBlowoff)) ? close : proximal
+            slP = sDir == 1 ? accFvgL - buf : accFvgU + buf
+            slDist = math.abs(proximal - slP)
+            slAcc = slDist / accumATR
+            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
+                tp1 = sDir == 1 ? proximal + slDist : proximal - slDist
+                tp2 = sDir == 1 ? proximal + slDist * 2.0 : proximal - slDist * 2.0
+                tp3 = sDir == 1 ? proximal + slDist * 3.0 : proximal - slDist * 3.0
+                tier = biasAlign == 1 ? "A" : "B"
+                conf = "reaction-fvg-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
+                alert(f_buildAlertR("reaction-fvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
+                if showPosBox
+                    f_drawPosBox(emitEntry, slP, tp3)
+                sigFvgL := sDir == 1
+                sigFvgS := sDir == -1
+                fired := true
+                rState := 0
+                rCool := cooldownBars
+
+        // ── PATH B — IFVG inversion (close through the frozen opposing FVG) ──
+        invLong  = rOppDir == -1 and not na(rOppHi) and accClose > rOppHi
+        invShort = rOppDir == 1  and not na(rOppLo) and accClose < rOppLo
+        if useIfvgConfirm and nearZone and guardOK and (invLong or invShort) and not fired
+            sDir = invLong ? 1 : -1
+            dir  = invLong ? "LONG" : "SHORT"
+            biasAlign = (h1B == sDir or h4B == sDir) ? 1 : 0
+            htfOk = not requireHTFalign or biasAlign == 1
+            proximal = invLong ? rOppHi : rOppLo
+            notBlowoff = math.abs(close - open) <= atrVal * immediateMaxBodyATR
+            emitEntry = (entryStyle == "immediate" or (entryStyle == "auto" and notBlowoff)) ? close : proximal
+            slP = invLong ? rOppLo - buf : rOppHi + buf
+            slDist = math.abs(proximal - slP)
+            slAcc = slDist / accumATR
+            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
+                tp1 = invLong ? proximal + slDist : proximal - slDist
+                tp2 = invLong ? proximal + slDist * 2.0 : proximal - slDist * 2.0
+                tp3 = invLong ? proximal + slDist * 3.0 : proximal - slDist * 3.0
+                tier = biasAlign == 1 ? "A" : "B"
+                conf = "reaction-ifvg-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
+                alert(f_buildAlertR("reaction-ifvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
+                if showPosBox
+                    f_drawPosBox(emitEntry, slP, tp3)
+                sigIfvgL := invLong
+                sigIfvgS := invShort
+                fired := true
+                rState := 0
+                rCool := cooldownBars
+
+        // update freshness baseline for next bar
+        rPrevFvgU := accFvgU
+        rPrevFvgL := accFvgL
+
+        // ── existing COIL path (only if neither confirmation fired) ──
+        if not fired
+            if not nearZone or rWatch > maxWatchBars
+                rState := 0
+            else if coilTight
+                rState := 2
+                rCoilHi := accumCoilHi
+                rCoilLo := accumCoilLo
+
+    else if rState == 2
+        rWatch := rWatch + 1
+        brokeUp = close > rCoilHi
+        brokeDn = close < rCoilLo
+        if (brokeUp or brokeDn) and not na(accumATR) and accumATR > 0 and atrVal > 0
+            dir  = brokeUp ? "LONG" : "SHORT"
+            sDir = brokeUp ? 1 : -1
+            biasAlign = (h1B == sDir or h4B == sDir) ? 1 : 0
+            htfOk = not requireHTFalign or biasAlign == 1
+            posBody = math.abs(close - open)
+            strongBreak = posBody >= atrVal * immediateBodyATR
+            notBlowoff = posBody <= atrVal * immediateMaxBodyATR
+            goImmediate = entryStyle == "immediate" or (entryStyle == "auto" and strongBreak and notBlowoff)
+            retestLevel = brokeUp ? rCoilHi : rCoilLo
+            emitEntry = goImmediate ? close : retestLevel
+            buf = math.max(0.3 * atrVal, 0.05 * accumATR)
+            slP = brokeUp ? rCoilLo - buf : rCoilHi + buf
+            slDist = math.abs(retestLevel - slP)
+            slAcc = slDist / accumATR
+            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
+                tp1 = brokeUp ? retestLevel + slDist * 1.0 : retestLevel - slDist * 1.0
+                tp2 = brokeUp ? retestLevel + slDist * 2.0 : retestLevel - slDist * 2.0
+                tp3 = brokeUp ? retestLevel + slDist * 3.0 : retestLevel - slDist * 3.0
+                tier = biasAlign == 1 ? "A" : "B"
+                conf = "reaction-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
+                alert(f_buildAlertR("reaction", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
+                if showPosBox
+                    f_drawPosBox(emitEntry, slP, tp3)
+            rState := 0
+            rCool := cooldownBars
+        else if rWatch > maxWatchBars
+            rState := 0
+
+// ─── VISUALS ─────────────────────────────────────────────────────────
+var box zoneBox = na
+var box coilBox = na
+if showZones and barstate.islast
+    if not na(zoneBox)
+        box.delete(zoneBox)
+    if not na(coilBox)
+        box.delete(coilBox)
+    if rState >= 1 and not na(rZU) and not na(rZL)
+        zoneBox := box.new(bar_index - 10, rZU, bar_index, rZL, border_color=color.new(color.teal, 0), bgcolor=color.new(color.teal, 85))
+    if rState == 2 and not na(rCoilHi) and not na(rCoilLo)
+        coilBox := box.new(bar_index - 5, rCoilHi, bar_index, rCoilLo, border_color=color.new(color.orange, 0), bgcolor=color.new(color.orange, 80))
+
+plotshape(rState == 2 and rState[1] == 1, "Armed", shape.triangleup, location.belowbar, color.orange, size=size.tiny)
+plotshape(sigFvgL,  "FVG↑",  shape.diamond, location.belowbar, color.new(color.aqua, 0),    size=size.tiny)
+plotshape(sigFvgS,  "FVG↓",  shape.diamond, location.abovebar, color.new(color.aqua, 0),    size=size.tiny)
+plotshape(sigIfvgL, "IFVG↑", shape.xcross,  location.belowbar, color.new(color.fuchsia, 0), size=size.tiny)
+plotshape(sigIfvgS, "IFVG↓", shape.xcross,  location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
+bgcolor(rState == 1 ? color.new(color.teal, 92) : rState == 2 ? color.new(color.orange, 90) : na)

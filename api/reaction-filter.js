@@ -138,8 +138,10 @@ function evaluateReactionMTF({ template, direction, entry, session, mode, htfBia
   };
 
   if (!triggerPresent) return { applies: true, pass: false, reason: 'no-trigger-on-either-ltf', checks };
-  if (biasAligned === true || biasAligned === null) return { applies: true, pass: true, reason: 'confirmed', checks };
-  if (location !== false && sessionOK) return { applies: true, pass: true, reason: 'confirmed-counter-trend', checks };
+  if (biasAligned === null) return { applies: true, pass: false, reason: 'bias-unconfirmed', checks };
+  if (biasAligned === true) return { applies: true, pass: true, reason: 'confirmed', checks };
+  if (location !== true) return { applies: true, pass: false, reason: 'location-unconfirmed', checks };
+  if (sessionOK) return { applies: true, pass: true, reason: 'confirmed-counter-trend', checks };
   return { applies: true, pass: false, reason: 'counter-trend-no-location-or-session', checks };
 }
 

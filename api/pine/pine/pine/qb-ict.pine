@@ -1,0 +1,2264 @@
+//@version=6
+indicator(title="Quantum Bot — ICT Narrative Engine", shorttitle="QB ICT", overlay=true, max_bars_back=1500, max_labels_count=100, max_lines_count=100, max_boxes_count=60)
+
+// ═════════════════════════════════════════════════════════════════════
+//
+//   QUANTUM BOT — ICT NARRATIVE ENGINE
+//   ──────────────────────────────────────
+//   Pine Script v6  •  v2.3 — Multi-timeframe HTF context + REACTION-ZONE tiers
+//
+//   v2.3 ORB TEMPLATE (Opening Range Breakout — 7th template):
+//     • Freezes the opening range of the chosen session (NY / London / Asian,
+//       set per chart) over the first orbORMinutes, then watches for a breakout.
+//     • Width filter (range ÷ ATR) skips too-wide (chop) / too-narrow (noise)
+//       sessions — fires an ORB skip alert so you see what was filtered.
+//     • HTF-gated entry style: breakout aligned with H1/H4 bias → IMMEDIATE
+//       (tier A); counter / LTF-only → RETEST entry (tier B). One trade/session.
+//     • Emits the standard payload (template "orb") → flows through the same
+//       webhook/rules/execute/manage pipeline. NOTE: backend acceptedTemplates
+//       must include "orb" or the signal will be filtered — backend patch pending.
+//
+//   v2.3 REACTION-ZONE GRADING (this build):
+//     • Tier A = M15 setup sits at an HTF POI (OB/FVG matching trade dir)
+//                AND aligned with HTF bias → with-trend. Full size/extension.
+//     • Tier B = at an HTF POI but COUNTER to HTF bias → VALID, take it,
+//                scalp to next zone / early partials (NOT vetoed).
+//     • Tier C = open space, no HTF POI near → NO TRADE. Fires a non-trading
+//                f_buildSkip() alert (action:"skip", no entry/sl/tp) so you
+//                SEE what the HTF filter rejected. Backend forwards to Telegram.
+//     • Trade payloads now carry action:"trade"; backend branches on action.
+//
+//   v2.3 HTF LAYER (additive — v2.2 detection stack untouched):
+//     • H1/H4/Daily bias, FVG, OB, dealing-range from CONFIRMED bars only.
+//     • Payload adds: activeSession, htfTier, htfBias, htfBiasAlign, htfConfluence.
+//
+//   v2.2 FIXES CARRIED IN:
+//     • Near-edge (proximal-line) entries on SB/Unicorn/TurtleSoup/Judas/AM
+//       (OTE stays deep-Fib by design). Fills on shallower retrace.
+//     • Draw-clamp math.max(storedBar, bar_index-499) on FVG/OB/IFVG boxes.
+//     • max_bars_back=500 ; impulseATR "0.00" JSON mask ; seeded webhook key.
+//     • NOTE: NAS100→NDQ symbol mapping is a BACKEND (webhook.js) fix, not Pine.
+//
+//   v2.2: OTE Fib fallback removed (real-confluence only).
+//   v2.1: IFVG primitive + Equal H/L + AM IFVG template.
+//
+// ═════════════════════════════════════════════════════════════════════
+
+// ─── INPUTS — VISIBILITY ─────────────────────────────────────────────
+
+G_VIS = "Visibility"
+showPhaseBox     = input.bool(true,  "AMD phase box",          group=G_VIS)
+showTradeSignal  = input.bool(true,  "Trade signal label",     group=G_VIS)
+showPDHPDL       = input.bool(true,  "PDH / PDL lines",        group=G_VIS)
+showStatusBadge  = input.bool(true,  "Status badge top-right", group=G_VIS)
+showPriceLabels  = input.bool(true,  "Prices on level labels", group=G_VIS)
+phaseTintBg      = input.bool(false, "Subtle phase background tint", group=G_VIS)
+showPosBox       = input.bool(true,  "Position box (entry / SL / TP3)", group=G_VIS, tooltip="Draws the trade box on every fired signal: green zone entry→TP3, red zone entry→SL, dashed entry line. Pure visual — does not affect any trade logic.")
+posBoxBars       = input.int(40, "Position box width (bars)", minval=5, maxval=300, group=G_VIS)
+
+// ─── INPUTS — PHASE DETECTION (new in v2.0) ─────────────────────────
+
+G_PHASE = "AMD Phase Detection"
+accumLookback   = input.int(8,    "Accumulation lookback (bars)",     minval=4, maxval=30, group=G_PHASE)
+accumRangeATR   = input.float(1.5,"Accumulation max range (× ATR)",   minval=0.5, maxval=5.0, step=0.1, group=G_PHASE, tooltip="Range over the lookback must be tighter than this to qualify as accumulation.")
+manipTimeoutBars= input.int(10,   "Manipulation max age (bars)",      minval=3, maxval=30, group=G_PHASE)
+distTimeoutBars = input.int(30,   "Distribution max age (bars)",      minval=10, maxval=80, group=G_PHASE)
+majorLevelATR   = input.float(0.5,"Major level proximity (× ATR)",    minval=0.1, maxval=2.0, step=0.05, group=G_PHASE, tooltip="A sweep counts as 'major' when it occurs within this distance of PDH/PDL/Asian H/L.")
+
+// ─── INPUTS — DETECTORS (silent backend) ─────────────────────────────
+
+G_DET = "Detectors (silent)"
+atrLength         = input.int(14,    "ATR period",                  minval=2, maxval=200, group=G_DET)
+swingLookback     = input.int(2,     "Swing lookback (bars)",       minval=1, maxval=10, group=G_DET)
+sweepATRMin       = input.float(0.20,"Sweep min wick (× ATR)",      minval=0.05, step=0.05, group=G_DET)
+sweepRecentSwings = input.int(5,     "Sweep recent swings",         minval=2, maxval=15, group=G_DET)
+fvgMiddleBodyATR  = input.float(0.50,"FVG middle body (× ATR)",     minval=0.1, step=0.05, group=G_DET)
+fvgGapMinATR      = input.float(0.15,"FVG min gap (× ATR)",         minval=0.05, step=0.05, group=G_DET)
+fvgHideFilled     = input.bool(true, "Hide filled FVGs",            group=G_DET)
+fvgMaxHistory     = input.int(8,     "FVGs in memory",              minval=2, maxval=30, group=G_DET)
+dispBodyATR       = input.float(1.00,"Displacement body (× ATR)",   minval=0.5, step=0.05, group=G_DET)
+dispBodyRatio     = input.float(0.65,"Displacement body/range",     minval=0.4, maxval=1.0, step=0.05, group=G_DET)
+obImpulseATR      = input.float(1.00,"OB impulse (× ATR)",          minval=0.5, step=0.05, group=G_DET)
+obMinBodyRatio    = input.float(0.30,"OB min body/range",           minval=0.1, maxval=1.0, step=0.05, group=G_DET)
+obHideMitigated   = input.bool(true, "Hide mitigated OBs",          group=G_DET)
+obMaxHistory      = input.int(6,     "OBs in memory",               minval=2, maxval=20, group=G_DET)
+brkBodyATR        = input.float(0.60,"Breaker body (× ATR)",        minval=0.3, step=0.05, group=G_DET)
+brkHideMitigated  = input.bool(true, "Hide mitigated Breakers",     group=G_DET)
+brkMaxHistory     = input.int(4,     "Breakers in memory",          minval=2, maxval=10, group=G_DET)
+mssBodyATR        = input.float(0.60,"MSS body (× ATR)",            minval=0.3, step=0.05, group=G_DET)
+mssMaxHistory     = input.int(5,     "MSS in memory",               minval=2, maxval=15, group=G_DET)
+bosBodyATR        = input.float(0.60,"BOS body (× ATR)",            minval=0.3, step=0.05, group=G_DET)
+bosMaxHistory     = input.int(5,     "BOS in memory",               minval=2, maxval=20, group=G_DET)
+oteMinImpulseATR  = input.float(3.00,"OTE min impulse (× ATR)",     minval=1.0, step=0.1, group=G_DET)
+
+// ─── INPUTS — CONTEXT ────────────────────────────────────────────────
+
+G_CTX = "Context"
+htfTrendTF = input.timeframe("60", "HTF bias timeframe", group=G_CTX)
+emaLength  = input.int(20, "HTF bias EMA period", minval=5, maxval=200, group=G_CTX)
+
+// ═══ v2.3 — INPUTS: HTF CONTEXT ═══════════════════════════════════════
+G_HTF = "HTF Context — v2.3"
+assetClass      = input.string("Forex", "Asset class (set once per chart)", options=["Forex","Metal","Index","Crypto"], group=G_HTF, tooltip="Drives the kill-zone clock. Forex/Metal/Index keep session windows (extended for retrace entries); Crypto replaces the wall-clock with an HTF-liquidity trigger.")
+htfUseH1        = input.bool(true,  "Consult H1 structure",    group=G_HTF)
+htfUseH4        = input.bool(true,  "Consult H4 structure",    group=G_HTF)
+htfUseD         = input.bool(true,  "Consult Daily structure", group=G_HTF)
+htfSwingN       = input.int(20,     "HTF range lookback (bars)", minval=5, maxval=100, group=G_HTF, tooltip="Bars used to mark each HTF dealing range — drives premium/discount and liquidity targets.")
+htfFvgBodyATR   = input.float(0.30, "HTF FVG/OB min body (× HTF ATR)", minval=0.05, step=0.05, group=G_HTF, tooltip="Minimum middle-candle body for an HTF FVG, and impulse body for an HTF OB, as a multiple of that timeframe's ATR.")
+htfKZExtendBars = input.int(8,      "Kill-zone retrace extension (bars)", minval=0, maxval=40, group=G_HTF, tooltip="After a time-gated template's window closes, keep it armed this many M15 bars so the entry can fire on the retrace. 0 = strict window (old v2.2 behavior).")
+
+// ─── INPUTS — TEMPLATES (silent) ─────────────────────────────────────
+
+G_TMPL = "Templates (silent — fire alerts only)"
+sbEnabled = input.bool(true, "Silver Bullet",    group=G_TMPL, inline="t1")
+unEnabled = input.bool(true, "Unicorn",          group=G_TMPL, inline="t1")
+tsEnabled = input.bool(true, "Turtle Soup",      group=G_TMPL, inline="t2")
+jsEnabled = input.bool(true, "Judas Swing",      group=G_TMPL, inline="t2")
+ocEnabled = input.bool(true, "OTE Continuation", group=G_TMPL, inline="t2")
+
+sbLondonOn = input.bool(true, "SB: London (08-09 UTC)", group=G_TMPL)
+sbNYAMOn   = input.bool(true, "SB: NY AM (14-15 UTC)",  group=G_TMPL)
+sbNYPMOn   = input.bool(true, "SB: NY PM (18-19 UTC)",  group=G_TMPL)
+sbFVGLookbackBars = input.int(48,   "SB: FVG lookback (bars)",            minval=12, maxval=200, group=G_TMPL)
+sbFVGMaxDistATR   = input.float(1.50,"SB: max FVG distance (× ATR)",      minval=0.5, step=0.1, group=G_TMPL)
+sbMinGapH1ATR     = input.float(0.15,"SB: min FVG gap (× H1 ATR)",        minval=0.05, step=0.05, group=G_TMPL)
+sbMaxFVGFill      = input.float(0.50,"SB: max FVG fill %",                minval=0.0, maxval=1.0, step=0.05, group=G_TMPL)
+sbSweepLookback   = input.int(72,    "SB: sweep lookback (bars)",         minval=12, maxval=300, group=G_TMPL)
+
+unMaxBrkAgeBars = input.int(50, "UN: max Breaker age (bars)",          minval=10, maxval=200, group=G_TMPL)
+unMaxFVGAgeBars = input.int(50, "UN: max FVG age (bars)",              minval=10, maxval=200, group=G_TMPL)
+unMaxBrkFVGGap  = input.int(18, "UN: max Brk↔FVG gap (bars)",          minval=4, maxval=60, group=G_TMPL)
+unMaxFVGFill    = input.float(0.50, "UN: max FVG fill %",              minval=0.0, maxval=1.0, step=0.05, group=G_TMPL)
+unMaxDistH1ATR  = input.float(0.50, "UN: max zone distance (× H1 ATR)",minval=0.1, step=0.05, group=G_TMPL)
+
+tsSweepLookback   = input.int(96,   "TS: sweep lookback (bars)", minval=12, maxval=300, group=G_TMPL)
+tsPDProximityATR  = input.float(0.50,"TS: PD proximity (× ATR)",minval=0.1, step=0.05, group=G_TMPL)
+tsDispMaxAgeBars  = input.int(20,   "TS: max disp age (bars)",  minval=4, maxval=60, group=G_TMPL)
+tsMSSMaxAgeBars   = input.int(20,   "TS: max MSS age (bars)",   minval=4, maxval=60, group=G_TMPL)
+tsFVGOBGapBars    = input.int(18,   "TS: FVG/OB gap (bars)",    minval=4, maxval=60, group=G_TMPL)
+tsMaxFVGFill      = input.float(0.50,"TS: max FVG fill %",      minval=0.0, maxval=1.0, step=0.05, group=G_TMPL)
+
+jsKZStartHour    = input.int(6,    "JS: London KZ start (UTC h)",     minval=0, maxval=23, group=G_TMPL)
+jsKZEndHour      = input.int(10,   "JS: London KZ end (UTC h)",       minval=1, maxval=23, group=G_TMPL)
+jsMaxARAgeBars   = input.int(144,  "JS: max Asian Range age (bars)",  minval=24, maxval=400, group=G_TMPL)
+jsProximityATR   = input.float(0.50,"JS: AH/AL proximity (× ATR)",    minval=0.1, step=0.05, group=G_TMPL)
+jsSweepLookback  = input.int(60,   "JS: sweep lookback (bars)",       minval=12, maxval=200, group=G_TMPL)
+jsDispMaxAgeBars = input.int(20,   "JS: max disp age (bars)",         minval=4, maxval=60, group=G_TMPL)
+jsMSSMaxAgeBars  = input.int(20,   "JS: max MSS age (bars)",          minval=4, maxval=60, group=G_TMPL)
+jsFVGOBGapBars   = input.int(18,   "JS: FVG/OB gap (bars)",           minval=4, maxval=60, group=G_TMPL)
+jsMaxFVGFill     = input.float(0.50,"JS: max FVG fill %",             minval=0.0, maxval=1.0, step=0.05, group=G_TMPL)
+
+ocMaxFVGFill = input.float(0.50,"OC: max FVG fill %", minval=0.0, maxval=1.0, step=0.05, group=G_TMPL)
+
+slMinH1ATR       = input.float(0.30, "All: SL min (× H1 ATR)",  minval=0.1, step=0.05, group=G_TMPL)
+slMaxH1ATR       = input.float(3.00, "All: SL max (× H1 ATR)",  minval=1.0, step=0.1,  group=G_TMPL)
+signalExpireBars = input.int(16,     "All: signal lifetime (bars)", minval=4, maxval=100, group=G_TMPL)
+minSLATRMult     = input.float(1.5,  "All: SL absolute floor (× chart ATR)", minval=0.5, step=0.1, group=G_TMPL, tooltip="Skip signals whose stop is tighter than this multiple of the current-timeframe ATR. Prevents sub-noise stops that force oversized positions.")
+minSLPctFloor    = input.float(0.06, "All: SL absolute floor (% of price)",  minval=0.01, step=0.01, group=G_TMPL, tooltip="Second floor: stop must be at least this percent of price. Catches dead-session micro-stops even when ATR collapses.")
+
+// ─── INPUTS — IFVG PRIMITIVE (v2.1 Phase 1) ──────────────────────────
+
+G_IFVG = "IFVG (Inversion FVG) — v2.1"
+ifvgEnabled     = input.bool(true, "Track inversion FVGs", group=G_IFVG, tooltip="An IFVG forms when a regular FVG is violated (close-through). The zone flips role — bullish FVG becomes bearish resistance, and vice versa. Used by AM IFVG template.")
+ifvgMaxHistory  = input.int(12,    "Max IFVGs to track", minval=2, maxval=30, group=G_IFVG)
+ifvgShowOnChart = input.bool(true, "Render IFVGs on chart", group=G_IFVG)
+
+// ─── INPUTS — EQUAL H/L PRIMITIVE (v2.1 Phase 1) ─────────────────────
+
+G_EQL = "Equal H/L (Engineered Liquidity) — v2.1"
+eqLiquidityEnabled  = input.bool(true,  "Detect equal H/L clusters", group=G_EQL, tooltip="Clusters of swing highs or lows within tolerance form liquidity pools where retail stops cluster. Used as TP3 targets for AM IFVG template.")
+eqTolerancePct      = input.float(0.05, "Equality tolerance (% of price)", minval=0.01, maxval=0.5, step=0.01, group=G_EQL)
+eqMinCluster        = input.int(2,      "Min swings for cluster", minval=2, maxval=5, group=G_EQL)
+eqMaxLookbackSwings = input.int(8,      "Lookback (recent swings to cluster)", minval=3, maxval=20, group=G_EQL)
+eqShowOnChart       = input.bool(true,  "Render equal H/L lines on chart", group=G_EQL)
+
+// ─── INPUTS — AM IFVG REVERSAL TEMPLATE (v2.1 Phase 1) ───────────────
+
+G_AMI = "🌅 AM IFVG Reversal — v2.1"
+amIfvgEnabled    = input.bool(true,  "AM IFVG enabled", group=G_AMI)
+amIfvgKZStart    = input.int(13,     "KZ start hour (UTC)", minval=0, maxval=23, group=G_AMI, tooltip="13 UTC = 9:00 NY summer / 8:00 NY winter. NY equities cash session opens 13:30 UTC summer.")
+amIfvgKZStartMin = input.int(30,     "KZ start minute", minval=0, maxval=59, group=G_AMI)
+amIfvgKZEndHour  = input.int(15,     "KZ end hour (UTC)", minval=1, maxval=23, group=G_AMI)
+amIfvgMaxIfvgAge = input.int(30,     "Max IFVG age (M5 bars)", minval=5, maxval=100, group=G_AMI, tooltip="How recent the IFVG must be to count as a fresh setup")
+amIfvgMaxDistATR = input.float(2.0,  "Max distance from price (× ATR)", minval=0.5, maxval=5.0, step=0.5, group=G_AMI)
+
+// ─── INPUTS — ALERTS ─────────────────────────────────────────────────
+
+G_ALR = "Alerts"
+alertApiKey = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API key (Tier 2)", group=G_ALR)
+
+// ─── ORB (Opening Range Breakout) — v2.3 ─────────────────────────────
+G_ORB = "🚀 ORB (Opening Range Breakout) — v2.3"
+orbEnabled    = input.bool(true,  "ORB enabled", group=G_ORB)
+orbSession    = input.string("NY", "Session open to trade", options=["NY","London","Asian"], group=G_ORB, tooltip="NY for indices (NAS100/US500) + gold. London for EUR/GBP. Asian for USDJPY. Set per chart to match the instrument.")
+orbDSTadj     = input.int(-60, "DST adjust (min)", step=15, group=G_ORB, tooltip="Shift the session open for daylight saving. SUMMER (now): NY & London = -60. Asian (Tokyo, no DST) = 0. Winter: all 0.")
+orbORMinutes  = input.int(30,  "Opening-range length (min)", minval=15, step=15, group=G_ORB, tooltip="How long the opening range builds. 30 = first two M15 bars after the open.")
+orbTradeMin   = input.int(360, "Trade window after open (min)", minval=30, step=30, group=G_ORB, tooltip="How long after the open a breakout may fire. 360 = 6h.")
+orbMinWidthATR= input.float(0.5, "Width filter MIN (× M15 ATR)", minval=0.0, step=0.1, group=G_ORB, tooltip="Skip sessions whose opening range is too NARROW (noise). Range ÷ ATR below this = no trade.")
+orbMaxWidthATR= input.float(5.0, "Width filter MAX (× M15 ATR)", minval=1.0, step=0.5, group=G_ORB, tooltip="Skip sessions whose opening range is too WIDE (chop). Range ÷ ATR above this = no trade. The single biggest defense against ORB overfitting.")
+
+// ─── COLOR CONSTANTS ─────────────────────────────────────────────────
+
+color C_BULL    = #14B8A6
+color C_BEAR    = #F43F5E
+color C_NEUT    = #94A3B8
+color C_AMBER   = #F59E0B
+color C_GOLD    = #EAB308
+color C_ACCUM   = #3B82F6
+color C_MANIP   = #F59E0B
+color C_DIST_L  = #10B981
+color C_DIST_S  = #EF4444
+color C_COPPER  = #C8753B
+color C_IFVG_BULL = #D4A14A
+color C_IFVG_BEAR = #C8753B
+
+// ─── HELPERS ─────────────────────────────────────────────────────────
+
+fLine(color _c, int _t) => color.new(_c, _t)
+fmt(float _v) => na(_v) ? "—" : str.tostring(_v, format.mintick)
+fLabel(string _name, float _price) => showPriceLabels ? _name + " " + fmt(_price) : _name
+
+// ═══ v2.3 — HTF PACK: confirmed-bar structure read for one timeframe ══
+// Repaint-safe: uses ONLY closed HTF bars ([1]/[2]/[3]); never the forming bar.
+// Returns: bias, atr, fvgUpper, fvgLower, fvgDir, obUpper, obLower, obDir, rangeHi, rangeLo
+f_htfPack(int emaLen, int atrLen, int swingN, float bodyMult) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    midBody = math.abs(close[2] - open[2])
+    bullFVG = high[3] < low[1] and midBody >= a * bodyMult
+    bearFVG = low[3] > high[1] and midBody >= a * bodyMult
+    float fU = na
+    float fL = na
+    int   fD = 0
+    if bullFVG
+        fU := low[1]
+        fL := high[3]
+        fD := 1
+    else if bearFVG
+        fU := low[3]
+        fL := high[1]
+        fD := -1
+    impBody = math.abs(close[1] - open[1])
+    bullOB = close[2] < open[2] and close[1] > open[1] and impBody >= a * bodyMult
+    bearOB = close[2] > open[2] and close[1] < open[1] and impBody >= a * bodyMult
+    float oU = na
+    float oL = na
+    int   oD = 0
+    if bullOB
+        oU := math.max(open[2], close[2])
+        oL := math.min(open[2], close[2])
+        oD := 1
+    else if bearOB
+        oU := math.max(open[2], close[2])
+        oL := math.min(open[2], close[2])
+        oD := -1
+    rHi = ta.highest(high[1], swingN)
+    rLo = ta.lowest(low[1], swingN)
+    [b, a, fU, fL, fD, oU, oL, oD, rHi, rLo]
+
+// ─── CORE ────────────────────────────────────────────────────────────
+
+atrVal   = ta.atr(atrLength)
+htfClose = request.security(syminfo.tickerid, htfTrendTF, close,                    lookahead=barmerge.lookahead_off)
+htfEma   = request.security(syminfo.tickerid, htfTrendTF, ta.ema(close, emaLength), lookahead=barmerge.lookahead_off)
+h1ATR    = request.security(syminfo.tickerid, "60", ta.atr(atrLength),              lookahead=barmerge.lookahead_off)
+
+// ─── ENTRY STYLE (v2.3) — confirmation-aware retest vs immediate ──────
+// "Sometimes when there's enough confirmation we don't need a retest." auto
+// enters at the signal close when the firing candle is a genuine displacement
+// (body ≥ immediateBodyATR × ATR), else keeps the near-edge retest as the
+// fill-quality / fakeout filter. OTE-continuation ignores this (its entry IS
+// the retracement) and ORB already has its own immediate/retest split.
+G_ENTRY = "Entry style — v2.3"
+entryStyle = input.string("auto", "Entry on confirmation", options=["auto","retest","immediate"], group=G_ENTRY, tooltip="auto = skip the retest when the signal candle is a strong displacement, else wait for the near-edge retest. retest = always limit at the near edge (best price, misses strong runs). immediate = always at the signal close. Note: OTE-continuation is always a retracement entry and ignores this.")
+immediateBodyATR = input.float(1.2, "Auto: min signal body ×ATR to skip retest", minval=0.3, step=0.1, group=G_ENTRY, tooltip="In 'auto', a template fills at the signal close (instead of waiting for the retest) only when the firing candle's body is at least this ×ATR — a real displacement. Below it, the retest still applies. Higher = stricter (fewer immediate fills). Your stop, targets and validity are unchanged either way — only the fill timing differs.")
+immediateMaxBodyATR = input.float(2.5, "Auto: max signal body ×ATR (skip blow-off spikes)", minval=1.0, step=0.1, group=G_ENTRY, tooltip="In 'auto', if the signal candle's body is LARGER than this ×ATR it's treated as a parabolic blow-off spike (the kind that snaps back) and falls back to the retest instead of filling at market — so you don't chase the top of a vertical candle. Only affects 'auto'; forced immediate/retest ignore it.")
+goImmediateNow = entryStyle == "immediate" or (entryStyle == "auto" and math.abs(close - open) >= atrVal * immediateBodyATR and math.abs(close - open) <= atrVal * immediateMaxBodyATR)
+
+// ─── POSITION BOX (v2.3 viz) — green entry→TP3, red entry→SL, dashed entry ──
+f_drawPosBox(float e, float sl, float tp3) =>
+    l = bar_index
+    r = bar_index + posBoxBars
+    box.new(l, math.max(e, tp3), r, math.min(e, tp3), border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+    box.new(l, math.max(e, sl),  r, math.min(e, sl),  border_color=color.new(color.red, 55),  bgcolor=color.new(color.red, 90))
+    line.new(l, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+// ═══ v2.3 — HTF CONTEXT LAYER (3 batched security calls: H1 / H4 / D) ══
+[h1B, h1Apk, h1fU, h1fL, h1fD, h1oU, h1oL, h1oD, h1rHi, h1rLo] = request.security(syminfo.tickerid, "60",  f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+[h4B, h4Apk, h4fU, h4fL, h4fD, h4oU, h4oL, h4oD, h4rHi, h4rLo] = request.security(syminfo.tickerid, "240", f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+[hdB, hdApk, hdfU, hdfL, hdfD, hdoU, hdoL, hdoD, hdrHi, hdrLo] = request.security(syminfo.tickerid, "D",   f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+
+// ═══ v2.3 — asset-class clock driver + HTF liquidity trigger ══════════
+isCrypto = assetClass == "Crypto"
+htfLiqActive = (not na(h4rHi) and high >= h4rHi) or (not na(h4rLo) and low <= h4rLo) or (not na(hdrHi) and high >= hdrHi) or (not na(hdrLo) and low <= hdrLo) or h4fD != 0 or hdfD != 0
+
+// ═══ v2.3 — HTF CONFLUENCE TIER ENGINE ════════════════════════════════
+// dir: "LONG"/"SHORT"; zU/zL: the M15 entry zone; useX: HTFs this template consults.
+// Returns [tierStr "A"/"B"/"C", biasAlignCount, confluenceStr].
+// Mean-reversion tap-in: A = price tapped INTO an HTF POI + full bias agree + right side of range.
+f_tier(string dir, float zU, float zL, bool useH1, bool useH4, bool useD) =>
+    sDir = dir == "LONG" ? 1 : -1
+    bool tap = false
+    int  biasAlign = 0
+    int  used = 0
+    string conf = ""
+    if useH1
+        used += 1
+        if h1B == sDir
+            biasAlign += 1
+        bool h1fHit = h1fD == sDir and zU >= h1fL and zL <= h1fU
+        bool h1oHit = h1oD == sDir and zU >= h1oL and zL <= h1oU
+        if h1fHit or h1oHit
+            tap := true
+            conf := conf + (str.length(conf) > 0 ? "+" : "") + (h1fHit ? "h1-fvg" : "h1-ob")
+    if useH4
+        used += 1
+        if h4B == sDir
+            biasAlign += 1
+        bool h4fHit = h4fD == sDir and zU >= h4fL and zL <= h4fU
+        bool h4oHit = h4oD == sDir and zU >= h4oL and zL <= h4oU
+        if h4fHit or h4oHit
+            tap := true
+            conf := conf + (str.length(conf) > 0 ? "+" : "") + (h4fHit ? "h4-fvg" : "h4-ob")
+    if useD
+        used += 1
+        if hdB == sDir
+            biasAlign += 1
+        bool hdfHit = hdfD == sDir and zU >= hdfL and zL <= hdfU
+        bool hdoHit = hdoD == sDir and zU >= hdoL and zL <= hdoU
+        if hdfHit or hdoHit
+            tap := true
+            conf := conf + (str.length(conf) > 0 ? "+" : "") + (hdfHit ? "d-fvg" : "d-ob")
+    bool biasAligned = used > 0 and biasAlign == used
+    // ─── v2.3 REACTION-ZONE GRADING (replaces bias-veto) ──────────────────
+    //   tap        = M15 entry zone sits INSIDE an HTF POI (OB/FVG) whose
+    //                direction matches the trade → price has a reason to react here.
+    //   biasAligned= HTF trend agrees with the trade direction.
+    //
+    //   A = at an HTF POI AND with HTF bias  → with-trend continuation.
+    //                                          full size, full extension.
+    //   B = at an HTF POI but COUNTER to bias→ valid retracement. TAKE IT,
+    //                                          but scalp to next zone / early partials.
+    //   C = NOT at any HTF POI (open space)  → NO TRADE. fire skip-alert only.
+    //
+    //   Counter-bias is NOT vetoed — that was the whole point. Only open-space
+    //   setups (no HTF confluence) are filtered out.
+    string tierStr = not tap ? "C" : biasAligned ? "A" : "B"
+    [tierStr, biasAlign, conf]
+
+string htfTrend = "NEUTRAL"
+if not na(htfClose) and not na(htfEma)
+    htfTrend := htfClose > htfEma ? "LONG" : htfClose < htfEma ? "SHORT" : "NEUTRAL"
+
+// ─── STATE — DETECTOR ARRAYS ─────────────────────────────────────────
+
+var array<float> shPrice = array.new<float>()
+var array<int>   shBar   = array.new<int>()
+var array<float> slPrice = array.new<float>()
+var array<int>   slBar   = array.new<int>()
+var array<int>   swingTypes  = array.new<int>()
+var array<int>   swingBars   = array.new<int>()
+var array<float> swingPrices = array.new<float>()
+
+var array<float> sweepLevel    = array.new<float>()
+var array<float> sweepWickPrice = array.new<float>()
+var array<int>   sweepBar      = array.new<int>()
+var array<int>   sweepDir      = array.new<int>()
+
+var array<float> fvgUpper   = array.new<float>()
+var array<float> fvgLower   = array.new<float>()
+var array<float> fvgCE      = array.new<float>()
+var array<int>   fvgC2Bar   = array.new<int>()
+var array<int>   fvgDir     = array.new<int>()
+var array<float> fvgFillPct = array.new<float>()
+
+var array<int>   dispBar        = array.new<int>()
+var array<float> dispPrice      = array.new<float>()
+var array<int>   dispDir        = array.new<int>()
+var array<float> dispImpulseATR = array.new<float>()
+
+var array<float> obUpper     = array.new<float>()
+var array<float> obLower     = array.new<float>()
+var array<int>   obBar       = array.new<int>()
+var array<int>   obDir       = array.new<int>()
+var array<float> obImpulse   = array.new<float>()
+var array<bool>  obMitigated = array.new<bool>()
+
+var array<float> brkUpper     = array.new<float>()
+var array<float> brkLower     = array.new<float>()
+var array<int>   brkBar       = array.new<int>()
+var array<int>   brkDir       = array.new<int>()
+var array<float> brkSweptLvl  = array.new<float>()
+var array<bool>  brkMitigated = array.new<bool>()
+
+var array<float> mssLevel    = array.new<float>()
+var array<int>   mssFromBar  = array.new<int>()
+var array<int>   mssToBar    = array.new<int>()
+var array<int>   mssDir      = array.new<int>()
+
+var array<float> bosLevel    = array.new<float>()
+var array<int>   bosFromBar  = array.new<int>()
+var array<int>   bosToBar    = array.new<int>()
+var array<int>   bosDir      = array.new<int>()
+
+var array<float> arHi        = array.new<float>()
+var array<float> arLo        = array.new<float>()
+var array<int>   arStartBar  = array.new<int>()
+var array<int>   arEndBar    = array.new<int>()
+
+// ─── STATE — IFVG ARRAYS (v2.1) ──────────────────────────────────────
+
+var array<float> ifvgUpper        = array.new<float>()
+var array<float> ifvgLower        = array.new<float>()
+var array<int>   ifvgC2Bar        = array.new<int>()
+var array<int>   ifvgDir          = array.new<int>()    // INVERTED direction (1=bullish IFVG, -1=bearish IFVG)
+var array<int>   ifvgViolatedBar  = array.new<int>()
+var array<int>   ifvgRespectCount = array.new<int>()
+
+// ─── STATE — EQUAL H/L ARRAYS (v2.1) ─────────────────────────────────
+
+var array<float> eqhPrice    = array.new<float>()
+var array<int>   eqhFirstBar = array.new<int>()
+var array<int>   eqhLastBar  = array.new<int>()
+var array<int>   eqhCount    = array.new<int>()
+var array<float> eqlPrice    = array.new<float>()
+var array<int>   eqlFirstBar = array.new<int>()
+var array<int>   eqlLastBar  = array.new<int>()
+var array<int>   eqlCount    = array.new<int>()
+
+// ─── STATE — PHASE MACHINE (new in v2.0) ────────────────────────────
+
+var int    currentPhase    = 0
+var int    phaseStartBar   = na
+var float  phaseRefLevel   = na
+var string phaseReason     = ""
+var float  phaseHi         = na
+var float  phaseLo         = na
+var box    phaseBoxObj     = na
+
+// ─── STATE — ACTIVE SIGNAL (powers hidden plots + trade label) ──────
+
+var int   activeSignalDir = 0
+var int   activeSetupId   = 0
+var float activeEntry     = na
+var float activeSL        = na
+var float activeTP1       = na
+var float activeTP2       = na
+var float activeTP3       = na
+var int   activeSignalBar = na
+var label tradeSignalLbl  = na
+
+var bool sbHasFired = false
+var int  sbFireBar  = na
+var bool unHasFired = false
+var int  unFireBar  = na
+var bool tsHasFired = false
+var int  tsFireBar  = na
+var bool jsHasFired = false
+var int  jsFireBar  = na
+var bool ocHasFired = false
+var int  ocFireBar  = na
+var bool amIfvgHasFired = false
+var int  amIfvgFireBar  = na
+
+// ─── PDH / PDL DATA ──────────────────────────────────────────────────
+
+pdhRaw = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdlRaw = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+
+// ─── SESSION TIMING (intraday only) ─────────────────────────────────
+
+sessionsEnabled = timeframe.isintraday
+
+utcMinOfDay = hour(time, "UTC") * 60 + minute(time)
+
+isAsian  = sessionsEnabled and (utcMinOfDay >= 22 * 60 or utcMinOfDay < 5 * 60)
+isLondon = sessionsEnabled and (utcMinOfDay >= 6  * 60 and utcMinOfDay < 12 * 60)
+isNY     = sessionsEnabled and (utcMinOfDay >= 12 * 60 and utcMinOfDay < 19 * 60)
+
+asianSessionStart  = isAsian and not isAsian[1]
+londonSessionStart = isLondon and not isLondon[1]
+nySessionStart     = isNY and not isNY[1]
+asianSessionEnd    = not isAsian and isAsian[1]
+
+inLondonSB = utcMinOfDay >= 8  * 60 and utcMinOfDay < 9  * 60
+inNYAMSB   = utcMinOfDay >= 14 * 60 and utcMinOfDay < 15 * 60
+inNYPMSB   = utcMinOfDay >= 18 * 60 and utcMinOfDay < 19 * 60
+
+string sbWindow = "—"
+if inLondonSB and sbLondonOn
+    sbWindow := "LONDON"
+else if inNYAMSB and sbNYAMOn
+    sbWindow := "NY_AM"
+else if inNYPMSB and sbNYPMOn
+    sbWindow := "NY_PM"
+
+// AM IFVG kill zone (v2.1)
+inAmIfvgKZ = utcMinOfDay >= (amIfvgKZStart * 60 + amIfvgKZStartMin) and utcMinOfDay < amIfvgKZEndHour * 60
+
+// Judas London kill zone (hoisted to session block in v2.3 so re-anchor gates can see it)
+inLondonKZ = utcMinOfDay >= jsKZStartHour * 60 and utcMinOfDay < jsKZEndHour * 60
+
+// ═══ v2.3 — ACTIVE SESSION LABEL (Pine's own vocabulary) ══════════════
+string activeSession = "OFF"
+if sbWindow != "—"
+    activeSession := sbWindow
+else if isLondon
+    activeSession := "LONDON"
+else if isNY
+    activeSession := "NY"
+else if isAsian
+    activeSession := "ASIAN"
+
+// ═══ v2.3 — KILL-ZONE RE-ANCHOR GATES (by asset class) ════════════════
+// Crypto: ignore wall clock, trade on HTF-liquidity events.
+// Forex/Metal/Index: keep kill zone, but extend it htfKZExtendBars after
+// close so the entry can fire on the retrace (manipulation still in-window).
+// v2.3: ta.barssince hoisted to globals — MUST run every bar for consistent
+// state. Calling it inside the ternary skipped bars and could miscount.
+sbWinBars  = ta.barssince(sbWindow != "—")
+jsKZBars   = ta.barssince(inLondonKZ)
+amKZBars   = ta.barssince(inAmIfvgKZ)
+sbGate     = isCrypto ? htfLiqActive : (sbWindow != "—" or (htfKZExtendBars > 0 and sbWinBars <= htfKZExtendBars))
+jsGate     = isCrypto ? htfLiqActive : (inLondonKZ or (htfKZExtendBars > 0 and jsKZBars <= htfKZExtendBars))
+amIfvgGate = isCrypto ? htfLiqActive : (inAmIfvgKZ or (htfKZExtendBars > 0 and amKZBars <= htfKZExtendBars))
+
+// ─── SESSION RUNNING H/L (data only) ────────────────────────────────
+
+var float asianH = na
+var float asianL = na
+var int   asianStartBarIdx = na
+
+if asianSessionStart
+    asianH := high
+    asianL := low
+    asianStartBarIdx := bar_index
+else if isAsian
+    asianH := na(asianH) ? high : math.max(asianH, high)
+    asianL := na(asianL) ? low  : math.min(asianL, low)
+
+// Asian Range archive (used by Judas template)
+if asianSessionEnd and not na(asianH) and not na(asianL) and not na(asianStartBarIdx)
+    array.push(arHi, asianH)
+    array.push(arLo, asianL)
+    array.push(arStartBar, asianStartBarIdx)
+    array.push(arEndBar, bar_index - 1)
+    while array.size(arHi) > 5
+        array.shift(arHi)
+        array.shift(arLo)
+        array.shift(arStartBar)
+        array.shift(arEndBar)
+    asianH := na
+    asianL := na
+    asianStartBarIdx := na
+
+// ═══ ORB — OPENING-RANGE CAPTURE (v2.3) ═══════════════════════════════
+// Mirrors the Asian-range pattern: freeze the high/low of the first
+// orbORMinutes after the chosen session open, then arm for a breakout.
+orbBaseOpen = orbSession == "NY" ? 870 : orbSession == "London" ? 480 : 0  // UTC min-of-day (winter base)
+orbOpenMin  = orbBaseOpen + orbDSTadj
+orbORend    = orbOpenMin + orbORMinutes
+orbTradeEnd = orbOpenMin + orbTradeMin
+inOrbORWin  = sessionsEnabled and utcMinOfDay >= orbOpenMin and utcMinOfDay < orbORend
+inOrbTrade  = sessionsEnabled and utcMinOfDay >= orbORend  and utcMinOfDay < orbTradeEnd
+
+var float orbH = na
+var float orbL = na
+var bool  orbArmed         = false   // OR frozen + width OK → watching for breakout
+var bool  orbHasFired      = false   // a trade (or skip) already taken this session
+var bool  orbPendingRetest = false   // LTF-only breakout: waiting for a retest to confirm
+var int   orbBreakDir      = 0       // 1 long / -1 short (pending retest)
+
+orbOpenEdge   = inOrbORWin and not inOrbORWin[1]   // rising edge = session open
+orbWindowEnd  = (not inOrbORWin) and inOrbORWin[1] // OR window just closed
+
+if orbOpenEdge
+    orbH := high
+    orbL := low
+    orbArmed := false
+    orbHasFired := false
+    orbPendingRetest := false
+    orbBreakDir := 0
+else if inOrbORWin
+    orbH := na(orbH) ? high : math.max(orbH, high)
+    orbL := na(orbL) ? low  : math.min(orbL, low)
+
+var line  lnPDH = na
+var line  lnPDL = na
+var label lbPDH = na
+var label lbPDL = na
+
+pdhLeft  = bar_index - 100
+pdhRight = bar_index + 5
+
+if showPDHPDL and not na(pdhRaw) and barstate.islast
+    if na(lnPDH)
+        lnPDH := line.new(pdhLeft, pdhRaw, pdhRight, pdhRaw, color=fLine(C_GOLD, 25), width=1, style=line.style_solid)
+        lbPDH := label.new(pdhLeft, pdhRaw, fLabel("PDH", pdhRaw), color=color.new(color.black, 100), textcolor=C_GOLD, style=label.style_label_right, size=size.tiny)
+    else
+        line.set_xy1(lnPDH, pdhLeft, pdhRaw)
+        line.set_xy2(lnPDH, pdhRight, pdhRaw)
+        label.set_xy(lbPDH, pdhLeft, pdhRaw)
+        label.set_text(lbPDH, fLabel("PDH", pdhRaw))
+
+if showPDHPDL and not na(pdlRaw) and barstate.islast
+    if na(lnPDL)
+        lnPDL := line.new(pdhLeft, pdlRaw, pdhRight, pdlRaw, color=fLine(C_GOLD, 25), width=1, style=line.style_solid)
+        lbPDL := label.new(pdhLeft, pdlRaw, fLabel("PDL", pdlRaw), color=color.new(color.black, 100), textcolor=C_GOLD, style=label.style_label_right, size=size.tiny)
+    else
+        line.set_xy1(lnPDL, pdhLeft, pdlRaw)
+        line.set_xy2(lnPDL, pdhRight, pdlRaw)
+        label.set_xy(lbPDL, pdhLeft, pdlRaw)
+        label.set_text(lbPDL, fLabel("PDL", pdlRaw))
+
+// ─── SWING DETECTION ────────────────────────────────────────────────
+
+f_isSwingHigh(N) =>
+    candidateHigh = high[N]
+    result = true
+    for j = 1 to N
+        if high[N - j] >= candidateHigh
+            result := false
+        if high[N + j] >= candidateHigh
+            result := false
+    result
+
+f_isSwingLow(N) =>
+    candidateLow = low[N]
+    result = true
+    for j = 1 to N
+        if low[N - j] <= candidateLow
+            result := false
+        if low[N + j] <= candidateLow
+            result := false
+    result
+
+newSwingHigh = barstate.isconfirmed and f_isSwingHigh(swingLookback)
+newSwingLow  = barstate.isconfirmed and f_isSwingLow(swingLookback)
+
+if newSwingHigh
+    p = high[swingLookback]
+    b = bar_index - swingLookback
+    array.push(shPrice, p)
+    array.push(shBar, b)
+    array.push(swingTypes, 1)
+    array.push(swingBars, b)
+    array.push(swingPrices, p)
+    if array.size(shPrice) > 50
+        array.shift(shPrice)
+        array.shift(shBar)
+    if array.size(swingTypes) > 100
+        array.shift(swingTypes)
+        array.shift(swingBars)
+        array.shift(swingPrices)
+
+if newSwingLow
+    p = low[swingLookback]
+    b = bar_index - swingLookback
+    array.push(slPrice, p)
+    array.push(slBar, b)
+    array.push(swingTypes, -1)
+    array.push(swingBars, b)
+    array.push(swingPrices, p)
+    if array.size(slPrice) > 50
+        array.shift(slPrice)
+        array.shift(slBar)
+    if array.size(swingTypes) > 100
+        array.shift(swingTypes)
+        array.shift(swingBars)
+        array.shift(swingPrices)
+
+// ─── EQUAL H/L HELPERS + HOOK (v2.1) ─────────────────────────────────
+
+f_findOrCreateEQH(float p, int barIdx) =>
+    foundIdx = -1
+    tol = p * eqTolerancePct / 100.0
+    n = array.size(eqhPrice)
+    if n > 0
+        for j = n - 1 to math.max(0, n - eqMaxLookbackSwings)
+            if math.abs(array.get(eqhPrice, j) - p) <= tol
+                foundIdx := j
+                break
+    if foundIdx >= 0
+        existPrice = array.get(eqhPrice, foundIdx)
+        existCount = array.get(eqhCount, foundIdx)
+        newPrice = (existPrice * existCount + p) / (existCount + 1)
+        array.set(eqhPrice, foundIdx, newPrice)
+        array.set(eqhLastBar, foundIdx, barIdx)
+        array.set(eqhCount, foundIdx, existCount + 1)
+        0
+    else
+        array.push(eqhPrice, p)
+        array.push(eqhFirstBar, barIdx)
+        array.push(eqhLastBar, barIdx)
+        array.push(eqhCount, 1)
+        while array.size(eqhPrice) > 20
+            array.shift(eqhPrice)
+            array.shift(eqhFirstBar)
+            array.shift(eqhLastBar)
+            array.shift(eqhCount)
+        0
+
+f_findOrCreateEQL(float p, int barIdx) =>
+    foundIdx = -1
+    tol = p * eqTolerancePct / 100.0
+    n = array.size(eqlPrice)
+    if n > 0
+        for j = n - 1 to math.max(0, n - eqMaxLookbackSwings)
+            if math.abs(array.get(eqlPrice, j) - p) <= tol
+                foundIdx := j
+                break
+    if foundIdx >= 0
+        existPrice = array.get(eqlPrice, foundIdx)
+        existCount = array.get(eqlCount, foundIdx)
+        newPrice = (existPrice * existCount + p) / (existCount + 1)
+        array.set(eqlPrice, foundIdx, newPrice)
+        array.set(eqlLastBar, foundIdx, barIdx)
+        array.set(eqlCount, foundIdx, existCount + 1)
+        0
+    else
+        array.push(eqlPrice, p)
+        array.push(eqlFirstBar, barIdx)
+        array.push(eqlLastBar, barIdx)
+        array.push(eqlCount, 1)
+        while array.size(eqlPrice) > 20
+            array.shift(eqlPrice)
+            array.shift(eqlFirstBar)
+            array.shift(eqlLastBar)
+            array.shift(eqlCount)
+        0
+
+if eqLiquidityEnabled and newSwingHigh
+    f_findOrCreateEQH(high[swingLookback], bar_index - swingLookback)
+if eqLiquidityEnabled and newSwingLow
+    f_findOrCreateEQL(low[swingLookback], bar_index - swingLookback)
+
+// ─── SWEEP DETECTION ────────────────────────────────────────────────
+
+f_checkShortSweep() =>
+    nH = array.size(shPrice)
+    if nH == 0 or atrVal <= 0
+        [false, float(na), int(na)]
+    else
+        float sweptLevel = na
+        int sweptBar = na
+        startIdx = math.max(0, nH - sweepRecentSwings)
+        for i = nH - 1 to startIdx
+            sp = array.get(shPrice, i)
+            sb = array.get(shBar, i)
+            if (bar_index - sb) < 2
+                continue
+            if high > sp and close < sp
+                if (high - sp) >= atrVal * sweepATRMin
+                    sweptLevel := sp
+                    sweptBar := sb
+                    break
+        [not na(sweptLevel), sweptLevel, sweptBar]
+
+f_checkLongSweep() =>
+    nL = array.size(slPrice)
+    if nL == 0 or atrVal <= 0
+        [false, float(na), int(na)]
+    else
+        float sweptLevel = na
+        int sweptBar = na
+        startIdx = math.max(0, nL - sweepRecentSwings)
+        for i = nL - 1 to startIdx
+            sp = array.get(slPrice, i)
+            sb = array.get(slBar, i)
+            if (bar_index - sb) < 2
+                continue
+            if low < sp and close > sp
+                if (sp - low) >= atrVal * sweepATRMin
+                    sweptLevel := sp
+                    sweptBar := sb
+                    break
+        [not na(sweptLevel), sweptLevel, sweptBar]
+
+[isShortSweep, shortSweptLevel, shortSweptBar] = f_checkShortSweep()
+[isLongSweep,  longSweptLevel,  longSweptBar]  = f_checkLongSweep()
+
+if barstate.isconfirmed and isShortSweep
+    array.push(sweepLevel, shortSweptLevel)
+    array.push(sweepWickPrice, high)
+    array.push(sweepBar, bar_index)
+    array.push(sweepDir, -1)
+    if array.size(sweepLevel) > 30
+        array.shift(sweepLevel)
+        array.shift(sweepWickPrice)
+        array.shift(sweepBar)
+        array.shift(sweepDir)
+
+if barstate.isconfirmed and isLongSweep
+    array.push(sweepLevel, longSweptLevel)
+    array.push(sweepWickPrice, low)
+    array.push(sweepBar, bar_index)
+    array.push(sweepDir, 1)
+    if array.size(sweepLevel) > 30
+        array.shift(sweepLevel)
+        array.shift(sweepWickPrice)
+        array.shift(sweepBar)
+        array.shift(sweepDir)
+
+// ─── FVG DETECTION (data only — no boxes) ───────────────────────────
+
+if barstate.isconfirmed and atrVal > 0
+    c1H = high[2]
+    c1L = low[2]
+    c2O = open[1]
+    c2C = close[1]
+    c3H = high[0]
+    c3L = low[0]
+    c2Body = math.abs(c2C - c2O)
+
+    if c1H < c3L and c2Body >= atrVal * fvgMiddleBodyATR
+        gapSize = c3L - c1H
+        if gapSize >= atrVal * fvgGapMinATR
+            array.push(fvgUpper, c3L)
+            array.push(fvgLower, c1H)
+            array.push(fvgCE, (c3L + c1H) / 2)
+            array.push(fvgC2Bar, bar_index - 1)
+            array.push(fvgDir, 1)
+            array.push(fvgFillPct, 0.0)
+
+    if c1L > c3H and c2Body >= atrVal * fvgMiddleBodyATR
+        gapSize = c1L - c3H
+        if gapSize >= atrVal * fvgGapMinATR
+            array.push(fvgUpper, c1L)
+            array.push(fvgLower, c3H)
+            array.push(fvgCE, (c1L + c3H) / 2)
+            array.push(fvgC2Bar, bar_index - 1)
+            array.push(fvgDir, -1)
+            array.push(fvgFillPct, 0.0)
+
+if barstate.isconfirmed and array.size(fvgUpper) > 0
+    for i = array.size(fvgUpper) - 1 to 0
+        upper = array.get(fvgUpper, i)
+        lower = array.get(fvgLower, i)
+        dir = array.get(fvgDir, i)
+        gapSize = upper - lower
+        if gapSize > 0
+            fillAmt = 0.0
+            if dir == 1
+                if low < upper
+                    fillAmt := math.max(0, upper - math.max(lower, low))
+            else
+                if high > lower
+                    fillAmt := math.max(0, math.min(upper, high) - lower)
+            fillPct = math.min(1.0, fillAmt / gapSize)
+            if fillPct > array.get(fvgFillPct, i)
+                array.set(fvgFillPct, i, fillPct)
+
+// ─── IFVG DETECTION (v2.1) ───────────────────────────────────────────
+// When an FVG is fully violated (close-through), record as IFVG with FLIPPED direction.
+// Must run AFTER FVG fill tracking but BEFORE hide-filled cleanup (which would remove the source FVG).
+
+if ifvgEnabled and barstate.isconfirmed and array.size(fvgUpper) > 0
+    for i = array.size(fvgUpper) - 1 to 0
+        fvgF = array.get(fvgFillPct, i)
+        if fvgF < 0.999
+            continue
+        fU = array.get(fvgUpper, i)
+        fL = array.get(fvgLower, i)
+        fD = array.get(fvgDir, i)
+        fB = array.get(fvgC2Bar, i)
+        // Bullish FVG → close BELOW lower = violated, flips to bearish IFVG
+        if fD == 1 and close < fL
+            alreadyExists = false
+            if array.size(ifvgC2Bar) > 0
+                for k = 0 to array.size(ifvgC2Bar) - 1
+                    if array.get(ifvgC2Bar, k) == fB
+                        alreadyExists := true
+                        break
+            if not alreadyExists
+                array.push(ifvgUpper, fU)
+                array.push(ifvgLower, fL)
+                array.push(ifvgC2Bar, fB)
+                array.push(ifvgDir, -1)
+                array.push(ifvgViolatedBar, bar_index)
+                array.push(ifvgRespectCount, 0)
+        // Bearish FVG → close ABOVE upper = violated, flips to bullish IFVG
+        if fD == -1 and close > fU
+            alreadyExists2 = false
+            if array.size(ifvgC2Bar) > 0
+                for k = 0 to array.size(ifvgC2Bar) - 1
+                    if array.get(ifvgC2Bar, k) == fB
+                        alreadyExists2 := true
+                        break
+            if not alreadyExists2
+                array.push(ifvgUpper, fU)
+                array.push(ifvgLower, fL)
+                array.push(ifvgC2Bar, fB)
+                array.push(ifvgDir, 1)
+                array.push(ifvgViolatedBar, bar_index)
+                array.push(ifvgRespectCount, 0)
+
+while array.size(ifvgUpper) > ifvgMaxHistory
+    array.shift(ifvgUpper)
+    array.shift(ifvgLower)
+    array.shift(ifvgC2Bar)
+    array.shift(ifvgDir)
+    array.shift(ifvgViolatedBar)
+    array.shift(ifvgRespectCount)
+
+// IFVG respect tracking (informational — counts price respecting the IFVG zone)
+if ifvgEnabled and barstate.isconfirmed and array.size(ifvgUpper) > 0
+    for i = array.size(ifvgUpper) - 1 to 0
+        upr = array.get(ifvgUpper, i)
+        lwr = array.get(ifvgLower, i)
+        dir = array.get(ifvgDir, i)
+        if dir == 1 and low <= upr and low >= lwr and close > upr
+            array.set(ifvgRespectCount, i, array.get(ifvgRespectCount, i) + 1)
+        if dir == -1 and high >= lwr and high <= upr and close < lwr
+            array.set(ifvgRespectCount, i, array.get(ifvgRespectCount, i) + 1)
+
+if fvgHideFilled and barstate.isconfirmed and array.size(fvgUpper) > 0
+    for i = array.size(fvgUpper) - 1 to 0
+        if array.get(fvgFillPct, i) >= 1.0
+            array.remove(fvgUpper, i)
+            array.remove(fvgLower, i)
+            array.remove(fvgCE, i)
+            array.remove(fvgC2Bar, i)
+            array.remove(fvgDir, i)
+            array.remove(fvgFillPct, i)
+
+while array.size(fvgUpper) > fvgMaxHistory
+    array.shift(fvgUpper)
+    array.shift(fvgLower)
+    array.shift(fvgCE)
+    array.shift(fvgC2Bar)
+    array.shift(fvgDir)
+    array.shift(fvgFillPct)
+
+// ─── DISPLACEMENT (data only) ───────────────────────────────────────
+
+if barstate.isconfirmed and atrVal > 0
+    c1H_d = high[2]
+    c1L_d = low[2]
+    c2O_d = open[1]
+    c2C_d = close[1]
+    c2H_d = high[1]
+    c2L_d = low[1]
+    c3H_d = high[0]
+    c3L_d = low[0]
+    c2Body_d = math.abs(c2C_d - c2O_d)
+    c2Range_d = c2H_d - c2L_d
+    c2BodyRatio_d = c2Range_d > 0 ? c2Body_d / c2Range_d : 0
+
+    if c2C_d > c2O_d and c2Body_d >= atrVal * dispBodyATR and c2BodyRatio_d >= dispBodyRatio and c1H_d < c3L_d
+        array.push(dispBar, bar_index - 1)
+        array.push(dispPrice, c2C_d)
+        array.push(dispDir, 1)
+        array.push(dispImpulseATR, c2Body_d / atrVal)
+
+    if c2C_d < c2O_d and c2Body_d >= atrVal * dispBodyATR and c2BodyRatio_d >= dispBodyRatio and c1L_d > c3H_d
+        array.push(dispBar, bar_index - 1)
+        array.push(dispPrice, c2C_d)
+        array.push(dispDir, -1)
+        array.push(dispImpulseATR, c2Body_d / atrVal)
+
+if array.size(dispBar) > 50
+    array.shift(dispBar)
+    array.shift(dispPrice)
+    array.shift(dispDir)
+    array.shift(dispImpulseATR)
+
+// ─── OB DETECTION (data only) ───────────────────────────────────────
+
+if barstate.isconfirmed and atrVal > 0
+    impulseO = open[0]
+    impulseC = close[0]
+    impulseBody = math.abs(impulseC - impulseO)
+    obO = open[1]
+    obC = close[1]
+    obH = high[1]
+    obL = low[1]
+    obBodyVal = math.abs(obC - obO)
+    obRange = obH - obL
+    obBodyRatioVal = obRange > 0 ? obBodyVal / obRange : 0
+
+    if impulseBody >= atrVal * obImpulseATR and obBodyRatioVal >= obMinBodyRatio
+        if impulseC > impulseO and obC < obO
+            array.push(obUpper, math.max(obO, obC))
+            array.push(obLower, math.min(obO, obC))
+            array.push(obBar, bar_index - 1)
+            array.push(obDir, 1)
+            array.push(obImpulse, impulseBody / atrVal)
+            array.push(obMitigated, false)
+        if impulseC < impulseO and obC > obO
+            array.push(obUpper, math.max(obO, obC))
+            array.push(obLower, math.min(obO, obC))
+            array.push(obBar, bar_index - 1)
+            array.push(obDir, -1)
+            array.push(obImpulse, impulseBody / atrVal)
+            array.push(obMitigated, false)
+
+if barstate.isconfirmed and array.size(obUpper) > 0
+    for i = array.size(obUpper) - 1 to 0
+        if array.get(obMitigated, i)
+            continue
+        upper = array.get(obUpper, i)
+        lower = array.get(obLower, i)
+        dir = array.get(obDir, i)
+        if (dir == 1 and close < lower) or (dir == -1 and close > upper)
+            array.set(obMitigated, i, true)
+
+if obHideMitigated and barstate.isconfirmed and array.size(obUpper) > 0
+    for i = array.size(obUpper) - 1 to 0
+        if array.get(obMitigated, i)
+            array.remove(obUpper, i)
+            array.remove(obLower, i)
+            array.remove(obBar, i)
+            array.remove(obDir, i)
+            array.remove(obImpulse, i)
+            array.remove(obMitigated, i)
+
+while array.size(obUpper) > obMaxHistory
+    array.shift(obUpper)
+    array.shift(obLower)
+    array.shift(obBar)
+    array.shift(obDir)
+    array.shift(obImpulse)
+    array.shift(obMitigated)
+
+// ─── MSS + BREAKER + BOS DETECTION (data only) ──────────────────────
+
+if barstate.isconfirmed and atrVal > 0 and array.size(shPrice) >= 2 and array.size(slPrice) >= 2
+    cBodyMSS = math.abs(close - open)
+    nH = array.size(shPrice)
+    nL = array.size(slPrice)
+    lastHH_v = array.get(shPrice, nH - 1)
+    prevHH_v = array.get(shPrice, nH - 2)
+    lastHHBar = array.get(shBar, nH - 1)
+    lastLL_v = array.get(slPrice, nL - 1)
+    prevLL_v = array.get(slPrice, nL - 2)
+    lastLLBar = array.get(slBar, nL - 1)
+    wasUp_v = lastHH_v > prevHH_v and lastLL_v > prevLL_v
+    wasDown_v = lastHH_v < prevHH_v and lastLL_v < prevLL_v
+
+    // Bearish MSS
+    if cBodyMSS >= atrVal * mssBodyATR and wasUp_v and close < lastLL_v and close < open
+        array.push(mssLevel, lastLL_v)
+        array.push(mssFromBar, lastLLBar)
+        array.push(mssToBar, bar_index)
+        array.push(mssDir, -1)
+        while array.size(mssLevel) > mssMaxHistory
+            array.shift(mssLevel)
+            array.shift(mssFromBar)
+            array.shift(mssToBar)
+            array.shift(mssDir)
+        // Bearish Breaker data
+        if cBodyMSS >= atrVal * brkBodyATR
+            barsBack = bar_index - lastHHBar
+            if barsBack >= 0 and barsBack < 500
+                brkO = open[barsBack]
+                brkC = close[barsBack]
+                if not na(brkO) and not na(brkC)
+                    array.push(brkUpper, math.max(brkO, brkC))
+                    array.push(brkLower, math.min(brkO, brkC))
+                    array.push(brkBar, lastHHBar)
+                    array.push(brkDir, -1)
+                    array.push(brkSweptLvl, lastHH_v)
+                    array.push(brkMitigated, false)
+
+    // Bullish MSS
+    if cBodyMSS >= atrVal * mssBodyATR and wasDown_v and close > lastHH_v and close > open
+        array.push(mssLevel, lastHH_v)
+        array.push(mssFromBar, lastHHBar)
+        array.push(mssToBar, bar_index)
+        array.push(mssDir, 1)
+        while array.size(mssLevel) > mssMaxHistory
+            array.shift(mssLevel)
+            array.shift(mssFromBar)
+            array.shift(mssToBar)
+            array.shift(mssDir)
+        // Bullish Breaker data
+        if cBodyMSS >= atrVal * brkBodyATR
+            barsBack = bar_index - lastLLBar
+            if barsBack >= 0 and barsBack < 500
+                brkO = open[barsBack]
+                brkC = close[barsBack]
+                if not na(brkO) and not na(brkC)
+                    array.push(brkUpper, math.max(brkO, brkC))
+                    array.push(brkLower, math.min(brkO, brkC))
+                    array.push(brkBar, lastLLBar)
+                    array.push(brkDir, 1)
+                    array.push(brkSweptLvl, lastLL_v)
+                    array.push(brkMitigated, false)
+
+    // Bullish BOS
+    if cBodyMSS >= atrVal * bosBodyATR and wasUp_v and close > lastHH_v and close > open
+        array.push(bosLevel, lastHH_v)
+        array.push(bosFromBar, lastHHBar)
+        array.push(bosToBar, bar_index)
+        array.push(bosDir, 1)
+        while array.size(bosLevel) > bosMaxHistory
+            array.shift(bosLevel)
+            array.shift(bosFromBar)
+            array.shift(bosToBar)
+            array.shift(bosDir)
+
+    // Bearish BOS
+    if cBodyMSS >= atrVal * bosBodyATR and wasDown_v and close < lastLL_v and close < open
+        array.push(bosLevel, lastLL_v)
+        array.push(bosFromBar, lastLLBar)
+        array.push(bosToBar, bar_index)
+        array.push(bosDir, -1)
+        while array.size(bosLevel) > bosMaxHistory
+            array.shift(bosLevel)
+            array.shift(bosFromBar)
+            array.shift(bosToBar)
+            array.shift(bosDir)
+
+// ─── BREAKER MITIGATION + HISTORY CLEANUP ───────────────────────────
+
+if barstate.isconfirmed and array.size(brkUpper) > 0
+    for i = array.size(brkUpper) - 1 to 0
+        if array.get(brkMitigated, i)
+            continue
+        upper = array.get(brkUpper, i)
+        lower = array.get(brkLower, i)
+        dir = array.get(brkDir, i)
+        if (dir == 1 and close < lower) or (dir == -1 and close > upper)
+            array.set(brkMitigated, i, true)
+
+if brkHideMitigated and barstate.isconfirmed and array.size(brkUpper) > 0
+    for i = array.size(brkUpper) - 1 to 0
+        if array.get(brkMitigated, i)
+            array.remove(brkUpper, i)
+            array.remove(brkLower, i)
+            array.remove(brkBar, i)
+            array.remove(brkDir, i)
+            array.remove(brkSweptLvl, i)
+            array.remove(brkMitigated, i)
+
+while array.size(brkUpper) > brkMaxHistory
+    array.shift(brkUpper)
+    array.shift(brkLower)
+    array.shift(brkBar)
+    array.shift(brkDir)
+    array.shift(brkSweptLvl)
+    array.shift(brkMitigated)
+
+// ─── TREND BIAS (used by templates) ─────────────────────────────────
+
+f_determineTrend() =>
+    n = array.size(swingTypes)
+    if n < 3
+        "RANGE"
+    else
+        lastType = array.get(swingTypes, n - 1)
+        lastPrice = array.get(swingPrices, n - 1)
+        float prevPrice = na
+        for i = n - 2 to 0
+            if array.get(swingTypes, i) == lastType
+                prevPrice := array.get(swingPrices, i)
+                break
+        if na(prevPrice)
+            "RANGE"
+        else if lastType == 1
+            lastPrice > prevPrice ? "UP" : "DOWN"
+        else
+            lastPrice < prevPrice ? "DOWN" : "UP"
+
+trendBias = f_determineTrend()
+
+// Absolute minimum SL distance — the larger of (chart ATR × mult) and (% of price).
+minSLDist = math.max(atrVal * minSLATRMult, close * (minSLPctFloor / 100.0))
+// ═════════════════════════════════════════════════════════════════════
+// ─── AMD PHASE MACHINE (the v2.0 signature) ─────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+
+accumHi = ta.highest(high, accumLookback)
+accumLo = ta.lowest(low,  accumLookback)
+
+if barstate.isconfirmed and atrVal > 0
+    accumRange = accumHi - accumLo
+    isAccumulating = accumRange <= atrVal * accumRangeATR
+    bool  manipFired = false
+    float manipLevel = na
+    string manipKind = ""
+    int   manipDir   = 0
+
+    if isShortSweep
+        if not na(pdhRaw) and math.abs(shortSweptLevel - pdhRaw) <= atrVal * majorLevelATR
+            manipFired := true
+            manipLevel := pdhRaw
+            manipKind := "PDH"
+            manipDir := -1
+        else if not na(asianH) and math.abs(shortSweptLevel - asianH) <= atrVal * majorLevelATR
+            manipFired := true
+            manipLevel := asianH
+            manipKind := "Asian H"
+            manipDir := -1
+
+    if not manipFired and isLongSweep
+        if not na(pdlRaw) and math.abs(longSweptLevel - pdlRaw) <= atrVal * majorLevelATR
+            manipFired := true
+            manipLevel := pdlRaw
+            manipKind := "PDL"
+            manipDir := 1
+        else if not na(asianL) and math.abs(longSweptLevel - asianL) <= atrVal * majorLevelATR
+            manipFired := true
+            manipLevel := asianL
+            manipKind := "Asian L"
+            manipDir := 1
+
+    bool distFired = false
+    int  distDir   = 0
+    float distLevel = na
+
+    if currentPhase == 2 and array.size(mssToBar) > 0
+        lastMssToBar = array.get(mssToBar, array.size(mssToBar) - 1)
+        if lastMssToBar == bar_index
+            lastMssDir = array.get(mssDir, array.size(mssDir) - 1)
+            lastMssLevel = array.get(mssLevel, array.size(mssLevel) - 1)
+            if lastMssDir == activeSignalDir or activeSignalDir == 0
+                distFired := true
+                distDir := lastMssDir
+                distLevel := lastMssLevel
+
+    // ─── Phase transitions ───────────────────────────────────────────
+
+    if manipFired
+        if not na(phaseBoxObj)
+            box.delete(phaseBoxObj)
+            phaseBoxObj := na
+        currentPhase   := 2
+        phaseStartBar  := bar_index
+        phaseRefLevel  := manipLevel
+        phaseReason    := "Swept " + manipKind
+        phaseHi        := high
+        phaseLo        := low
+        activeSignalDir := manipDir
+
+    else if distFired
+        if not na(phaseBoxObj)
+            box.delete(phaseBoxObj)
+            phaseBoxObj := na
+        currentPhase   := 3
+        phaseStartBar  := bar_index
+        phaseRefLevel  := distLevel
+        phaseReason    := "MSS confirmed"
+        phaseHi        := high
+        phaseLo        := low
+        activeSignalDir := distDir
+
+    else if isAccumulating and currentPhase != 1 and currentPhase != 2
+        if not na(phaseBoxObj)
+            box.delete(phaseBoxObj)
+            phaseBoxObj := na
+        currentPhase   := 1
+        phaseStartBar  := bar_index - accumLookback
+        phaseRefLevel  := (accumHi + accumLo) / 2
+        phaseReason    := "Range tight"
+        phaseHi        := accumHi
+        phaseLo        := accumLo
+
+    else if currentPhase == 2 and not na(phaseStartBar) and bar_index - phaseStartBar > manipTimeoutBars
+        if not na(phaseBoxObj)
+            box.delete(phaseBoxObj)
+            phaseBoxObj := na
+        currentPhase   := 0
+        phaseStartBar  := na
+        phaseRefLevel  := na
+        phaseReason    := ""
+    else if currentPhase == 3 and not na(phaseStartBar) and bar_index - phaseStartBar > distTimeoutBars
+        if not na(phaseBoxObj)
+            box.delete(phaseBoxObj)
+            phaseBoxObj := na
+        currentPhase   := 0
+        phaseStartBar  := na
+        phaseRefLevel  := na
+        phaseReason    := ""
+    else if currentPhase == 1 and not isAccumulating
+        if not na(phaseBoxObj)
+            box.delete(phaseBoxObj)
+            phaseBoxObj := na
+        currentPhase   := 0
+        phaseStartBar  := na
+        phaseReason    := ""
+
+    if currentPhase > 0
+        phaseHi := na(phaseHi) ? high : math.max(phaseHi, high)
+        phaseLo := na(phaseLo) ? low  : math.min(phaseLo, low)
+
+// ─── PHASE BOX RENDERING ────────────────────────────────────────────
+
+if showPhaseBox and currentPhase > 0 and not na(phaseStartBar) and atrVal > 0 and barstate.islast
+    int    pbLeft  = math.max(phaseStartBar, bar_index - 12)
+    int    pbRight = bar_index + 2
+    float  pbMid   = na(phaseRefLevel) ? close : phaseRefLevel
+    float  pbHalfH = atrVal * 0.15
+    float  pbTop   = pbMid + pbHalfH
+    float  pbBot   = pbMid - pbHalfH
+
+    pbColor = currentPhase == 1 ? C_ACCUM : currentPhase == 2 ? C_MANIP : (activeSignalDir == 1 ? C_DIST_L : C_DIST_S)
+    pbName = "Neutral"
+    if currentPhase == 1
+        pbName := "ACCUM"
+    else if currentPhase == 2
+        pbName := "⚡ MANIP"
+    else if currentPhase == 3
+        pbName := activeSignalDir == 1 ? "→ DIST LONG" : "→ DIST SHORT"
+
+    if na(phaseBoxObj)
+        phaseBoxObj := box.new(pbLeft, pbTop, pbRight, pbBot, border_color=color.new(pbColor, 30), border_width=1, border_style=line.style_dotted, bgcolor=color.new(pbColor, 88), text=pbName, text_color=color.new(pbColor, 0), text_size=size.tiny, text_halign=text.align_left, text_valign=text.align_center)
+    else
+        box.set_lefttop(phaseBoxObj, pbLeft, pbTop)
+        box.set_rightbottom(phaseBoxObj, pbRight, pbBot)
+        box.set_border_color(phaseBoxObj, color.new(pbColor, 30))
+        box.set_bgcolor(phaseBoxObj, color.new(pbColor, 88))
+        box.set_text(phaseBoxObj, pbName)
+        box.set_text_color(phaseBoxObj, color.new(pbColor, 0))
+
+// ─── SUBTLE PHASE BG TINT (optional) ────────────────────────────────
+
+phaseTintColor = phaseTintBg and currentPhase == 1 ? color.new(C_ACCUM, 96) : phaseTintBg and currentPhase == 2 ? color.new(C_MANIP, 96) : phaseTintBg and currentPhase == 3 and activeSignalDir == 1 ? color.new(C_DIST_L, 96) : phaseTintBg and currentPhase == 3 and activeSignalDir == -1 ? color.new(C_DIST_S, 96) : na
+bgcolor(phaseTintColor, title="Phase tint")
+
+bgcolor(inAmIfvgKZ and amIfvgEnabled ? color.new(C_AMBER, 96) : na, title="AM IFVG KZ tint")
+
+// ═════════════════════════════════════════════════════════════════════
+// ─── DUAL-FORMAT ALERT BUILDER (Tier 1 + Tier 2) — v2.3 enriched ────
+// ═════════════════════════════════════════════════════════════════════
+
+f_whyText(string template, string window, string swept) =>
+    base = template == "silver-bullet" ? "Kill zone setup" : template == "unicorn" ? "Order block + gap confluence" : template == "turtle-soup" ? "False breakout reversal" : template == "judas-swing" ? "Asian range fakeout" : template == "ote-continuation" ? "Trend pullback to discount" : template == "am-ifvg" ? "NY AM IFVG reversal" : template == "orb" ? "Opening range breakout" : "Setup confluence"
+    ctx = window != "" ? " · " + window : swept != "" ? " · swept " + swept : ""
+    base + ctx
+
+f_buildAlert(string template, string direction, float entry, float sl, float tp1, float tp2, float tp3, float zoneU, float zoneL, string zoneType, string window, string swept, float impulseATR, string tier, int biasAlign, string conf, string session) =>
+    dEmoji = direction == "LONG" ? "🟢" : "🔴"
+    dWord  = direction == "LONG" ? "BUY" : "SELL"
+    why    = f_whyText(template, window, swept)
+    h1 = dEmoji + " " + syminfo.ticker + " · " + dWord + " SIGNAL · " + timeframe.period + " · Tier " + tier
+    h2 = "Entry zone: " + str.tostring(zoneL, format.mintick) + " - " + str.tostring(zoneU, format.mintick)
+    h3 = "Why: " + why + (conf != "" ? "  [" + conf + "]" : "")
+    readable = h1 + "\n" + h2 + "\n" + h3 + "\n---\n"
+    head   = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"" + template + "\",\"direction\":\"" + direction + "\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"timestamp\":" + str.tostring(time)
+    slRisk = math.abs(entry - sl)
+    rr1 = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2 = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3 = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    prices = ",\"entry\":\"" + str.tostring(entry, format.mintick) + "\",\"sl\":\"" + str.tostring(sl, format.mintick) + "\",\"tp1\":\"" + str.tostring(tp1, format.mintick) + "\",\"tp2\":\"" + str.tostring(tp2, format.mintick) + "\",\"tp3\":\"" + str.tostring(tp3, format.mintick) + "\",\"rr1\":" + str.tostring(rr1, "0.00") + ",\"rr2\":" + str.tostring(rr2, "0.00") + ",\"rr3\":" + str.tostring(rr3, "0.00")
+    zone   = ",\"zoneUpper\":\"" + str.tostring(zoneU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zoneL, format.mintick) + "\",\"zoneType\":\"" + zoneType + "\""
+    htf    = ",\"activeSession\":\"" + session + "\",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "/" + str.tostring(hdB) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
+    ctx    = ",\"window\":\"" + window + "\",\"swept\":\"" + swept + "\",\"impulseATR\":" + str.tostring(impulseATR, "0.00") + ",\"apiKey\":\"" + alertApiKey + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+// ─── v2.3 TIER-C SKIP ALERT ───────────────────────────────────────────
+// Non-trading notification. Fires when a valid M15 setup forms in OPEN SPACE
+// (no HTF POI nearby → tier C). Carries NO entry/sl/tp, so even a naive
+// backend cannot place an order from it. action:"skip" tells the backend to
+// forward it to Telegram as a "formed but filtered" notice — visibility into
+// what the HTF filter is rejecting, without taking the trade.
+f_buildSkip(string template, string direction, string conf) =>
+    dWord  = direction == "LONG" ? "BUY" : "SELL"
+    why    = f_whyText(template, "", "")
+    h1 = "⚪ " + syminfo.ticker + " · " + dWord + " setup · " + timeframe.period + " · SKIPPED (no HTF confluence)"
+    h2 = "Why skipped: setup formed in open space — no HTF POI for price to react to."
+    h3 = "Setup: " + why + (conf != "" ? "  [" + conf + "]" : "")
+    readable = h1 + "\n" + h2 + "\n" + h3 + "\n---\n"
+    head = "{\"version\":\"2.3\",\"action\":\"skip\",\"template\":\"" + template + "\",\"direction\":\"" + direction + "\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"timestamp\":" + str.tostring(time)
+    body = ",\"reason\":\"no-htf-confluence\",\"htfTier\":\"C\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "/" + str.tostring(hdB) + "\",\"note\":\"setup formed, no HTF confluence, skipped\",\"apiKey\":\"" + alertApiKey + "\"}"
+    readable + head + body
+
+// ─── ORB WIDTH-FILTER SKIP ALERT ──────────────────────────────────────
+// Non-trading notice when the opening range is too wide (chop) or too narrow
+// (noise) → no trade. NO entry/sl/tp. Lets you see what the width filter
+// rejected, the same way tier-C skips show rejected ICT setups.
+f_buildSkipORB(string session, float widthATR, string reason) =>
+    h1 = "⚪ " + syminfo.ticker + " · ORB · " + session + " open · SKIPPED (" + reason + ")"
+    h2 = "Opening-range width: " + str.tostring(widthATR, "0.00") + "× ATR — outside the tradeable band."
+    readable = h1 + "\n" + h2 + "\n---\n"
+    head = "{\"version\":\"2.3\",\"action\":\"skip\",\"template\":\"orb\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"timestamp\":" + str.tostring(time)
+    body = ",\"reason\":\"orb-width-" + reason + "\",\"session\":\"" + session + "\",\"widthATR\":" + str.tostring(widthATR, "0.00") + ",\"note\":\"ORB skipped: opening range width out of band\",\"apiKey\":\"" + alertApiKey + "\"}"
+    readable + head + body
+// ─── SILENT TEMPLATES — detection only, alerts fire ─────────────────
+// ═════════════════════════════════════════════════════════════════════
+
+// ─── SILVER BULLET ──────────────────────────────────────────────────
+// v2.3: time gate uses sbGate (asset-class aware + retrace extension)
+if sbEnabled and barstate.isconfirmed and sbGate and not sbHasFired and atrVal > 0 and not na(h1ATR) and h1ATR > 0
+    bias = htfTrend
+    if bias != "NEUTRAL"
+        int   bestFVGIdx = -1
+        float bestFVGDist = 999999.0
+        if array.size(fvgUpper) > 0
+            for i = array.size(fvgUpper) - 1 to 0
+                fvgD = array.get(fvgDir, i)
+                fvgC = array.get(fvgCE, i)
+                fvgB = array.get(fvgC2Bar, i)
+                fvgF = array.get(fvgFillPct, i)
+                dirOk = (bias == "LONG" and fvgD == 1) or (bias == "SHORT" and fvgD == -1)
+                if not dirOk
+                    continue
+                if fvgF >= sbMaxFVGFill
+                    continue
+                if bar_index - fvgB > sbFVGLookbackBars
+                    continue
+                dist = math.abs(fvgC - close)
+                if dist > atrVal * sbFVGMaxDistATR
+                    continue
+                if dist < bestFVGDist
+                    bestFVGIdx := i
+                    bestFVGDist := dist
+        if bestFVGIdx >= 0
+            fvgU = array.get(fvgUpper, bestFVGIdx)
+            fvgL = array.get(fvgLower, bestFVGIdx)
+            fvgC = array.get(fvgCE,    bestFVGIdx)
+            gapSz = fvgU - fvgL
+            if gapSz >= h1ATR * sbMinGapH1ATR
+                entryVal = bias == "LONG" ? fvgU : fvgL
+                buffer = math.max(0.5 * atrVal, 0.15 * h1ATR)
+                minDist = math.max(0.5 * h1ATR, 2 * atrVal)
+                float anchorPrice = na
+                float slVal = na
+                if bias == "LONG" and array.size(sweepWickPrice) > 0
+                    float bestAnchor = na
+                    for i = array.size(sweepWickPrice) - 1 to 0
+                        sWick = array.get(sweepWickPrice, i)
+                        sDir  = array.get(sweepDir, i)
+                        sBar  = array.get(sweepBar, i)
+                        if sDir != 1
+                            continue
+                        if bar_index - sBar > sbSweepLookback
+                            continue
+                        if entryVal - sWick < minDist
+                            continue
+                        if na(bestAnchor) or sWick > bestAnchor
+                            bestAnchor := sWick
+                    if not na(bestAnchor)
+                        anchorPrice := bestAnchor
+                        slVal := anchorPrice - buffer
+                else if bias == "SHORT" and array.size(sweepWickPrice) > 0
+                    float bestAnchor = na
+                    for i = array.size(sweepWickPrice) - 1 to 0
+                        sWick = array.get(sweepWickPrice, i)
+                        sDir  = array.get(sweepDir, i)
+                        sBar  = array.get(sweepBar, i)
+                        if sDir != -1
+                            continue
+                        if bar_index - sBar > sbSweepLookback
+                            continue
+                        if sWick - entryVal < minDist
+                            continue
+                        if na(bestAnchor) or sWick < bestAnchor
+                            bestAnchor := sWick
+                    if not na(bestAnchor)
+                        anchorPrice := bestAnchor
+                        slVal := anchorPrice + buffer
+                if not na(slVal)
+                    slDist = math.abs(entryVal - slVal)
+                    slDistH1ATR = slDist / h1ATR
+                    if slDistH1ATR >= slMinH1ATR and slDistH1ATR <= slMaxH1ATR and slDist >= minSLDist
+                        tp1v = bias == "LONG" ? entryVal + slDist * 1.0 : entryVal - slDist * 1.0
+                        tp2v = bias == "LONG" ? entryVal + slDist * 2.0 : entryVal - slDist * 2.0
+                        tp3v = bias == "LONG" ? entryVal + slDist * 3.0 : entryVal - slDist * 3.0
+                        sbHasFired := true
+                        sbFireBar := bar_index
+                        activeSignalDir := bias == "LONG" ? 1 : -1
+                        activeSetupId   := 1
+                        activeEntry     := entryVal
+                        activeSL        := slVal
+                        activeTP1       := tp1v
+                        activeTP2       := tp2v
+                        activeTP3       := tp3v
+                        activeSignalBar := bar_index
+                        [sbTier, sbBA, sbConf] = f_tier(bias, fvgU, fvgL, htfUseH1, htfUseH4, false)
+                        if sbTier == "C"
+                            alert(f_buildSkip("silver-bullet", bias, sbConf), alert.freq_once_per_bar)
+                        else
+                            alert(f_buildAlert("silver-bullet", bias, goImmediateNow ? close : entryVal, slVal, tp1v, tp2v, tp3v, fvgU, fvgL, "FVG", sbWindow, "", 0.0, sbTier, sbBA, sbConf, activeSession), alert.freq_once_per_bar)
+
+if sbHasFired and barstate.isconfirmed and not na(sbFireBar) and bar_index - sbFireBar > signalExpireBars
+    sbHasFired := false
+
+// ─── UNICORN ────────────────────────────────────────────────────────
+if unEnabled and barstate.isconfirmed and not unHasFired and atrVal > 0 and not na(h1ATR) and h1ATR > 0
+    bias = htfTrend
+    if bias != "NEUTRAL" and array.size(brkUpper) > 0 and array.size(fvgUpper) > 0
+        biasDir = bias == "LONG" ? 1 : -1
+        float unBestEntry = na
+        float unBestSL = na
+        float unBestZoneU = na
+        float unBestZoneL = na
+        for bi = array.size(brkUpper) - 1 to 0
+            if array.get(brkMitigated, bi)
+                continue
+            brkD = array.get(brkDir, bi)
+            if brkD != biasDir
+                continue
+            brkBarIdx = array.get(brkBar, bi)
+            if bar_index - brkBarIdx > unMaxBrkAgeBars
+                continue
+            brkU = array.get(brkUpper, bi)
+            brkL = array.get(brkLower, bi)
+            brkSwept = array.get(brkSweptLvl, bi)
+            for fi = array.size(fvgUpper) - 1 to 0
+                fvgD = array.get(fvgDir, fi)
+                if fvgD != biasDir
+                    continue
+                fvgF = array.get(fvgFillPct, fi)
+                if fvgF >= unMaxFVGFill
+                    continue
+                fvgB = array.get(fvgC2Bar, fi)
+                if bar_index - fvgB > unMaxFVGAgeBars
+                    continue
+                if math.abs(fvgB - brkBarIdx) > unMaxBrkFVGGap
+                    continue
+                fvgU = array.get(fvgUpper, fi)
+                fvgL = array.get(fvgLower, fi)
+                overlapU = math.min(brkU, fvgU)
+                overlapL = math.max(brkL, fvgL)
+                if overlapU <= overlapL
+                    continue
+                entryCandidate = bias == "LONG" ? overlapU : overlapL
+                buffer = math.max(0.5 * atrVal, 0.15 * h1ATR)
+                slCandidate = bias == "LONG" ? brkSwept - buffer : brkSwept + buffer
+                slDist = math.abs(entryCandidate - slCandidate)
+                slDistH1ATR = slDist / h1ATR
+                if slDistH1ATR < slMinH1ATR or slDistH1ATR > slMaxH1ATR
+                    continue
+                if slDist < minSLDist
+                    continue
+                inZone = close >= overlapL and close <= overlapU
+                distToZone = math.min(math.abs(close - overlapU), math.abs(close - overlapL))
+                if not inZone and distToZone > h1ATR * unMaxDistH1ATR
+                    continue
+                unBestEntry := entryCandidate
+                unBestSL := slCandidate
+                unBestZoneU := overlapU
+                unBestZoneL := overlapL
+                break
+            if not na(unBestEntry)
+                break
+        if not na(unBestEntry) and not na(unBestSL)
+            slDist = math.abs(unBestEntry - unBestSL)
+            tp1v = bias == "LONG" ? unBestEntry + slDist * 1.0 : unBestEntry - slDist * 1.0
+            tp2v = bias == "LONG" ? unBestEntry + slDist * 2.0 : unBestEntry - slDist * 2.0
+            tp3v = bias == "LONG" ? unBestEntry + slDist * 3.0 : unBestEntry - slDist * 3.0
+            unHasFired := true
+            unFireBar := bar_index
+            activeSignalDir := bias == "LONG" ? 1 : -1
+            activeSetupId   := 2
+            activeEntry     := unBestEntry
+            activeSL        := unBestSL
+            activeTP1       := tp1v
+            activeTP2       := tp2v
+            activeTP3       := tp3v
+            activeSignalBar := bar_index
+            [unTier, unBA, unConf] = f_tier(bias, unBestZoneU, unBestZoneL, htfUseH1, htfUseH4, false)
+            if unTier == "C"
+                alert(f_buildSkip("unicorn", bias, unConf), alert.freq_once_per_bar)
+            else
+                alert(f_buildAlert("unicorn", bias, goImmediateNow ? close : unBestEntry, unBestSL, tp1v, tp2v, tp3v, unBestZoneU, unBestZoneL, "OVERLAP", "", "", 0.0, unTier, unBA, unConf, activeSession), alert.freq_once_per_bar)
+
+if unHasFired and barstate.isconfirmed and not na(unFireBar) and bar_index - unFireBar > signalExpireBars
+    unHasFired := false
+
+// ─── TURTLE SOUP ────────────────────────────────────────────────────
+if tsEnabled and barstate.isconfirmed and not tsHasFired and atrVal > 0 and not na(h1ATR) and h1ATR > 0
+    int tsBestSweepIdx = -1
+    string tsSweepKind = ""
+    if array.size(sweepLevel) > 0
+        for i = array.size(sweepLevel) - 1 to 0
+            sLvl = array.get(sweepLevel, i)
+            sBar = array.get(sweepBar, i)
+            sDir = array.get(sweepDir, i)
+            if bar_index - sBar > tsSweepLookback
+                continue
+            if sDir == -1 and not na(pdhRaw) and math.abs(sLvl - pdhRaw) <= atrVal * tsPDProximityATR
+                tsBestSweepIdx := i
+                tsSweepKind := "PDH"
+                break
+            if sDir == 1 and not na(pdlRaw) and math.abs(sLvl - pdlRaw) <= atrVal * tsPDProximityATR
+                tsBestSweepIdx := i
+                tsSweepKind := "PDL"
+                break
+    if tsBestSweepIdx >= 0
+        tsSweptWick = array.get(sweepWickPrice, tsBestSweepIdx)
+        tsSweepBarIdx = array.get(sweepBar, tsBestSweepIdx)
+        tsSweepDirVal = array.get(sweepDir, tsBestSweepIdx)
+        tsReversalDir = tsSweepDirVal == 1 ? "LONG" : "SHORT"
+        tsBiasDir = tsSweepDirVal
+        int tsBestDispIdx = -1
+        int tsDispBarIdx = na
+        if array.size(dispBar) > 0
+            for i = array.size(dispBar) - 1 to 0
+                dB = array.get(dispBar, i)
+                dD = array.get(dispDir, i)
+                if dB <= tsSweepBarIdx
+                    continue
+                if dB - tsSweepBarIdx > tsDispMaxAgeBars
+                    continue
+                if dD != tsBiasDir
+                    continue
+                tsBestDispIdx := i
+                tsDispBarIdx := dB
+                break
+        if tsBestDispIdx >= 0
+            int tsBestMSSIdx = -1
+            if array.size(mssToBar) > 0
+                for i = array.size(mssToBar) - 1 to 0
+                    mB = array.get(mssToBar, i)
+                    mD = array.get(mssDir, i)
+                    if mB <= tsDispBarIdx
+                        continue
+                    if mB - tsDispBarIdx > tsMSSMaxAgeBars
+                        continue
+                    if mD != tsBiasDir
+                        continue
+                    tsBestMSSIdx := i
+                    break
+            if tsBestMSSIdx >= 0
+                float tsZoneU = na
+                float tsZoneL = na
+                string tsEntryType = ""
+                if array.size(fvgUpper) > 0
+                    for i = array.size(fvgUpper) - 1 to 0
+                        fD = array.get(fvgDir, i)
+                        fB = array.get(fvgC2Bar, i)
+                        fF = array.get(fvgFillPct, i)
+                        if fD != tsBiasDir
+                            continue
+                        if fF >= tsMaxFVGFill
+                            continue
+                        if math.abs(fB - tsDispBarIdx) > tsFVGOBGapBars
+                            continue
+                        tsZoneU := array.get(fvgUpper, i)
+                        tsZoneL := array.get(fvgLower, i)
+                        tsEntryType := "FVG"
+                        break
+                if na(tsZoneU) and array.size(obUpper) > 0
+                    for i = array.size(obUpper) - 1 to 0
+                        if array.get(obMitigated, i)
+                            continue
+                        oD = array.get(obDir, i)
+                        oB = array.get(obBar, i)
+                        if oD != tsBiasDir
+                            continue
+                        if math.abs(oB - tsDispBarIdx) > tsFVGOBGapBars
+                            continue
+                        tsZoneU := array.get(obUpper, i)
+                        tsZoneL := array.get(obLower, i)
+                        tsEntryType := "OB"
+                        break
+                if not na(tsZoneU) and not na(tsZoneL)
+                    tsEntryVal = tsReversalDir == "LONG" ? tsZoneU : tsZoneL
+                    tsBuffer = math.max(0.5 * atrVal, 0.15 * h1ATR)
+                    tsSL = tsReversalDir == "SHORT" ? tsSweptWick + tsBuffer : tsSweptWick - tsBuffer
+                    tsSLDist = math.abs(tsEntryVal - tsSL)
+                    tsSLDistH1ATR = tsSLDist / h1ATR
+                    if tsSLDistH1ATR >= slMinH1ATR and tsSLDistH1ATR <= slMaxH1ATR and tsSLDist >= minSLDist
+                        tsTp1 = tsReversalDir == "LONG" ? tsEntryVal + tsSLDist * 1.0 : tsEntryVal - tsSLDist * 1.0
+                        tsTp2 = tsReversalDir == "LONG" ? tsEntryVal + tsSLDist * 2.0 : tsEntryVal - tsSLDist * 2.0
+                        tsTp3 = tsReversalDir == "LONG" ? tsEntryVal + tsSLDist * 3.0 : tsEntryVal - tsSLDist * 3.0
+                        tsHasFired := true
+                        tsFireBar := bar_index
+                        activeSignalDir := tsReversalDir == "LONG" ? 1 : -1
+                        activeSetupId   := 3
+                        activeEntry     := tsEntryVal
+                        activeSL        := tsSL
+                        activeTP1       := tsTp1
+                        activeTP2       := tsTp2
+                        activeTP3       := tsTp3
+                        activeSignalBar := bar_index
+                        [tsTier, tsBA, tsConf] = f_tier(tsReversalDir, tsZoneU, tsZoneL, false, htfUseH4, htfUseD)
+                        if tsTier == "C"
+                            alert(f_buildSkip("turtle-soup", tsReversalDir, tsConf), alert.freq_once_per_bar)
+                        else
+                            alert(f_buildAlert("turtle-soup", tsReversalDir, goImmediateNow ? close : tsEntryVal, tsSL, tsTp1, tsTp2, tsTp3, tsZoneU, tsZoneL, tsEntryType, "", tsSweepKind, 0.0, tsTier, tsBA, tsConf, activeSession), alert.freq_once_per_bar)
+
+if tsHasFired and barstate.isconfirmed and not na(tsFireBar) and bar_index - tsFireBar > signalExpireBars
+    tsHasFired := false
+
+// ─── JUDAS SWING ────────────────────────────────────────────────────
+// v2.3: time gate uses jsGate. inLondonKZ is now defined in the session block.
+if jsEnabled and barstate.isconfirmed and jsGate and not jsHasFired and atrVal > 0 and not na(h1ATR) and h1ATR > 0 and array.size(arHi) > 0
+    nAr = array.size(arHi)
+    jsAsianH = array.get(arHi, nAr - 1)
+    jsAsianL = array.get(arLo, nAr - 1)
+    jsArEndBar = array.get(arEndBar, nAr - 1)
+    if bar_index - jsArEndBar <= jsMaxARAgeBars
+        int jsBestSweepIdx = -1
+        string jsSweepKind = ""
+        if array.size(sweepLevel) > 0
+            for i = array.size(sweepLevel) - 1 to 0
+                sLvl = array.get(sweepLevel, i)
+                sBar = array.get(sweepBar, i)
+                sDir = array.get(sweepDir, i)
+                if sBar <= jsArEndBar
+                    continue
+                if bar_index - sBar > jsSweepLookback
+                    continue
+                if sDir == -1 and math.abs(sLvl - jsAsianH) <= atrVal * jsProximityATR
+                    jsBestSweepIdx := i
+                    jsSweepKind := "AsianH"
+                    break
+                if sDir == 1 and math.abs(sLvl - jsAsianL) <= atrVal * jsProximityATR
+                    jsBestSweepIdx := i
+                    jsSweepKind := "AsianL"
+                    break
+        if jsBestSweepIdx >= 0
+            jsSweptWick = array.get(sweepWickPrice, jsBestSweepIdx)
+            jsSweepBarIdx = array.get(sweepBar, jsBestSweepIdx)
+            jsSweepDirVal = array.get(sweepDir, jsBestSweepIdx)
+            jsReversalDir = jsSweepDirVal == 1 ? "LONG" : "SHORT"
+            jsBiasDir = jsSweepDirVal
+            int jsBestDispIdx = -1
+            int jsDispBarIdx = na
+            if array.size(dispBar) > 0
+                for i = array.size(dispBar) - 1 to 0
+                    dB = array.get(dispBar, i)
+                    dD = array.get(dispDir, i)
+                    if dB <= jsSweepBarIdx
+                        continue
+                    if dB - jsSweepBarIdx > jsDispMaxAgeBars
+                        continue
+                    if dD != jsBiasDir
+                        continue
+                    jsBestDispIdx := i
+                    jsDispBarIdx := dB
+                    break
+            if jsBestDispIdx >= 0
+                int jsBestMSSIdx = -1
+                if array.size(mssToBar) > 0
+                    for i = array.size(mssToBar) - 1 to 0
+                        mB = array.get(mssToBar, i)
+                        mD = array.get(mssDir, i)
+                        if mB <= jsDispBarIdx
+                            continue
+                        if mB - jsDispBarIdx > jsMSSMaxAgeBars
+                            continue
+                        if mD != jsBiasDir
+                            continue
+                        jsBestMSSIdx := i
+                        break
+                if jsBestMSSIdx >= 0
+                    float jsZoneU = na
+                    float jsZoneL = na
+                    string jsEntryType = ""
+                    if array.size(fvgUpper) > 0
+                        for i = array.size(fvgUpper) - 1 to 0
+                            fD = array.get(fvgDir, i)
+                            fB = array.get(fvgC2Bar, i)
+                            fF = array.get(fvgFillPct, i)
+                            if fD != jsBiasDir
+                                continue
+                            if fF >= jsMaxFVGFill
+                                continue
+                            if math.abs(fB - jsDispBarIdx) > jsFVGOBGapBars
+                                continue
+                            jsZoneU := array.get(fvgUpper, i)
+                            jsZoneL := array.get(fvgLower, i)
+                            jsEntryType := "FVG"
+                            break
+                    if na(jsZoneU) and array.size(obUpper) > 0
+                        for i = array.size(obUpper) - 1 to 0
+                            if array.get(obMitigated, i)
+                                continue
+                            oD = array.get(obDir, i)
+                            oB = array.get(obBar, i)
+                            if oD != jsBiasDir
+                                continue
+                            if math.abs(oB - jsDispBarIdx) > jsFVGOBGapBars
+                                continue
+                            jsZoneU := array.get(obUpper, i)
+                            jsZoneL := array.get(obLower, i)
+                            jsEntryType := "OB"
+                            break
+                    if not na(jsZoneU) and not na(jsZoneL)
+                        jsEntryVal = jsReversalDir == "LONG" ? jsZoneU : jsZoneL
+                        jsBuffer = math.max(0.5 * atrVal, 0.15 * h1ATR)
+                        jsSL = jsReversalDir == "SHORT" ? jsSweptWick + jsBuffer : jsSweptWick - jsBuffer
+                        jsSLDist = math.abs(jsEntryVal - jsSL)
+                        jsSLDistH1ATR = jsSLDist / h1ATR
+                        if jsSLDistH1ATR >= slMinH1ATR and jsSLDistH1ATR <= slMaxH1ATR and jsSLDist >= minSLDist
+                            jsTp1 = jsReversalDir == "LONG" ? jsEntryVal + jsSLDist * 1.0 : jsEntryVal - jsSLDist * 1.0
+                            jsTp2 = jsReversalDir == "LONG" ? jsEntryVal + jsSLDist * 2.0 : jsEntryVal - jsSLDist * 2.0
+                            jsTp3 = jsReversalDir == "LONG" ? jsEntryVal + jsSLDist * 3.0 : jsEntryVal - jsSLDist * 3.0
+                            jsHasFired := true
+                            jsFireBar := bar_index
+                            activeSignalDir := jsReversalDir == "LONG" ? 1 : -1
+                            activeSetupId   := 4
+                            activeEntry     := jsEntryVal
+                            activeSL        := jsSL
+                            activeTP1       := jsTp1
+                            activeTP2       := jsTp2
+                            activeTP3       := jsTp3
+                            activeSignalBar := bar_index
+                            [jsTier, jsBA, jsConf] = f_tier(jsReversalDir, jsZoneU, jsZoneL, htfUseH1, htfUseH4, false)
+                            if jsTier == "C"
+                                alert(f_buildSkip("judas-swing", jsReversalDir, jsConf), alert.freq_once_per_bar)
+                            else
+                                alert(f_buildAlert("judas-swing", jsReversalDir, goImmediateNow ? close : jsEntryVal, jsSL, jsTp1, jsTp2, jsTp3, jsZoneU, jsZoneL, jsEntryType, "", jsSweepKind, 0.0, jsTier, jsBA, jsConf, activeSession), alert.freq_once_per_bar)
+
+if jsHasFired and barstate.isconfirmed and not na(jsFireBar) and bar_index - jsFireBar > signalExpireBars
+    jsHasFired := false
+
+// ─── OTE CONTINUATION ───────────────────────────────────────────────
+// v2.2: Fib-only fallback removed. OTE requires a real OB or FVG in the Fib zone.
+if ocEnabled and barstate.isconfirmed and not ocHasFired and atrVal > 0 and not na(h1ATR) and h1ATR > 0 and array.size(shPrice) > 0 and array.size(slPrice) > 0
+    bias = htfTrend
+    if bias != "NEUTRAL"
+        ocNH = array.size(shPrice)
+        ocNL = array.size(slPrice)
+        ocLastHighPrice = array.get(shPrice, ocNH - 1)
+        ocLastHighBar = array.get(shBar, ocNH - 1)
+        ocLastLowPrice = array.get(slPrice, ocNL - 1)
+        ocLastLowBar = array.get(slBar, ocNL - 1)
+        float ocFromPrice = na
+        float ocToPrice = na
+        string ocDirComp = ""
+        if ocLastHighBar > ocLastLowBar
+            ocFromPrice := ocLastLowPrice
+            ocToPrice := ocLastHighPrice
+            ocDirComp := "LONG"
+        else
+            ocFromPrice := ocLastHighPrice
+            ocToPrice := ocLastLowPrice
+            ocDirComp := "SHORT"
+        if ocDirComp == bias
+            ocImpulseRange = math.abs(ocToPrice - ocFromPrice)
+            if ocImpulseRange >= atrVal * oteMinImpulseATR
+                ocFib62  = bias == "LONG" ? ocToPrice - ocImpulseRange * 0.62  : ocToPrice + ocImpulseRange * 0.62
+                ocFib705 = bias == "LONG" ? ocToPrice - ocImpulseRange * 0.705 : ocToPrice + ocImpulseRange * 0.705
+                ocFib79  = bias == "LONG" ? ocToPrice - ocImpulseRange * 0.79  : ocToPrice + ocImpulseRange * 0.79
+                ocBandU = math.max(ocFib62, ocFib79)
+                ocBandL = math.min(ocFib62, ocFib79)
+                if close >= ocBandL and close <= ocBandU
+                    biasDir = bias == "LONG" ? 1 : -1
+                    float ocEntryVal = na
+                    float ocZoneU = na
+                    float ocZoneL = na
+                    string ocEntryType = ""
+                    if array.size(obUpper) > 0
+                        for i = array.size(obUpper) - 1 to 0
+                            if array.get(obMitigated, i)
+                                continue
+                            oD = array.get(obDir, i)
+                            if oD != biasDir
+                                continue
+                            oU = array.get(obUpper, i)
+                            oL = array.get(obLower, i)
+                            if oU >= ocBandL and oL <= ocBandU
+                                ocEntryVal := (oU + oL) / 2
+                                ocZoneU := oU
+                                ocZoneL := oL
+                                ocEntryType := "OB"
+                                break
+                    if na(ocEntryVal) and array.size(fvgUpper) > 0
+                        for i = array.size(fvgUpper) - 1 to 0
+                            fD = array.get(fvgDir, i)
+                            if fD != biasDir
+                                continue
+                            fF = array.get(fvgFillPct, i)
+                            if fF >= ocMaxFVGFill
+                                continue
+                            fU = array.get(fvgUpper, i)
+                            fL = array.get(fvgLower, i)
+                            if fU >= ocBandL and fL <= ocBandU
+                                ocEntryVal := array.get(fvgCE, i)
+                                ocZoneU := fU
+                                ocZoneL := fL
+                                ocEntryType := "FVG"
+                                break
+                    // v2.2: NO Fib fallback. If no real OB or FVG found, OTE does not fire.
+                    if not na(ocEntryVal)
+                        ocBuffer = math.max(0.5 * atrVal, 0.15 * h1ATR)
+                        ocSL = bias == "LONG" ? ocFromPrice - ocBuffer : ocFromPrice + ocBuffer
+                        ocSLDist = math.abs(ocEntryVal - ocSL)
+                        ocSLDistH1ATR = ocSLDist / h1ATR
+                        if ocSLDistH1ATR >= slMinH1ATR and ocSLDistH1ATR <= slMaxH1ATR and ocSLDist >= minSLDist
+                            ocTp1 = bias == "LONG" ? ocEntryVal + ocSLDist * 1.0 : ocEntryVal - ocSLDist * 1.0
+                            ocTp2 = bias == "LONG" ? ocEntryVal + ocSLDist * 2.0 : ocEntryVal - ocSLDist * 2.0
+                            ocTp3 = bias == "LONG" ? ocEntryVal + ocSLDist * 3.0 : ocEntryVal - ocSLDist * 3.0
+                            ocHasFired := true
+                            ocFireBar := bar_index
+                            activeSignalDir := bias == "LONG" ? 1 : -1
+                            activeSetupId   := 5
+                            activeEntry     := ocEntryVal
+                            activeSL        := ocSL
+                            activeTP1       := ocTp1
+                            activeTP2       := ocTp2
+                            activeTP3       := ocTp3
+                            activeSignalBar := bar_index
+                            [ocTier, ocBA, ocConf] = f_tier(bias, ocZoneU, ocZoneL, false, htfUseH4, htfUseD)
+                            if ocTier == "C"
+                                alert(f_buildSkip("ote-continuation", bias, ocConf), alert.freq_once_per_bar)
+                            else
+                                alert(f_buildAlert("ote-continuation", bias, ocEntryVal, ocSL, ocTp1, ocTp2, ocTp3, ocZoneU, ocZoneL, ocEntryType, "", "", ocImpulseRange / atrVal, ocTier, ocBA, ocConf, activeSession), alert.freq_once_per_bar)
+
+if ocHasFired and barstate.isconfirmed and not na(ocFireBar) and bar_index - ocFireBar > signalExpireBars
+    ocHasFired := false
+
+// ─── AM IFVG REVERSAL (v2.1 — Template #6) ───────────────────────────
+// v2.3: time gate uses amIfvgGate (asset-class aware + retrace extension)
+if amIfvgEnabled and barstate.isconfirmed and amIfvgGate and not amIfvgHasFired and atrVal > 0 and not na(h1ATR) and h1ATR > 0 and array.size(ifvgUpper) > 0
+    int amBestIfvgIdx = -1
+    for i = array.size(ifvgUpper) - 1 to 0
+        ifvgV = array.get(ifvgViolatedBar, i)
+        if bar_index - ifvgV > amIfvgMaxIfvgAge
+            continue
+        ifvgU_i = array.get(ifvgUpper, i)
+        ifvgL_i = array.get(ifvgLower, i)
+        ifvgC_i = (ifvgU_i + ifvgL_i) / 2.0
+        if math.abs(close - ifvgC_i) > atrVal * amIfvgMaxDistATR
+            continue
+        amBestIfvgIdx := i
+        break
+
+    if amBestIfvgIdx >= 0
+        amIfvgU  = array.get(ifvgUpper, amBestIfvgIdx)
+        amIfvgL  = array.get(ifvgLower, amBestIfvgIdx)
+        amIfvgD  = array.get(ifvgDir, amBestIfvgIdx)
+        amDirStr = amIfvgD == 1 ? "LONG" : "SHORT"
+
+        amEntryVal = amIfvgD == 1 ? amIfvgU : amIfvgL
+        amBuffer   = math.max(0.5 * atrVal, 0.15 * h1ATR)
+        amSL       = amIfvgD == 1 ? amIfvgL - amBuffer : amIfvgU + amBuffer
+        amSLDist   = math.abs(amEntryVal - amSL)
+        amSLDistH1 = amSLDist / h1ATR
+
+        if amSLDistH1 >= slMinH1ATR and amSLDistH1 <= slMaxH1ATR and amSLDist >= minSLDist
+            float amTPTarget = na
+            string amTPSrc = ""
+            if amIfvgD == 1 and array.size(eqhPrice) > 0
+                for j = array.size(eqhPrice) - 1 to 0
+                    eqhP_j = array.get(eqhPrice, j)
+                    eqhC_j = array.get(eqhCount, j)
+                    if eqhP_j > close and eqhC_j >= eqMinCluster
+                        if na(amTPTarget) or eqhP_j < amTPTarget
+                            amTPTarget := eqhP_j
+                            amTPSrc := "EQH x" + str.tostring(eqhC_j)
+            if amIfvgD == -1 and array.size(eqlPrice) > 0
+                for j = array.size(eqlPrice) - 1 to 0
+                    eqlP_j = array.get(eqlPrice, j)
+                    eqlC_j = array.get(eqlCount, j)
+                    if eqlP_j < close and eqlC_j >= eqMinCluster
+                        if na(amTPTarget) or eqlP_j > amTPTarget
+                            amTPTarget := eqlP_j
+                            amTPSrc := "EQL x" + str.tostring(eqlC_j)
+
+            amTp1 = amIfvgD == 1 ? amEntryVal + amSLDist       : amEntryVal - amSLDist
+            amTp2 = amIfvgD == 1 ? amEntryVal + amSLDist * 2.0 : amEntryVal - amSLDist * 2.0
+            amTp3 = (not na(amTPTarget) and ((amIfvgD == 1 and amTPTarget > amTp2) or (amIfvgD == -1 and amTPTarget < amTp2))) ? amTPTarget : (amIfvgD == 1 ? amEntryVal + amSLDist * 3.0 : amEntryVal - amSLDist * 3.0)
+
+            amIfvgHasFired  := true
+            amIfvgFireBar   := bar_index
+            activeSignalDir := amIfvgD
+            activeSetupId   := 6
+            activeEntry     := amEntryVal
+            activeSL        := amSL
+            activeTP1       := amTp1
+            activeTP2       := amTp2
+            activeTP3       := amTp3
+            activeSignalBar := bar_index
+            [amTier, amBA, amConf] = f_tier(amDirStr, amIfvgU, amIfvgL, htfUseH1, htfUseH4, false)
+            if amTier == "C"
+                alert(f_buildSkip("am-ifvg", amDirStr, amConf), alert.freq_once_per_bar)
+            else
+                alert(f_buildAlert("am-ifvg", amDirStr, goImmediateNow ? close : amEntryVal, amSL, amTp1, amTp2, amTp3, amIfvgU, amIfvgL, "IFVG", "NY_AM", amTPSrc, 0.0, amTier, amBA, amConf, activeSession), alert.freq_once_per_bar)
+
+if amIfvgHasFired and barstate.isconfirmed and not na(amIfvgFireBar) and bar_index - amIfvgFireBar > signalExpireBars
+    amIfvgHasFired := false
+
+// ═══ ORB TEMPLATE — Opening Range Breakout (v2.3) ═════════════════════
+// At OR-window close: width filter (range ÷ ATR) → arm or fire a skip alert.
+// Within the trade window, on the first breakout (M15 close beyond the OR):
+//   • aligned with HTF bias (H1/H4) → IMMEDIATE: fire now, tier A.
+//   • counter / LTF-only            → RETEST: wait for price to return to the
+//                                      broken edge and hold, then fire, tier B.
+// Entry = proximal OR edge (limit fills on the pullback). SL = opposite edge.
+// One trade per session. Day/swing structure — TP 1R/2R/3R, backend trails.
+if orbEnabled and barstate.isconfirmed and orbWindowEnd and not na(orbH) and not na(orbL) and atrVal > 0
+    orbWidth = orbH - orbL
+    orbWidthATR = orbWidth / atrVal
+    if orbWidthATR < orbMinWidthATR
+        orbArmed := false
+        orbHasFired := true
+        alert(f_buildSkipORB(orbSession, orbWidthATR, "too-narrow"), alert.freq_once_per_bar)
+    else if orbWidthATR > orbMaxWidthATR
+        orbArmed := false
+        orbHasFired := true
+        alert(f_buildSkipORB(orbSession, orbWidthATR, "too-wide"), alert.freq_once_per_bar)
+    else
+        orbArmed := true
+
+if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOrbTrade and atrVal > 0 and not na(h1ATR) and h1ATR > 0
+    orbWATR = (orbH - orbL) / atrVal
+    if not orbPendingRetest
+        orbBrokeUp   = close > orbH
+        orbBrokeDown = close < orbL
+        if orbBrokeUp or orbBrokeDown
+            orbDir  = orbBrokeUp ? "LONG" : "SHORT"
+            orbSDir = orbBrokeUp ? 1 : -1
+            orbHtfConfirms = (h1B == orbSDir) or (h4B == orbSDir)
+            orbEntryP = orbBrokeUp ? orbH : orbL
+            orbBuf    = math.max(0.3 * atrVal, 0.10 * h1ATR)
+            orbSLP    = orbBrokeUp ? orbL - orbBuf : orbH + orbBuf
+            orbSLDist = math.abs(orbEntryP - orbSLP)
+            orbSLH1   = orbSLDist / h1ATR
+            if orbSLDist > 0 and orbSLH1 >= slMinH1ATR and orbSLH1 <= slMaxH1ATR
+                orbT1 = orbBrokeUp ? orbEntryP + orbSLDist * 1.0 : orbEntryP - orbSLDist * 1.0
+                orbT2 = orbBrokeUp ? orbEntryP + orbSLDist * 2.0 : orbEntryP - orbSLDist * 2.0
+                orbT3 = orbBrokeUp ? orbEntryP + orbSLDist * 3.0 : orbEntryP - orbSLDist * 3.0
+                if orbHtfConfirms
+                    orbHasFired := true
+                    activeSignalDir := orbSDir
+                    activeSetupId   := 7
+                    activeEntry     := orbEntryP
+                    activeSL        := orbSLP
+                    activeTP1       := orbT1
+                    activeTP2       := orbT2
+                    activeTP3       := orbT3
+                    activeSignalBar := bar_index
+                    alert(f_buildAlert("orb", orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, "ORB", orbSession, "", orbWATR, "A", 1, "orb-immediate", activeSession), alert.freq_once_per_bar)
+                else
+                    orbPendingRetest := true
+                    orbBreakDir := orbSDir
+    else
+        orbRetestUp   = orbBreakDir == 1  and low  <= orbH and close > orbH
+        orbRetestDown = orbBreakDir == -1 and high >= orbL and close < orbL
+        if orbRetestUp or orbRetestDown
+            orbUp     = orbBreakDir == 1
+            orbDir    = orbUp ? "LONG" : "SHORT"
+            orbEntryP = orbUp ? orbH : orbL
+            orbBuf    = math.max(0.3 * atrVal, 0.10 * h1ATR)
+            orbSLP    = orbUp ? orbL - orbBuf : orbH + orbBuf
+            orbSLDist = math.abs(orbEntryP - orbSLP)
+            orbSLH1   = orbSLDist / h1ATR
+            if orbSLDist > 0 and orbSLH1 >= slMinH1ATR and orbSLH1 <= slMaxH1ATR
+                orbT1 = orbUp ? orbEntryP + orbSLDist * 1.0 : orbEntryP - orbSLDist * 1.0
+                orbT2 = orbUp ? orbEntryP + orbSLDist * 2.0 : orbEntryP - orbSLDist * 2.0
+                orbT3 = orbUp ? orbEntryP + orbSLDist * 3.0 : orbEntryP - orbSLDist * 3.0
+                orbHasFired := true
+                orbPendingRetest := false
+                activeSignalDir := orbBreakDir
+                activeSetupId   := 7
+                activeEntry     := orbEntryP
+                activeSL        := orbSLP
+                activeTP1       := orbT1
+                activeTP2       := orbT2
+                activeTP3       := orbT3
+                activeSignalBar := bar_index
+                alert(f_buildAlert("orb", orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, "ORB", orbSession, "", orbWATR, "B", 0, "orb-retest", activeSession), alert.freq_once_per_bar)
+
+// ─── POSITION BOX DRAW — on the bar a signal fires (any template) ───
+if showPosBox and barstate.isconfirmed and not na(activeSignalBar) and activeSignalBar == bar_index and not na(activeEntry) and not na(activeSL) and not na(activeTP3)
+    f_drawPosBox(activeEntry, activeSL, activeTP3)
+
+// ─── ACTIVE SIGNAL EXPIRATION ───────────────────────────────────────
+
+if barstate.isconfirmed and not na(activeSignalBar) and bar_index - activeSignalBar > signalExpireBars
+    if not na(tradeSignalLbl)
+        label.delete(tradeSignalLbl)
+        tradeSignalLbl := na
+    activeSignalDir := 0
+    activeSetupId   := 0
+    activeEntry     := na
+    activeSL        := na
+    activeTP1       := na
+    activeTP2       := na
+    activeTP3       := na
+    activeSignalBar := na
+
+// ═════════════════════════════════════════════════════════════════════
+// ─── TRADE SIGNAL LABEL (the BUY/SELL clean visual) ─────────────────
+// ═════════════════════════════════════════════════════════════════════
+
+if showTradeSignal and activeSetupId > 0 and not na(activeSignalBar) and not na(activeEntry) and barstate.islast
+    sigEmoji = activeSignalDir == 1 ? "🟢" : "🔴"
+    sigWord  = activeSignalDir == 1 ? "BUY" : "SELL"
+    sigColor = activeSignalDir == 1 ? C_DIST_L : C_DIST_S
+    sigText = sigEmoji + " " + sigWord
+    sigStyle = activeSignalDir == 1 ? label.style_label_up : label.style_label_down
+    sigYloc  = activeSignalDir == 1 ? yloc.belowbar : yloc.abovebar
+
+    if na(tradeSignalLbl)
+        tradeSignalLbl := label.new(activeSignalBar, activeEntry, sigText, yloc=sigYloc, color=color.new(sigColor, 20), textcolor=color.white, style=sigStyle, size=size.small, textalign=text.align_center)
+    else
+        label.set_xy(tradeSignalLbl, activeSignalBar, activeEntry)
+        label.set_text(tradeSignalLbl, sigText)
+        label.set_color(tradeSignalLbl, color.new(sigColor, 20))
+        label.set_yloc(tradeSignalLbl, sigYloc)
+        label.set_style(tradeSignalLbl, sigStyle)
+
+// ═════════════════════════════════════════════════════════════════════
+// ─── HIDDEN PLOTS (Pine Screener + alert placeholders + exports) ────
+// ═════════════════════════════════════════════════════════════════════
+
+biasStateNum  = htfTrend == "LONG" ? 1 : htfTrend == "SHORT" ? -1 : 0
+inKillZoneNum = sbWindow != "—" ? 1 : 0
+
+plot(activeSignalDir,    "QB Direction",    display=display.none, editable=false)
+plot(activeSetupId,      "QB Setup ID",     display=display.none, editable=false)
+plot(currentPhase,       "QB Phase",        display=display.none, editable=false)
+plot(biasStateNum,       "QB Bias",         display=display.none, editable=false)
+plot(inKillZoneNum,      "QB Kill Zone",    display=display.none, editable=false)
+plot(activeEntry,        "QB Entry",        display=display.none, editable=false, format=format.price)
+plot(activeSL,           "QB SL",           display=display.none, editable=false, format=format.price)
+plot(activeTP1,          "QB TP1",          display=display.none, editable=false, format=format.price)
+plot(activeTP2,          "QB TP2",          display=display.none, editable=false, format=format.price)
+plot(activeTP3,          "QB TP3",          display=display.none, editable=false, format=format.price)
+plot(array.size(ifvgUpper), "QB IFVGs",     display=display.none, editable=false)
+plot(array.size(eqhPrice),  "QB EQH",       display=display.none, editable=false)
+plot(array.size(eqlPrice),  "QB EQL",       display=display.none, editable=false)
+
+// ═════════════════════════════════════════════════════════════════════
+// ─── ACTIVE ZONE VISUALIZATION (FVG / OB / sweeps / IFVG within 2×ATR) ─
+// ═════════════════════════════════════════════════════════════════════
+
+zoneShow = input.bool(true, "Show active FVG/OB zones", group="Visuals — Zones")
+zoneATRMult = input.float(2.0, "Zone visibility range (× ATR)", minval=0.5, maxval=5.0, step=0.5, group="Visuals — Zones")
+zoneMaxScan = input.int(20, "How many recent zones to scan", minval=5, maxval=50, group="Visuals — Zones")
+
+var box[] zoneBoxes = array.new<box>()
+var line[] zoneLines = array.new<line>()
+var label[] zoneLabels = array.new<label>()
+
+if zoneShow and atrVal > 0 and barstate.islast
+    while array.size(zoneBoxes) > 0
+        box.delete(array.pop(zoneBoxes))
+    while array.size(zoneLines) > 0
+        line.delete(array.pop(zoneLines))
+    while array.size(zoneLabels) > 0
+        label.delete(array.pop(zoneLabels))
+
+    rangeATR = atrVal * zoneATRMult
+
+    // ── Render active FVGs in range ─────────────────────────────────
+    if array.size(fvgUpper) > 0
+        scanStart = math.max(0, array.size(fvgUpper) - zoneMaxScan)
+        for i = array.size(fvgUpper) - 1 to scanStart
+            fU = array.get(fvgUpper, i)
+            fL = array.get(fvgLower, i)
+            fF = array.get(fvgFillPct, i)
+            fD = array.get(fvgDir, i)
+            fB = math.max(array.get(fvgC2Bar, i), bar_index - 499)
+            if fF >= 0.7
+                continue
+            fCE = (fU + fL) / 2
+            if math.abs(close - fCE) > rangeATR
+                continue
+            fvgBg = fD == 1 ? color.new(C_BULL, 88) : color.new(C_BEAR, 88)
+            fvgBr = fD == 1 ? color.new(C_BULL, 55) : color.new(C_BEAR, 55)
+            b = box.new(fB, fU, bar_index + 8, fL, bgcolor=fvgBg, border_color=fvgBr, border_width=1, border_style=line.style_dashed)
+            array.push(zoneBoxes, b)
+
+    // ── Render unmitigated OBs in range ─────────────────────────────
+    if array.size(obUpper) > 0
+        scanStart = math.max(0, array.size(obUpper) - zoneMaxScan)
+        for i = array.size(obUpper) - 1 to scanStart
+            if array.get(obMitigated, i)
+                continue
+            oU = array.get(obUpper, i)
+            oL = array.get(obLower, i)
+            oD = array.get(obDir, i)
+            oB = math.max(array.get(obBar, i), bar_index - 499)
+            oCE = (oU + oL) / 2
+            if math.abs(close - oCE) > rangeATR
+                continue
+            obBg = oD == 1 ? color.new(C_BULL, 85) : color.new(C_BEAR, 85)
+            obBr = oD == 1 ? color.new(C_BULL, 40) : color.new(C_BEAR, 40)
+            b = box.new(oB, oU, bar_index + 8, oL, bgcolor=obBg, border_color=obBr, border_width=1, border_style=line.style_solid)
+            array.push(zoneBoxes, b)
+
+    // ── Render IFVGs in range (v2.1) ────────────────────────────────
+    if ifvgShowOnChart and array.size(ifvgUpper) > 0
+        scanStart_ifvg = math.max(0, array.size(ifvgUpper) - zoneMaxScan)
+        for ii = array.size(ifvgUpper) - 1 to scanStart_ifvg
+            i_u = array.get(ifvgUpper, ii)
+            i_l = array.get(ifvgLower, ii)
+            i_d = array.get(ifvgDir, ii)
+            i_b = math.max(array.get(ifvgC2Bar, ii), bar_index - 499)
+            i_ce = (i_u + i_l) / 2.0
+            if math.abs(close - i_ce) > rangeATR * 1.5
+                continue
+            i_bg = i_d == 1 ? color.new(C_IFVG_BULL, 86) : color.new(C_IFVG_BEAR, 86)
+            i_br = i_d == 1 ? color.new(C_IFVG_BULL, 30) : color.new(C_IFVG_BEAR, 30)
+            b_ifvg = box.new(i_b, i_u, bar_index + 6, i_l, bgcolor=i_bg, border_color=i_br, border_width=1, border_style=line.style_dashed)
+            array.push(zoneBoxes, b_ifvg)
+
+    // ── Render Equal H/L liquidity (v2.1) ───────────────────────────
+    if eqShowOnChart and array.size(eqhPrice) > 0
+        for i = array.size(eqhPrice) - 1 to math.max(0, array.size(eqhPrice) - 5)
+            eqhP = array.get(eqhPrice, i)
+            eqhC = array.get(eqhCount, i)
+            if eqhC < eqMinCluster
+                continue
+            if math.abs(close - eqhP) > rangeATR * 1.5
+                continue
+            ln = line.new(bar_index - 60, eqhP, bar_index + 10, eqhP, color=color.new(C_IFVG_BULL, 45), width=1, style=line.style_dashed)
+            array.push(zoneLines, ln)
+            lbl = label.new(bar_index + 10, eqhP, "EQH x" + str.tostring(eqhC), color=color.new(color.black, 100), textcolor=C_IFVG_BULL, style=label.style_label_left, size=size.tiny)
+            array.push(zoneLabels, lbl)
+    if eqShowOnChart and array.size(eqlPrice) > 0
+        for i = array.size(eqlPrice) - 1 to math.max(0, array.size(eqlPrice) - 5)
+            eqlP = array.get(eqlPrice, i)
+            eqlC = array.get(eqlCount, i)
+            if eqlC < eqMinCluster
+                continue
+            if math.abs(close - eqlP) > rangeATR * 1.5
+                continue
+            ln = line.new(bar_index - 60, eqlP, bar_index + 10, eqlP, color=color.new(C_IFVG_BEAR, 45), width=1, style=line.style_dashed)
+            array.push(zoneLines, ln)
+            lbl = label.new(bar_index + 10, eqlP, "EQL x" + str.tostring(eqlC), color=color.new(color.black, 100), textcolor=C_IFVG_BEAR, style=label.style_label_left, size=size.tiny)
+            array.push(zoneLabels, lbl)
+
+    // ── Render recent sweep wick markers in range ────────────────────
+    if array.size(sweepLevel) > 0
+        scanStart = math.max(0, array.size(sweepLevel) - 10)
+        for i = array.size(sweepLevel) - 1 to scanStart
+            sW = array.get(sweepWickPrice, i)
+            sB = array.get(sweepBar, i)
+            sD = array.get(sweepDir, i)
+            if math.abs(close - sW) > rangeATR
+                continue
+            if bar_index - sB > 80
+                continue
+            sweepCol = sD == 1 ? color.new(C_BULL, 20) : color.new(C_BEAR, 20)
+            ln = line.new(sB - 1, sW, sB + 1, sW, color=sweepCol, width=3)
+            array.push(zoneLines, ln)
+
+// ═════════════════════════════════════════════════════════════════════
+// ─── STATUS BADGE (top-right, marketplace polish) ───────────────────
+// ═════════════════════════════════════════════════════════════════════
+
+var table statusBadge = table.new(position.top_right, 1, 1, border_width=0)
+
+if showStatusBadge and barstate.islast
+    biasTxt = "→ NEUTRAL"
+    if biasStateNum == 1
+        biasTxt := "↑ LONG"
+    else if biasStateNum == -1
+        biasTxt := "↓ SHORT"
+
+    phaseTxt = "Neutral"
+    if currentPhase == 1
+        phaseTxt := "Accumulation"
+    else if currentPhase == 2
+        phaseTxt := "⚡ Manipulation"
+    else if currentPhase == 3
+        phaseTxt := activeSignalDir == 1 ? "Distribution LONG" : "Distribution SHORT"
+
+    badgeCol = C_NEUT
+    if currentPhase == 2
+        badgeCol := C_MANIP
+    else if currentPhase == 3
+        badgeCol := activeSignalDir == 1 ? C_DIST_L : C_DIST_S
+    else if biasStateNum == 1
+        badgeCol := C_BULL
+    else if biasStateNum == -1
+        badgeCol := C_BEAR
+
+    table.cell(statusBadge, 0, 0, biasTxt + "  |  " + phaseTxt, bgcolor=na, text_color=color.new(badgeCol, 25), text_size=size.tiny)
+
+// ═════════════════════════════════════════════════════════════════════
+//  End of Quantum Bot — ICT Narrative Engine v2.3
+//  v2.3: Multi-timeframe HTF context + confluence tiers + asset-class clock
+//  Detection stack unchanged from v2.2. New fields ride the payload additively.
+// ═════════════════════════════════════════════════════════════════════
