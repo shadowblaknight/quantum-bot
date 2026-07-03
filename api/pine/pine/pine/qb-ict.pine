@@ -274,7 +274,6 @@ G_ENTRY = "Entry style — v2.3"
 entryStyle = input.string("auto", "Entry on confirmation", options=["auto","retest","immediate"], group=G_ENTRY, tooltip="auto = skip the retest when the signal candle is a strong displacement, else wait for the near-edge retest. retest = always limit at the near edge (best price, misses strong runs). immediate = always at the signal close. Note: OTE-continuation is always a retracement entry and ignores this.")
 immediateBodyATR = input.float(1.2, "Auto: min signal body ×ATR to skip retest", minval=0.3, step=0.1, group=G_ENTRY, tooltip="In 'auto', a template fills at the signal close (instead of waiting for the retest) only when the firing candle's body is at least this ×ATR — a real displacement. Below it, the retest still applies. Higher = stricter (fewer immediate fills). Your stop, targets and validity are unchanged either way — only the fill timing differs.")
 immediateMaxBodyATR = input.float(2.5, "Auto: max signal body ×ATR (skip blow-off spikes)", minval=1.0, step=0.1, group=G_ENTRY, tooltip="In 'auto', if the signal candle's body is LARGER than this ×ATR it's treated as a parabolic blow-off spike (the kind that snaps back) and falls back to the retest instead of filling at market — so you don't chase the top of a vertical candle. Only affects 'auto'; forced immediate/retest ignore it.")
-goImmediateNow = entryStyle == "immediate" or (entryStyle == "auto" and math.abs(close - open) >= atrVal * immediateBodyATR and math.abs(close - open) <= atrVal * immediateMaxBodyATR)
 
 // ─── POSITION BOX (v2.3 viz) — green entry→TP3, red entry→SL, dashed entry ──
 f_drawPosBox(float e, float sl, float tp3) =>
@@ -287,6 +286,9 @@ f_drawPosBox(float e, float sl, float tp3) =>
 // ═══ v2.3 — HTF CONTEXT LAYER (3 batched security calls: H1 / H4 / D) ══
 [h1B, h1Apk, h1fU, h1fL, h1fD, h1oU, h1oL, h1oD, h1rHi, h1rLo] = request.security(syminfo.tickerid, "60",  f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
 [h4B, h4Apk, h4fU, h4fL, h4fD, h4oU, h4oL, h4oD, h4rHi, h4rLo] = request.security(syminfo.tickerid, "240", f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
+dispRefIct = math.max(nz(h1ATR, 0), nz(h4Apk, 0))
+dispOkIct  = dispRefIct > 0 and math.abs(close - open) >= dispRefIct * immediateBodyATR and math.abs(close - open) <= dispRefIct * immediateMaxBodyATR
+goImmediateNow = entryStyle == "immediate" or (entryStyle == "auto" and dispOkIct)
 [hdB, hdApk, hdfU, hdfL, hdfD, hdoU, hdoL, hdoD, hdrHi, hdrLo] = request.security(syminfo.tickerid, "D",   f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
 
 // ═══ v2.3 — asset-class clock driver + HTF liquidity trigger ══════════

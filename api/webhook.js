@@ -99,10 +99,10 @@ async function alreadyExecuted(dedupeKey) {
   catch (e) { console.warn('[webhook] Redis dedupe check failed — dedupe disabled for this request:', e && e.message); return false; }
 }
 
-async function markExecuted(dedupeKey, info) {
+async function markExecuted(dedupeKey, info, ttlSeconds = DEDUPE_TTL) {
   const r = getRedis();
   if (!r || !dedupeKey) return;
-  try { await r.set(DEDUPE_PREFIX + dedupeKey, JSON.stringify(info), { ex: DEDUPE_TTL }); }
+  try { await r.set(DEDUPE_PREFIX + dedupeKey, JSON.stringify(info), { ex: ttlSeconds }); }
   catch (_) {}
 }
 
@@ -429,6 +429,9 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         `Template: ${p.template}\nDirection: ${p.direction}\nLot: ${finalLot}\n` +
         `Error: <code>${(placement.error || 'unknown').slice(0, 200)}</code>`);
     } catch (_) {}
+    // Downgrade pending marker to a short-lived failure record. Blocks an immediate
+    // TV retry of the same bad signal for 60 s; allows a genuine later signal after.
+    await markExecuted(dedupeKey, { status: 'failed', failedAt: Date.now() }, 60);
     return;
   }
 
@@ -589,21 +592,28 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true, executed: false, reason: 'duplicate-signal', dedupeKey });
   }
 
+  // Write a 'pending' dedupe marker BEFORE the ACK. Any TradingView retry that
+  // arrives while the order is in-flight will hit alreadyExecuted and be blocked
+  // as a duplicate. Overwritten with the real order record on success; downgraded
+  // to a short-lived failure record on broker rejection or exception.
+  await markExecuted(dedupeKey, { status: 'pending', startedAt: Date.now() });
+
   // ---- Run the heavy pipeline. Placement MUST survive the response. ----
-  // Vercel FREEZES a serverless function the moment its response is flushed,
-  // UNLESS post-response work is registered via waitUntil. So branch on it:
-  //   • waitUntil present  → fast-ACK now, place in background (clean TV log).
-  //   • waitUntil ABSENT   → place INLINE first, THEN respond. Guaranteed
-  //     placement. The TV log may occasionally read "took too long", which is
-  //     cosmetic: Vercel still completes the function and the order IS placed.
+  // With @vercel/functions installed _waitUntil is a real function (expected
+  // production path): ACK TradingView sub-second, then run the full pipeline
+  // post-response via waitUntil so Vercel keeps the function alive. Without it
+  // (local/dev fallback): inline-await so nothing silently drops — TV may log a
+  // timeout but the order still places.
   if (typeof _waitUntil === 'function') {
     res.status(202).json({ ok: true, accepted: true, dedupeKey, ackMs: Date.now() - t0 });
     _waitUntil(
       processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 })
-        .catch((e) => {
+        .catch(async (e) => {
           try { console.error('[webhook bg] error:', e && e.message); } catch (_) {}
           // QB-DIAG: surface swallowed background throws over Telegram.
           try { sendOnce(`diag-throw:${dedupeKey}`, `\ud83d\udca5 DIAG THROW \u2014 ${assetId} \u00b7 ${p.template}\n${(e && (e.stack || e.message)) ? String(e.stack || e.message).slice(0, 400) : 'unknown error'}`); } catch (_) {}
+          // Downgrade pending marker so an unhandled throw doesn't block this signal for a full hour.
+          await markExecuted(dedupeKey, { status: 'failed', failedAt: Date.now() }, 60);
         })
     );
   } else {
@@ -614,6 +624,8 @@ module.exports = async (req, res) => {
       try { console.error('[webhook] inline pipeline error:', e && e.message); } catch (_) {}
       // QB-DIAG: surface swallowed inline throws over Telegram.
       try { await sendOnce(`diag-throw:${dedupeKey}`, `\ud83d\udca5 DIAG THROW (inline) \u2014 ${assetId} \u00b7 ${p.template}\n${(e && (e.stack || e.message)) ? String(e.stack || e.message).slice(0, 400) : 'unknown error'}`); } catch (_) {}
+      // Downgrade pending marker on exception.
+      try { await markExecuted(dedupeKey, { status: 'failed', failedAt: Date.now() }, 60); } catch (_) {}
       if (!res.headersSent) res.status(200).json({ ok: false, error: (e && e.message) || 'pipeline-error', dedupeKey });
     }
   }

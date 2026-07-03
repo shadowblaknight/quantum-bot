@@ -254,15 +254,16 @@ if barstate.isconfirmed
             biasAlign = (h1B == sDir or h4B == sDir) ? 1 : 0
             htfOk = not requireHTFalign or biasAlign == 1
             proximal = sDir == 1 ? accFvgU : accFvgL
-            notBlowoff = math.abs(close - open) <= atrVal * immediateMaxBodyATR
+            notBlowoff = (math.max(nz(accumATR,0), nz(h1ATR,0))) > 0 and math.abs(close - open) <= (math.max(nz(accumATR,0), nz(h1ATR,0))) * immediateMaxBodyATR
             emitEntry = (entryStyle == "immediate" or (entryStyle == "auto" and notBlowoff)) ? close : proximal
             slP = sDir == 1 ? accFvgL - buf : accFvgU + buf
             slDist = math.abs(proximal - slP)
             slAcc = slDist / accumATR
             if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
-                tp1 = sDir == 1 ? proximal + slDist : proximal - slDist
-                tp2 = sDir == 1 ? proximal + slDist * 2.0 : proximal - slDist * 2.0
-                tp3 = sDir == 1 ? proximal + slDist * 3.0 : proximal - slDist * 3.0
+                tpBase = emitEntry
+                tp1 = sDir == 1 ? tpBase + slDist : tpBase - slDist
+                tp2 = sDir == 1 ? tpBase + slDist * 2.0 : tpBase - slDist * 2.0
+                tp3 = sDir == 1 ? tpBase + slDist * 3.0 : tpBase - slDist * 3.0
                 tier = biasAlign == 1 ? "A" : "B"
                 conf = "reaction-fvg-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
                 alert(f_buildAlertR("reaction-fvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
@@ -283,15 +284,16 @@ if barstate.isconfirmed
             biasAlign = (h1B == sDir or h4B == sDir) ? 1 : 0
             htfOk = not requireHTFalign or biasAlign == 1
             proximal = invLong ? rOppHi : rOppLo
-            notBlowoff = math.abs(close - open) <= atrVal * immediateMaxBodyATR
+            notBlowoff = (math.max(nz(accumATR,0), nz(h1ATR,0))) > 0 and math.abs(close - open) <= (math.max(nz(accumATR,0), nz(h1ATR,0))) * immediateMaxBodyATR
             emitEntry = (entryStyle == "immediate" or (entryStyle == "auto" and notBlowoff)) ? close : proximal
             slP = invLong ? rOppLo - buf : rOppHi + buf
             slDist = math.abs(proximal - slP)
             slAcc = slDist / accumATR
             if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
-                tp1 = invLong ? proximal + slDist : proximal - slDist
-                tp2 = invLong ? proximal + slDist * 2.0 : proximal - slDist * 2.0
-                tp3 = invLong ? proximal + slDist * 3.0 : proximal - slDist * 3.0
+                tpBase = emitEntry
+                tp1 = invLong ? tpBase + slDist : tpBase - slDist
+                tp2 = invLong ? tpBase + slDist * 2.0 : tpBase - slDist * 2.0
+                tp3 = invLong ? tpBase + slDist * 3.0 : tpBase - slDist * 3.0
                 tier = biasAlign == 1 ? "A" : "B"
                 conf = "reaction-ifvg-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
                 alert(f_buildAlertR("reaction-ifvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
@@ -326,8 +328,9 @@ if barstate.isconfirmed
             biasAlign = (h1B == sDir or h4B == sDir) ? 1 : 0
             htfOk = not requireHTFalign or biasAlign == 1
             posBody = math.abs(close - open)
-            strongBreak = posBody >= atrVal * immediateBodyATR
-            notBlowoff = posBody <= atrVal * immediateMaxBodyATR
+            dispRefR    = math.max(nz(accumATR, 0), nz(h1ATR, 0))
+            strongBreak = dispRefR > 0 and posBody >= dispRefR * immediateBodyATR
+            notBlowoff  = dispRefR > 0 and posBody <= dispRefR * immediateMaxBodyATR
             goImmediate = entryStyle == "immediate" or (entryStyle == "auto" and strongBreak and notBlowoff)
             retestLevel = brokeUp ? rCoilHi : rCoilLo
             emitEntry = goImmediate ? close : retestLevel
@@ -336,9 +339,10 @@ if barstate.isconfirmed
             slDist = math.abs(retestLevel - slP)
             slAcc = slDist / accumATR
             if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
-                tp1 = brokeUp ? retestLevel + slDist * 1.0 : retestLevel - slDist * 1.0
-                tp2 = brokeUp ? retestLevel + slDist * 2.0 : retestLevel - slDist * 2.0
-                tp3 = brokeUp ? retestLevel + slDist * 3.0 : retestLevel - slDist * 3.0
+                tpBase = emitEntry
+                tp1 = brokeUp ? tpBase + slDist * 1.0 : tpBase - slDist * 1.0
+                tp2 = brokeUp ? tpBase + slDist * 2.0 : tpBase - slDist * 2.0
+                tp3 = brokeUp ? tpBase + slDist * 3.0 : tpBase - slDist * 3.0
                 tier = biasAlign == 1 ? "A" : "B"
                 conf = "reaction-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
                 alert(f_buildAlertR("reaction", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
