@@ -259,11 +259,15 @@ module.exports = async (req, res) => {
   try {
     const q = req.query || {};
     const key = q.key || (req.headers && (req.headers['x-api-key'] || req.headers['authorization']));
-    const expected = process.env.WEBHOOK_API_KEY || process.env.CRON_SECRET;
-    // Vercel cron requests carry an x-vercel-cron header; allow those too.
-    const isCron = req.headers && req.headers['x-vercel-cron'];
-    if (expected && !isCron && key !== expected && key !== `Bearer ${expected}`) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    const ua = (req.headers && req.headers['user-agent']) || '';
+    // Vercel's scheduler is identified by User-Agent (confirmed in logs) and/or x-vercel-cron header.
+    const isCron = ua.startsWith('vercel-cron') || !!(req.headers && req.headers['x-vercel-cron']);
+    const webhookKey = process.env.WEBHOOK_API_KEY;
+    const cronSecret = process.env.CRON_SECRET;
+    if ((webhookKey || cronSecret) && !isCron) {
+      const keyOk = (webhookKey && (key === webhookKey || key === `Bearer ${webhookKey}`)) ||
+                    (cronSecret  && (key === cronSecret  || key === `Bearer ${cronSecret}`));
+      if (!keyOk) return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
     const dryRun = q.dry === '1' || q.dry === 'true';
     const summary = await runAlexg({ dryRun });

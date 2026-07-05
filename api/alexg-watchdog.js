@@ -12,10 +12,14 @@ module.exports = async (req, res) => {
   try {
     const q = (req && req.query) || {};
     const key = q.key || (req.headers && (req.headers['x-api-key'] || req.headers['authorization']));
-    const expected = process.env.WEBHOOK_API_KEY || process.env.CRON_SECRET;
-    const isCron = req.headers && req.headers['x-vercel-cron'];
-    if (expected && !isCron && key !== expected && key !== `Bearer ${expected}`) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    const ua = (req.headers && req.headers['user-agent']) || '';
+    const isCron = ua.startsWith('vercel-cron') || !!(req.headers && req.headers['x-vercel-cron']);
+    const webhookKey = process.env.WEBHOOK_API_KEY;
+    const cronSecret = process.env.CRON_SECRET;
+    if ((webhookKey || cronSecret) && !isCron) {
+      const keyOk = (webhookKey && (key === webhookKey || key === `Bearer ${webhookKey}`)) ||
+                    (cronSecret  && (key === cronSecret  || key === `Bearer ${cronSecret}`));
+      if (!keyOk) return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
     if (!HEARTBEAT || !HEARTBEAT.runWatchdog) {
       return res.status(200).json({ ok: true, watchdog: { alerted: false, status: 'heartbeat-unavailable' } });
