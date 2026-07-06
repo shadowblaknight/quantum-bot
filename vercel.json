@@ -48,6 +48,10 @@
     "api/alexg-watchdog.js": {
       "memory": 256,
       "maxDuration": 10
+    },
+    "api/ledger.js": {
+      "memory": 512,
+      "maxDuration": 60
     }
   },
   "crons": [

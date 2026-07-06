@@ -28,6 +28,7 @@ const { fetchPositions, fetchCandles } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
+const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
 const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
 
@@ -541,6 +542,13 @@ async function detectAndProcessClosed(currentOpenIds) {
     };
 
     const stored = await storeClosedTrade(closedTrade);
+
+    // v14: write full cost breakdown to ledger (gross, commission, swap, slippage)
+    try {
+      await writeLedgerRecord({ state, matchedPending, positionDeals, positionId });
+    } catch (e) {
+      console.error('[manage-trades] ledger write failed:', e.message);
+    }
 
     // v1.3: NEW — contribute to today's realized P&L
     // Without this, dashboard's "Today realized" stays at $0 forever.
