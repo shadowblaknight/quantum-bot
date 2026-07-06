@@ -251,7 +251,7 @@ async function computeSummary({ since } = {}) {
 }
 
 // ── one-shot backfill from MetaAPI deal history ───────────────────────
-async function backfillFromMetaAPI({ days = 60 } = {}) {
+async function backfillFromMetaAPI({ days = 365 } = {}) {
   const { resolveAsset } = require('./symbol-resolver');
 
   const token     = process.env.METAAPI_TOKEN;
@@ -259,6 +259,9 @@ async function backfillFromMetaAPI({ days = 60 } = {}) {
   const region    = process.env.METAAPI_REGION || 'london';
   if (!token || !accountId) throw new Error('METAAPI_TOKEN or METAAPI_ACCOUNT_ID missing');
 
+  // MetaAPI /history-deals/time returns all deals created within the range in one
+  // response (no pagination). 365 days of daily-to-swing trading is comfortably
+  // within the typical response size.
   const since = new Date(Date.now() - days * 86400000).toISOString();
   const until = new Date().toISOString();
   const url   = `https://mt-client-api-v1.${region}.agiliumtrade.ai`
@@ -266,7 +269,7 @@ async function backfillFromMetaAPI({ days = 60 } = {}) {
 
   const resp = await fetch(url, {
     headers: { 'auth-token': token, 'Accept': 'application/json' },
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(25000),
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
@@ -287,79 +290,124 @@ async function backfillFromMetaAPI({ days = 60 } = {}) {
   const existIdx    = safeParse(indexRaw) || [];
   const existingIds = new Set(existIdx.map(e => e.id));
 
-  const newRecords = [];
+  // ── Pass 1: filter positions, resolve symbols, collect candidates ───
+  // Collecting first lets us batch-fetch all recognition-memory records in one
+  // pipeline call instead of one Redis round-trip per position.
+  const candidates = [];
   let skipped = 0, already = 0;
+  const skipCounts = { noDeals: 0, nonQb: 0, noSymbol: 0 };
 
   for (const [positionId, posDeals] of Object.entries(byPos)) {
     const entryDeal = posDeals.find(d => d.entryType === 'DEAL_ENTRY_IN');
     const exitDeals = posDeals.filter(d =>
       d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT'
     );
-    if (!entryDeal || !exitDeals.length) { skipped++; continue; }
 
-    const comment = entryDeal.comment || '';
-    if (!comment.startsWith('QB-V')) { skipped++; continue; }
+    // Must have at least one closing deal — no way to compute P&L without it
+    if (!exitDeals.length) { skipCounts.noDeals++; skipped++; continue; }
+
+    // Use whichever deal is available for symbol lookup
+    const refDeal  = entryDeal || exitDeals[exitDeals.length - 1];
+    const symbol   = refDeal.symbol;
 
     let asset = null;
-    try { asset = await resolveAsset(entryDeal.symbol); } catch (_) {}
-    if (!asset) { skipped++; continue; }
+    try { asset = await resolveAsset(symbol); } catch (_) {}
+    if (!asset) { skipCounts.noSymbol++; skipped++; continue; }
 
     const tradeId = `trade_${asset}_${positionId}`;
     if (existingIds.has(tradeId)) { already++; continue; }
 
-    // enrich from recognition-memory if available (template, style, session, tpsHit, riskDollars)
-    let mem = null;
+    candidates.push({ positionId, posDeals, entryDeal, exitDeals, asset, tradeId, symbol });
+  }
+
+  // ── Batch-fetch recognition-memory for all candidates ───────────────
+  const memMap = {};
+  if (candidates.length) {
     try {
-      const memRaw = await r.get(`v12:trades:closed:${tradeId}`).catch(() => null);
-      mem = safeParse(memRaw);
-    } catch (_) {}
+      const pipe = r.pipeline();
+      for (const c of candidates) pipe.get(`v12:trades:closed:${c.tradeId}`);
+      const results = await pipe.exec();
+      for (let i = 0; i < candidates.length; i++) {
+        const raw = results[i];
+        const v   = raw ? (typeof raw === 'string' ? safeParse(raw) : raw) : null;
+        if (v) memMap[candidates[i].tradeId] = v;
+      }
+    } catch (_) { /* mem enrichment is best-effort */ }
+  }
+
+  // ── Pass 2: QB filter + build records ───────────────────────────────
+  const newRecords = [];
+
+  for (const { positionId, posDeals, entryDeal, exitDeals, asset, tradeId, symbol } of candidates) {
+    const mem      = memMap[tradeId] || null;
+    const exitDeal = exitDeals[exitDeals.length - 1];
+
+    // QB check: entry comment → exit comment → recognition-memory
+    // Exit deals typically carry system comments ("[tp 1]", "[sl]") rather than
+    // QB-V* labels, but we check all three sources before discarding.
+    const entryComment = entryDeal ? (entryDeal.comment || '') : '';
+    const exitComment  = exitDeal.comment || '';
+    const isQb = entryComment.startsWith('QB-V')
+              || exitComment.startsWith('QB-V')
+              || !!(mem && mem.template);
+    if (!isQb) { skipCounts.nonQb++; skipped++; continue; }
 
     const grossPnl   = posDeals.reduce((s, d) => s + (d.profit     || 0), 0);
     const commission = posDeals.reduce((s, d) => s + (d.commission || 0), 0);
     const swap       = posDeals.reduce((s, d) => s + (d.swap       || 0), 0);
     const netPnl     = grossPnl + commission + swap;
-    const exitDeal   = exitDeals[exitDeals.length - 1];
-    const direction  = entryDeal.type === 'DEAL_TYPE_BUY' ? 'LONG' : 'SHORT';
-    const template   = (mem && mem.template) || parseTemplateFromComment(comment);
+
+    // Direction: read from entry deal if present; infer from exit type if not.
+    // In MT5 hedging: entry BUY → long position, exit is SELL.
+    // So if only exit is available: exit SELL → was LONG, exit BUY → was SHORT.
+    const direction = entryDeal
+      ? (entryDeal.type === 'DEAL_TYPE_BUY' ? 'LONG' : 'SHORT')
+      : (exitDeal.type  === 'DEAL_TYPE_SELL' ? 'LONG' : 'SHORT');
+
+    const comment  = entryComment || exitComment;
+    const template = (mem && mem.template) || parseTemplateFromComment(comment) || 'unknown';
     const riskDollars = (mem && mem.riskDollars) || null;
     const pnlR = riskDollars > 0
       ? netPnl / riskDollars
       : ((mem && mem.pnlR != null) ? mem.pnlR : null);
     const outcome = netPnl > 0.5 ? 'WIN' : netPnl < -0.5 ? 'LOSS' : 'BREAKEVEN';
-    const holdTimeMinutes = (entryDeal.time && exitDeal.time)
+
+    // holdTimeMinutes is null when entry deal is outside the fetch window
+    const holdTimeMinutes = (entryDeal && exitDeal.time)
       ? Math.round((new Date(exitDeal.time) - new Date(entryDeal.time)) / 60000) : null;
 
     newRecords.push({
       id:          tradeId,
       asset,
-      symbol:      entryDeal.symbol,
+      symbol,
       direction,
       template,
-      style:       (mem && mem.style)   || null,
-      session:     (mem && mem.session) || null,
-      lot:         entryDeal.volume,
-      plannedEntry: null,  // not available for historical trades
-      actualEntry:  entryDeal.price,
-      slippage:    null,
+      style:        (mem && mem.style)   || null,
+      session:      (mem && mem.session) || null,
+      lot:          entryDeal ? entryDeal.volume : null,
+      plannedEntry: null,
+      actualEntry:  entryDeal ? entryDeal.price : null,
+      slippage:     null,
       slippagePips: null,
-      exitPrice:   exitDeal.price,
-      exitReason:  exitDeal.reason,
-      slPrice:     entryDeal.stopLoss || null,
-      tpsHit:      (mem && Array.isArray(mem.tpsHit)) ? mem.tpsHit : [],
-      maxTP:       (mem && mem.maxTP != null) ? mem.maxTP : 0,
-      grossPnl:    r2(grossPnl),
-      commission:  r2(commission),
-      swap:        r2(swap),
-      netPnl:      r2(netPnl),
+      exitPrice:    exitDeal.price,
+      exitReason:   exitDeal.reason,
+      slPrice:      entryDeal ? (entryDeal.stopLoss || null) : null,
+      tpsHit:       (mem && Array.isArray(mem.tpsHit)) ? mem.tpsHit : [],
+      maxTP:        (mem && mem.maxTP != null) ? mem.maxTP : 0,
+      grossPnl:     r2(grossPnl),
+      commission:   r2(commission),
+      swap:         r2(swap),
+      netPnl:       r2(netPnl),
       spreadEstPips: null,
       riskDollars,
-      pnlR:        pnlR != null ? r2(pnlR) : null,
+      pnlR:         pnlR != null ? r2(pnlR) : null,
       outcome,
-      openedAt:    entryDeal.time,
-      closedAt:    exitDeal.time,
+      openedAt:     entryDeal ? entryDeal.time : null,
+      closedAt:     exitDeal.time,
       holdTimeMinutes,
       accountCurrencyExchangeRate: exitDeal.accountCurrencyExchangeRate || null,
-      _backfilled: true,
+      _backfilled:  true,
+      _entryMissing: !entryDeal,
     });
   }
 
@@ -382,10 +430,11 @@ async function backfillFromMetaAPI({ days = 60 } = {}) {
   }
 
   return {
-    written:  newRecords.length,
+    written:   newRecords.length,
     skipped,
     already,
-    total:    Object.keys(byPos).length,
+    total:     Object.keys(byPos).length,
+    skipBreakdown: skipCounts,
   };
 }
 
@@ -416,7 +465,7 @@ module.exports = async (req, res) => {
       if (!process.env.WEBHOOK_API_KEY || key !== process.env.WEBHOOK_API_KEY) {
         return res.status(401).json({ error: 'unauthorized — pass ?key=WEBHOOK_API_KEY' });
       }
-      const days = Math.min(parseInt(q.days || '60', 10), 365);
+      const days = Math.min(parseInt(q.days || '365', 10), 730);
       const result = await backfillFromMetaAPI({ days });
       return res.status(200).json({ ok: true, ...result });
     }
