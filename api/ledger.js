@@ -208,17 +208,29 @@ async function computeSummary({ since } = {}) {
 
   const slipRecs = records.filter(t => t.slippagePips != null);
 
-  // per-template breakdown (worst net first)
-  const byTemplate = _groupBy(records, t => t.template || 'unknown');
+  // Split legacy vs current records.
+  // Legacy = _legacy:true (pre-versioning "QuantumBot" trades, no template metadata).
+  // Per-template breakdown is current-only to avoid "legacy-unknown" swamping the table.
+  // Per-instrument uses all records so the dollar net per pair is always complete.
+  const legacyRecs   = records.filter(t => t._legacy);
+  const currentRecs  = records.filter(t => !t._legacy);
+
+  const byTemplate = _groupBy(currentRecs, t => t.template || 'unknown');
   const templateBreakdown = Object.entries(byTemplate)
     .map(([k, ts]) => _breakdownGroup('template', k, ts))
     .sort((a, b) => a.netPnl - b.netPnl);
 
-  // per-instrument breakdown (worst net first)
   const byAsset = _groupBy(records, t => t.asset || 'unknown');
   const instrumentBreakdown = Object.entries(byAsset)
     .map(([k, ts]) => _breakdownGroup('asset', k, ts))
     .sort((a, b) => a.netPnl - b.netPnl);
+
+  const legWins     = legacyRecs.filter(t => t.outcome === 'WIN').length;
+  const legLosses   = legacyRecs.filter(t => t.outcome === 'LOSS').length;
+  const legNet      = legacyRecs.reduce((s, t) => s + (t.netPnl || 0), 0);
+  const legGross    = legacyRecs.reduce((s, t) => s + (t.grossPnl || 0), 0);
+  const legComm     = legacyRecs.reduce((s, t) => s + (t.commission || 0), 0);
+  const legSwap     = legacyRecs.reduce((s, t) => s + (t.swap || 0), 0);
 
   return {
     since: since || null,
@@ -245,8 +257,18 @@ async function computeSummary({ since } = {}) {
         ? Math.round(_avg(slipRecs.map(t => t.slippagePips)) * 10) / 10 : null,
       slippageSampleSize: slipRecs.length,
     },
-    byTemplate:    templateBreakdown,
-    byInstrument:  instrumentBreakdown,
+    legacy: {
+      trades:   legacyRecs.length,
+      wins:     legWins,
+      losses:   legLosses,
+      grossPnl: r2(legGross),
+      commission: r2(legComm),
+      swap:     r2(legSwap),
+      netPnl:   r2(legNet),
+      note:     'pre-versioning trades (comment="QuantumBot"); no template/R metadata',
+    },
+    byTemplate:   templateBreakdown,
+    byInstrument: instrumentBreakdown,
   };
 }
 
@@ -342,15 +364,25 @@ async function backfillFromMetaAPI({ days = 365 } = {}) {
     const mem      = memMap[tradeId] || null;
     const exitDeal = exitDeals[exitDeals.length - 1];
 
-    // QB check: entry comment → exit comment → recognition-memory
-    // Exit deals typically carry system comments ("[tp 1]", "[sl]") rather than
-    // QB-V* labels, but we check all three sources before discarding.
+    // QB check: entry comment → exit comment → legacy EA comment → recognition-memory.
+    // "QuantumBot" was the comment QB Bot used before the QB-V{N}-{template} format.
+    // DEAL_REASON_EXPERT confirms the deal was placed by an EA (not manually).
     const entryComment = entryDeal ? (entryDeal.comment || '') : '';
     const exitComment  = exitDeal.comment || '';
+    const isQbLegacy   = !!(entryDeal
+      && entryDeal.reason === 'DEAL_REASON_EXPERT'
+      && entryComment === 'QuantumBot');
     const isQb = entryComment.startsWith('QB-V')
               || exitComment.startsWith('QB-V')
+              || isQbLegacy
               || !!(mem && mem.template);
     if (!isQb) { skipCounts.nonQb++; skipped++; continue; }
+
+    // Legacy = only evidence is old "QuantumBot" comment; no versioned metadata available.
+    const isLegacy = isQbLegacy
+      && !entryComment.startsWith('QB-V')
+      && !exitComment.startsWith('QB-V')
+      && !(mem && mem.template);
 
     const grossPnl   = posDeals.reduce((s, d) => s + (d.profit     || 0), 0);
     const commission = posDeals.reduce((s, d) => s + (d.commission || 0), 0);
@@ -359,31 +391,34 @@ async function backfillFromMetaAPI({ days = 365 } = {}) {
 
     // Direction: read from entry deal if present; infer from exit type if not.
     // In MT5 hedging: entry BUY → long position, exit is SELL.
-    // So if only exit is available: exit SELL → was LONG, exit BUY → was SHORT.
     const direction = entryDeal
       ? (entryDeal.type === 'DEAL_TYPE_BUY' ? 'LONG' : 'SHORT')
       : (exitDeal.type  === 'DEAL_TYPE_SELL' ? 'LONG' : 'SHORT');
 
     const comment  = entryComment || exitComment;
-    const template = (mem && mem.template) || parseTemplateFromComment(comment) || 'unknown';
-    const riskDollars = (mem && mem.riskDollars) || null;
+    // Legacy trades get a distinct template label so the summary can separate them
+    // from a genuine missing-template bug in current trades.
+    const template = isLegacy
+      ? 'legacy-unknown'
+      : ((mem && mem.template) || parseTemplateFromComment(comment) || 'unknown');
+    const riskDollars = isLegacy ? null : ((mem && mem.riskDollars) || null);
     const pnlR = riskDollars > 0
       ? netPnl / riskDollars
-      : ((mem && mem.pnlR != null) ? mem.pnlR : null);
+      : (!isLegacy && mem && mem.pnlR != null) ? mem.pnlR : null;
     const outcome = netPnl > 0.5 ? 'WIN' : netPnl < -0.5 ? 'LOSS' : 'BREAKEVEN';
 
-    // holdTimeMinutes is null when entry deal is outside the fetch window
+    // Entry deal IS in the 365-day window for legacy trades (confirmed by diagnostic).
     const holdTimeMinutes = (entryDeal && exitDeal.time)
       ? Math.round((new Date(exitDeal.time) - new Date(entryDeal.time)) / 60000) : null;
 
     newRecords.push({
-      id:          tradeId,
+      id:           tradeId,
       asset,
       symbol,
       direction,
       template,
-      style:        (mem && mem.style)   || null,
-      session:      (mem && mem.session) || null,
+      style:        isLegacy ? null : ((mem && mem.style)   || null),
+      session:      isLegacy ? null : ((mem && mem.session) || null),
       lot:          entryDeal ? entryDeal.volume : null,
       plannedEntry: null,
       actualEntry:  entryDeal ? entryDeal.price : null,
@@ -392,8 +427,8 @@ async function backfillFromMetaAPI({ days = 365 } = {}) {
       exitPrice:    exitDeal.price,
       exitReason:   exitDeal.reason,
       slPrice:      entryDeal ? (entryDeal.stopLoss || null) : null,
-      tpsHit:       (mem && Array.isArray(mem.tpsHit)) ? mem.tpsHit : [],
-      maxTP:        (mem && mem.maxTP != null) ? mem.maxTP : 0,
+      tpsHit:       (!isLegacy && mem && Array.isArray(mem.tpsHit)) ? mem.tpsHit : [],
+      maxTP:        (!isLegacy && mem && mem.maxTP != null) ? mem.maxTP : 0,
       grossPnl:     r2(grossPnl),
       commission:   r2(commission),
       swap:         r2(swap),
@@ -406,8 +441,9 @@ async function backfillFromMetaAPI({ days = 365 } = {}) {
       closedAt:     exitDeal.time,
       holdTimeMinutes,
       accountCurrencyExchangeRate: exitDeal.accountCurrencyExchangeRate || null,
-      _backfilled:  true,
+      _backfilled:   true,
       _entryMissing: !entryDeal,
+      _legacy:       isLegacy,
     });
   }
 
