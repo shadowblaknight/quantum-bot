@@ -46,6 +46,17 @@ const PINE_TO_ASSET = {
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60;
 const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'];
+
+// ── Reversible template circuit breakers ─────────────────────────────────
+// DISABLED_TEMPLATES: any template in this array is skipped before the rules
+// engine or broker are called. Returns 200 so TradingView does not retry.
+// To re-enable ote-continuation: remove it from the array.
+const DISABLED_TEMPLATES = ['ote-continuation'];
+
+// SB_IMMEDIATE_ONLY: when true, silver-bullet signals that route as retest
+// (limit) entries are suppressed. Immediate (market) entries are unaffected.
+// Set to false to restore silver-bullet retest entries.
+const SB_IMMEDIATE_ONLY = true;
 function _escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function withTimeout(promise, ms, fallback) {
@@ -390,6 +401,19 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
   } catch (_) { /* candle fetch failed — fall through to limit; broker is final guard */ }
 
+  // SB_IMMEDIATE_ONLY: silver-bullet retest (limit) entries are net -$188 vs
+  // immediate entries at +$51. Block retest entries until the entry logic improves.
+  // Set SB_IMMEDIATE_ONLY = false to restore retest entries.
+  if (SB_IMMEDIATE_ONLY && p.template === 'silver-bullet' && !useMarket) {
+    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction, reason: 'sb-retest-suppressed', entryType: 'retest' }); } catch (_) {}
+    return bgSkip({
+      dedupeKey, pineTicker, template: p.template,
+      reason: 'sb-retest-suppressed',
+      extras: { assetId, direction: p.direction },
+      notify: false,
+    });
+  }
+
   // v14.1: one-line record of HOW this signal was routed and WHY, so a suspected
   // immediate/retest mis-route can be diagnosed straight from the activity log.
   try {
@@ -480,6 +504,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       status: 'placed',
       brokerOrderId: placement.orderId, comment, positionId: null,
       entryType, execKind: useMarket ? 'market' : 'limit',
+      htfTier: p.htfTier || null,
       v13: true, pilotRulesApplied: decision.rulesApplied,
     };
     await addPendingSetup(assetId, pendingRecord);
@@ -556,6 +581,12 @@ module.exports = async (req, res) => {
 
   if (!ACCEPTED_TEMPLATES.includes(p.template)) {
     return res.status(400).json({ ok: false, error: `unknown template: ${p.template}` });
+  }
+
+  // Template blocklist — single-array change to re-enable. Logged for audit.
+  if (DISABLED_TEMPLATES.includes(p.template)) {
+    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: 'template-disabled' }); } catch (_) {}
+    return res.status(200).json({ ok: true, executed: false, reason: 'template-disabled', template: p.template });
   }
 
   // 9. Parse numerics (fast) — fail fast on a malformed payload

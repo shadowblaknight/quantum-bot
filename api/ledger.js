@@ -96,6 +96,7 @@ function buildLedgerRecord({ state, matchedPending, positionDeals, positionId })
     maxTP:       (state.tpsHit || []).reduce(
       (m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0
     ),
+    htfTier:     matchedPending?.htfTier || null,
     grossPnl:    r2(grossPnl),
     commission:  r2(commission),
     swap:        r2(swap),

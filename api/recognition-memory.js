@@ -125,6 +125,7 @@ function buildFeatureVector(trade) {
     // v14: entry-style label for the Immediate-vs-Retest comparison panel.
     entryType: trade.entryType || null,
     execKind: trade.execKind || null,
+    htfTier: trade.htfTier || null,
     // v14.1: TP rungs reached, for the per-template TP-hit breakdown.
     tpsHit: Array.isArray(trade.tpsHit) ? trade.tpsHit : [],
     maxTP: trade.maxTP != null ? trade.maxTP

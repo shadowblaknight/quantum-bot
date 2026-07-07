@@ -523,6 +523,7 @@ async function detectAndProcessClosed(currentOpenIds) {
       // Only trades placed after this ships will have it (older ones = null).
       entryType: matchedPending.entryType || null,
       execKind: matchedPending.execKind || null,
+      htfTier: matchedPending.htfTier || null,
       // v14.1: which TP rungs the trade reached (for per-template TP-hit stats)
       tpsHit: state.tpsHit || [],
       maxTP: (state.tpsHit || []).reduce((m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0),

@@ -99,7 +99,7 @@ emaLength  = input.int(20, "HTF bias EMA period", minval=5, maxval=200, group=G_
 
 // ═══ v2.3 — INPUTS: HTF CONTEXT ═══════════════════════════════════════
 G_HTF = "HTF Context — v2.3"
-assetClass      = input.string("Forex", "Asset class (set once per chart)", options=["Forex","Metal","Index","Crypto"], group=G_HTF, tooltip="Drives the kill-zone clock. Forex/Metal/Index keep session windows (extended for retrace entries); Crypto replaces the wall-clock with an HTF-liquidity trigger.")
+assetClassOverride = input.string("auto", "Asset class", options=["auto","Forex","Metal","Index","Crypto"], group=G_HTF, tooltip="auto = derived from the chart symbol (XAU/XAG→Metal, BTC/ETH→Crypto, NAS/SP500/DAX/etc.→Index, else Forex). Override only if your broker uses an unusual symbol name.")
 htfUseH1        = input.bool(true,  "Consult H1 structure",    group=G_HTF)
 htfUseH4        = input.bool(true,  "Consult H4 structure",    group=G_HTF)
 htfUseD         = input.bool(true,  "Consult Daily structure", group=G_HTF)
@@ -190,7 +190,7 @@ alertApiKey = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API key 
 // ─── ORB (Opening Range Breakout) — v2.3 ─────────────────────────────
 G_ORB = "🚀 ORB (Opening Range Breakout) — v2.3"
 orbEnabled    = input.bool(true,  "ORB enabled", group=G_ORB)
-orbSession    = input.string("NY", "Session open to trade", options=["NY","London","Asian"], group=G_ORB, tooltip="NY for indices (NAS100/US500) + gold. London for EUR/GBP. Asian for USDJPY. Set per chart to match the instrument.")
+orbSessionOverride = input.string("auto", "Session open to trade", options=["auto","NY","London","Asian"], group=G_ORB, tooltip="auto = JPY pairs→Asian, Forex (non-JPY)→London, Metal/Index/Crypto→NY. Override to force a specific session.")
 orbDSTadj     = input.int(-60, "DST adjust (min)", step=15, group=G_ORB, tooltip="Shift the session open for daylight saving. SUMMER (now): NY & London = -60. Asian (Tokyo, no DST) = 0. Winter: all 0.")
 orbORMinutes  = input.int(30,  "Opening-range length (min)", minval=15, step=15, group=G_ORB, tooltip="How long the opening range builds. 30 = first two M15 bars after the open.")
 orbTradeMin   = input.int(360, "Trade window after open (min)", minval=30, step=30, group=G_ORB, tooltip="How long after the open a breakout may fire. 360 = 6h.")
@@ -217,6 +217,20 @@ color C_IFVG_BEAR = #C8753B
 fLine(color _c, int _t) => color.new(_c, _t)
 fmt(float _v) => na(_v) ? "—" : str.tostring(_v, format.mintick)
 fLabel(string _name, float _price) => showPriceLabels ? _name + " " + fmt(_price) : _name
+
+// Metal keywords checked first — brokers often register XAU/XAG as "forex"/"cfd".
+// Crypto checked by type OR ticker keyword. Index uses ticker keywords (more reliable
+// than syminfo.type=="cfd" which brokers apply to metals AND indices alike).
+f_autoAssetClass() =>
+    t = str.upper(syminfo.ticker)
+    str.contains(t, "XAU") or str.contains(t, "XAG") or str.contains(t, "GOLD") or str.contains(t, "SILVER") ? "Metal" :
+    syminfo.type == "crypto" or str.contains(t, "BTC") or str.contains(t, "ETH") ? "Crypto" :
+    str.contains(t, "NAS") or str.contains(t, "NDQ") or str.contains(t, "US100") or str.contains(t, "USTEC") or
+    str.contains(t, "US500") or str.contains(t, "SP500") or str.contains(t, "SPX") or str.contains(t, "DOW") or
+    str.contains(t, "DAX") or str.contains(t, "FTSE") or str.contains(t, "UK100") or str.contains(t, "AUS200") or
+    str.contains(t, "NIKKEI") or str.contains(t, "JP225") or str.contains(t, "GER40") or
+    syminfo.type == "index" ? "Index" :
+    "Forex"
 
 // ═══ v2.3 — HTF PACK: confirmed-bar structure read for one timeframe ══
 // Repaint-safe: uses ONLY closed HTF bars ([1]/[2]/[3]); never the forming bar.
@@ -292,6 +306,8 @@ goImmediateNow = entryStyle == "immediate" or (entryStyle == "auto" and dispOkIc
 [hdB, hdApk, hdfU, hdfL, hdfD, hdoU, hdoL, hdoD, hdrHi, hdrLo] = request.security(syminfo.tickerid, "D",   f_htfPack(emaLength, atrLength, htfSwingN, htfFvgBodyATR), lookahead=barmerge.lookahead_off)
 
 // ═══ v2.3 — asset-class clock driver + HTF liquidity trigger ══════════
+assetClass  = assetClassOverride == "auto" ? f_autoAssetClass() : assetClassOverride
+_orbSession = orbSessionOverride == "auto" ? (str.contains(str.upper(syminfo.ticker), "JPY") ? "Asian" : assetClass == "Forex" ? "London" : "NY") : orbSessionOverride
 isCrypto = assetClass == "Crypto"
 htfLiqActive = (not na(h4rHi) and high >= h4rHi) or (not na(h4rLo) and low <= h4rLo) or (not na(hdrHi) and high >= hdrHi) or (not na(hdrLo) and low <= hdrLo) or h4fD != 0 or hdfD != 0
 
@@ -558,7 +574,7 @@ if asianSessionEnd and not na(asianH) and not na(asianL) and not na(asianStartBa
 // ═══ ORB — OPENING-RANGE CAPTURE (v2.3) ═══════════════════════════════
 // Mirrors the Asian-range pattern: freeze the high/low of the first
 // orbORMinutes after the chosen session open, then arm for a breakout.
-orbBaseOpen = orbSession == "NY" ? 870 : orbSession == "London" ? 480 : 0  // UTC min-of-day (winter base)
+orbBaseOpen = _orbSession == "NY" ? 870 : _orbSession == "London" ? 480 : 0  // UTC min-of-day (winter base)
 orbOpenMin  = orbBaseOpen + orbDSTadj
 orbORend    = orbOpenMin + orbORMinutes
 orbTradeEnd = orbOpenMin + orbTradeMin
@@ -1982,11 +1998,11 @@ if orbEnabled and barstate.isconfirmed and orbWindowEnd and not na(orbH) and not
     if orbWidthATR < orbMinWidthATR
         orbArmed := false
         orbHasFired := true
-        alert(f_buildSkipORB(orbSession, orbWidthATR, "too-narrow"), alert.freq_once_per_bar)
+        alert(f_buildSkipORB(_orbSession, orbWidthATR, "too-narrow"), alert.freq_once_per_bar)
     else if orbWidthATR > orbMaxWidthATR
         orbArmed := false
         orbHasFired := true
-        alert(f_buildSkipORB(orbSession, orbWidthATR, "too-wide"), alert.freq_once_per_bar)
+        alert(f_buildSkipORB(_orbSession, orbWidthATR, "too-wide"), alert.freq_once_per_bar)
     else
         orbArmed := true
 
@@ -2018,7 +2034,7 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                     activeTP2       := orbT2
                     activeTP3       := orbT3
                     activeSignalBar := bar_index
-                    alert(f_buildAlert("orb", orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, "ORB", orbSession, "", orbWATR, "A", 1, "orb-immediate", activeSession), alert.freq_once_per_bar)
+                    alert(f_buildAlert("orb", orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, "ORB", _orbSession, "", orbWATR, "A", 1, "orb-immediate", activeSession), alert.freq_once_per_bar)
                 else
                     orbPendingRetest := true
                     orbBreakDir := orbSDir
@@ -2047,7 +2063,7 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                 activeTP2       := orbT2
                 activeTP3       := orbT3
                 activeSignalBar := bar_index
-                alert(f_buildAlert("orb", orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, "ORB", orbSession, "", orbWATR, "B", 0, "orb-retest", activeSession), alert.freq_once_per_bar)
+                alert(f_buildAlert("orb", orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, "ORB", _orbSession, "", orbWATR, "B", 0, "orb-retest", activeSession), alert.freq_once_per_bar)
 
 // ─── POSITION BOX DRAW — on the bar a signal fires (any template) ───
 if showPosBox and barstate.isconfirmed and not na(activeSignalBar) and activeSignalBar == bar_index and not na(activeEntry) and not na(activeSL) and not na(activeTP3)
