@@ -9,8 +9,8 @@
 // in-memory record so the heartbeat itself can never crash the cron, and so
 // the module is unit-testable without Upstash.
 
-function safeReq(m) { try { return require(m); } catch (_) { return null; } }
-const _lib = safeReq('./_lib') || {};
+let _lib = {}; try { _lib = require('./_lib'); } catch (_) { _lib = {}; }
+let _telegram = null; try { _telegram = require('./telegram'); } catch (_) {}
 const getRedis  = _lib.getRedis  || (() => null);
 const safeParse = _lib.safeParse || ((s) => { try { return JSON.parse(s); } catch (_) { return null; } });
 const applyCors = _lib.applyCors || (() => {});
@@ -92,7 +92,7 @@ async function recordError(err, meta = {}, opts = {}) {
   await _writeLatest(rec, opts);
   await _pushHistory(rec, opts);
   // push alert on a hard failure (deduped per message so a retry loop can't spam)
-  const tg = opts.telegram || safeReq('./telegram');
+  const tg = opts.telegram || _telegram;
   if (tg && tg.sendOnce) {
     try { await tg.sendOnce('alexg-cron-fail:' + msg.slice(0, 60), `⚠️ <b>Alex G cron failed</b>\n${msg}`); } catch (_) {}
   }
@@ -146,7 +146,7 @@ async function runWatchdog(opts = {}) {
     }
     const ageMs = now - (unknownSince || now);
     if (ageMs < CFG.staleMs) return { alerted: false, status: h.status };
-    const tg = opts.telegram || safeReq('./telegram');
+    const tg = opts.telegram || _telegram;
     if (tg && tg.sendOnce) {
       const ageMin = Math.round(ageMs / 60000);
       const txt = `⚠️ <b>Alex G cron — heartbeat NEVER written</b>\nNo confirmed run in ~${ageMin} min. Check Vercel logs for timeout (504) or auth error.`;
@@ -157,7 +157,7 @@ async function runWatchdog(opts = {}) {
   }
 
   // status === 'failed' or 'stale' — original behavior unchanged
-  const tg = opts.telegram || safeReq('./telegram');
+  const tg = opts.telegram || _telegram;
   if (tg && tg.sendOnce) {
     const ageMin = h.ageMs != null ? Math.round(h.ageMs / 60000) : '?';
     const txt = h.status === 'failed'
