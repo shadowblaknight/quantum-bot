@@ -35,7 +35,7 @@
     },
     "api/alexg-run.js": {
       "memory": 1024,
-      "maxDuration": 180
+      "maxDuration": 300
     },
     "api/alexg-trade.js": {
       "memory": 1024,

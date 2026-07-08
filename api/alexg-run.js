@@ -128,28 +128,44 @@ async function runAlexg(opts = {}) {
 
   let liveCount = positions.length;
 
-  for (const asset of INSTRUMENTS) {
+  // Phase 1 — evaluate all pairs concurrently (the slow, read-only part).
+  // Each pair runs its full candle-fetch + bias/AOI/entry pipeline in parallel,
+  // cutting wall time from sum(pairs) to max(pairs). One pair erroring cannot
+  // reject the batch — each is isolated in its own try/catch.
+  const evalBatch = await Promise.all(INSTRUMENTS.map(async (asset) => {
     const meta = getAssetById(asset);
     const inst = rules.instruments[asset];
-    if (!inst || !inst.enabled) { summary.skipped.push({ asset, reason: 'instrument-disabled' }); continue; }
+    if (!inst || !inst.enabled) return { asset, meta, inst, skip: 'instrument-disabled' };
 
-    // one-per-pair: skip if an alexg position OR active alexg pending exists here
+    // one-per-pair gate reads the pre-loop positions/pending snapshot — safe to check concurrently
     const hasOpen = positions.some((p) => (p.assetId === asset || (p.symbol && meta && p.symbol.toUpperCase().includes((meta.pineTicker || '').toUpperCase()))) && p.comment && /^QB-V1[23]-alexg-/.test(p.comment));
     let hasPending = false;
     try {
       const pend = await D.watcher.getPendingSetups(asset);
       hasPending = (pend || []).some((p) => p && p.setup && p.setup.template === 'alexg' && ['pending', 'placed', 'filled'].includes(p.status));
     } catch (_) {}
-    if (hasOpen || hasPending) { summary.skipped.push({ asset, reason: 'alexg-already-active-on-pair' }); continue; }
+    if (hasOpen || hasPending) return { asset, meta, inst, skip: 'alexg-already-active-on-pair' };
 
-    if (liveCount >= maxConc) { summary.skipped.push({ asset, reason: `max-concurrent (${liveCount}/${maxConc})` }); continue; }
+    // trade evaluation — the candle-heavy work; concurrent is the goal
+    try {
+      const plan = await D.tradeFn(asset, { fetchCandlesFn: D.fetchCandlesFn, now: D.now, minGradePct: CFG.minGradePct });
+      return { asset, meta, inst, plan };
+    } catch (e) {
+      return { asset, meta, inst, skip: 'eval-threw:' + e.message };
+    }
+  }));
 
-    // ── Layer 4 verdict ──
-    let plan;
-    try { plan = await D.tradeFn(asset, { fetchCandlesFn: D.fetchCandlesFn, now: D.now, minGradePct: CFG.minGradePct }); }
-    catch (e) { summary.skipped.push({ asset, reason: 'eval-threw:' + e.message }); continue; }
+  // Phase 2 — sequential placement. liveCount is mutated here, so this must be
+  // serialized. Each iteration is fast (sizing math + at most one broker order
+  // call), so the serialization cost is negligible vs. the evaluation savings.
+  for (const r of evalBatch) {
+    const { asset, skip, meta, inst, plan } = r;
+    if (skip) { summary.skipped.push({ asset, reason: skip }); continue; }
+
     summary.evaluated.push({ asset, tradeable: plan.tradeable, grade: plan.grade && plan.grade.letter, direction: plan.direction, reason: plan.reason });
     if (!plan.tradeable) { summary.skipped.push({ asset, reason: plan.reason }); continue; }
+
+    if (liveCount >= maxConc) { summary.skipped.push({ asset, reason: `max-concurrent (${liveCount}/${maxConc})` }); continue; }
 
     const dir = plan.direction === 'long' ? 'LONG' : 'SHORT';
     const isLong = dir === 'LONG';

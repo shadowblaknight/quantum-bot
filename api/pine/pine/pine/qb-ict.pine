@@ -222,15 +222,11 @@ fLabel(string _name, float _price) => showPriceLabels ? _name + " " + fmt(_price
 // Crypto checked by type OR ticker keyword. Index uses ticker keywords (more reliable
 // than syminfo.type=="cfd" which brokers apply to metals AND indices alike).
 f_autoAssetClass() =>
-    t = str.upper(syminfo.ticker)
-    str.contains(t, "XAU") or str.contains(t, "XAG") or str.contains(t, "GOLD") or str.contains(t, "SILVER") ? "Metal" :
-    syminfo.type == "crypto" or str.contains(t, "BTC") or str.contains(t, "ETH") ? "Crypto" :
-    str.contains(t, "NAS") or str.contains(t, "NDQ") or str.contains(t, "US100") or str.contains(t, "USTEC") or
-    str.contains(t, "US500") or str.contains(t, "SP500") or str.contains(t, "SPX") or str.contains(t, "DOW") or
-    str.contains(t, "DAX") or str.contains(t, "FTSE") or str.contains(t, "UK100") or str.contains(t, "AUS200") or
-    str.contains(t, "NIKKEI") or str.contains(t, "JP225") or str.contains(t, "GER40") or
-    syminfo.type == "index" ? "Index" :
-    "Forex"
+    t       = str.upper(syminfo.ticker)
+    _metal  = str.contains(t, "XAU") or str.contains(t, "XAG") or str.contains(t, "GOLD") or str.contains(t, "SILVER")
+    _crypto = syminfo.type == "crypto" or str.contains(t, "BTC") or str.contains(t, "ETH")
+    _index  = str.contains(t, "NAS") or str.contains(t, "NDQ") or str.contains(t, "US100") or str.contains(t, "USTEC") or str.contains(t, "US500") or str.contains(t, "SP500") or str.contains(t, "SPX") or str.contains(t, "DOW") or str.contains(t, "DAX") or str.contains(t, "FTSE") or str.contains(t, "UK100") or str.contains(t, "AUS200") or str.contains(t, "NIKKEI") or str.contains(t, "JP225") or str.contains(t, "GER40") or syminfo.type == "index"
+    _metal ? "Metal" : _crypto ? "Crypto" : _index ? "Index" : "Forex"
 
 // ═══ v2.3 — HTF PACK: confirmed-bar structure read for one timeframe ══
 // Repaint-safe: uses ONLY closed HTF bars ([1]/[2]/[3]); never the forming bar.

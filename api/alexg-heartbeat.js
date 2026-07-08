@@ -15,8 +15,9 @@ const getRedis  = _lib.getRedis  || (() => null);
 const safeParse = _lib.safeParse || ((s) => { try { return JSON.parse(s); } catch (_) { return null; } });
 const applyCors = _lib.applyCors || (() => {});
 
-const KEY      = 'v13:alexg:heartbeat';
-const HIST_KEY = 'v13:alexg:heartbeat:history';
+const KEY               = 'v13:alexg:heartbeat';
+const HIST_KEY          = 'v13:alexg:heartbeat:history';
+const UNKNOWN_SINCE_KEY = 'v13:alexg:heartbeat:unknown-since';
 const CFG = {
   staleMs: 35 * 60 * 1000,   // cron is */15 ⇒ >35min without a run = stale (one miss + margin)
   histMax: 30,
@@ -24,8 +25,8 @@ const CFG = {
 };
 
 // in-memory fallback (also the unit-test substrate)
-const _mem = { latest: null, history: [] };
-function _resetMem() { _mem.latest = null; _mem.history = []; } // test helper
+const _mem = { latest: null, history: [], unknownSince: null };
+function _resetMem() { _mem.latest = null; _mem.history = []; _mem.unknownSince = null; } // test helper
 
 function _redis(opts) { return (opts && opts.redis) || getRedis(); }
 function _now(opts)   { return (opts && opts.now != null) ? opts.now : Date.now(); }
@@ -113,7 +114,49 @@ async function getHealth(opts = {}) {
 // pushes a deduped Telegram alert when the last run failed or the cron is stale.
 async function runWatchdog(opts = {}) {
   const h = await getHealth(opts);
-  if (h.status === 'ok' || h.status === 'unknown') return { alerted: false, status: h.status };
+
+  if (h.status === 'ok') {
+    // cron healthy — clear the unknown-since marker so re-deploys get a clean grace window
+    const r = _redis(opts);
+    if (r) { try { await r.del(UNKNOWN_SINCE_KEY); } catch (_) {} }
+    _mem.unknownSince = null;
+    return { alerted: false, status: h.status };
+  }
+
+  if (h.status === 'unknown') {
+    // Heartbeat was never written. Record when we first noticed; alert only after
+    // staleMs (35 min) so a fresh deploy has time for its first cron run.
+    const r = _redis(opts);
+    const now = h.now;
+    let unknownSince = null;
+    if (r) {
+      try {
+        const raw = await r.get(UNKNOWN_SINCE_KEY).catch(() => null);
+        if (raw) {
+          unknownSince = parseInt(raw, 10) || null;
+        } else {
+          await r.set(UNKNOWN_SINCE_KEY, String(now), { ex: CFG.ttlSec });
+          unknownSince = now;
+        }
+      } catch (_) {
+        unknownSince = _mem.unknownSince || (_mem.unknownSince = now);
+      }
+    } else {
+      unknownSince = _mem.unknownSince || (_mem.unknownSince = now);
+    }
+    const ageMs = now - (unknownSince || now);
+    if (ageMs < CFG.staleMs) return { alerted: false, status: h.status };
+    const tg = opts.telegram || safeReq('./telegram');
+    if (tg && tg.sendOnce) {
+      const ageMin = Math.round(ageMs / 60000);
+      const txt = `⚠️ <b>Alex G cron — heartbeat NEVER written</b>\nNo confirmed run in ~${ageMin} min. Check Vercel logs for timeout (504) or auth error.`;
+      const bucket = Math.floor(now / CFG.staleMs);
+      try { await tg.sendOnce(`alexg-cron-unknown:${bucket}`, txt); } catch (_) {}
+    }
+    return { alerted: true, status: h.status };
+  }
+
+  // status === 'failed' or 'stale' — original behavior unchanged
   const tg = opts.telegram || safeReq('./telegram');
   if (tg && tg.sendOnce) {
     const ageMin = h.ageMs != null ? Math.round(h.ageMs / 60000) : '?';
