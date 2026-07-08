@@ -45,14 +45,26 @@ const CFG = {
   tpConfirmR:   0.10,
 };
 
-function safeReq(m) { try { return require(m); } catch (_) { return null; } }
+// Hard requires with literal paths so Vercel's webpack/ncc bundler includes each
+// file in the Lambda bundle. safeReq(m) used a variable — webpack can't trace it,
+// so all six modules were absent from the bundle and returned null at runtime.
+// Each try/catch preserves graceful-degradation: if a module is genuinely absent
+// (e.g. in a stripped test bundle) the dep stays null and the missing-deps guard
+// handles it cleanly. Injection via opts still works for unit tests.
+let _broker    = null; try { _broker    = require('./broker');          } catch (_) {}
+let _rules     = null; try { _rules     = require('./rules-store');     } catch (_) {}
+let _execute   = null; try { _execute   = require('./execute');         } catch (_) {}
+let _watcher   = null; try { _watcher   = require('./watcher');         } catch (_) {}
+let _telegram  = null; try { _telegram  = require('./telegram');        } catch (_) {}
+let _heartbeat = null; try { _heartbeat = require('./alexg-heartbeat'); } catch (_) {}
+
 function deps(o = {}) {
   return {
-    broker:   o.broker   || safeReq('./broker'),
-    rules:    o.rules    || safeReq('./rules-store'),
-    execute:  o.execute  || safeReq('./execute'),
-    watcher:  o.watcher  || safeReq('./watcher'),
-    telegram: o.telegram || safeReq('./telegram'),
+    broker:   o.broker   || _broker,
+    rules:    o.rules    || _rules,
+    execute:  o.execute  || _execute,
+    watcher:  o.watcher  || _watcher,
+    telegram: o.telegram || _telegram,
     fetchCandlesFn: o.fetchCandlesFn,
     tradeFn: o.tradeFn || TRADE.evaluateTrade,
     now: o.now,
@@ -270,7 +282,7 @@ async function runAlexg(opts = {}) {
 
 // ─── HTTP handler (cron + key-guarded manual trigger) ───────────────
 module.exports = async (req, res) => {
-  const heartbeat = safeReq('./alexg-heartbeat');
+  const heartbeat = _heartbeat;
   const started = Date.now();
   try {
     const q = req.query || {};
