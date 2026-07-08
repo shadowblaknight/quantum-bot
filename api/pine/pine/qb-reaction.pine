@@ -64,7 +64,7 @@ requireHTFalign = input.bool(false, "Only trade WITH H1/H4 bias", group=G_ENTRY,
 
 G_CONF = "FVG / IFVG confirmation — parallel paths that fire on HTF displacement (no coil needed)"
 useFvgConfirm  = input.bool(true,  "FVG confirm (reaction-fvg)",     group=G_CONF, tooltip="Fire when a FRESH accum-TF FVG forms while price is at the zone. The displacement gap replaces the coil as the 'they're committed' proof. Direction = the FVG's direction.")
-useIfvgConfirm = input.bool(false, "IFVG inversion (reaction-ifvg)", group=G_CONF, tooltip="Fire when price CLOSES THROUGH the opposing accum-TF FVG frozen at the tap, inverting it. Staged OFF — enable after the FVG path proves out on a real sample.")
+useIfvgConfirm = input.bool(true,  "IFVG inversion (reaction-ifvg)", group=G_CONF, tooltip="Fire when price CLOSES THROUGH the opposing accum-TF FVG frozen at the tap, inverting it.")
 
 G_ALR = "Alerts"
 alertApiKey = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API key", group=G_ALR)
