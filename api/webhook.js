@@ -57,6 +57,14 @@ const DISABLED_TEMPLATES = ['ote-continuation'];
 // (limit) entries are suppressed. Immediate (market) entries are unaffected.
 // Set to false to restore silver-bullet retest entries.
 const SB_IMMEDIATE_ONLY = true;
+
+// ── Per-template instrument blocklist ────────────────────────────────────────
+// ORB bleeds on BTC and NAS100 (wide opening ranges → far stops → fakeouts).
+// All other templates on those instruments remain fully active.
+// To re-enable ORB on BTC/NAS100: remove the key or empty the array.
+const TEMPLATE_INSTRUMENT_BLOCKS = {
+  'orb': ['btc', 'nas100'],
+};
 function _escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function withTimeout(promise, ms, fallback) {
@@ -587,6 +595,15 @@ module.exports = async (req, res) => {
   if (DISABLED_TEMPLATES.includes(p.template)) {
     try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: 'template-disabled' }); } catch (_) {}
     return res.status(200).json({ ok: true, executed: false, reason: 'template-disabled', template: p.template });
+  }
+
+  // Per-template instrument block — returns 200 so TradingView does not retry.
+  // Blocks only the specific template/instrument combination; other templates on
+  // the same instrument and the same template on other instruments are unaffected.
+  const _blockedInstruments = TEMPLATE_INSTRUMENT_BLOCKS[p.template];
+  if (_blockedInstruments && _blockedInstruments.includes(assetId)) {
+    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: 'template-instrument-blocked' }); } catch (_) {}
+    return res.status(200).json({ ok: true, executed: false, reason: 'template-instrument-blocked', template: p.template, asset: assetId });
   }
 
   // 9. Parse numerics (fast) — fail fast on a malformed payload
