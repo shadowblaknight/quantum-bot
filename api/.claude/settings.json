@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(git commit -m ' *)",
+      "Bash(curl -s \"https://talented-doe-70974.upstash.io/get/v13%3Aalexg%3Aheartbeat\" -H \"Authorization: Bearer gQAAAAAAARU-AAIncDIxMzJkZWM3YTJjNzY0MjViOTRjNTQyYjFlZDg1MTk4OXAyNzA5NzQ\")",
+      "Bash(curl -s \"https://talented-doe-70974.upstash.io/get/v13%3Apilot%3Aactivity\" -H \"Authorization: Bearer gQAAAAAAARU-AAIncDIxMzJkZWM3YTJjNzY0MjViOTRjNTQyYjFlZDg1MTk4OXAyNzA5NzQ\")",
+      "Bash(curl -s \"https://talented-doe-70974.upstash.io/get/v14%3Aledger%3Aindex\" -H \"Authorization: Bearer gQAAAAAAARU-AAIncDIxMzJkZWM3YTJjNzY0MjViOTRjNTQyYjFlZDg1MTk4OXAyNzA5NzQ\")",
+      "Bash(curl -s \"https://talented-doe-70974.upstash.io/get/v13%3Aalexg%3Aheartbeat\" -H \"Authorization: Bearer ggAAAAAAARU-AAIgcDKXFL9HNJMYX32MD3Twr3JeW8H7nLYHyEiXH3V_ojpL9g\")",
+      "Bash(curl -s \"https://quantum-bot.vercel.app/api/alexg-heartbeat\")",
+      "Bash(curl -s \"https://quantum-bot-omars-projects-ad9e75b3.vercel.app/api/alexg-heartbeat\")",
+      "Bash(curl -sL \"https://quantum-bot-omars-projects-ad9e75b3.vercel.app/api/alexg-heartbeat\")",
+      "Bash(curl -sv \"https://talented-doe-70974.upstash.io/get/v13:alexg:heartbeat?_token=gQAAAAAAARU-AAIncDIxMzJkZWM3YTJjNzY0MjViOTRjNTQyYjFlZDg1MTk4OXAyNzA5NzQ\")",
+      "Bash(curl -s --max-time 10 \"https://quantum-bot-shadowblaknight.vercel.app/api/alexg-heartbeat\")"
+    ]
+  }
+}

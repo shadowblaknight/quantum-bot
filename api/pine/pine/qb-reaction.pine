@@ -290,7 +290,8 @@ if barstate.isconfirmed
             slP = invLong ? rOppLo - buf : rOppHi + buf
             slDist = math.abs(proximal - slP)
             slAcc = slDist / accumATR
-            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR
+            slOk = invLong ? slP < emitEntry : slP > emitEntry
+            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR and slOk
                 tpBase = emitEntry
                 tp1 = invLong ? tpBase + slDist : tpBase - slDist
                 tp2 = invLong ? tpBase + slDist * 2.0 : tpBase - slDist * 2.0
