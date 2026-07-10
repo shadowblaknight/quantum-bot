@@ -56,11 +56,11 @@ const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg'];
 // higher-conviction subset (drops the two most aggressive ICT setups).
 const ACCEPTED_ACTIVE = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
 ];
 const ACCEPTED_DEFENSIVE = [
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
-  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
 ];
 
 module.exports = {

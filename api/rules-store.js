@@ -105,6 +105,7 @@ const DEFAULT_RULES = {
     'ote-continuation': { enabled: true, tradingStyle: 'swing',    lotMultiplier: 1.0, label: '🎯 OTE Continuation' },
     'am-ifvg':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🌅 AM IFVG Reversal' },
     'orb':              { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🚀 ORB Breakout' },
+    'orb-pro':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '⚡ PRO ORB' },
     'reaction':         { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction') },
     'reaction-fvg':     { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-fvg') },
     'reaction-ifvg':    { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-ifvg') },
