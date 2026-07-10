@@ -21,6 +21,7 @@ const TEMPLATE_META = {
   'ote-continuation': { glyph: '🎯', label: 'OTE Continuation' },
   'am-ifvg':          { glyph: '🌅', label: 'AM IFVG Reversal' },
   'orb':              { glyph: '🚀', label: 'ORB Breakout' },
+  'orb-pro':          { glyph: '⚡', label: 'PRO ORB' },
   'reaction':         { glyph: '🎯', label: 'Reaction (coil break)' },
   'reaction-fvg':     { glyph: '🌀', label: 'Reaction (FVG)' },
   'reaction-ifvg':    { glyph: '🔄', label: 'Reaction (IFVG)' },
@@ -44,7 +45,7 @@ function templateLabelMap() {
 // Display order (heatmaps, cards).
 const TEMPLATE_ORDER = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
 ];
 
 // UI groupings — separately MEASURED, grouped only for a tidy screen.

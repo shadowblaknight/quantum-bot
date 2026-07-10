@@ -1,0 +1,372 @@
+//@version=6
+indicator("Quantum Bot — PRO ORB", shorttitle="QB PRO ORB", overlay=true, max_bars_back=500, max_labels_count=50, max_lines_count=20, max_boxes_count=10)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QUANTUM BOT — PRO ORB  (template: "orb-pro")
+//  ──────────────────────────────────────────────
+//  Standalone challenger to the live ORB in qb-ict.pine.
+//  Both fire live on the same account — overlap is intentional.
+//
+//  Core (mirrors live ORB):
+//    • auto asset-class → session (NY / London / Asian)
+//    • freeze first-N-min opening range, watch for full-close breakout
+//    • structural SL = opposite OR edge + buffer
+//    • TPs at 1R / 2R / 3R from OR entry
+//
+//  PRO filters (each a toggle):
+//    a. RVOL       — breakout candle volume > rvolMult × avg prior N bars
+//                    tick-volume; gracefully falls back (PASS) if feed lacks data
+//    b. Range      — OR too wide (chop) or too narrow (noise) → skip session
+//    c. Close %    — close in top/bottom third of breakout candle's range
+//    d. VWAP dir   — LONG only above session VWAP, SHORT only below (ta.vwap)
+//    e. Retest     — toggle: wait for OR-edge tap before firing
+//
+//  Visuals:
+//    • Shaded OR box + midpoint dashed line
+//    • Session VWAP line (purple)
+//    • RVOL value + per-filter PASS/FAIL label at the breakout bar
+//    • Entry/SL/TP3 position box on fire
+//    • Top-right status table (range ATR, RVOL, VWAP side, H1/H4 bias)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── INPUTS — CORE ──────────────────────────────────────────────────
+G_CORE = "PRO ORB — Core"
+orbEnabled         = input.bool(true,   "ORB enabled",                                    group=G_CORE)
+orbSessionOverride = input.string("auto","Session",  options=["auto","NY","London","Asian"], group=G_CORE)
+orbDSTadj          = input.int(-60,     "DST adjust (min)", step=15,                       group=G_CORE, tooltip="Shift session open for daylight saving. Summer: NY & London = -60. Asian = 0. Winter: 0.")
+orbORMinutes       = input.int(30,      "Opening-range length (min)", minval=15, step=15,  group=G_CORE)
+orbTradeMin        = input.int(360,     "Trade window after open (min)", minval=30, step=30, group=G_CORE)
+slMinH1ATR         = input.float(0.30,  "SL min (× H1 ATR)", minval=0.1, step=0.05,       group=G_CORE)
+slMaxH1ATR         = input.float(3.00,  "SL max (× H1 ATR)", minval=1.0, step=0.10,       group=G_CORE)
+
+// ─── INPUTS — PRO FILTERS ────────────────────────────────────────────
+G_FILT = "PRO Filters"
+orbMinWidthATR  = input.float(0.5,  "Range MIN (× ATR)",    minval=0.0,  step=0.1,  group=G_FILT, tooltip="Skip sessions whose opening range is too narrow. Range/ATR below this = no trade.")
+orbMaxWidthATR  = input.float(5.0,  "Range MAX (× ATR)",    minval=1.0,  step=0.5,  group=G_FILT, tooltip="Skip sessions whose opening range is too wide (chop). Range/ATR above this = no trade.")
+useRvol         = input.bool(true,  "RVOL filter",                                    group=G_FILT)
+rvolMult        = input.float(1.5,  "RVOL multiplier (× avg)", minval=1.0, step=0.1, group=G_FILT, tooltip="Breakout candle volume must exceed this multiple of the prior-N-bar average. Falls back to PASS when volume data is unavailable (FX/Metal flat feeds).")
+rvolPeriod      = input.int(20,     "RVOL avg period (bars)", minval=5, maxval=100,   group=G_FILT)
+useCandleQuality= input.bool(true,  "Candle close quality (top/bot ⅓)",               group=G_FILT, tooltip="Breakout candle must close in the TOP third of its range (LONG) or BOTTOM third (SHORT). Filters weak closes that snap back.")
+useVwap         = input.bool(true,  "VWAP direction filter",                          group=G_FILT, tooltip="LONG only when price is above the session VWAP; SHORT only when below. Applied to intraday charts only (ta.vwap resets each session).")
+useRetestEntry  = input.bool(false, "Wait-for-retest entry",                          group=G_FILT, tooltip="When enabled, after a qualifying breakout the indicator waits for price to return to the broken OR edge and hold before firing the alert. When disabled, fires on the breakout bar (OR edge as limit entry).")
+
+// ─── INPUTS — HTF CONTEXT ─────────────────────────────────────────────
+G_HTF = "HTF Context"
+atrLength          = input.int(14,   "ATR period", minval=2, maxval=200, group=G_HTF)
+emaLength          = input.int(20,   "EMA period (bias)", minval=5, maxval=200, group=G_HTF)
+assetClassOverride = input.string("auto","Asset class", options=["auto","Forex","Metal","Index","Crypto"], group=G_HTF, tooltip="auto = derived from symbol. Override if your broker uses an unusual symbol name.")
+
+// ─── INPUTS — VISUALS ─────────────────────────────────────────────────
+G_VIS = "Visuals"
+showORBox        = input.bool(true,  "Shaded OR box + midpoint",     group=G_VIS)
+showVwapLine     = input.bool(true,  "Session VWAP line",            group=G_VIS)
+showFilterLabels = input.bool(true,  "Filter PASS/FAIL labels",      group=G_VIS, tooltip="Show VOL✓/✗ CLS✓/✗ VWP✓/✗ at every breakout bar, even when a filter blocks the signal.")
+showStatusTable  = input.bool(true,  "Corner status table",          group=G_VIS)
+showPosBox       = input.bool(true,  "Position box on fire",         group=G_VIS)
+posBoxBars       = input.int(40,     "Position box width (bars)", minval=5, maxval=300, group=G_VIS)
+alertApiKey      = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API key", group=G_VIS)
+
+// ─── COLORS ──────────────────────────────────────────────────────────
+C_ORB_BOX = color.new(#60A5FA, 85)
+C_ORB_BDR = color.new(#60A5FA, 30)
+C_ORB_MID = color.new(#60A5FA, 45)
+C_VWAP    = color.new(#7E57C2, 0)
+C_BULL    = #14B8A6
+C_BEAR    = #F43F5E
+C_AMBER   = #F59E0B
+
+// ─── ASSET CLASS ─────────────────────────────────────────────────────
+f_autoAssetClass() =>
+    t = str.upper(syminfo.ticker)
+    _metal  = str.contains(t,"XAU") or str.contains(t,"XAG") or str.contains(t,"GOLD") or str.contains(t,"SILVER")
+    _crypto = syminfo.type == "crypto" or str.contains(t,"BTC") or str.contains(t,"ETH")
+    _index  = str.contains(t,"NAS") or str.contains(t,"NDQ") or str.contains(t,"US100") or str.contains(t,"USTEC") or str.contains(t,"US500") or str.contains(t,"SP500") or str.contains(t,"SPX") or str.contains(t,"DOW") or str.contains(t,"DAX") or str.contains(t,"FTSE") or str.contains(t,"UK100") or str.contains(t,"AUS200") or str.contains(t,"NIKKEI") or str.contains(t,"JP225") or str.contains(t,"GER40") or syminfo.type == "index"
+    _metal ? "Metal" : _crypto ? "Crypto" : _index ? "Index" : "Forex"
+
+assetClass  = assetClassOverride == "auto" ? f_autoAssetClass() : assetClassOverride
+_orbSession = orbSessionOverride == "auto" ? (str.contains(str.upper(syminfo.ticker),"JPY") ? "Asian" : assetClass == "Forex" ? "London" : "NY") : orbSessionOverride
+
+// ─── HTF H1/H4 BIAS + ATR ────────────────────────────────────────────
+// Repaint-safe: only reads from confirmed closed HTF bars ([1]).
+f_htfBias(int emaLen, int atrLen) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    [b, a]
+
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+
+atrVal = ta.atr(atrLength)
+
+// ─── SESSION TIMING ───────────────────────────────────────────────────
+sessEnabled  = timeframe.isintraday
+utcMin       = hour(time, "UTC") * 60 + minute(time)
+orbBaseOpen  = _orbSession == "NY" ? 870 : _orbSession == "London" ? 480 : 0
+orbOpenMin   = orbBaseOpen + orbDSTadj
+orbORend     = orbOpenMin + orbORMinutes
+orbTradeEnd  = orbOpenMin + orbTradeMin
+inOrbORWin   = sessEnabled and utcMin >= orbOpenMin and utcMin < orbORend
+inOrbTrade   = sessEnabled and utcMin >= orbORend   and utcMin < orbTradeEnd
+orbOpenEdge  = inOrbORWin  and not inOrbORWin[1]
+orbWindowEnd = not inOrbORWin and inOrbORWin[1]
+
+// ─── OR RANGE BUILD ───────────────────────────────────────────────────
+var float orbH             = na
+var float orbL             = na
+var bool  orbArmed         = false
+var bool  orbHasFired      = false
+var bool  orbPendingRetest = false
+var int   orbBreakDir      = 0
+var int   orbFireBar       = na
+var float orbFireEntry     = na
+var float orbFireSL        = na
+var float orbFireTP3       = na
+
+if orbOpenEdge
+    orbH             := high
+    orbL             := low
+    orbArmed         := false
+    orbHasFired      := false
+    orbPendingRetest := false
+    orbBreakDir      := 0
+    orbFireBar       := na
+else if inOrbORWin
+    orbH := na(orbH) ? high : math.max(orbH, high)
+    orbL := na(orbL) ? low  : math.min(orbL, low)
+
+// ─── WIDTH FILTER AT OR CLOSE ──────────────────────────────────────────
+// Filter (b): range guard. Arms the indicator if within band; consumes the
+// session (no trade) if out of band. Fires no skip alert — keep it quiet.
+if orbEnabled and barstate.isconfirmed and orbWindowEnd and not na(orbH) and not na(orbL) and atrVal > 0
+    orbWidthATR = (orbH - orbL) / atrVal
+    if orbWidthATR < orbMinWidthATR or orbWidthATR > orbMaxWidthATR
+        orbArmed    := false
+        orbHasFired := true
+    else
+        orbArmed := true
+
+// ─── PRO FILTER PRE-COMPUTE ───────────────────────────────────────────
+// Filter (a): RVOL
+// Volume feed detection: if volume is zero OR has been exactly identical
+// for 4+ consecutive bars the feed has no live tick volume — skip the filter.
+volAvg     = ta.sma(volume, rvolPeriod)
+volIsFlat  = volume == nz(volume[1]) and volume[1] == nz(volume[2]) and volume[2] == nz(volume[3]) and volume[3] == nz(volume[4])
+volUnavail = volume == 0 or volIsFlat
+rvolCur    = (volUnavail or volAvg <= 0) ? na : volume / volAvg
+
+// Filter (d): VWAP
+// ta.vwap resets at session start on intraday charts.
+// Non-intraday charts: filter is bypassed via the useVwap + isintraday guard below.
+vwapVal = ta.vwap(hlc3)
+
+// ─── ALERT BUILDER ────────────────────────────────────────────────────
+f_buildAlertPro(string dir, float entry, float sl,
+                float tp1, float tp2, float tp3,
+                float zU, float zL,
+                string sess, float wATR,
+                string tier, int biasAlign,
+                string conf, string filters) =>
+    slRisk = math.abs(entry - sl)
+    rr1    = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2    = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3    = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    dEmoji = dir == "LONG" ? "🟢" : "🔴"
+    dWord  = dir == "LONG" ? "BUY" : "SELL"
+    readable = dEmoji + " " + syminfo.ticker + " · " + dWord + " · PRO ORB · " + timeframe.period + " · Tier " + tier + "\n" +
+               "OR: " + str.tostring(zL, format.mintick) + " – " + str.tostring(zU, format.mintick) + "  width=" + str.tostring(wATR, "0.00") + "× ATR\n" +
+               "Filters: " + filters + "\n---\n"
+    head   = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"orb-pro\",\"direction\":\"" + dir + "\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"timestamp\":" + str.tostring(time)
+    prices = ",\"entry\":\"" + str.tostring(entry, format.mintick) + "\",\"sl\":\"" + str.tostring(sl, format.mintick) + "\",\"tp1\":\"" + str.tostring(tp1, format.mintick) + "\",\"tp2\":\"" + str.tostring(tp2, format.mintick) + "\",\"tp3\":\"" + str.tostring(tp3, format.mintick) + "\",\"rr1\":" + str.tostring(rr1, "0.00") + ",\"rr2\":" + str.tostring(rr2, "0.00") + ",\"rr3\":" + str.tostring(rr3, "0.00")
+    zone   = ",\"zoneUpper\":\"" + str.tostring(zU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zL, format.mintick) + "\",\"zoneType\":\"ORB\""
+    htf    = ",\"activeSession\":\"" + sess + "\",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
+    ctx    = ",\"window\":\"" + sess + "\",\"swept\":\"\",\"impulseATR\":" + str.tostring(wATR, "0.00") + ",\"filters\":\"" + filters + "\",\"apiKey\":\"" + alertApiKey + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+// ─── POSITION BOX ─────────────────────────────────────────────────────
+f_drawPosBox(float e, float sl, float tp3) =>
+    l = bar_index
+    r = bar_index + posBoxBars
+    box.new(l, math.max(e, tp3), r, math.min(e, tp3), border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+    box.new(l, math.max(e, sl),  r, math.min(e, sl),  border_color=color.new(color.red,  55), bgcolor=color.new(color.red,  90))
+    line.new(l, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+// ═══ BREAKOUT LOGIC + PRO FILTERS ════════════════════════════════════
+if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOrbTrade and atrVal > 0 and not na(h1ATR) and h1ATR > 0
+
+    orbWATR = (orbH - orbL) / atrVal
+
+    // ── IMMEDIATE BREAKOUT PATH ─────────────────────────────────────
+    if not orbPendingRetest
+        orbBrokeUp   = close > orbH
+        orbBrokeDown = close < orbL
+
+        if orbBrokeUp or orbBrokeDown
+            orbDir  = orbBrokeUp ? "LONG" : "SHORT"
+            orbSDir = orbBrokeUp ? 1 : -1
+            orbHtfOk = (h1B == orbSDir) or (h4B == orbSDir)
+
+            // Filter (a): RVOL
+            rvolPass = (not useRvol) or volUnavail or (not na(rvolCur) and rvolCur >= rvolMult)
+
+            // Filter (c): candle close quality
+            barRng      = high - low
+            closeQualOk = barRng > 0 and (orbBrokeUp ? close >= low + barRng * 0.667 : close <= low + barRng * 0.333)
+            candlePass  = (not useCandleQuality) or closeQualOk
+
+            // Filter (d): VWAP direction (intraday only)
+            vwapOk   = not useVwap or not timeframe.isintraday or na(vwapVal) or (orbBrokeUp ? close > vwapVal : close < vwapVal)
+
+            allPass  = rvolPass and candlePass and vwapOk
+
+            // Build filter label string
+            lStr = ""
+            if useRvol
+                lStr := lStr + (rvolPass ? "VOL✓ " : "VOL✗ ")
+            if useCandleQuality
+                lStr := lStr + (candlePass ? "CLS✓ " : "CLS✗ ")
+            if useVwap
+                lStr := lStr + (vwapOk ? "VWP✓ " : "VWP✗ ")
+            rvolTag = volUnavail ? "RVOL:n/a " : (not na(rvolCur) ? "RVOL:" + str.tostring(rvolCur, "0.0") + "× " : "")
+
+            // Entry / SL geometry (identical to live ORB)
+            orbEntryP = orbBrokeUp ? orbH : orbL
+            orbBuf    = math.max(0.3 * atrVal, 0.10 * h1ATR)
+            orbSLP    = orbBrokeUp ? orbL - orbBuf : orbH + orbBuf
+            orbSLDist = math.abs(orbEntryP - orbSLP)
+            orbSLH1   = orbSLDist / h1ATR
+
+            if orbSLDist > 0 and orbSLH1 >= slMinH1ATR and orbSLH1 <= slMaxH1ATR
+                if allPass
+                    orbT1 = orbBrokeUp ? orbEntryP + orbSLDist * 1.0 : orbEntryP - orbSLDist * 1.0
+                    orbT2 = orbBrokeUp ? orbEntryP + orbSLDist * 2.0 : orbEntryP - orbSLDist * 2.0
+                    orbT3 = orbBrokeUp ? orbEntryP + orbSLDist * 3.0 : orbEntryP - orbSLDist * 3.0
+                    htfTier  = orbHtfOk ? "A" : "B"
+                    htfAlign = orbHtfOk ? 1 : 0
+                    confStr  = "orb-pro-" + (orbHtfOk ? "withbias" : "counter")
+
+                    // Filter (e): retest toggle
+                    if useRetestEntry and not orbHtfOk
+                        // Counter-trend breakout + retest mode → queue for pullback
+                        orbPendingRetest := true
+                        orbBreakDir      := orbSDir
+                    else
+                        // Fire: HTF-aligned always immediate; counter-trend if retest disabled
+                        orbHasFired  := true
+                        orbFireBar   := bar_index
+                        orbFireEntry := orbEntryP
+                        orbFireSL    := orbSLP
+                        orbFireTP3   := orbT3
+                        alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, orbWATR, htfTier, htfAlign, confStr, lStr), alert.freq_once_per_bar)
+                        if showPosBox
+                            f_drawPosBox(orbEntryP, orbSLP, orbT3)
+
+            // Filter labels at every qualifying breakout bar (PASS or FAIL)
+            if showFilterLabels and (useRvol or useCandleQuality or useVwap)
+                lblY   = orbBrokeUp ? high + atrVal * 0.55 : low - atrVal * 0.55
+                lblSty = orbBrokeUp ? label.style_label_down : label.style_label_up
+                lblCol = allPass ? color.new(color.lime, 15) : color.new(color.orange, 15)
+                label.new(bar_index, lblY, rvolTag + lStr, color=color.new(color.black, 100), textcolor=lblCol, style=lblSty, size=size.small)
+
+    // ── RETEST PATH (filter e active) ──────────────────────────────
+    else
+        orbRetestUp   = orbBreakDir ==  1 and low  <= orbH and close > orbH
+        orbRetestDown = orbBreakDir == -1 and high >= orbL and close < orbL
+
+        if orbRetestUp or orbRetestDown
+            orbUp     = orbBreakDir == 1
+            orbDir    = orbUp ? "LONG" : "SHORT"
+            orbEntryP = orbUp ? orbH : orbL
+            orbBuf    = math.max(0.3 * atrVal, 0.10 * h1ATR)
+            orbSLP    = orbUp ? orbL - orbBuf : orbH + orbBuf
+            orbSLDist = math.abs(orbEntryP - orbSLP)
+            orbSLH1   = orbSLDist / h1ATR
+            if orbSLDist > 0 and orbSLH1 >= slMinH1ATR and orbSLH1 <= slMaxH1ATR
+                orbT1 = orbUp ? orbEntryP + orbSLDist * 1.0 : orbEntryP - orbSLDist * 1.0
+                orbT2 = orbUp ? orbEntryP + orbSLDist * 2.0 : orbEntryP - orbSLDist * 2.0
+                orbT3 = orbUp ? orbEntryP + orbSLDist * 3.0 : orbEntryP - orbSLDist * 3.0
+                orbHasFired      := true
+                orbPendingRetest := false
+                orbFireBar       := bar_index
+                orbFireEntry     := orbEntryP
+                orbFireSL        := orbSLP
+                orbFireTP3       := orbT3
+                alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, (orbH - orbL) / atrVal, "B", 0, "orb-pro-retest-confirmed", "RETEST✓"), alert.freq_once_per_bar)
+                if showPosBox
+                    f_drawPosBox(orbEntryP, orbSLP, orbT3)
+
+// ═══ VISUALS ═══════════════════════════════════════════════════════════
+
+// ─── OR BOX ──────────────────────────────────────────────────────────
+var box  orbBoxObj  = na
+var line orbMidObj  = na
+
+if showORBox and not na(orbH) and not na(orbL) and (orbArmed or orbHasFired or inOrbORWin) and barstate.islast
+    midP    = (orbH + orbL) / 2.0
+    boxLeft = bar_index - math.min(bar_index, 80)
+    boxRight= bar_index + 12
+    if na(orbBoxObj)
+        orbBoxObj := box.new(boxLeft, orbH, boxRight, orbL, bgcolor=C_ORB_BOX, border_color=C_ORB_BDR, border_width=1)
+        orbMidObj := line.new(boxLeft, midP, boxRight, midP, color=C_ORB_MID, style=line.style_dashed, width=1)
+    else
+        box.set_lefttop(orbBoxObj,     boxLeft, orbH)
+        box.set_rightbottom(orbBoxObj, boxRight, orbL)
+        line.set_xy1(orbMidObj, boxLeft, midP)
+        line.set_xy2(orbMidObj, boxRight, midP)
+
+// ─── VWAP LINE ────────────────────────────────────────────────────────
+plot(showVwapLine and timeframe.isintraday ? vwapVal : na, "Session VWAP", C_VWAP, 1, plot.style_line)
+
+// ─── STATUS TABLE ─────────────────────────────────────────────────────
+var table stTbl = na
+
+if showStatusTable and barstate.islast and atrVal > 0
+    if na(stTbl)
+        stTbl := table.new(position.top_right, 2, 7,
+            bgcolor      = color.new(color.black, 70),
+            border_color = color.new(color.gray,  60),
+            border_width = 1,
+            frame_color  = color.new(color.gray,  60),
+            frame_width  = 1)
+
+    // header row
+    orbStatus = orbHasFired ? "FIRED" : (orbPendingRetest ? "RETEST" : (orbArmed ? "ARMED" : (inOrbORWin ? "BUILDING" : "WAITING")))
+    table.cell(stTbl, 0, 0, "QB PRO ORB", text_color=color.new(#60A5FA, 0), text_size=size.tiny, bgcolor=color.new(color.black, 55), text_halign=text.align_left)
+    table.cell(stTbl, 1, 0, _orbSession + " · " + orbStatus, text_color=color.new(color.white, 20), text_size=size.tiny, bgcolor=color.new(color.black, 55), text_halign=text.align_right)
+
+    // Range / ATR
+    orbWidthNow = (not na(orbH) and not na(orbL)) ? (orbH - orbL) / atrVal : float(na)
+    rangeStr    = na(orbWidthNow) ? "—" : str.tostring(orbWidthNow, "0.00") + "×"
+    rangeCol    = na(orbWidthNow) ? color.gray : (orbWidthNow < orbMinWidthATR or orbWidthNow > orbMaxWidthATR ? C_AMBER : C_BULL)
+    table.cell(stTbl, 0, 1, "Range/ATR", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 1, rangeStr,    text_color=color.new(rangeCol, 0),    text_size=size.tiny, text_halign=text.align_right)
+
+    // RVOL
+    rvolStr  = volUnavail ? "n/a (feed)" : (na(rvolCur) ? "—" : str.tostring(rvolCur, "0.0") + "×")
+    rvolCol  = volUnavail ? color.gray : (na(rvolCur) ? color.gray : (rvolCur >= rvolMult ? C_BULL : C_AMBER))
+    table.cell(stTbl, 0, 2, "RVOL",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 2, rvolStr, text_color=color.new(rvolCol, 0),     text_size=size.tiny, text_halign=text.align_right)
+
+    // VWAP side
+    vwapSide = not timeframe.isintraday ? "daily" : (na(vwapVal) ? "—" : (close > vwapVal ? "ABOVE" : "BELOW"))
+    vwapCol  = vwapSide == "ABOVE" ? C_BULL : vwapSide == "BELOW" ? C_BEAR : color.gray
+    table.cell(stTbl, 0, 3, "VWAP",   text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 3, vwapSide, text_color=color.new(vwapCol, 0),     text_size=size.tiny, text_halign=text.align_right)
+
+    // H1 bias
+    h1BiasStr = h1B == 1 ? "LONG" : h1B == -1 ? "SHORT" : "NEUT"
+    h1Col     = h1B == 1 ? C_BULL : h1B == -1 ? C_BEAR : color.gray
+    table.cell(stTbl, 0, 4, "H1 bias",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 4, h1BiasStr,  text_color=color.new(h1Col, 0),       text_size=size.tiny, text_halign=text.align_right)
+
+    // H4 bias
+    h4BiasStr = h4B == 1 ? "LONG" : h4B == -1 ? "SHORT" : "NEUT"
+    h4Col     = h4B == 1 ? C_BULL : h4B == -1 ? C_BEAR : color.gray
+    table.cell(stTbl, 0, 5, "H4 bias",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 5, h4BiasStr,  text_color=color.new(h4Col, 0),       text_size=size.tiny, text_halign=text.align_right)
+
+    // Filter pack active
+    filterPack = (useRvol ? "RVOL " : "") + (useCandleQuality ? "CLS " : "") + (useVwap ? "VWP " : "") + (useRetestEntry ? "RETEST" : "")
+    fpStr = str.length(filterPack) > 0 ? filterPack : "none"
+    table.cell(stTbl, 0, 6, "Filters",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 6, fpStr,      text_color=color.new(color.gray, 0),  text_size=size.tiny, text_halign=text.align_right)

@@ -53,6 +53,7 @@ const TEMPLATE_DISPLAY = {
   "ote-continuation": { glyph: "🎯", label: "OTE Continuation" },
   "am-ifvg":          { glyph: "🌅", label: "AM IFVG Reversal" },
   "orb":              { glyph: "🚀", label: "ORB Breakout" },
+  "orb-pro":          { glyph: "⚡", label: "PRO ORB" },
   "reaction":         { glyph: "🎯", label: "Reaction (coil break)" },
   "reaction-fvg":     { glyph: "🌀", label: "Reaction (FVG)" },
   "reaction-ifvg":    { glyph: "🔄", label: "Reaction (IFVG)" },
@@ -61,7 +62,7 @@ const TEMPLATE_DISPLAY = {
 
 const TEMPLATE_ORDER = [
   "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg",
-  "orb", "reaction", "reaction-fvg", "reaction-ifvg", "alexg",
+  "orb", "orb-pro", "reaction", "reaction-fvg", "reaction-ifvg", "alexg",
 ];
 
 // v14: the five ICT templates are grouped under one collapsible "ICT" header in
@@ -535,6 +536,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         {/* ─── v14.1 · TP reach by template (full width) ─── */}
         <TpHitPanel />
+        <ORBComparePanel />
         <TradeDataPanel />
 
         {/* ─── v14.4 · Alex G live-signal scanner (full width) ─── */}
@@ -2143,6 +2145,197 @@ function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
   );
 }
 
+// ─── ORB vs PRO ORB comparison panel ─────────────────────────────────────
+// Side-by-side performance cards for 'orb' and 'orb-pro', pulled live from
+// /api/ledger?action=list. Includes per-instrument breakdown and per-metric
+// winner indicators. When orb-pro has < MIN_TRADES trades it shows a
+// "collecting data" notice so thin samples don't look bad.
+
+const MIN_ORB_PRO_TRADES = 10;
+
+function _aggLedger(trades) {
+  if (!trades || !trades.length) return { count: 0, wins: 0, losses: 0, winRate: null, netPnl: 0, avgR: null, profitFactor: null, avgSlippage: null };
+  const wins   = trades.filter((t) => t.outcome === "WIN");
+  const losses = trades.filter((t) => t.outcome === "LOSS");
+  const winPnl  = wins.reduce((s, t) => s + (t.netPnl || 0), 0);
+  const lossPnl = losses.reduce((s, t) => s + Math.abs(t.netPnl || 0), 0);
+  const rs    = trades.filter((t) => t.pnlR != null).map((t) => t.pnlR);
+  const slips = trades.filter((t) => t.slippagePips != null).map((t) => t.slippagePips);
+  return {
+    count:        trades.length,
+    wins:         wins.length,
+    losses:       losses.length,
+    winRate:      trades.length ? wins.length / trades.length : null,
+    netPnl:       trades.reduce((s, t) => s + (t.netPnl || 0), 0),
+    avgR:         rs.length ? rs.reduce((s, v) => s + v, 0) / rs.length : null,
+    profitFactor: lossPnl > 0 ? winPnl / lossPnl : (winPnl > 0 ? null : null),
+    avgSlippage:  slips.length ? slips.reduce((s, v) => s + v, 0) / slips.length : null,
+  };
+}
+
+function _winnerOf(a, b, higherIsBetter = true) {
+  if (a == null || b == null || !isFinite(a) || !isFinite(b)) return null;
+  if (a === b) return null;
+  return higherIsBetter ? (a > b ? "orb" : "orb-pro") : (a < b ? "orb" : "orb-pro");
+}
+
+function ORBStatCard({ title, agg, winners, isChallenger, thin }) {
+  const s = { padding: "10px 12px", borderRadius: 6, border: "1px solid var(--qb-border)", background: "var(--qb-surface2)", minWidth: 180, flex: "1 1 180px" };
+  const header = { fontFamily: "var(--qb-font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: isChallenger ? "var(--qb-accent)" : "var(--qb-text-hi)", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 };
+  const row = { display: "flex", justifyContent: "space-between", padding: "3px 0", fontFamily: "var(--qb-font-mono)", fontSize: 10, borderBottom: "1px solid var(--qb-border)" };
+  const badge = (metric) => {
+    const w = winners[metric];
+    if (!w) return null;
+    const isWin = (w === "orb" && !isChallenger) || (w === "orb-pro" && isChallenger);
+    return <span style={{ marginLeft: 4, fontSize: 9, color: isWin ? "var(--qb-ok)" : "var(--qb-text-faint)" }}>{isWin ? "▲" : "▼"}</span>;
+  };
+  const fmtWR  = (v) => v != null ? `${(v * 100).toFixed(0)}%` : "—";
+  const fmtPnl = (v) => v != null ? `${v >= 0 ? "+" : ""}$${v.toFixed(2)}` : "—";
+  const fmtR   = (v) => v != null ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}R` : "—";
+  const fmtPF  = (v) => v != null ? v.toFixed(2) : "—";
+  const fmtSlip= (v) => v != null ? `${v.toFixed(1)} pip` : "—";
+  const wrCol  = agg.winRate != null ? (agg.winRate >= 0.5 ? "var(--qb-ok)" : agg.winRate >= 0.35 ? "var(--qb-warn)" : "var(--qb-bad)") : "var(--qb-text-mid)";
+  const pnlCol = agg.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
+
+  return (
+    <div style={s}>
+      <div style={header}>
+        {isChallenger ? "⚡" : "🚀"} {title}
+        {thin && <span style={{ fontSize: 9, color: "var(--qb-warn)", fontWeight: 400, marginLeft: 4 }}>collecting data</span>}
+      </div>
+      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Trades</span><span>{agg.count}{badge("count")}</span></div>
+      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Win rate</span><span style={{ color: wrCol }}>{fmtWR(agg.winRate)}{badge("winRate")}</span></div>
+      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Net P&L</span><span style={{ color: pnlCol }}>{fmtPnl(agg.netPnl)}{badge("netPnl")}</span></div>
+      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Avg R</span><span>{fmtR(agg.avgR)}{badge("avgR")}</span></div>
+      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Prof. factor</span><span>{fmtPF(agg.profitFactor)}{badge("profitFactor")}</span></div>
+      <div style={{ ...row, border: "none" }}><span style={{ color: "var(--qb-text-faint)" }}>Avg slip</span><span>{fmtSlip(agg.avgSlippage)}{badge("avgSlippage")}</span></div>
+    </div>
+  );
+}
+
+function ORBComparePanel({ gridColumn = "1 / 4" }) {
+  const [trades, setTrades] = useState(null);
+  const [error, setError]   = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(API("ledger?action=list&limit=500")).then((res) => res.json());
+        if (alive) {
+          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
+          else setError(r?.error || "ledger unavailable");
+        }
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    tick();
+    const id = setInterval(tick, 90000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const all    = trades || [];
+  const orbT   = all.filter((t) => t.template === "orb");
+  const proT   = all.filter((t) => t.template === "orb-pro");
+  const orbAgg = _aggLedger(orbT);
+  const proAgg = _aggLedger(proT);
+  const thin   = proT.length < MIN_ORB_PRO_TRADES;
+
+  // Per-metric winner map
+  const winners = {
+    winRate:      _winnerOf(orbAgg.winRate,      proAgg.winRate,      true),
+    netPnl:       _winnerOf(orbAgg.netPnl,       proAgg.netPnl,       true),
+    avgR:         _winnerOf(orbAgg.avgR,          proAgg.avgR,         true),
+    profitFactor: _winnerOf(orbAgg.profitFactor,  proAgg.profitFactor, true),
+    avgSlippage:  _winnerOf(orbAgg.avgSlippage,   proAgg.avgSlippage,  false),
+  };
+
+  // Per-instrument breakdown (both templates)
+  const assets = Array.from(new Set([...orbT, ...proT].map((t) => t.asset).filter(Boolean))).sort();
+  const instrRows = assets.map((asset) => ({
+    asset,
+    orb:    _aggLedger(orbT.filter((t) => t.asset === asset)),
+    orbPro: _aggLedger(proT.filter((t) => t.asset === asset)),
+  }));
+
+  const fmtWR  = (v) => v != null ? `${(v * 100).toFixed(0)}%` : "—";
+  const fmtPnl = (v, n) => n === 0 ? "—" : `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`;
+  const wrCol  = (v) => v != null ? (v >= 0.5 ? "var(--qb-ok)" : v >= 0.35 ? "var(--qb-warn)" : "var(--qb-bad)") : "var(--qb-text-faint)";
+
+  return (
+    <Panel title="ORB vs PRO ORB" subtitle="live challenger comparison — same account" style={{ gridColumn }}>
+      <div style={{ padding: 12, overflow: "auto" }}>
+        {error && <PlaceholderError msg={`ORB compare: ${error}`} />}
+        {!error && orbT.length === 0 && proT.length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            No ledger trades for orb or orb-pro yet. Stats appear here as trades close.
+          </div>
+        )}
+
+        {(orbT.length > 0 || proT.length > 0) && (
+          <>
+            {/* ── side-by-side summary cards ── */}
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+              <ORBStatCard title="ORB (live)"  agg={orbAgg} winners={winners} isChallenger={false} thin={false} />
+              <ORBStatCard title="PRO ORB"     agg={proAgg} winners={winners} isChallenger={true}  thin={thin}  />
+            </div>
+
+            {thin && proT.length > 0 && (
+              <div style={{ marginBottom: 12, fontSize: 10, color: "var(--qb-warn)", fontFamily: "var(--qb-font-mono)" }}>
+                ⚠ PRO ORB has {proT.length} trade{proT.length === 1 ? "" : "s"} — need {MIN_ORB_PRO_TRADES}+ for reliable stats. ▲/▼ indicators hidden until then.
+              </div>
+            )}
+
+            {/* ── per-instrument table ── */}
+            {instrRows.length > 0 && (
+              <div style={{ overflow: "auto" }}>
+                <div style={{ fontSize: 10, color: "var(--qb-text-faint)", marginBottom: 6, fontFamily: "var(--qb-font-mono)", letterSpacing: 0.4 }}>
+                  PER-INSTRUMENT BREAKDOWN
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+                  <thead>
+                    <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
+                      <th style={{ textAlign: "left",  padding: "3px 6px" }}>Instrument</th>
+                      <th style={{ padding: "3px 6px" }}>ORB n</th>
+                      <th style={{ padding: "3px 6px" }}>ORB WR</th>
+                      <th style={{ padding: "3px 6px" }}>ORB net</th>
+                      <th style={{ padding: "3px 4px", color: "var(--qb-accent)" }}>PRO n</th>
+                      <th style={{ padding: "3px 4px", color: "var(--qb-accent)" }}>PRO WR</th>
+                      <th style={{ padding: "3px 4px", color: "var(--qb-accent)" }}>PRO net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {instrRows.map(({ asset, orb, orbPro }) => {
+                      const assetMeta = ASSET_CATALOG.find((a) => a.id === asset);
+                      const label = assetMeta ? assetMeta.name : asset;
+                      const orbWRc = wrCol(orb.winRate);
+                      const proWRc = wrCol(orbPro.winRate);
+                      const pnlWin = orb.count && orbPro.count ? (orbPro.netPnl > orb.netPnl ? "pro" : orbPro.netPnl < orb.netPnl ? "orb" : null) : null;
+                      return (
+                        <tr key={asset} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
+                          <td style={{ textAlign: "left", padding: "3px 6px", color: "var(--qb-text-hi)" }}>{label}</td>
+                          <td style={{ padding: "3px 6px", color: "var(--qb-text-mid)" }}>{orb.count || "·"}</td>
+                          <td style={{ padding: "3px 6px", color: orbWRc }}>{fmtWR(orb.winRate)}</td>
+                          <td style={{ padding: "3px 6px", color: orb.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)" }}>{fmtPnl(orb.netPnl, orb.count)}</td>
+                          <td style={{ padding: "3px 4px", color: "var(--qb-text-mid)" }}>{orbPro.count || "·"}</td>
+                          <td style={{ padding: "3px 4px", color: proWRc }}>{fmtWR(orbPro.winRate)}</td>
+                          <td style={{ padding: "3px 4px", color: orbPro.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)" }}>
+                            {fmtPnl(orbPro.netPnl, orbPro.count)}
+                            {pnlWin === "pro" && <span style={{ marginLeft: 3, color: "var(--qb-accent)", fontSize: 9 }}>▲</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 // ─── v14.3 · Trade Data manager — view & purge recognition records ──────
 // Remove software-artifact trades (e.g. a position force-closed by a bug) so
 // they don't poison recognition memory / template stats. Delete is key-guarded
@@ -3441,6 +3634,9 @@ function MobileLayout({
             )}
             {card("min(56vh, 440px)",
               <TpHitPanel gridColumn="auto" />
+            )}
+            {card("min(52vh, 400px)",
+              <ORBComparePanel gridColumn="auto" />
             )}
             {card("min(60vh, 480px)",
               <TradeDataPanel gridColumn="auto" />

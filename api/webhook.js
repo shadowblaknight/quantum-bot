@@ -45,7 +45,7 @@ const PINE_TO_ASSET = {
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60;
-const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'];
+const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','orb-pro','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'];
 
 // ── Reversible template circuit breakers ─────────────────────────────────
 // DISABLED_TEMPLATES: any template in this array is skipped before the rules
