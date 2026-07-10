@@ -178,6 +178,37 @@ async function bgSkip({ dedupeKey, pineTicker, template, reason, extras = {}, no
 
 // The heavy pipeline. Runs AFTER TradingView has been acked. NEVER touches res.
 async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 }) {
+  // ── PHASE 1 REGIME SHADOW (read-only) ────────────────────────────────────
+  // Assess market regime and write what the detector WOULD have done.
+  // Entirely isolated: wrapped in try/catch, hard-capped at 2.5s, no variable
+  // from this block is read by any downstream code. Trade execution is unchanged.
+  try {
+    const { assessRegime, writeShadowLog } = require('./regime-detector');
+    const _ra = await withTimeout(
+      assessRegime({ assetId, template: p.template, nowTs: p.timestamp || Date.now() }),
+      2500, null
+    );
+    if (_ra) {
+      writeShadowLog({
+        signalId:     dedupeKey,
+        assetId,
+        template:     p.template,
+        direction:    p.direction,
+        ts:           p.timestamp || Date.now(),
+        regime:       _ra.regime,
+        newsState:    _ra.newsState,
+        macroVol:     _ra.macroVol,
+        vix:          _ra.vix,
+        vixDate:      _ra.vixDate,
+        instrumentVol: _ra.instrumentVol,
+        wouldAction:  _ra.wouldAction,
+        wouldSizeMult: _ra.wouldSizeMult,
+        reasons:      _ra.reasons,
+      }).catch(() => {});  // fire-and-forget; Redis failure never reaches the trade path
+    }
+  } catch (_regimeErr) {}
+  // ─────────────────────────────────────────────────────────────────────────
+
   // 6. Bounded fetch
   const [positions, capital] = await Promise.all([
     withTimeout(fetchPositions(), 1500, []),
