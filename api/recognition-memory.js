@@ -439,7 +439,65 @@ module.exports = async (req, res) => {
       return res.status(result.error ? 400 : 200).json(result);
     }
 
-    return res.status(400).json({ error: 'unknown action', validActions: ['list', 'recent', 'find', 'similar', 'stats', 'delete'] });
+    if (action === 'session-heatmap') {
+      const all = await getAllTrades(1000);
+      const real = all.filter((t) => !t.deleted && !String(t.id || '').includes('legacy'));
+
+      function classifySession(openedAtMs) {
+        if (!openedAtMs) return 'UNKNOWN';
+        const d = new Date(openedAtMs);
+        const day = d.getUTCDay();
+        const h   = d.getUTCHours() + d.getUTCMinutes() / 60;
+        if (day === 0 || day === 6) return 'WEEKEND';
+        if (h >= 23 || h < 8)      return 'ASIAN';
+        if (h >= 8  && h < 13)     return 'LONDON';
+        if (h >= 13 && h < 16)     return 'NY_AM';
+        if (h >= 16 && h < 21)     return 'NY_PM';
+        return 'OFF';
+      }
+
+      const SESSIONS  = ['ASIAN', 'LONDON', 'NY_AM', 'NY_PM', 'WEEKEND', 'OFF'];
+      const raw = {};
+      for (const t of real) {
+        const tmpl = t.template || (t.contributingTactics || [])[0] || 'unknown';
+        const sess = classifySession(t.openedAt);
+        if (!raw[tmpl])       raw[tmpl] = {};
+        if (!raw[tmpl][sess]) raw[tmpl][sess] = { n: 0, wins: 0, losses: 0, be: 0, pnl: 0, pnlRSum: 0, pnlRCount: 0 };
+        const c = raw[tmpl][sess];
+        c.n++;
+        if (t.outcome === 'WIN')       c.wins++;
+        else if (t.outcome === 'LOSS') c.losses++;
+        else                           c.be++;
+        c.pnl += (t.pnl || 0);
+        if (t.pnlR != null) { c.pnlRSum += t.pnlR; c.pnlRCount++; }
+      }
+
+      const templates = Object.keys(raw).sort();
+      const usedSessions = SESSIONS.filter((s) => real.some((t) => classifySession(t.openedAt) === s));
+
+      const matrix = {};
+      for (const tmpl of templates) {
+        matrix[tmpl] = {};
+        for (const sess of SESSIONS) {
+          const c = raw[tmpl]?.[sess];
+          if (!c || c.n === 0) { matrix[tmpl][sess] = null; continue; }
+          matrix[tmpl][sess] = {
+            n: c.n, wins: c.wins, losses: c.losses, be: c.be,
+            wr: Math.round(c.wins / c.n * 1000) / 1000,
+            pnl: Math.round(c.pnl * 100) / 100,
+            avgR: c.pnlRCount > 0 ? Math.round(c.pnlRSum / c.pnlRCount * 100) / 100 : null,
+          };
+        }
+      }
+
+      return res.status(200).json({
+        ok: true, total: real.length,
+        sessions: usedSessions, templates,
+        matrix,
+      });
+    }
+
+    return res.status(400).json({ error: 'unknown action', validActions: ['list', 'recent', 'find', 'similar', 'stats', 'delete', 'session-heatmap'] });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

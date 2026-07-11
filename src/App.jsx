@@ -542,6 +542,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         {/* ─── v14.4 · Alex G live-signal scanner (full width) ─── */}
         <AlexgHeartbeatPanel />
         <AlexgSignalsPanel />
+
+        {/* ─── v15.3 · Session performance heatmap (full width) ─── */}
+        <SessionHeatmapPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -3076,6 +3079,163 @@ function PerfHeatmapPanel({ perf, watchlist, gridColumn = "3 / 4" }) {
                 </>
               )}
               <span style={{ color: "var(--qb-text-faint)" }}>· faint = n&lt;3 · "·" = no data</span>
+            </div>
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15b · SESSION PERFORMANCE HEATMAP  (v15.3)
+// =====================================================================
+// Template rows × session columns. Color by net P&L or win rate.
+// Data from recognition-memory?action=session-heatmap (server-side).
+
+const SESSION_LABELS = { ASIAN: 'Asia', LONDON: 'London', NY_AM: 'NY AM', NY_PM: 'NY PM', WEEKEND: 'Wknd', OFF: 'Off' };
+const SESSION_ORDER  = ['ASIAN', 'LONDON', 'NY_AM', 'NY_PM', 'WEEKEND', 'OFF'];
+
+function sessHeatColor(metric, cell) {
+  if (!cell || cell.n === 0) return 'var(--qb-border)';
+  if (metric === 'wr') {
+    if (cell.wr >= 0.6) return 'var(--qb-ok)';
+    if (cell.wr >= 0.45) return 'var(--qb-warn)';
+    return 'var(--qb-bad)';
+  }
+  // net P&L
+  if (cell.pnl > 0) return 'var(--qb-ok)';
+  if (cell.pnl < 0) return 'var(--qb-bad)';
+  return 'var(--qb-text-faint)';
+}
+
+function sessHeatText(metric, cell) {
+  if (!cell || cell.n === 0) return '·';
+  if (metric === 'wr') return `${Math.round(cell.wr * 100)}%`;
+  const sign = cell.pnl >= 0 ? '+' : '';
+  return `${sign}$${Math.round(cell.pnl)}`;
+}
+
+function SessionHeatmapPanel({ gridColumn = "1 / 4" }) {
+  const [data, setData]     = useState(null);
+  const [error, setError]   = useState(null);
+  const [metric, setMetric] = useState('pnl'); // 'pnl' | 'wr'
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('recognition-memory?action=session-heatmap')).then((res) => res.json());
+        if (!alive) return;
+        if (r?.ok) { setData(r); setError(null); }
+        else setError(r?.error || 'endpoint error');
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const sessions = data?.sessions?.filter((s) => SESSION_ORDER.includes(s))
+    .sort((a, b) => SESSION_ORDER.indexOf(a) - SESSION_ORDER.indexOf(b)) || SESSION_ORDER;
+
+  const rows = data
+    ? TEMPLATE_ORDER.filter((t) => data.templates.includes(t))
+        .concat(data.templates.filter((t) => !TEMPLATE_ORDER.includes(t)).sort())
+    : TEMPLATE_ORDER;
+
+  return (
+    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn }}>
+      <div style={{ padding: 10, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          {[{ id: 'pnl', label: 'Net P&L' }, { id: 'wr', label: 'Win %' }].map((opt) => (
+            <button key={opt.id} onClick={() => setMetric(opt.id)} className="qb-mono" style={{
+              background: metric === opt.id ? 'var(--qb-accent-soft)' : 'transparent',
+              color: metric === opt.id ? 'var(--qb-accent)' : 'var(--qb-text-mid)',
+              border: `1px solid ${metric === opt.id ? 'var(--qb-accent)' : 'var(--qb-border)'}`,
+              borderRadius: 3, padding: '4px 8px', fontSize: 9, cursor: 'pointer',
+              letterSpacing: 0.5, textTransform: 'uppercase',
+            }}>{opt.label}</button>
+          ))}
+          {data && (
+            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 6 }}>
+              {data.total} trades · {data.sessions?.length || 0} sessions
+            </span>
+          )}
+        </div>
+
+        {error && <PlaceholderError msg={`Session heatmap: ${error}`} />}
+        {!error && !data && <Placeholder msg="Loading session data…" />}
+
+        {data && (
+          <div style={{ overflow: 'auto' }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: `80px repeat(${sessions.length}, minmax(56px, 1fr))`,
+              gap: 2,
+            }}>
+              {/* header */}
+              <div />
+              {sessions.map((s) => (
+                <div key={`h-${s}`} className="qb-mono" style={{
+                  fontSize: 8, color: 'var(--qb-text-faint)', textAlign: 'center',
+                  letterSpacing: 0.4, padding: '2px 0',
+                }}>{SESSION_LABELS[s] || s}</div>
+              ))}
+
+              {/* template rows */}
+              {rows.map((t) => {
+                const meta = TEMPLATE_DISPLAY[t];
+                const row  = data.matrix?.[t] || {};
+                return (
+                  <Fragment key={t}>
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 4,
+                      fontSize: 9, color: 'var(--qb-text-mid)', overflow: 'hidden',
+                    }} title={meta?.label || t}>
+                      <span style={{ fontSize: 11 }}>{meta?.glyph || '·'}</span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {meta?.label || t}
+                      </span>
+                    </div>
+                    {sessions.map((s) => {
+                      const cell = row[s] || null;
+                      const col  = sessHeatColor(metric, cell);
+                      const dimmed = cell && cell.n > 0 && cell.n < 8;
+                      return (
+                        <div key={`${t}-${s}`} className="qb-mono"
+                          title={cell ? `${meta?.label || t} · ${SESSION_LABELS[s] || s} · n=${cell.n} · WR=${Math.round(cell.wr * 100)}% · net=$${Math.round(cell.pnl)} · avgR=${cell.avgR ?? '—'}` : `${meta?.label || t} · ${SESSION_LABELS[s] || s} · no trades`}
+                          style={{
+                            background: 'var(--qb-bg-panel-hi)',
+                            border: `1px solid ${cell && cell.n ? col : 'var(--qb-border)'}`,
+                            borderRadius: 3, padding: '4px 2px',
+                            textAlign: 'center', fontSize: 9, color: col,
+                            opacity: dimmed ? 0.6 : 1,
+                            lineHeight: 1.3,
+                          }}
+                        >
+                          {cell && cell.n > 0 ? (
+                            <>
+                              <div style={{ fontSize: 7, color: 'var(--qb-text-faint)' }}>n={cell.n}</div>
+                              <div>{sessHeatText(metric, cell)}</div>
+                            </>
+                          ) : '·'}
+                        </div>
+                      );
+                    })}
+                  </Fragment>
+                );
+              })}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 8, fontSize: 8, color: 'var(--qb-text-faint)', flexWrap: 'wrap' }}>
+              {metric === 'wr' ? (
+                <><LegendDot color="var(--qb-ok)" label="≥60%" /><LegendDot color="var(--qb-warn)" label="45–60%" /><LegendDot color="var(--qb-bad)" label="<45%" /></>
+              ) : (
+                <><LegendDot color="var(--qb-ok)" label="+P&L" /><LegendDot color="var(--qb-bad)" label="-P&L" /></>
+              )}
+              <span>· faint = n&lt;8 (insufficient sample) · hover for details</span>
             </div>
           </div>
         )}

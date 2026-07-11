@@ -48,6 +48,27 @@ const CFG = {
   emaPeriod:       50,    // the 50 EMA confluence
 };
 
+// ── FIX6 flag: count raw body touches, not just distinct visit-runs ───────────
+// PDF says "at least three touches (body, not wicks)." The original code uses
+// `visits` — distinct approach runs — which is stricter. When FIX6 is ON, a zone
+// qualifies if it has >=3 body touches OR >=3 distinct visits. Flip to false to
+// revert to visit-only counting.
+const FIX6_TOUCH_COUNTING = true;
+
+// ── fixlog writer (fire-and-forget, mirrors alexg-entry.js helper) ────────────
+let _getRedisAOI = null;
+function _writeAoiFixLog(entry) {
+  try {
+    if (!_getRedisAOI) { try { _getRedisAOI = require('./_lib').getRedis; } catch (_) {} }
+    const r = _getRedisAOI ? _getRedisAOI() : null;
+    if (!r) return;
+    const line = JSON.stringify({ ...entry, ts: entry.ts || Date.now() });
+    r.rpush('v13:alexg:fixlog', line)
+      .then(() => r.ltrim('v13:alexg:fixlog', -1000, -1))
+      .catch(() => {});
+  } catch (_) {}
+}
+
 // ─── helpers ────────────────────────────────────────────────────────
 function bodyLowOf(c)  { return Math.min(c.open, c.close); }
 function bodyHighOf(c) { return Math.max(c.open, c.close); }
@@ -115,7 +136,17 @@ function buildZones(candles, pivots, kind, atrVal, opts = {}) {
       if (ov) { touches++; lastTouchIdx = i; if (!inRun) { visits++; inRun = true; } }
       else inRun = false;
     }
-    if (visits >= minTouches) {
+    // FIX6: qualify on raw body-touch count OR distinct visit-runs.
+    // PDF says ">=3 body touches" — original code required >=3 separate visit-runs
+    // (stricter). With FIX6 ON, either criterion is sufficient.
+    const qualifies = FIX6_TOUCH_COUNTING
+      ? (touches >= minTouches || visits >= minTouches)
+      : (visits >= minTouches);
+    // FIX6 log: zone would not have qualified under the old visit-only rule
+    if (FIX6_TOUCH_COUNTING && touches >= minTouches && visits < minTouches) {
+      _writeAoiFixLog({ fix: 'RANK6', reason: 'zone qualified by body-touch count (not visit-runs)', tf: 'D/W', assetId: 'n/a', detail: { touches, visits, minTouches, lo: Math.round(lo * 1e5) / 1e5, hi: Math.round(hi * 1e5) / 1e5 } });
+    }
+    if (qualifies) {
       raw.push({ kind, lo, hi, mid: (lo + hi) / 2, touches, visits, anchorIdx: a.idx, lastTouchIdx });
     }
   }

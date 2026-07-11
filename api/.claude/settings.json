@@ -11,7 +11,10 @@
       "Bash(curl -s \"https://quantum-bot-omars-projects-ad9e75b3.vercel.app/api/alexg-heartbeat\")",
       "Bash(curl -sL \"https://quantum-bot-omars-projects-ad9e75b3.vercel.app/api/alexg-heartbeat\")",
       "Bash(curl -sv \"https://talented-doe-70974.upstash.io/get/v13:alexg:heartbeat?_token=gQAAAAAAARU-AAIncDIxMzJkZWM3YTJjNzY0MjViOTRjNTQyYjFlZDg1MTk4OXAyNzA5NzQ\")",
-      "Bash(curl -s --max-time 10 \"https://quantum-bot-shadowblaknight.vercel.app/api/alexg-heartbeat\")"
+      "Bash(curl -s --max-time 10 \"https://quantum-bot-shadowblaknight.vercel.app/api/alexg-heartbeat\")",
+      "Bash(node --experimental-fetch analyze_sessions.mjs)",
+      "Bash(powershell -Command \"\\(Get-Content 'C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\src\\\\App.jsx'\\).Count\")",
+      "Bash(node --check \"C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\api\\\\recognition-memory.js\")"
     ]
   }
 }

@@ -285,7 +285,7 @@ async function evaluateTrade(asset, opts = {}) {
 
   return plan(asset, {
     direction: dir, tradeType: entry.tradeType, triggerTF: entry.triggerTF,
-    tradeable,
+    tradeable, highRisk: !!(entry && entry.highRisk),
     reason: tradeable ? 'all gates passed' : notes.join('; '),
     entry: round(entryPx, pip), sl: round(sl, pip), tp: round(tp, pip),
     rr: rr == null ? null : Math.round(rr * 100) / 100,
@@ -335,7 +335,7 @@ async function evaluateUniverse(assets, opts = {}) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 function round(x, pip) { if (x == null || !isFinite(x)) return null; const dec = pip < 0.01 ? 5 : pip < 1 ? 3 : 2; return Math.round(x * 10 ** dec) / 10 ** dec; }
-function plan(asset, o) { return { asset, direction: o.direction || null, tradeType: o.tradeType || null, triggerTF: o.triggerTF || null, tradeable: !!o.tradeable, reason: o.reason || null, entry: o.entry != null ? o.entry : null, sl: o.sl != null ? o.sl : null, tp: o.tp != null ? o.tp : null, rr: o.rr != null ? o.rr : null, riskPips: o.riskPips != null ? o.riskPips : null, rewardPips: o.rewardPips != null ? o.rewardPips : null, tpSource: o.tpSource || null, zone: o.zone || null, grade: o.grade || null, patterns: o.patterns || [], session: o.session || null, confluences: o.confluences || null, notes: o.notes || [], funnel: o.funnel || null, evaluatedAt: Date.now() }; }
+function plan(asset, o) { return { asset, direction: o.direction || null, tradeType: o.tradeType || null, triggerTF: o.triggerTF || null, tradeable: !!o.tradeable, highRisk: !!o.highRisk, reason: o.reason || null, entry: o.entry != null ? o.entry : null, sl: o.sl != null ? o.sl : null, tp: o.tp != null ? o.tp : null, rr: o.rr != null ? o.rr : null, riskPips: o.riskPips != null ? o.riskPips : null, rewardPips: o.rewardPips != null ? o.rewardPips : null, tpSource: o.tpSource || null, zone: o.zone || null, grade: o.grade || null, patterns: o.patterns || [], session: o.session || null, confluences: o.confluences || null, notes: o.notes || [], funnel: o.funnel || null, evaluatedAt: Date.now() }; }
 
 // ─── FUNNEL: read-only progress trace for the dashboard ─────────────
 // Purely diagnostic. Turns the discarded bias/AOI/entry objects into a

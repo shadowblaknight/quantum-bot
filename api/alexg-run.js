@@ -251,6 +251,7 @@ async function runAlexg(opts = {}) {
         style, template: 'alexg',
         targets: [{ price: rTP, rMultiple: rOf(rTP) }],
         grade: { letter: plan.grade.letter, pct: plan.grade.pct }, patterns: plan.patterns || [],
+        highRisk: !!plan.highRisk,
       },
       recognition: { advice: 'neutral', matchCount: 0, wins: 0, losses: 0, confidence: 'none' },
       sizing: { baseLot: lot, recommendedLot: lot },
@@ -297,6 +298,19 @@ module.exports = async (req, res) => {
                     (cronSecret  && (key === cronSecret  || key === `Bearer ${cronSecret}`));
       if (!keyOk) return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
+    // ── fixlog read: GET /api/alexg-run?action=fixlog ─────────────────────────
+    if (q.action === 'fixlog') {
+      let r; try { r = require('./_lib').getRedis(); } catch (_) {}
+      if (!r) return res.status(200).json({ ok: true, entries: [], note: 'redis unavailable' });
+      const raw = await r.lrange('v13:alexg:fixlog', 0, -1).catch(() => []);
+      const entries = (raw || []).map((line) => { try { return JSON.parse(line); } catch (_) { return { raw: line }; } });
+      const byFix = {};
+      for (const e of entries) { const k = e.fix || 'unknown'; if (!byFix[k]) byFix[k] = []; byFix[k].push(e); }
+      const fixSummary = {};
+      for (const k of Object.keys(byFix)) fixSummary[k] = byFix[k].length;
+      return res.status(200).json({ ok: true, total: entries.length, summary: fixSummary, entries });
+    }
+
     const dryRun = q.dry === '1' || q.dry === 'true';
     const summary = await runAlexg({ dryRun });
     // heartbeat: record a healthy run (proves the cron is alive). Never throws.
