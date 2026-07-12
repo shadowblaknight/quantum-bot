@@ -62,12 +62,11 @@ const TF_CACHE_TTL = {
 //   added a 3.5s/2-attempt retry, which (a) aborted slow-but-ALIVE MetaAPI
 //   responses early and blanked the dashboard, and (b) doubled request volume.
 //   This version keeps a single attempt (no load doubling) but raises the
-//   timeout to 8s so a slow-but-healthy MetaAPI gets time to answer instead of
-//   being killed at 3.5s. Still caps under Vercel's 10s limit, so it cannot
-//   reintroduce the original hang-to-504. If MetaAPI returns a fast error
-//   (e.g. 503 nginx page, region mismatch), that comes back immediately and is
-//   reported as-is — the timeout only matters for genuinely slow responses.
-const BROKER_TIMEOUT_MS   = parseInt(process.env.BROKER_TIMEOUT_MS, 10)   || 8000;
+//   timeout to 14s so a slow-but-healthy MetaAPI gets time to answer. The
+//   original 8s was too tight — MetaAPI has been observed taking >8s during
+//   low-activity hours (01:00–05:00 UTC). manage-trades has a 30s maxDuration
+//   so 14s is well within budget and still safely below the platform kill limit.
+const BROKER_TIMEOUT_MS   = parseInt(process.env.BROKER_TIMEOUT_MS, 10)   || 14000;
 const BROKER_MAX_ATTEMPTS = parseInt(process.env.BROKER_MAX_ATTEMPTS, 10) || 1;
 const BROKER_BACKOFF_MS   = parseInt(process.env.BROKER_BACKOFF_MS, 10)   || 500;
 const RETRYABLE_STATUS    = new Set([408, 425, 429, 500, 502, 503, 504]);

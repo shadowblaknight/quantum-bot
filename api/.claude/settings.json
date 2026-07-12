@@ -14,7 +14,8 @@
       "Bash(curl -s --max-time 10 \"https://quantum-bot-shadowblaknight.vercel.app/api/alexg-heartbeat\")",
       "Bash(node --experimental-fetch analyze_sessions.mjs)",
       "Bash(powershell -Command \"\\(Get-Content 'C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\src\\\\App.jsx'\\).Count\")",
-      "Bash(node --check \"C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\api\\\\recognition-memory.js\")"
+      "Bash(node --check \"C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\api\\\\recognition-memory.js\")",
+      "Read(//c/Users/Omar Nasr/quantum-bot/**)"
     ]
   }
 }
