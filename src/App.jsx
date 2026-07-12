@@ -528,6 +528,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         {/* ─── v14 · Macro regime risk dial (full width) ─── */}
         <RegimePanel regime={regime} onSetOverride={setRegimeOverride} />
 
+        {/* ─── v15.3 · Regime Detector shadow validation (full width) ─── */}
+        <RegimeDetectorShadowPanel />
+
         {/* ─── v14 · Day-vs-Swing comparison (full width) ─── */}
         <StyleComparisonPanel />
 
@@ -3088,6 +3091,140 @@ function PerfHeatmapPanel({ perf, watchlist, gridColumn = "3 / 4" }) {
 }
 
 // =====================================================================
+// 15a · REGIME DETECTOR SHADOW PANEL  (v15.3)
+// =====================================================================
+// Shows the shadow-mode regime detector validation data.
+// Always renders — zero shadow records is the expected initial state.
+
+const REGIME_COLORS_MAP = {
+  'NEWS-BLOCKED': 'var(--qb-bad)',
+  'ERRATIC':      'var(--qb-bad)',
+  'CHOPPY':       'var(--qb-warn)',
+  'TRENDING':     'var(--qb-ok)',
+  'NORMAL':       'var(--qb-text-hi)',
+};
+
+function RegimeDetectorShadowPanel({ gridColumn = "1 / 4" }) {
+  const [summary, setSummary]       = useState(null);
+  const [vixData, setVixData]       = useState(null);
+  const [thresholds, setThresholds] = useState(null);
+  const [error, setError]           = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const [sumR, vixR, thrR] = await Promise.all([
+          fetch(API('regime-detector?action=shadow-summary')).then((r) => r.json()),
+          fetch(API('regime-detector?action=vix')).then((r) => r.json()),
+          fetch(API('regime-detector?action=thresholds')).then((r) => r.json()),
+        ]);
+        if (!alive) return;
+        if (sumR && sumR.error && !sumR.ok) setError(sumR.error);
+        else { setSummary(sumR || {}); setError(null); }
+        if (vixR?.ok)  setVixData(vixR.vixData);
+        if (thrR?.ok)  setThresholds(thrR.THRESHOLDS);
+      } catch (e) { if (alive) setError(e.message); }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const total     = summary?.totalShadowed ?? 0;
+  const byRegime  = summary?.byRegime || [];
+  const vix       = vixData?.vix;
+  const vixDate   = vixData?.date;
+  const vixCalm   = thresholds?.vix?.calm ?? 15;
+  const vixStress = thresholds?.vix?.stressed ?? 20;
+  const vixColor  = vix == null ? 'var(--qb-text-faint)'
+    : vix > vixStress ? 'var(--qb-bad)'
+    : vix < vixCalm   ? 'var(--qb-ok)'
+    : 'var(--qb-warn)';
+
+  return (
+    <Panel title="Regime Detector" subtitle="shadow mode · validation only · not gating trades yet" style={{ gridColumn }}>
+      <div style={{ padding: 12, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+        {/* Status bar — always visible */}
+        <div style={{ display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap', paddingBottom: 8, borderBottom: '1px solid var(--qb-border)' }}>
+          <div className="qb-mono" style={{ fontSize: 11 }}>
+            VIX&nbsp;
+            {vix != null ? (
+              <>
+                <span style={{ color: vixColor, fontSize: 14, fontWeight: 600 }}>{vix.toFixed(1)}</span>
+                <span style={{ color: 'var(--qb-text-faint)', fontSize: 9 }}> as of {vixDate}</span>
+                <span style={{ color: 'var(--qb-text-faint)', fontSize: 9 }}> · calm &lt;{vixCalm} · stressed &gt;{vixStress}</span>
+              </>
+            ) : (
+              <span style={{ color: 'var(--qb-text-faint)' }}>loading…</span>
+            )}
+          </div>
+          <div className="qb-mono" style={{ fontSize: 10, color: 'var(--qb-text-faint)' }}>
+            Shadow log:&nbsp;
+            <span style={{ color: total > 0 ? 'var(--qb-text-hi)' : 'var(--qb-text-faint)' }}>
+              {total} signal{total !== 1 ? 's' : ''} logged
+            </span>
+            {summary?.matchedToLedger != null && total > 0 && (
+              <span>&nbsp;· {summary.matchedToLedger} matched to ledger</span>
+            )}
+          </div>
+          {error && (
+            <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-bad)' }}>⚠ {error}</span>
+          )}
+        </div>
+
+        {/* Empty state — expected right after deploy */}
+        {byRegime.length === 0 ? (
+          <div style={{ padding: '18px 0', textAlign: 'center', fontSize: 11, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+            {summary == null && !error
+              ? 'Loading…'
+              : `Collecting shadow data — ${total} signal${total !== 1 ? 's' : ''} logged so far. Records accumulate as live signals arrive.`}
+          </div>
+        ) : (
+          /* By-regime breakdown table */
+          <div style={{ overflow: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+              <thead>
+                <tr style={{ color: 'var(--qb-text-faint)' }}>
+                  {['Regime', 'Signals', 'Matched', 'Gated P&L', 'Est. saved', 'Actions'].map((h, i) => (
+                    <th key={h} className="qb-mono" style={{ padding: '4px 8px', borderBottom: '1px solid var(--qb-border)', fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: i === 0 ? 'left' : 'right' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {byRegime.map((g) => {
+                  const col = REGIME_COLORS_MAP[g.regime] || 'var(--qb-text-mid)';
+                  const actions = Object.values(g.byAction || {}).map((a) => `${a.wouldAction}×${a.signals}`).join(' / ');
+                  const saved = g.detectorWouldHaveSaved;
+                  return (
+                    <tr key={g.regime} style={{ borderBottom: '1px solid var(--qb-border)' }}>
+                      <td className="qb-mono" style={{ padding: '6px 8px', color: col, fontWeight: 700 }}>{g.regime}</td>
+                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--qb-text-hi)' }}>{g.signals}</td>
+                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--qb-text-mid)' }}>{g.matchedToLedger}</td>
+                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: g.gatedNetPnl < 0 ? 'var(--qb-bad)' : 'var(--qb-ok)' }}>
+                        {g.gatedNetPnl != null ? `$${g.gatedNetPnl.toFixed(2)}` : '—'}
+                      </td>
+                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: saved > 0 ? 'var(--qb-ok)' : saved < 0 ? 'var(--qb-bad)' : 'var(--qb-text-faint)' }}>
+                        {saved != null ? `${saved >= 0 ? '+' : ''}$${saved.toFixed(2)}` : '—'}
+                      </td>
+                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--qb-text-faint)', fontSize: 9 }}>{actions}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {summary?.unmatchedNote && (
+              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', marginTop: 6, fontStyle: 'italic' }}>ℹ {summary.unmatchedNote}</div>
+            )}
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
 // 15b · SESSION PERFORMANCE HEATMAP  (v15.3)
 // =====================================================================
 // Template rows × session columns. Color by net P&L or win rate.
@@ -3145,8 +3282,8 @@ function SessionHeatmapPanel({ gridColumn = "1 / 4" }) {
     : TEMPLATE_ORDER;
 
   return (
-    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn }}>
-      <div style={{ padding: 10, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn, minHeight: '440px' }}>
+      <div style={{ padding: 10, height: '100%', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
 
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           {[{ id: 'pnl', label: 'Net P&L' }, { id: 'wr', label: 'Win %' }].map((opt) => (
