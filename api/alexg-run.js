@@ -303,7 +303,10 @@ module.exports = async (req, res) => {
       let r; try { r = require('./_lib').getRedis(); } catch (_) {}
       if (!r) return res.status(200).json({ ok: true, entries: [], note: 'redis unavailable' });
       const raw = await r.lrange('v13:alexg:fixlog', 0, -1).catch(() => []);
-      const entries = (raw || []).map((line) => { try { return JSON.parse(line); } catch (_) { return { raw: line }; } });
+      const entries = (raw || []).map((line) => {
+        if (line !== null && typeof line === 'object') return line;
+        try { return JSON.parse(line); } catch (_) { return { raw: line }; }
+      });
       const byFix = {};
       for (const e of entries) { const k = e.fix || 'unknown'; if (!byFix[k]) byFix[k] = []; byFix[k].push(e); }
       const fixSummary = {};
