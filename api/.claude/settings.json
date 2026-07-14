@@ -16,7 +16,8 @@
       "Bash(powershell -Command \"\\(Get-Content 'C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\src\\\\App.jsx'\\).Count\")",
       "Bash(node --check \"C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\api\\\\recognition-memory.js\")",
       "Read(//c/Users/Omar Nasr/quantum-bot/**)",
-      "Read(//c/Users/Omar Nasr/quantum-bot/src/**)"
+      "Read(//c/Users/Omar Nasr/quantum-bot/src/**)",
+      "WebFetch(domain:quantum-bot-mocha.vercel.app)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Omar Nasr\\quantum-bot\\src"

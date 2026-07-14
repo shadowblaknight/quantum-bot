@@ -434,11 +434,16 @@ async function computeShadowSummary({ since, until } = {}) {
     })
     .filter(Boolean);
 
-  // 3. Ledger index + batch-fetch trades in a wider window for matching
+  // 3. Ledger index + batch-fetch trades in a wider window for matching.
+  // Limit orders can fill hours after the signal fires (e.g. ORB at 14:00 fills at 15:30,
+  // or a set-and-forget limit held overnight). MATCH_WINDOW_MS is the forward search width.
+  const MATCH_WINDOW_MS = 8 * 60 * 60 * 1000; // 8 h forward from signal time
   const ledgerIndexRaw = await redis.get(LEDGER_INDEX_KEY).catch(() => null);
   const ledgerSlice = (safeParse(ledgerIndexRaw) || []).filter((e) => {
     const t = e.closedAt ? new Date(e.closedAt).getTime() : 0;
-    return t >= sinceMs - 60 * 60 * 1000 && t <= untilMs + 4 * 60 * 60 * 1000;
+    // Extend ceiling: a trade that opened up to MATCH_WINDOW_MS after 'until' and ran
+    // intraday (≤24h) would close up to MATCH_WINDOW_MS+24h after 'until'.
+    return t >= sinceMs - 60 * 60 * 1000 && t <= untilMs + MATCH_WINDOW_MS + 24 * 60 * 60 * 1000;
   });
 
   const ledgerPipe = redis.pipeline();
@@ -451,19 +456,40 @@ async function computeShadowSummary({ since, until } = {}) {
     })
     .filter(Boolean);
 
-  // 4. Match each shadow record to a ledger trade (asset + template + direction + ±15min)
-  const MATCH_WINDOW_MS = 15 * 60 * 1000;
-  const paired = shadowRecords.map((sr) => {
-    const signalTs = sr.ts || 0;
-    const match = ledgerRecords.find((lr) =>
-      lr.asset === sr.assetId &&
-      lr.template === sr.template &&
-      lr.direction === sr.direction &&
-      lr.openedAt &&
-      Math.abs(new Date(lr.openedAt).getTime() - signalTs) < MATCH_WINDOW_MS
-    );
-    return { shadow: sr, ledger: match || null };
-  });
+  // 4. Match each shadow record to a ledger trade.
+  //
+  // Rules applied in this order:
+  //   Forward-only  — openedAt must be >= signalTs (a fill can't precede the signal).
+  //   First-fill    — among qualifying candidates, take the earliest openedAt.
+  //   No double-claim — a ledger trade may match at most one shadow record; process
+  //                    shadows oldest-first so the signal that "owns" the fill wins.
+  //   Case-insensitive direction — Pine may send 'LONG' or 'long'.
+  //
+  // The ID-join alternative (option a) was ruled out: the ledger record id is
+  // `trade_{asset}_{positionId}` (a broker position ID) which is never written to the
+  // shadow record. There is no shared key between the two stores.
+  const claimed = new Set();
+  const paired = shadowRecords
+    .slice()
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+    .map((sr) => {
+      const signalTs = sr.ts || 0;
+      const dir = (sr.direction || '').toUpperCase();
+      const candidates = ledgerRecords
+        .filter((lr) => {
+          if (claimed.has(lr.id)) return false;
+          const openedMs = lr.openedAt ? new Date(lr.openedAt).getTime() : 0;
+          return (lr.asset     || '').toLowerCase() === (sr.assetId  || '').toLowerCase() &&
+                 lr.template                         === sr.template                       &&
+                 (lr.direction || '').toUpperCase()  === dir                               &&
+                 openedMs >= signalTs                                                       &&
+                 openedMs <= signalTs + MATCH_WINDOW_MS;
+        })
+        .sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt));
+      const match = candidates[0] || null;
+      if (match) claimed.add(match.id);
+      return { shadow: sr, ledger: match || null };
+    });
 
   // 5. Group by regime × wouldAction and aggregate P&L
   const byRegime = {};
@@ -517,7 +543,7 @@ async function computeShadowSummary({ since, until } = {}) {
     totalShadowed: shadowRecords.length,
     matchedToLedger: totalMatched,
     unmatchedNote: totalMatched < shadowRecords.length
-      ? `${shadowRecords.length - totalMatched} shadow records have no matching ledger trade yet (trade may be open, or opened >15min after signal)`
+      ? `${shadowRecords.length - totalMatched} shadow records have no matching ledger trade yet (trade may still be open, or the fill arrived outside the 8-hour forward window)`
       : null,
     byRegime: Object.values(byRegime).sort((a, b) => b.signals - a.signals),
     howToRead: {

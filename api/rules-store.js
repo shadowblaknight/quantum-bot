@@ -95,6 +95,12 @@ const DEFAULT_RULES = {
     nas100: makeInstrumentDefault('nas100', { fixedLot: 0.20, maxLot: 0.50, fixedSLPips: 60 }),
     us500:  makeInstrumentDefault('us500',  { fixedLot: 0.20, maxLot: 1.00, fixedSLPips: 25 }),
     btc:    makeInstrumentDefault('btc',    { fixedLot: 0.03, maxLot: 0.08, fixedSLPips: 150 }),
+    usdchf: makeInstrumentDefault('usdchf', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 15 }),
+    audusd: makeInstrumentDefault('audusd', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 15 }),
+    nzdusd: makeInstrumentDefault('nzdusd', { fixedLot: 0.30, maxLot: 1.00, fixedSLPips: 15 }),
+    usdcad: makeInstrumentDefault('usdcad', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 15 }),
+    eurjpy: makeInstrumentDefault('eurjpy', { fixedLot: 0.30, maxLot: 1.00, fixedSLPips: 25 }),
+    gbpjpy: makeInstrumentDefault('gbpjpy', { fixedLot: 0.20, maxLot: 0.80, fixedSLPips: 35 }),
   },
 
   templateOverrides: {
