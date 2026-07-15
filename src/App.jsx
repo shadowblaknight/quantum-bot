@@ -2496,7 +2496,7 @@ const ES_SESS_SHORT = {
 
 function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
   const [data, setData]           = useState(null);
-  const [error, setError]         = useState(null);
+  const [fetchError, setFetchError] = useState(null);
   const [lastFetch, setLastFetch] = useState(null);
   const [ready, setReady]         = useState(false);
 
@@ -2506,10 +2506,11 @@ function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
       try {
         const r = await fetch(API("entrystyle-summary")).then((res) => res.json());
         if (!alive) return;
-        if (r?.ok) { setData(r); setError(null); }
-        else { setData(null); setError(r?.error || "not ready"); }
+        // Only set data when ok:true — never expose the not-ready shape downstream
+        if (r?.ok === true) { setData(r); setFetchError(null); }
+        else { setData(null); setFetchError(r?.error || "not ready"); }
       } catch (e) {
-        if (alive) setError(e.message);
+        if (alive) { setData(null); setFetchError(e.message); }
       }
       if (alive) { setLastFetch(new Date()); setReady(true); }
     };
@@ -2518,99 +2519,124 @@ function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  // Use server-provided lists so new templates appear automatically
-  const templates = data?.templates ?? [];
-  const sessions  = data?.sessions  ?? [];
-  const getCell   = (tmpl, sess) => data?.byTemplateSession?.[`${tmpl}|${sess}`] ?? null;
+  // ── GUARD: never access data.templates / .sessions / .byTemplateSession
+  //           before confirming data.ok. Only reach the grid render when ok===true.
+  const dataOk = data?.ok === true;
 
-  const nResolved = data?.totals?.nResolved ?? 0;
+  const panelProps = {
+    title: "Immediate vs Retest",
+    subtitle: "shadow EV · reaction + orb + ICT templates · not live gating",
+    style: { gridColumn },
+  };
+
+  // ── NOT READY state — renders a clearly visible collecting badge ──────────
+  if (!ready || !dataOk) {
+    const isNetworkError = ready && fetchError && fetchError !== "not ready";
+    return (
+      <Panel {...panelProps}>
+        <div style={{ padding: "14px 16px", minHeight: 120 }}>
+          {!ready && <Placeholder msg="Loading entry-style shadow data…" />}
+          {ready && !isNetworkError && (
+            <div style={{
+              padding: "10px 14px",
+              background: "var(--qb-bg-void)",
+              border: "1px solid var(--qb-border)",
+              borderRadius: 4,
+              fontSize: 10,
+              color: "var(--qb-text-mid)",
+              lineHeight: 1.7,
+            }}>
+              <div style={{ fontWeight: 600, color: "var(--qb-text-hi)", marginBottom: 4 }}>
+                Collecting entry-style data
+              </div>
+              Needs resolved reaction / orb trades to populate. Shadow records write on every
+              signal and evaluate after 4 h. No data yet (0 resolved).
+              {lastFetch && (
+                <div style={{ marginTop: 6, fontSize: 8, color: "var(--qb-text-faint)" }}>
+                  Last checked: {lastFetch.toLocaleTimeString()}
+                </div>
+              )}
+            </div>
+          )}
+          {isNetworkError && (
+            <PlaceholderError msg={`Cannot reach /api/entrystyle-summary: ${fetchError}`} />
+          )}
+        </div>
+      </Panel>
+    );
+  }
+
+  // ── DATA READY — data.ok === true; safe to access all fields ─────────────
+  // data.templates, data.sessions, data.byTemplateSession are all present.
+  const templates = data.templates;
+  const sessions  = data.sessions;
+  const getCell   = (tmpl, sess) => data.byTemplateSession[`${tmpl}|${sess}`] ?? null;
 
   return (
-    <Panel
-      title="Immediate vs Retest"
-      subtitle="shadow EV · reaction + orb + ICT templates · not live gating"
-      style={{ gridColumn }}
-    >
+    <Panel {...panelProps}>
       <div style={{ padding: 12, overflow: "auto" }}>
+        <EntryStyleSummaryBar totals={data.totals} />
 
-        {!ready && <Placeholder msg="Loading entry-style shadow data…" />}
-
-        {ready && error && (
-          <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic", padding: "8px 4px" }}>
-            {error === "not ready"
-              ? `Collecting entry-style data — needs resolved reaction/orb trades to populate (${nResolved} so far).`
-              : `Cannot reach /api/entrystyle-summary: ${error}`}
+        {templates.length > 0 && sessions.length > 0 ? (
+          <div style={{ overflowX: "auto", marginTop: 10 }}>
+            <table style={{
+              borderCollapse: "collapse",
+              fontFamily: "var(--qb-font-mono)",
+              fontSize: 9,
+              tableLayout: "auto",
+              whiteSpace: "nowrap",
+            }}>
+              <thead>
+                <tr>
+                  <th style={{
+                    textAlign: "left", padding: "3px 10px 6px 2px",
+                    color: "var(--qb-text-faint)", fontWeight: 400, minWidth: 138,
+                  }}>
+                    Template
+                  </th>
+                  {sessions.map((s) => (
+                    <th key={s} style={{
+                      textAlign: "center", padding: "3px 4px 6px",
+                      color: "var(--qb-text-faint)", fontWeight: 400, minWidth: 112,
+                    }}>
+                      {ES_SESS_SHORT[s] || s}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {templates.map((tmpl) => {
+                  const meta = TEMPLATE_DISPLAY[tmpl];
+                  return (
+                    <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)" }}>
+                      <td style={{
+                        padding: "6px 10px 6px 2px", verticalAlign: "top",
+                        color: "var(--qb-text-hi)", fontSize: 10, lineHeight: 1.4,
+                      }}>
+                        {meta ? `${meta.glyph} ${meta.label}` : tmpl}
+                      </td>
+                      {sessions.map((sess) => (
+                        <td key={sess} style={{ padding: "3px", verticalAlign: "top" }}>
+                          <EntryStyleCell c={getCell(tmpl, sess)} />
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic", padding: "6px 4px" }}>
+            No resolved signals yet — accumulates after reaction/orb trades close out.
           </div>
         )}
 
-        {data && (
-          <>
-            <EntryStyleSummaryBar totals={data.totals} />
-
-            {templates.length > 0 && sessions.length > 0 ? (
-              <div style={{ overflowX: "auto", marginTop: 10 }}>
-                <table style={{
-                  borderCollapse: "collapse",
-                  fontFamily: "var(--qb-font-mono)",
-                  fontSize: 9,
-                  tableLayout: "auto",
-                  whiteSpace: "nowrap",
-                }}>
-                  <thead>
-                    <tr>
-                      <th style={{
-                        textAlign: "left", padding: "3px 10px 6px 2px",
-                        color: "var(--qb-text-faint)", fontWeight: 400,
-                        minWidth: 138,
-                      }}>
-                        Template
-                      </th>
-                      {sessions.map((s) => (
-                        <th key={s} style={{
-                          textAlign: "center", padding: "3px 4px 6px",
-                          color: "var(--qb-text-faint)", fontWeight: 400,
-                          minWidth: 112,
-                        }}>
-                          {ES_SESS_SHORT[s] || s}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {templates.map((tmpl) => {
-                      const meta = TEMPLATE_DISPLAY[tmpl];
-                      return (
-                        <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)" }}>
-                          <td style={{
-                            padding: "6px 10px 6px 2px", verticalAlign: "top",
-                            color: "var(--qb-text-hi)", fontSize: 10, lineHeight: 1.4,
-                          }}>
-                            {meta ? `${meta.glyph} ${meta.label}` : tmpl}
-                          </td>
-                          {sessions.map((sess) => (
-                            <td key={sess} style={{ padding: "3px", verticalAlign: "top" }}>
-                              <EntryStyleCell c={getCell(tmpl, sess)} />
-                            </td>
-                          ))}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic", padding: "6px 4px" }}>
-                No resolved signals yet — accumulates after reaction/orb trades close out.
-              </div>
-            )}
-
-            <div style={{ marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
-              EV = avg R-per-signal · RET EV discounts no-fills (no-fill → 0R in denominator) ·
-              badge requires n≥{ES_MIN_N} resolved and gap&gt;{ES_EV_GAP}R
-              {lastFetch && ` · refreshed ${lastFetch.toLocaleTimeString()}`}
-            </div>
-          </>
-        )}
+        <div style={{ marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
+          EV = avg R-per-signal · RET EV discounts no-fills (no-fill → 0R in denominator) ·
+          badge requires n≥{ES_MIN_N} resolved and gap&gt;{ES_EV_GAP}R
+          {lastFetch && ` · refreshed ${lastFetch.toLocaleTimeString()}`}
+        </div>
       </div>
     </Panel>
   );
