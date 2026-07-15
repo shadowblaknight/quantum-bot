@@ -209,6 +209,18 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   } catch (_regimeErr) {}
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── PHASE 2 ENTRYSTYLE SHADOW (read-only) ────────────────────────────────
+  // For signals that carry immediateEntry + retestEntry (branching templates),
+  // write a shadow record comparing what WOULD have happened under each entry
+  // style. Entirely isolated: try/catch, no downstream code reads from this block.
+  try {
+    if (p.immediateEntry != null && p.retestEntry != null && p.template !== 'ote-continuation') {
+      const { writeEntryStyleShadow } = require('./entrystyle-shadow');
+      writeEntryStyleShadow(p, dedupeKey, assetId).catch(() => {});
+    }
+  } catch (_esErr) {}
+  // ─────────────────────────────────────────────────────────────────────────
+
   // 6. Bounded fetch
   const [positions, capital] = await Promise.all([
     withTimeout(fetchPositions(), 1500, []),

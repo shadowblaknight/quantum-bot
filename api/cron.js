@@ -17,6 +17,7 @@ const { runExecuteTick } = require('./execute');
 const { runManageTick } = require('./manage-trades');
 const { checkKillZone, killZoneDisplayName } = require('./kill-zones');
 const { notifyKillZoneOpen, notifyKillZoneClose } = require('./telegram');
+const { runEntryStyleEvaluator } = require('./entrystyle-evaluator');
 
 const KZ_STATE_KEY = 'v12:killzone:lastSeen';
 
@@ -130,6 +131,14 @@ async function runFullCronTick() {
     manageResult = { error: String(e) };
   }
 
+  // Step 5: entrystyle shadow evaluator (fire-and-forget style; never blocks)
+  let entryStyleResult;
+  try {
+    entryStyleResult = await runEntryStyleEvaluator();
+  } catch (e) {
+    entryStyleResult = { error: String(e) };
+  }
+
   return {
     ts: t0,
     durationMs: Date.now() - t0,
@@ -137,6 +146,7 @@ async function runFullCronTick() {
     watcher: watcherResult,
     execute: executeResult,
     manage:  manageResult,
+    entryStyle: entryStyleResult,
   };
 }
 

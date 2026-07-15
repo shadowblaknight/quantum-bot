@@ -166,7 +166,8 @@ f_buildAlertPro(string dir, float entry, float sl,
                 float zU, float zL,
                 string sess, float wATR,
                 string tier, int biasAlign,
-                string conf, string filters) =>
+                string conf, string filters,
+                float immediateEntry, float retestEntry, string actualStyle) =>
     slRisk = math.abs(entry - sl)
     rr1    = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
     rr2    = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
@@ -180,7 +181,7 @@ f_buildAlertPro(string dir, float entry, float sl,
     prices = ",\"entry\":\"" + str.tostring(entry, format.mintick) + "\",\"sl\":\"" + str.tostring(sl, format.mintick) + "\",\"tp1\":\"" + str.tostring(tp1, format.mintick) + "\",\"tp2\":\"" + str.tostring(tp2, format.mintick) + "\",\"tp3\":\"" + str.tostring(tp3, format.mintick) + "\",\"rr1\":" + str.tostring(rr1, "0.00") + ",\"rr2\":" + str.tostring(rr2, "0.00") + ",\"rr3\":" + str.tostring(rr3, "0.00")
     zone   = ",\"zoneUpper\":\"" + str.tostring(zU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zL, format.mintick) + "\",\"zoneType\":\"ORB\""
     htf    = ",\"activeSession\":\"" + sess + "\",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
-    ctx    = ",\"window\":\"" + sess + "\",\"swept\":\"\",\"impulseATR\":" + str.tostring(wATR, "0.00") + ",\"filters\":\"" + filters + "\",\"apiKey\":\"" + alertApiKey + "\"}"
+    ctx    = ",\"window\":\"" + sess + "\",\"swept\":\"\",\"impulseATR\":" + str.tostring(wATR, "0.00") + ",\"filters\":\"" + filters + "\",\"immediateEntry\":\"" + str.tostring(immediateEntry, format.mintick) + "\",\"retestEntry\":\"" + str.tostring(retestEntry, format.mintick) + "\",\"actualStyle\":\"" + actualStyle + "\",\"apiKey\":\"" + alertApiKey + "\"}"
     readable + head + prices + zone + htf + ctx
 
 // ─── POSITION BOX ─────────────────────────────────────────────────────
@@ -257,7 +258,7 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                         orbFireEntry := orbEntryP
                         orbFireSL    := orbSLP
                         orbFireTP3   := orbT3
-                        alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, orbWATR, htfTier, htfAlign, confStr, lStr), alert.freq_once_per_bar)
+                        alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, orbWATR, htfTier, htfAlign, confStr, lStr, close, orbEntryP, "immediate"), alert.freq_once_per_bar)
                         if showPosBox
                             f_drawPosBox(orbEntryP, orbSLP, orbT3)
 
@@ -291,7 +292,7 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                 orbFireEntry     := orbEntryP
                 orbFireSL        := orbSLP
                 orbFireTP3       := orbT3
-                alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, (orbH - orbL) / atrVal, "B", 0, "orb-pro-retest-confirmed", "RETEST✓"), alert.freq_once_per_bar)
+                alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, (orbH - orbL) / atrVal, "B", 0, "orb-pro-retest-confirmed", "RETEST✓", close, orbEntryP, "retest"), alert.freq_once_per_bar)
                 if showPosBox
                     f_drawPosBox(orbEntryP, orbSLP, orbT3)
 

@@ -2481,119 +2481,264 @@ function TradeDataPanel({ gridColumn = "1 / 4" }) {
   );
 }
 
-// ─── v14 · Immediate vs Retest entry-style comparison (full width) ──────
+// ─── v15.6 · Immediate vs Retest shadow EV comparison (full width) ─────────
+// Reads /api/entrystyle-summary. Shadow records log what WOULD have happened
+// under both entry styles for reaction/orb/ICT templates that branch.
+// Winner = higher EV-per-signal; no-fills count as 0R in denominator.
+
+const ES_MIN_N  = 8;     // min nResolved before showing a decisive winner badge
+const ES_EV_GAP = 0.05;  // min |immEV − retestEV| in R for a decisive call
+
+const ES_SESS_SHORT = {
+  ASIAN: "Asia", LONDON: "London", NY_AM: "NY AM", NY_PM: "NY PM",
+  WEEKEND: "Wknd", OFF: "Off-hrs",
+};
+
 function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
-  const [trades, setTrades] = useState(null);
-  const [error, setError]   = useState(null);
-  const [view, setView]     = useState("overall");   // "overall" | "template"
+  const [data, setData]           = useState(null);
+  const [error, setError]         = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [ready, setReady]         = useState(false);
 
   useEffect(() => {
     let alive = true;
-    const tick = async () => {
+    const load = async () => {
       try {
-        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
-        if (alive) {
-          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
-          else setError(r?.error || "no trade data");
-        }
-      } catch (e) { if (alive) setError(e.message); }
+        const r = await fetch(API("entrystyle-summary")).then((res) => res.json());
+        if (!alive) return;
+        if (r?.ok) { setData(r); setError(null); }
+        else { setData(null); setError(r?.error || "not ready"); }
+      } catch (e) {
+        if (alive) setError(e.message);
+      }
+      if (alive) { setLastFetch(new Date()); setReady(true); }
     };
-    tick();
-    const id = setInterval(tick, 60000);
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  const all      = (trades || []).filter((t) => t.entryType === "immediate" || t.entryType === "retest");
-  const immAgg   = aggTrades(all.filter((t) => t.entryType === "immediate"));
-  const retAgg   = aggTrades(all.filter((t) => t.entryType === "retest"));
-  const untagged = (trades || []).filter((t) => t.entryType !== "immediate" && t.entryType !== "retest").length;
+  // Use server-provided lists so new templates appear automatically
+  const templates = data?.templates ?? [];
+  const sessions  = data?.sessions  ?? [];
+  const getCell   = (tmpl, sess) => data?.byTemplateSession?.[`${tmpl}|${sess}`] ?? null;
 
-  const byTemplate = {};
-  for (const t of all) {
-    const tmpl = t.template || (t.contributingTactics || [])[0] || "—";
-    if (!byTemplate[tmpl]) byTemplate[tmpl] = { immediate: [], retest: [] };
-    byTemplate[tmpl][t.entryType].push(t);
-  }
-  const templateRows = Object.keys(byTemplate).sort();
+  const nResolved = data?.totals?.nResolved ?? 0;
 
   return (
-    <Panel title="Immediate vs Retest" subtitle="which entry style is working" style={{ gridColumn }}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
-        {error && <PlaceholderError msg={`Comparison: ${error}`} />}
-        {!error && all.length === 0 && (
-          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No labeled trades yet. Immediate vs Retest stats appear here as new trades close — only trades placed since the v14 entry-routing update are tagged.
+    <Panel
+      title="Immediate vs Retest"
+      subtitle="shadow EV · reaction + orb + ICT templates · not live gating"
+      style={{ gridColumn }}
+    >
+      <div style={{ padding: 12, overflow: "auto" }}>
+
+        {!ready && <Placeholder msg="Loading entry-style shadow data…" />}
+
+        {ready && error && (
+          <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic", padding: "8px 4px" }}>
+            {error === "not ready"
+              ? `Collecting entry-style data — needs resolved reaction/orb trades to populate (${nResolved} so far).`
+              : `Cannot reach /api/entrystyle-summary: ${error}`}
           </div>
         )}
 
-        {all.length > 0 && (
+        {data && (
           <>
-            <div style={{ display: "flex", marginBottom: 12, borderBottom: "1px solid var(--qb-border)" }}>
-              {[["overall", "Overall"], ["template", "By template"]].map(([id, label]) => (
-                <button key={id} onClick={() => setView(id)} style={{
-                  padding: "5px 14px", background: "transparent", border: "none", cursor: "pointer",
-                  fontFamily: "var(--qb-font-mono)", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase",
-                  color: view === id ? "var(--qb-accent)" : "var(--qb-text-faint)",
-                  borderBottom: view === id ? "2px solid var(--qb-accent)" : "2px solid transparent",
-                  fontWeight: view === id ? 700 : 400,
-                }}>{label}</button>
-              ))}
-            </div>
+            <EntryStyleSummaryBar totals={data.totals} />
 
-            {view === "overall" && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <StyleStatCard title="IMMEDIATE" agg={immAgg} />
-                <StyleStatCard title="RETEST" agg={retAgg} />
-              </div>
-            )}
-
-            {view === "template" && (
-              <div style={{ overflow: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
+            {templates.length > 0 && sessions.length > 0 ? (
+              <div style={{ overflowX: "auto", marginTop: 10 }}>
+                <table style={{
+                  borderCollapse: "collapse",
+                  fontFamily: "var(--qb-font-mono)",
+                  fontSize: 9,
+                  tableLayout: "auto",
+                  whiteSpace: "nowrap",
+                }}>
                   <thead>
-                    <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
-                      <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
-                      <th style={{ padding: "4px 6px" }}>Imm n</th>
-                      <th style={{ padding: "4px 6px" }}>Imm WR</th>
-                      <th style={{ padding: "4px 6px" }}>Imm net</th>
-                      <th style={{ padding: "4px 6px" }}>Ret n</th>
-                      <th style={{ padding: "4px 6px" }}>Ret WR</th>
-                      <th style={{ padding: "4px 6px" }}>Ret net</th>
+                    <tr>
+                      <th style={{
+                        textAlign: "left", padding: "3px 10px 6px 2px",
+                        color: "var(--qb-text-faint)", fontWeight: 400,
+                        minWidth: 138,
+                      }}>
+                        Template
+                      </th>
+                      {sessions.map((s) => (
+                        <th key={s} style={{
+                          textAlign: "center", padding: "3px 4px 6px",
+                          color: "var(--qb-text-faint)", fontWeight: 400,
+                          minWidth: 112,
+                        }}>
+                          {ES_SESS_SHORT[s] || s}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {templateRows.map((tmpl) => {
-                      const i = aggTrades(byTemplate[tmpl].immediate);
-                      const s = aggTrades(byTemplate[tmpl].retest);
+                    {templates.map((tmpl) => {
                       const meta = TEMPLATE_DISPLAY[tmpl];
                       return (
-                        <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
-                          <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>
+                        <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)" }}>
+                          <td style={{
+                            padding: "6px 10px 6px 2px", verticalAlign: "top",
+                            color: "var(--qb-text-hi)", fontSize: 10, lineHeight: 1.4,
+                          }}>
                             {meta ? `${meta.glyph} ${meta.label}` : tmpl}
                           </td>
-                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{i.count || "·"}</td>
-                          <td style={{ padding: "4px 6px", color: wrColorOf(i.winRate) }}>{fmtWR(i.winRate)}</td>
-                          <td style={{ padding: "4px 6px", color: netColorOf(i.net) }}>{fmtNet(i.net, i.count)}</td>
-                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{s.count || "·"}</td>
-                          <td style={{ padding: "4px 6px", color: wrColorOf(s.winRate) }}>{fmtWR(s.winRate)}</td>
-                          <td style={{ padding: "4px 6px", color: netColorOf(s.net) }}>{fmtNet(s.net, s.count)}</td>
+                          {sessions.map((sess) => (
+                            <td key={sess} style={{ padding: "3px", verticalAlign: "top" }}>
+                              <EntryStyleCell c={getCell(tmpl, sess)} />
+                            </td>
+                          ))}
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
               </div>
-            )}
-
-            {untagged > 0 && (
-              <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-                {untagged} older trade{untagged === 1 ? "" : "s"} predate entry-style tagging and aren't counted here.
+            ) : (
+              <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic", padding: "6px 4px" }}>
+                No resolved signals yet — accumulates after reaction/orb trades close out.
               </div>
             )}
+
+            <div style={{ marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
+              EV = avg R-per-signal · RET EV discounts no-fills (no-fill → 0R in denominator) ·
+              badge requires n≥{ES_MIN_N} resolved and gap&gt;{ES_EV_GAP}R
+              {lastFetch && ` · refreshed ${lastFetch.toLocaleTimeString()}`}
+            </div>
           </>
         )}
       </div>
     </Panel>
+  );
+}
+
+function EntryStyleCell({ c }) {
+  if (!c || (c.nResolved ?? 0) === 0) {
+    return (
+      <div style={{
+        padding: "5px 7px", textAlign: "center",
+        color: "var(--qb-text-faint)", fontSize: 9, minWidth: 108,
+      }}>·</div>
+    );
+  }
+
+  const { nResolved, immediate: imm, retest: ret, immEV, retestEV, winner } = c;
+
+  // Client-side gate: badge only when nResolved≥8 and |EV gap|≥0.05R
+  const hasEnough  = (nResolved || 0) >= ES_MIN_N;
+  const gap        = Math.abs((immEV ?? 0) - (retestEV ?? 0));
+  const decisive   = hasEnough && gap >= ES_EV_GAP && winner !== "tie";
+
+  let badgeText, badgeColor;
+  if (!hasEnough) {
+    badgeText = `collecting (${nResolved}/${ES_MIN_N})`;
+    badgeColor = "var(--qb-text-faint)";
+  } else if (!decisive) {
+    badgeText = "≈ tied";
+    badgeColor = "var(--qb-text-faint)";
+  } else if (winner === "immediate") {
+    badgeText = `▶ IMMEDIATE  +${gap.toFixed(2)}R`;
+    badgeColor = "var(--qb-ok)";
+  } else {
+    badgeText = `▶ RETEST  +${gap.toFixed(2)}R`;
+    badgeColor = "#4a9eff";
+  }
+
+  const borderColor = decisive ? badgeColor : "var(--qb-border)";
+
+  const fmtR      = (v) => v == null ? "·" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`;
+  const noFillPct = ret?.fillRate != null ? Math.round((1 - ret.fillRate) * 100) : null;
+
+  return (
+    <div style={{
+      background: "var(--qb-bg-panel-hi)", borderRadius: 3,
+      padding: "5px 7px", minWidth: 108,
+      border: `1px solid ${borderColor}`,
+    }}>
+      {/* IMM: WR%  avgR  n=X  EV */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}>
+        <span style={{ color: "var(--qb-text-faint)", minWidth: 24 }}>IMM</span>
+        <span style={{ color: wrColorOf(imm?.winRate) }}>{fmtWR(imm?.winRate)}</span>
+        <span style={{ color: netColorOf(imm?.avgR) }}>{fmtR(imm?.avgR)}</span>
+        <span style={{ color: "var(--qb-text-lo)", marginLeft: "auto" }}>n={imm?.n ?? "·"}</span>
+      </div>
+      {/* RET: WR%  avgRPerSignal  (fills)  EV */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
+        <span style={{ color: "var(--qb-text-faint)", minWidth: 24 }}>RET</span>
+        <span style={{ color: wrColorOf(ret?.winRate) }}>{fmtWR(ret?.winRate)}</span>
+        <span style={{ color: netColorOf(ret?.avgRPerSignal) }}>{fmtR(ret?.avgRPerSignal)}</span>
+        <span style={{ color: "var(--qb-text-lo)", marginLeft: "auto" }}>({ret?.nFilled ?? "·"} fills)</span>
+      </div>
+      {/* EV comparison line */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 2, fontSize: 8 }}>
+        <span style={{ color: "var(--qb-text-faint)" }}>EV</span>
+        <span style={{ color: netColorOf(immEV) }}>{fmtR(immEV)}</span>
+        <span style={{ color: "var(--qb-text-faint)" }}>vs</span>
+        <span style={{ color: netColorOf(retestEV) }}>{fmtR(retestEV)}</span>
+        {noFillPct != null && (
+          <span style={{
+            marginLeft: "auto",
+            color: noFillPct > 40 ? "var(--qb-bad)" : "var(--qb-text-faint)",
+          }}>
+            {noFillPct}% no-fill
+          </span>
+        )}
+      </div>
+      {/* Winner badge */}
+      <div style={{
+        fontSize: 8, fontWeight: decisive ? 700 : 400,
+        color: badgeColor, letterSpacing: 0.3, lineHeight: 1.4,
+      }}>
+        {badgeText}
+      </div>
+    </div>
+  );
+}
+
+function EntryStyleSummaryBar({ totals }) {
+  if (!totals || !(totals.n || totals.nResolved)) return null;
+  const { n, nResolved, retest: ret, immEV, retestEV } = totals;
+  const hasEnough = (nResolved || 0) >= ES_MIN_N;
+  const gap       = Math.abs((immEV ?? 0) - (retestEV ?? 0));
+  const decisive  = hasEnough && gap >= ES_EV_GAP;
+  const winner    = decisive ? (immEV > retestEV ? "immediate" : "retest") : null;
+  const col       = winner === "immediate" ? "var(--qb-ok)" : winner === "retest" ? "#4a9eff" : "var(--qb-text-faint)";
+  const fmtR      = (v) => v == null ? "·" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`;
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", flexWrap: "wrap", gap: 16,
+      padding: "7px 4px", borderBottom: "1px solid var(--qb-border)", marginBottom: 10,
+      fontFamily: "var(--qb-font-mono)", fontSize: 9,
+    }}>
+      <span style={{ color: "var(--qb-text-faint)" }}>
+        {nResolved ?? 0}/{n ?? 0} resolved
+      </span>
+      <span style={{ color: "var(--qb-text-mid)" }}>
+        IMM EV <span style={{ color: netColorOf(immEV) }}>{fmtR(immEV)}</span>
+      </span>
+      <span style={{ color: "var(--qb-text-mid)" }}>
+        RET EV <span style={{ color: netColorOf(retestEV) }}>{fmtR(retestEV)}</span>
+        {ret?.fillRate != null && (
+          <span style={{ color: "var(--qb-text-faint)", marginLeft: 4 }}>
+            ({Math.round(ret.fillRate * 100)}% fill)
+          </span>
+        )}
+      </span>
+      <span style={{ fontSize: 10, fontWeight: 700, color: col, marginLeft: "auto" }}>
+        {!hasEnough
+          ? `collecting (${nResolved ?? 0}/${ES_MIN_N})`
+          : !decisive
+          ? "≈ tied overall"
+          : winner === "immediate"
+          ? "▲ IMMEDIATE leads overall"
+          : "▲ RETEST leads overall"}
+      </span>
+    </div>
   );
 }
 
@@ -3943,6 +4088,9 @@ function MobileLayout({
             )}
             {card("min(60vh, 480px)",
               <AlexgSignalsPanel gridColumn="auto" />
+            )}
+            {card("min(64vh, 520px)",
+              <EntryStyleComparisonPanel gridColumn="auto" />
             )}
           </>
         )}

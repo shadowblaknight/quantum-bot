@@ -141,7 +141,7 @@ accFvgD  = accumTF == "60" ? h1fD : accumTF == "240" ? h4fD : hdfD
 accClose = request.security(syminfo.tickerid, accumTF, close, lookahead=barmerge.lookahead_off)
 
 // ─── ALERT PAYLOAD (reaction) ────────────────────────────────────────
-f_buildAlertR(string template, string direction, float entry, float sl, float tp1, float tp2, float tp3, float zoneU, float zoneL, string tier, int biasAlign, string conf) =>
+f_buildAlertR(string template, string direction, float entry, float sl, float tp1, float tp2, float tp3, float zoneU, float zoneL, string tier, int biasAlign, string conf, float immediateEntry, float retestEntry, string actualStyle) =>
     dEmoji = direction == "LONG" ? "🟢" : "🔴"
     dWord  = direction == "LONG" ? "BUY" : "SELL"
     label2 = template == "reaction-fvg" ? "FVG displacement off HTF zone: " : template == "reaction-ifvg" ? "IFVG inversion off HTF zone: " : "Coil break off HTF zone: "
@@ -157,7 +157,7 @@ f_buildAlertR(string template, string direction, float entry, float sl, float tp
     prices = ",\"entry\":\"" + str.tostring(entry, format.mintick) + "\",\"sl\":\"" + str.tostring(sl, format.mintick) + "\",\"tp1\":\"" + str.tostring(tp1, format.mintick) + "\",\"tp2\":\"" + str.tostring(tp2, format.mintick) + "\",\"tp3\":\"" + str.tostring(tp3, format.mintick) + "\",\"rr1\":" + str.tostring(rr1, "0.00") + ",\"rr2\":" + str.tostring(rr2, "0.00") + ",\"rr3\":" + str.tostring(rr3, "0.00")
     zone   = ",\"zoneUpper\":\"" + str.tostring(zoneU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zoneL, format.mintick) + "\",\"zoneType\":\"REACTION\""
     htf    = ",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(m15B) + "/" + str.tostring(h1B) + "/" + str.tostring(h4B) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
-    ctx    = ",\"window\":\"reaction\",\"impulseATR\":0.00,\"apiKey\":\"" + alertApiKey + "\"}"
+    ctx    = ",\"window\":\"reaction\",\"impulseATR\":0.00,\"immediateEntry\":\"" + str.tostring(immediateEntry, format.mintick) + "\",\"retestEntry\":\"" + str.tostring(retestEntry, format.mintick) + "\",\"actualStyle\":\"" + actualStyle + "\",\"apiKey\":\"" + alertApiKey + "\"}"
     readable + head + prices + zone + htf + ctx
 
 // ─── ZONE TAP DETECTION ──────────────────────────────────────────────
@@ -257,17 +257,18 @@ if barstate.isconfirmed
             notBlowoff = (math.max(nz(accumATR,0), nz(h1ATR,0))) > 0 and math.abs(close - open) <= (math.max(nz(accumATR,0), nz(h1ATR,0))) * immediateMaxBodyATR
             emitEntry = (entryStyle == "immediate" or (entryStyle == "auto" and notBlowoff)) ? close : proximal
             slP = sDir == 1 ? accFvgL - buf : accFvgU + buf
-            slDist = math.abs(proximal - slP)
+            slDist = math.abs(emitEntry - slP)
             slAcc = slDist / accumATR
             slOk = sDir == 1 ? slP < emitEntry : slP > emitEntry
-            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR and slOk
+            tpOk = sDir == 1 ? (emitEntry + slDist) > emitEntry : (emitEntry - slDist) < emitEntry
+            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR and slOk and tpOk
                 tpBase = emitEntry
                 tp1 = sDir == 1 ? tpBase + slDist : tpBase - slDist
                 tp2 = sDir == 1 ? tpBase + slDist * 2.0 : tpBase - slDist * 2.0
                 tp3 = sDir == 1 ? tpBase + slDist * 3.0 : tpBase - slDist * 3.0
                 tier = biasAlign == 1 ? "A" : "B"
                 conf = "reaction-fvg-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
-                alert(f_buildAlertR("reaction-fvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
+                alert(f_buildAlertR("reaction-fvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf, close, proximal, emitEntry == close ? "immediate" : "retest"), alert.freq_once_per_bar)
                 if showPosBox
                     f_drawPosBox(emitEntry, slP, tp3)
                 sigFvgL := sDir == 1
@@ -288,17 +289,18 @@ if barstate.isconfirmed
             notBlowoff = (math.max(nz(accumATR,0), nz(h1ATR,0))) > 0 and math.abs(close - open) <= (math.max(nz(accumATR,0), nz(h1ATR,0))) * immediateMaxBodyATR
             emitEntry = (entryStyle == "immediate" or (entryStyle == "auto" and notBlowoff)) ? close : proximal
             slP = invLong ? rOppLo - buf : rOppHi + buf
-            slDist = math.abs(proximal - slP)
+            slDist = math.abs(emitEntry - slP)
             slAcc = slDist / accumATR
             slOk = invLong ? slP < emitEntry : slP > emitEntry
-            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR and slOk
+            tpOk = invLong ? (emitEntry + slDist) > emitEntry : (emitEntry - slDist) < emitEntry
+            if htfOk and slDist > 0 and slAcc >= slMinH1ATR and slAcc <= slMaxH1ATR and slOk and tpOk
                 tpBase = emitEntry
                 tp1 = invLong ? tpBase + slDist : tpBase - slDist
                 tp2 = invLong ? tpBase + slDist * 2.0 : tpBase - slDist * 2.0
                 tp3 = invLong ? tpBase + slDist * 3.0 : tpBase - slDist * 3.0
                 tier = biasAlign == 1 ? "A" : "B"
                 conf = "reaction-ifvg-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
-                alert(f_buildAlertR("reaction-ifvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
+                alert(f_buildAlertR("reaction-ifvg", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf, close, proximal, emitEntry == close ? "immediate" : "retest"), alert.freq_once_per_bar)
                 if showPosBox
                     f_drawPosBox(emitEntry, slP, tp3)
                 sigIfvgL := invLong
@@ -347,7 +349,7 @@ if barstate.isconfirmed
                 tp3 = brokeUp ? tpBase + slDist * 3.0 : tpBase - slDist * 3.0
                 tier = biasAlign == 1 ? "A" : "B"
                 conf = "reaction-" + entryStyle + (biasAlign == 1 ? "-withbias" : "-counter")
-                alert(f_buildAlertR("reaction", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf), alert.freq_once_per_bar)
+                alert(f_buildAlertR("reaction", dir, emitEntry, slP, tp1, tp2, tp3, rZU, rZL, tier, biasAlign, conf, close, retestLevel, emitEntry == close ? "immediate" : "retest"), alert.freq_once_per_bar)
                 if showPosBox
                     f_drawPosBox(emitEntry, slP, tp3)
             rState := 0

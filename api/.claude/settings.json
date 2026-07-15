@@ -17,7 +17,8 @@
       "Bash(node --check \"C:\\\\Users\\\\Omar Nasr\\\\quantum-bot\\\\api\\\\recognition-memory.js\")",
       "Read(//c/Users/Omar Nasr/quantum-bot/**)",
       "Read(//c/Users/Omar Nasr/quantum-bot/src/**)",
-      "WebFetch(domain:quantum-bot-mocha.vercel.app)"
+      "WebFetch(domain:quantum-bot-mocha.vercel.app)",
+      "Read(//c/Users/Omar Nasr/quantum-bot/pine/pine/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Omar Nasr\\quantum-bot\\src"
