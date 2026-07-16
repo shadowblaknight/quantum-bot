@@ -122,6 +122,13 @@ module.exports = async (req, res) => {
       return tb - ta;
     });
 
+    // Template-quality filter: exclude trades with no meaningful attribution.
+    // "unknown" = template could not be parsed; "legacy"/"legacy-unknown" = pre-versioning
+    // MetaAPI trades; null/empty = template field missing entirely.
+    // Join/dedupe above is unchanged — only the trades array sent to the client is trimmed.
+    const EXCL = new Set(['unknown', 'legacy', 'legacy-unknown']);
+    const rankable = trades.filter(t => t.template && !EXCL.has(t.template));
+
     return res.status(200).json({
       ok:          true,
       generatedAt: Date.now(),
@@ -131,9 +138,11 @@ module.exports = async (req, res) => {
         matched,
         ledgerOnly,
         recogOnly,
-        total:       trades.length,
+        total:       trades.length,     // full deduped count (211)
+        rankable:    rankable.length,   // after template-quality filter (~150)
+        filteredOut: trades.length - rankable.length,
       },
-      trades,
+      trades: rankable,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });

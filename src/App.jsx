@@ -2987,14 +2987,19 @@ function PerfRankingPanel({ gridColumn = "1 / 4" }) {
   return (
     <Panel {...panelProps}>
       <div style={{ padding: "10px 12px" }}>
-        {/* Reconciliation info bar */}
+        {/* Reconciliation info bar — total reconciled + rankable subset */}
         {rec && (
-          <div style={{ fontSize: 8, color: "var(--qb-text-faint)", marginBottom: 10, lineHeight: 1.7 }}>
-            <span style={{ color: "var(--qb-text-mid)", fontWeight: 600 }}>{rec.total}</span> deduped trades
-            {" · "}{rec.matched} matched both
-            {" · "}{rec.ledgerOnly} ledger-only
-            {" · "}{rec.recogOnly} recog-only
-            <span style={{ marginLeft: 8 }}>({rec.recogInput} recog + {rec.ledgerInput} ledger inputs)</span>
+          <div style={{ fontSize: 8, color: "var(--qb-text-faint)", marginBottom: 10, lineHeight: 1.9 }}>
+            <span style={{ color: "var(--qb-text-hi)", fontWeight: 600 }}>{rec.rankable ?? rec.total}</span>
+            {" ranked trades"}
+            {rec.filteredOut > 0 && (
+              <span style={{ color: "var(--qb-text-faint)" }}>
+                {" · "}{rec.filteredOut} excluded (unknown/legacy template)
+              </span>
+            )}
+            <span style={{ color: "var(--qb-text-faint)" }}>
+              {" · "}{rec.total} total reconciled ({rec.matched} matched · {rec.ledgerOnly} ledger-only · {rec.recogOnly} recog-only)
+            </span>
           </div>
         )}
 
