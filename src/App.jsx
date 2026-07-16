@@ -537,6 +537,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         {/* ─── v14 · Immediate-vs-Retest entry-style comparison (full width) ─── */}
         <EntryStyleComparisonPanel />
 
+        {/* ─── v15.6 · Template × session × instrument performance ranking (full width) ─── */}
+        <PerfRankingPanel />
+
         {/* ─── v14.1 · TP reach by template (full width) ─── */}
         <TpHitPanel />
         <ORBComparePanel />
@@ -2768,6 +2771,333 @@ function EntryStyleSummaryBar({ totals }) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PERFORMANCE RANKING — deduped recognition-memory ∪ ledger
+// Join key: trade.id = "trade_{asset}_{positionId}" (deterministic).
+// RANKED = n≥8 buckets, sorted by chosen metric.
+// COLLECTING = n<8, greyed, sorted by n, no rank.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PR_MIN_N   = 8;
+const PR_VIEWS   = [
+  { id: "template", label: "By Template" },
+  { id: "ts",       label: "Template × Session" },
+  { id: "tsi",      label: "Template × Session × Instrument" },
+];
+const PR_SORTS   = [
+  { id: "netPnl",       label: "Net P&L" },
+  { id: "winRate",      label: "Win Rate" },
+  { id: "avgR",         label: "Avg R" },
+  { id: "profitFactor", label: "Profit Factor" },
+];
+const PR_SESSIONS = ["ASIAN", "LONDON", "NY_AM", "NY_PM", "WEEKEND", "OFF"];
+
+function prComputeBucket(trades) {
+  const n      = trades.length;
+  const wins   = trades.filter(t => t.outcome === "WIN");
+  const losses = trades.filter(t => t.outcome === "LOSS");
+  const netPnl = trades.reduce((s, t) => s + (t.netPnl || 0), 0);
+  const winPnl = wins.reduce((s, t) => s + (t.netPnl || 0), 0);
+  const lossPnl = Math.abs(losses.reduce((s, t) => s + (t.netPnl || 0), 0));
+  const rList  = trades.filter(t => t.pnlR != null).map(t => t.pnlR);
+  const slList = trades.filter(t => t.slippagePips != null).map(t => t.slippagePips);
+  const winRate = n > 0 ? wins.length / n : null;
+  const avgR    = rList.length  > 0 ? rList.reduce((s, v) => s + v, 0)  / rList.length  : null;
+  const profitFactor = lossPnl > 0 ? winPnl / lossPnl : (winPnl > 0 ? 99 : null);
+  const avgSlip = slList.length > 0 ? slList.reduce((s, v) => s + v, 0) / slList.length : null;
+  const avgWin  = wins.length   > 0 ? winPnl  / wins.length   : null;
+  const avgLoss = losses.length > 0 ? lossPnl / losses.length : null;
+  const breakEvenWR = avgWin != null && avgLoss != null && avgWin + avgLoss > 0
+    ? avgLoss / (avgWin + avgLoss) : null;
+  return { n, wins: wins.length, losses: losses.length, winRate, netPnl, avgR, profitFactor, avgSlip, breakEvenWR };
+}
+
+function PerfRankingPanel({ gridColumn = "1 / 4" }) {
+  const [data,       setData]       = useState(null);
+  const [fetchError, setFetchError] = useState(null);
+  const [ready,      setReady]      = useState(false);
+  const [view,       setView]       = useState("template");
+  const [sortBy,     setSortBy]     = useState("netPnl");
+  const [filterTemplate, setFilterTemplate] = useState("");
+  const [filterSession,  setFilterSession]  = useState("");
+  const [filterAsset,    setFilterAsset]    = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API("perf-ranking")).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok === true) { setData(r); setFetchError(null); }
+        else { setData(null); setFetchError(r?.error || "no data"); }
+      } catch (e) {
+        if (alive) { setData(null); setFetchError(e.message); }
+      }
+      if (alive) setReady(true);
+    };
+    load();
+    const tid = setInterval(load, 10 * 60 * 1000);
+    return () => { alive = false; clearInterval(tid); };
+  }, []);
+
+  const availTemplates = useMemo(() =>
+    [...new Set((data?.trades || []).map(t => t.template).filter(Boolean))].sort(), [data]);
+  const availAssets = useMemo(() =>
+    [...new Set((data?.trades || []).map(t => t.asset).filter(Boolean))].sort(), [data]);
+
+  const buckets = useMemo(() => {
+    if (!data?.trades) return [];
+    let filtered = data.trades;
+    if (filterTemplate) filtered = filtered.filter(t => t.template === filterTemplate);
+    if (filterSession)  filtered = filtered.filter(t => t.session  === filterSession);
+    if (filterAsset)    filtered = filtered.filter(t => t.asset    === filterAsset);
+    const getKey = (t) =>
+      view === "ts"  ? `${t.template || "unknown"}|${t.session}` :
+      view === "tsi" ? `${t.template || "unknown"}|${t.session}|${t.asset || "unknown"}` :
+                       (t.template || "unknown");
+    const groups = {};
+    for (const t of filtered) {
+      const k = getKey(t);
+      (groups[k] = groups[k] || []).push(t);
+    }
+    return Object.entries(groups).map(([key, ts]) => {
+      const parts = key.split("|");
+      return { key, template: parts[0], session: parts[1] || null, asset: parts[2] || null, ...prComputeBucket(ts) };
+    });
+  }, [data, view, filterTemplate, filterSession, filterAsset]);
+
+  const ranked = useMemo(() => {
+    return buckets
+      .filter(b => b.n >= PR_MIN_N)
+      .sort((a, b) =>
+        sortBy === "winRate"      ? (b.winRate       ?? -99) - (a.winRate       ?? -99) :
+        sortBy === "avgR"         ? (b.avgR           ?? -99) - (a.avgR           ?? -99) :
+        sortBy === "profitFactor" ? (b.profitFactor   ??   0) - (a.profitFactor   ??   0) :
+                                    b.netPnl - a.netPnl
+      );
+  }, [buckets, sortBy]);
+
+  const collecting = useMemo(() =>
+    buckets.filter(b => b.n < PR_MIN_N).sort((a, b) => b.n - a.n), [buckets]);
+
+  const panelProps = {
+    title:    "Performance Ranking",
+    subtitle: "deduped · recognition-memory ∪ ledger · real P&L",
+    style: { gridColumn },
+  };
+
+  if (!ready) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 14 }}><Placeholder msg="Loading performance ranking…" /></div>
+    </Panel>
+  );
+  if (!data) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 14 }}>
+        <PlaceholderError msg={fetchError ? `Cannot reach /api/perf-ranking: ${fetchError}` : "No data"} />
+      </div>
+    </Panel>
+  );
+
+  const rec = data.reconciliation;
+
+  const btnBase = { padding: "2px 7px", fontSize: 9, cursor: "pointer", borderRadius: 3, fontFamily: "inherit" };
+  const showSession  = view === "ts"  || view === "tsi";
+  const showAsset    = view === "tsi";
+
+  const thStyle = (align = "right") => ({
+    padding: "3px 8px 5px", color: "var(--qb-text-faint)", fontWeight: 400,
+    textAlign: align, whiteSpace: "nowrap", fontSize: 9, background: "transparent",
+  });
+  const tdR = (content, color) => (
+    <td style={{ padding: "4px 8px", textAlign: "right", color: color || "var(--qb-text-hi)", fontSize: 10, fontFamily: "var(--qb-font-mono)", whiteSpace: "nowrap" }}>
+      {content}
+    </td>
+  );
+  const tdL = (content, maxW = 130) => (
+    <td style={{ padding: "4px 6px 4px 2px", textAlign: "left", color: "var(--qb-text-hi)", fontSize: 10, whiteSpace: "nowrap", maxWidth: maxW, overflow: "hidden", textOverflow: "ellipsis" }}>
+      {content}
+    </td>
+  );
+
+  const tableHead = (
+    <thead>
+      <tr>
+        <th style={{ ...thStyle("right"), width: 22 }}> </th>
+        <th style={thStyle("left")}>Template</th>
+        {showSession && <th style={thStyle("left")}>Session</th>}
+        {showAsset   && <th style={thStyle("left")}>Instrument</th>}
+        <th style={thStyle()}>n</th>
+        <th style={thStyle()}>WR%</th>
+        <th style={thStyle()}>Net P&L</th>
+        <th style={thStyle()}>Avg R</th>
+        <th style={thStyle()}>PF</th>
+        <th style={thStyle()}>Avg Slip</th>
+      </tr>
+    </thead>
+  );
+
+  const renderRow = (b, rank, greyed) => {
+    const beGap    = b.winRate != null && b.breakEvenWR != null ? b.winRate - b.breakEvenWR : null;
+    const beColor  = beGap == null ? null : beGap >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
+    const bePp     = beGap != null ? `${beGap >= 0 ? "▲" : "▼"}${Math.abs(Math.round(beGap * 100))}pp` : "";
+    const tmplMeta = TEMPLATE_DISPLAY[b.template];
+    const tmplLbl  = tmplMeta ? `${tmplMeta.glyph} ${tmplMeta.label}` : (b.template || "unknown");
+    const wrColor  = b.winRate == null ? "var(--qb-text-faint)"
+      : b.winRate >= 0.55 ? "var(--qb-ok)" : b.winRate <= 0.40 ? "var(--qb-bad)" : "var(--qb-text-hi)";
+    return (
+      <tr key={b.key} style={{
+        borderTop: "1px solid var(--qb-border)",
+        opacity: greyed ? 0.5 : 1,
+        background: !greyed && rank % 2 === 0 ? "var(--qb-bg-void)" : "transparent",
+      }}>
+        <td style={{ padding: "4px 6px", textAlign: "right", color: "var(--qb-text-faint)", fontSize: 9, width: 22 }}>
+          {greyed ? "" : rank}
+        </td>
+        {tdL(tmplLbl)}
+        {showSession && tdL(b.session || "—", 80)}
+        {showAsset   && tdL(b.asset   || "—", 80)}
+        {tdR(b.n, "var(--qb-text-mid)")}
+        <td style={{ padding: "4px 8px", textAlign: "right", fontSize: 10, fontFamily: "var(--qb-font-mono)", whiteSpace: "nowrap" }}>
+          <span style={{ color: wrColor }}>
+            {b.winRate != null ? `${Math.round(b.winRate * 100)}%` : "—"}
+          </span>
+          {bePp && <span style={{ marginLeft: 3, fontSize: 8, color: beColor }}>{bePp}</span>}
+        </td>
+        {tdR(
+          b.netPnl != null ? `${b.netPnl >= 0 ? "+" : ""}$${Math.abs(b.netPnl).toFixed(0)}` : "—",
+          b.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"
+        )}
+        {tdR(
+          b.avgR != null ? `${b.avgR >= 0 ? "+" : ""}${b.avgR.toFixed(2)}R` : "—",
+          b.avgR == null ? "var(--qb-text-faint)" : b.avgR >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"
+        )}
+        {tdR(
+          b.profitFactor == null ? "—" : b.profitFactor >= 99 ? "∞" : b.profitFactor.toFixed(2),
+          b.profitFactor == null ? "var(--qb-text-faint)" : b.profitFactor >= 1 ? "var(--qb-ok)" : "var(--qb-bad)"
+        )}
+        {tdR(
+          b.avgSlip != null ? `${b.avgSlip >= 0 ? "+" : ""}${b.avgSlip.toFixed(1)}p` : "—",
+          b.avgSlip != null && b.avgSlip < -0.5 ? "var(--qb-bad)" : "var(--qb-text-faint)"
+        )}
+      </tr>
+    );
+  };
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: "10px 12px" }}>
+        {/* Reconciliation info bar */}
+        {rec && (
+          <div style={{ fontSize: 8, color: "var(--qb-text-faint)", marginBottom: 10, lineHeight: 1.7 }}>
+            <span style={{ color: "var(--qb-text-mid)", fontWeight: 600 }}>{rec.total}</span> deduped trades
+            {" · "}{rec.matched} matched both
+            {" · "}{rec.ledgerOnly} ledger-only
+            {" · "}{rec.recogOnly} recog-only
+            <span style={{ marginLeft: 8 }}>({rec.recogInput} recog + {rec.ledgerInput} ledger inputs)</span>
+          </div>
+        )}
+
+        {/* Controls — view selector + sort toggle */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 2 }}>
+            {PR_VIEWS.map(v => (
+              <button key={v.id} onClick={() => setView(v.id)} style={{
+                ...btnBase,
+                border: view === v.id ? "1px solid rgba(74,158,255,0.55)" : "1px solid var(--qb-border)",
+                background: view === v.id ? "rgba(74,158,255,0.12)" : "var(--qb-bg-void)",
+                color: view === v.id ? "#4a9eff" : "var(--qb-text-mid)",
+                fontWeight: view === v.id ? 600 : 400,
+              }}>
+                {v.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 2, marginLeft: "auto", alignItems: "center" }}>
+            <span style={{ fontSize: 8, color: "var(--qb-text-faint)", marginRight: 2 }}>sort</span>
+            {PR_SORTS.map(s => (
+              <button key={s.id} onClick={() => setSortBy(s.id)} style={{
+                ...btnBase,
+                border: "1px solid var(--qb-border)",
+                background: sortBy === s.id ? "rgba(255,255,255,0.07)" : "transparent",
+                color: sortBy === s.id ? "var(--qb-text-hi)" : "var(--qb-text-faint)",
+                fontWeight: sortBy === s.id ? 600 : 400,
+              }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 8, color: "var(--qb-text-faint)" }}>filter</span>
+          {[
+            { val: filterTemplate, set: setFilterTemplate, opts: availTemplates, placeholder: "All templates" },
+            { val: filterSession,  set: setFilterSession,  opts: PR_SESSIONS,    placeholder: "All sessions"  },
+            { val: filterAsset,    set: setFilterAsset,    opts: availAssets,    placeholder: "All instruments" },
+          ].map(({ val, set, opts, placeholder }, fi) => (
+            <select key={fi} value={val} onChange={e => set(e.target.value)} style={{
+              fontSize: 9, padding: "2px 4px",
+              background: "var(--qb-bg-void)", color: "var(--qb-text-mid)",
+              border: val ? "1px solid rgba(74,158,255,0.55)" : "1px solid var(--qb-border)",
+              borderRadius: 3, cursor: "pointer",
+            }}>
+              <option value="">{placeholder}</option>
+              {opts.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          ))}
+          {(filterTemplate || filterSession || filterAsset) && (
+            <button onClick={() => { setFilterTemplate(""); setFilterSession(""); setFilterAsset(""); }} style={{
+              ...btnBase, border: "1px solid var(--qb-border)",
+              background: "transparent", color: "var(--qb-amber)",
+            }}>
+              clear
+            </button>
+          )}
+        </div>
+
+        {/* RANKED table */}
+        {ranked.length > 0 ? (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+              {tableHead}
+              <tbody>{ranked.map((b, i) => renderRow(b, i + 1, false))}</tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{ padding: "10px 4px", fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
+            No buckets with n≥{PR_MIN_N} yet — keep accumulating trades.
+          </div>
+        )}
+
+        {/* COLLECTING section */}
+        {collecting.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{
+              fontSize: 8, color: "var(--qb-text-faint)", fontWeight: 600,
+              letterSpacing: 0.4, marginBottom: 4, paddingBottom: 4,
+              borderBottom: "1px dashed var(--qb-border)",
+            }}>
+              COLLECTING (n&lt;{PR_MIN_N}) — not ranked · sorted by trade count
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+                {tableHead}
+                <tbody>{collecting.map(b => renderRow(b, 0, true))}</tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
+          WR% flag: ▲/▼ pp vs break-even WR · PF = profit factor · Avg Slip in pips · ranked section n≥{PR_MIN_N} only
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function StyleComparisonPanel({ gridColumn = "1 / 4" }) {
   const [trades, setTrades] = useState(null);
   const [error, setError]   = useState(null);
@@ -4108,6 +4438,9 @@ function MobileLayout({
             )}
             {card("min(60vh, 480px)",
               <TradeDataPanel gridColumn="auto" />
+            )}
+            {card("min(68vh, 560px)",
+              <PerfRankingPanel gridColumn="auto" />
             )}
             {card("min(40vh, 300px)",
               <AlexgHeartbeatPanel gridColumn="auto" />
