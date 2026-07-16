@@ -99,8 +99,7 @@ module.exports = async (req, res) => {
 
     // Read index
     const rawIdx = await r.get(ES_SHADOW_INDEX_KEY).catch(() => null);
-    let idx;
-    try { idx = JSON.parse(rawIdx || 'null'); } catch (_) { idx = null; }
+    const idx = safeParse(rawIdx);
     if (!Array.isArray(idx) || idx.length === 0) {
       return res.status(200).json({ ok: false, error: 'not ready' });
     }

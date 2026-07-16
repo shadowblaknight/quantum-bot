@@ -4,7 +4,7 @@
 // Called fire-and-forget from processSignalBackground in webhook.js.
 // Writes go to Redis only; never touches live execution state.
 
-const { getRedis } = require('./_lib');
+const { getRedis, safeParse } = require('./_lib');
 
 const ES_SHADOW_KEY       = (id) => `v14:entrystyle:shadow:${id}`;
 const ES_SHADOW_INDEX_KEY = 'v14:entrystyle:shadow:index';
@@ -88,8 +88,7 @@ async function writeEntryStyleShadow(p, dedupeKey, assetId) {
   // Maintain newest-first index, deduped, capped
   try {
     const raw = await r.get(ES_SHADOW_INDEX_KEY).catch(() => null);
-    let idx;
-    try { idx = JSON.parse(raw || 'null'); } catch (_) { idx = null; }
+    let idx = safeParse(raw);
     if (!Array.isArray(idx)) idx = [];
     const filtered = idx.filter((e) => e.id !== dedupeKey);
     filtered.unshift({ id: dedupeKey, ts, template: p.template, assetId });

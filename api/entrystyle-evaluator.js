@@ -124,8 +124,7 @@ async function runEntryStyleEvaluator() {
   if (!r) return { skipped: 'no-redis' };
 
   const raw = await r.get(ES_SHADOW_INDEX_KEY).catch(() => null);
-  let idx;
-  try { idx = JSON.parse(raw || 'null'); } catch (_) { idx = null; }
+  const idx = safeParse(raw);
   if (!Array.isArray(idx) || idx.length === 0) return { skipped: 'empty-index' };
 
   const now = Date.now();
