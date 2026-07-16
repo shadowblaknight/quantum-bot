@@ -31,6 +31,7 @@ const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
 const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
+const { runEntryStyleEvaluator } = require('./entrystyle-evaluator');
 
 // v14: all-or-nothing exits. The full position rides to the FINAL TP (parked as
 // the broker TP at placement). At TP1/TP2 touches we ONLY ratchet the SL up to
@@ -631,7 +632,9 @@ async function runManageTick() {
 
   const watched = await checkAllWatchedSetups().catch((e) => ({ error: e.message }));
 
-  return {
+  // All trade-management work is done. Build result before the evaluator runs so
+  // a slow candle fetch or error can never corrupt the manage-tick return value.
+  const result = {
     ts: Date.now(),
     tradingEnabled: true,
     openCount: managedPositions.length,
@@ -639,6 +642,22 @@ async function runManageTick() {
     closedAndRecorded: recordings,
     watched,
   };
+
+  // ── Entrystyle shadow evaluator ─────────────────────────────────────────────
+  // Resolves immediate-vs-retest shadow records older than 4 h via MetaAPI 5m
+  // candles. MAX_PER_TICK = 20 (cap is in entrystyle-evaluator.js).
+  // 8 s hard timeout so a slow network call can't delay the next minute's tick.
+  // Errors are swallowed — never affects live position state.
+  try {
+    result.entryStyle = await Promise.race([
+      runEntryStyleEvaluator(),
+      new Promise((resolve) => setTimeout(() => resolve({ skipped: 'timeout' }), 8000)),
+    ]);
+  } catch (_) {
+    result.entryStyle = { error: 'evaluator-threw' };
+  }
+
+  return result;
 }
 
 module.exports = async (req, res) => {
