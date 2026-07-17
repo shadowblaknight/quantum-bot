@@ -553,7 +553,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         <SessionHeatmapPanel />
 
         {/* --- v15.7 . Order Flow Confirmation shadow panel (full width) --- */}
-        <OrderFlowPanel />
+        <OrderFlowPanel style={{ marginTop: 20 }} />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -3999,7 +3999,7 @@ function OFSectionLabel({ children }) {
   );
 }
 
-function OrderFlowPanel({ gridColumn = "1 / 4" }) {
+function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
   const [data, setData]           = useState(null);
   const [fetchError, setError]    = useState(null);
   const [lastFetch, setLastFetch] = useState(null);
@@ -4026,7 +4026,7 @@ function OrderFlowPanel({ gridColumn = "1 / 4" }) {
   const panelProps = {
     title: 'Order Flow Confirmation',
     subtitle: 'cvd shadow -- not gating yet -- measuring',
-    style: { gridColumn },
+    style: { gridColumn, minHeight: '440px', ...(style || {}) },
   };
 
   if (!ready) return (
