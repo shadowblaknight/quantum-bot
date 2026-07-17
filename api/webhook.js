@@ -221,6 +221,18 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   } catch (_esErr) {}
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── PHASE 3 ORDERFLOW SHADOW (read-only) ─────────────────────────────────
+  // Stores the CVD snapshot (slope, confirms, divergence, lowTrust) attached to
+  // this signal for later win-rate comparison against cvdConfirms=false signals.
+  // Entirely isolated: try/catch, no downstream code reads from this block.
+  try {
+    if (p.cvdSlope != null || p.cvdDivergence != null) {
+      const { writeOrderflowShadow } = require('./orderflow-shadow');
+      writeOrderflowShadow(p, dedupeKey, assetId).catch(() => {});
+    }
+  } catch (_ofErr) {}
+  // ─────────────────────────────────────────────────────────────────────────
+
   // 6. Bounded fetch
   const [positions, capital] = await Promise.all([
     withTimeout(fetchPositions(), 1500, []),
@@ -397,60 +409,79 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // decimals than the symbol allows, which the broker rejects as INVALID_PRICE.
   const isLong = p.direction === 'LONG';
   const pipSz = assetMeta.pipSize || 0.0001;
-  const rEntry = _roundTick(entry, pipSz, 'nearest');
-  const rSL = _roundTick(finalSL, pipSz, isLong ? 'down' : 'up');
-  const rTP = brokerTP != null ? _roundTick(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
 
-  // v14: decide MARKET vs LIMIT by whether a valid limit can be placed.
-  //  - retest entries sit away from price on the correct side  → LIMIT (as before)
-  //  - immediate entries sit at/through the market (the only way in) → MARKET fill,
-  //    UNLESS the market has drifted past the entry by more than the slippage budget
-  //    (stale / runaway signal) → skip, don't chase. Pine's blow-off cap already
-  //    keeps parabolic candles out of the immediate path upstream.
+  // v15.7: when actualStyle is present, use the matching entry price from the payload.
+  //   immediate -> p.immediateEntry (at-market close Pine computed for this signal path)
+  //   retest    -> p.retestEntry   (zone/ORB edge to wait for on a pending limit)
+  //   missing   -> p.entry         (pre-v15.7 payload -- geometry probe handles it below)
+  const _pStyle = p.actualStyle;
+  const _pImmE  = parseFloat(p.immediateEntry);
+  const _pRetE  = parseFloat(p.retestEntry);
+  const routingEntry = _pStyle === 'immediate' && isFinite(_pImmE) ? _pImmE
+                     : _pStyle === 'retest'    && isFinite(_pRetE) ? _pRetE
+                     : entry;
+
+  const rEntry = _roundTick(routingEntry, pipSz, 'nearest');
+  const rSL    = _roundTick(finalSL, pipSz, isLong ? 'down' : 'up');
+  const rTP    = brokerTP != null ? _roundTick(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
+
+  // v15.7: route MARKET vs LIMIT by actualStyle when present; fall back to geometry probe.
+  //   immediate -> ORDER_TYPE_BUY/SELL  (fill now, no geometry check)
+  //   retest    -> ORDER_TYPE_BUY/SELL_LIMIT at rEntry (= retestEntry, no geometry check)
+  //   missing   -> existing _canLimit geometry probe (all pre-v15.7 behavior unchanged)
   let entryType = 'retest';
   let useMarket = false;
-  // v14.1 diagnostic: capture the routing inputs so a mis-routed immediate/retest
-  // can be read back from the activity log — the probed market price, whether a
-  // valid limit could be placed, and how far the market had drifted past entry.
   let _dbgProbed = null, _dbgProbeOk = false, _dbgCanLimit = null, _dbgDriftPips = null;
-  try {
-    const { fetchCandles: _fcSrc } = require('./candle-source');
-    const _cr = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
-    const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
-    const _cur = _last && _last.close;
-    if (_cur && isFinite(_cur)) {
-      _dbgProbeOk = true; _dbgProbed = _cur;
-      const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
-      // A LIMIT is only valid when the entry sits AWAY from price on the correct
-      // side: a LONG buy-limit must be BELOW market, a SHORT sell-limit ABOVE it.
-      // Anything else — entry at/through the market (immediate), or so close the
-      // broker won't accept it — must go in as a MARKET order, otherwise MT5
-      // rejects the limit with TRADE_RETCODE_INVALID_PRICE.
-      const _canLimit = isLong ? (rEntry < _cur - _tol) : (rEntry > _cur + _tol);
-      _dbgCanLimit = _canLimit;
-      if (!_canLimit) {
-        const _slDist = Math.abs(rEntry - rSL);
-        const _budget = Math.max(_slDist * 0.25, pipSz * 10); // 25% of stop, min 10 pips
-        // Adverse drift only: skip just when a MARKET fill would be WORSE than the
-        // signalled entry by more than budget (don't chase a runaway). A favorable
-        // gap (market better than entry) still fills.
-        const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
-        _dbgDriftPips = +(_drift / pipSz).toFixed(1);
-        if (_drift > _budget) {
-          await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget', signalEntry: rEntry, marketPrice: _cur, driftPips: _dbgDriftPips });
-          try {
-            await sendOnce(`webhook-stale:${dedupeKey}`,
+
+  if (_pStyle === 'immediate') {
+    // Pine explicitly flagged this as an immediate fill -- send MARKET unconditionally.
+    useMarket = true;
+    entryType = 'immediate';
+  } else if (_pStyle === 'retest') {
+    // Pine explicitly flagged this as a retest -- place LIMIT at rEntry.
+    useMarket = false;
+    entryType = 'retest';
+  } else {
+    // No actualStyle: pre-v15.7 payload. Run geometry probe unchanged.
+    try {
+      const { fetchCandles: _fcSrc } = require('./candle-source');
+      const _cr = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
+      const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
+      const _cur = _last && _last.close;
+      if (_cur && isFinite(_cur)) {
+        _dbgProbeOk = true; _dbgProbed = _cur;
+        const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
+        // A LIMIT is only valid when the entry sits AWAY from price on the correct
+        // side: a LONG buy-limit must be BELOW market, a SHORT sell-limit ABOVE it.
+        // Anything else -- entry at/through the market (immediate), or so close the
+        // broker won't accept it -- must go in as a MARKET order, otherwise MT5
+        // rejects the limit with TRADE_RETCODE_INVALID_PRICE.
+        const _canLimit = isLong ? (rEntry < _cur - _tol) : (rEntry > _cur + _tol);
+        _dbgCanLimit = _canLimit;
+        if (!_canLimit) {
+          const _slDist = Math.abs(rEntry - rSL);
+          const _budget = Math.max(_slDist * 0.25, pipSz * 10); // 25% of stop, min 10 pips
+          // Adverse drift only: skip just when a MARKET fill would be WORSE than the
+          // signalled entry by more than budget (don't chase a runaway). A favorable
+          // gap (market better than entry) still fills.
+          const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
+          _dbgDriftPips = +(_drift / pipSz).toFixed(1);
+          if (_drift > _budget) {
+            await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget', signalEntry: rEntry, marketPrice: _cur, driftPips: _dbgDriftPips });
+            try {
+              await sendOnce(`webhook-stale:${dedupeKey}`,
               `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
               `Template: ${p.template}\nDirection: ${p.direction}\n` +
               `Reason: market moved past entry beyond slippage budget \u2014 not chasing`);
-          } catch (_) {}
-          return;
+            } catch (_) {}
+            return;
+          }
+          useMarket = true;
+          entryType = 'immediate';
         }
-        useMarket = true;
-        entryType = 'immediate';
       }
-    }
-  } catch (_) { /* candle fetch failed — fall through to limit; broker is final guard */ }
+    } catch (_) { /* candle fetch failed -- fall through to limit; broker is final guard */ }
+  }
 
   // SB_IMMEDIATE_ONLY: silver-bullet retest (limit) entries are net -$188 vs
   // immediate entries at +$51. Block retest entries until the entry logic improves.
@@ -470,7 +501,8 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   try {
     await logActivity({
       type: 'entry-routing', asset: assetId, template: p.template, direction: p.direction,
-      signalEntry: rEntry, marketPrice: _dbgProbed, probeOk: _dbgProbeOk,
+      pineActualStyle: _pStyle || null, signalEntry: rEntry, routingEntry,
+      marketPrice: _dbgProbed, probeOk: _dbgProbeOk,
       canLimit: _dbgCanLimit, driftPips: _dbgDriftPips,
       decided: useMarket ? 'immediate(market)' : 'retest(limit)',
     });

@@ -307,6 +307,38 @@ _orbSession = orbSessionOverride == "auto" ? (str.contains(str.upper(syminfo.tic
 isCrypto = assetClass == "Crypto"
 htfLiqActive = (not na(h4rHi) and high >= h4rHi) or (not na(h4rLo) and low <= h4rLo) or (not na(hdrHi) and high >= hdrHi) or (not na(hdrLo) and low <= hdrLo) or h4fD != 0 or hdfD != 0
 
+// ── ORDER-FLOW CONFIRMATION — CVD (Path 1) ────────────────────────────────────
+// Estimated from candle direction (OHLCV only — approximation, not true bid/ask delta).
+// Two series: session-reset cvd (slope/confirms), _cvdRunning never resets (divergence — no daily boundary jump).
+cvdMaPeriod    = input.int(14, "CVD MA period",    minval=5, maxval=50, group="Order Flow")
+cvdDivLookback = input.int(20, "CVD div lookback", minval=10, maxval=50, group="Order Flow")
+
+_ofTicker   = str.upper(syminfo.ticker)
+cvdLowTrust = not (str.contains(_ofTicker,"XAU") or str.contains(_ofTicker,"GOLD") or str.contains(_ofTicker,"BTC") or str.contains(_ofTicker,"ETH") or str.contains(_ofTicker,"NAS") or str.contains(_ofTicker,"NDQ") or str.contains(_ofTicker,"US100") or str.contains(_ofTicker,"US500") or str.contains(_ofTicker,"SP500") or str.contains(_ofTicker,"SPX") or syminfo.type == "crypto" or syminfo.type == "index")
+
+_signedVol  = close > open ? volume : close < open ? -volume : 0.0
+_newDay     = ta.change(time("D")) != 0
+
+var float _cvdRunning = 0.0
+_cvdRunning := _cvdRunning + _signedVol
+
+var float _cvdBase = 0.0
+if _newDay
+    _cvdBase := _cvdRunning - _signedVol
+
+cvd      = _cvdRunning - _cvdBase
+cvdMa    = ta.ema(cvd, cvdMaPeriod)
+cvdSlope = cvd > cvd[1] and cvd > cvdMa ? "rising" : cvd < cvd[1] and cvd < cvdMa ? "falling" : "flat"
+
+_divReady   = bar_index >= cvdDivLookback
+_divCvdHiN  = ta.highest(_cvdRunning, cvdDivLookback)[1]
+_divCvdLoN  = ta.lowest(_cvdRunning, cvdDivLookback)[1]
+_divPrHiN   = ta.highest(high, cvdDivLookback)[1]
+_divPrLoN   = ta.lowest(low, cvdDivLookback)[1]
+_bearishDiv = _divReady and not na(_divCvdHiN) and high >= _divPrHiN and _cvdRunning < _divCvdHiN
+_bullishDiv = _divReady and not na(_divCvdLoN) and low  <= _divPrLoN and _cvdRunning > _divCvdLoN
+cvdDivergence = _bearishDiv ? "bearish" : _bullishDiv ? "bullish" : "none"
+
 // ═══ v2.3 — HTF CONFLUENCE TIER ENGINE ════════════════════════════════
 // dir: "LONG"/"SHORT"; zU/zL: the M15 entry zone; useX: HTFs this template consults.
 // Returns [tierStr "A"/"B"/"C", biasAlignCount, confluenceStr].
@@ -1359,7 +1391,8 @@ f_buildAlert(string template, string direction, float entry, float sl, float tp1
     prices = ",\"entry\":\"" + str.tostring(entry, format.mintick) + "\",\"sl\":\"" + str.tostring(sl, format.mintick) + "\",\"tp1\":\"" + str.tostring(tp1, format.mintick) + "\",\"tp2\":\"" + str.tostring(tp2, format.mintick) + "\",\"tp3\":\"" + str.tostring(tp3, format.mintick) + "\",\"rr1\":" + str.tostring(rr1, "0.00") + ",\"rr2\":" + str.tostring(rr2, "0.00") + ",\"rr3\":" + str.tostring(rr3, "0.00")
     zone   = ",\"zoneUpper\":\"" + str.tostring(zoneU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zoneL, format.mintick) + "\",\"zoneType\":\"" + zoneType + "\""
     htf    = ",\"activeSession\":\"" + session + "\",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "/" + str.tostring(hdB) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
-    ctx    = ",\"window\":\"" + window + "\",\"swept\":\"" + swept + "\",\"impulseATR\":" + str.tostring(impulseATR, "0.00") + ",\"immediateEntry\":\"" + str.tostring(immediateEntry, format.mintick) + "\",\"retestEntry\":\"" + str.tostring(retestEntry, format.mintick) + "\",\"actualStyle\":\"" + actualStyle + "\",\"apiKey\":\"" + alertApiKey + "\"}"
+    _cvdConf = direction == "LONG" ? cvdSlope == "rising" : cvdSlope == "falling"
+    ctx    = ",\"window\":\"" + window + "\",\"swept\":\"" + swept + "\",\"impulseATR\":" + str.tostring(impulseATR, "0.00") + ",\"immediateEntry\":\"" + str.tostring(immediateEntry, format.mintick) + "\",\"retestEntry\":\"" + str.tostring(retestEntry, format.mintick) + "\",\"actualStyle\":\"" + actualStyle + "\",\"cvdSlope\":\"" + cvdSlope + "\",\"cvdConfirms\":" + str.tostring(_cvdConf) + ",\"cvdDivergence\":\"" + cvdDivergence + "\",\"cvdLowTrust\":" + str.tostring(cvdLowTrust) + ",\"apiKey\":\"" + alertApiKey + "\"}"
     readable + head + prices + zone + htf + ctx
 
 // ─── v2.3 TIER-C SKIP ALERT ───────────────────────────────────────────

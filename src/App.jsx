@@ -551,6 +551,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         {/* ─── v15.3 · Session performance heatmap (full width) ─── */}
         <SessionHeatmapPanel />
+
+        {/* --- v15.7 . Order Flow Confirmation shadow panel (full width) --- */}
+        <OrderFlowPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -3895,6 +3898,401 @@ function LegendDot({ color, label }) {
     </span>
   );
 }
+// =====================================================================
+// 15c . ORDER FLOW CONFIRMATION PANEL  (v15.7)
+// =====================================================================
+// Reads /api/orderflow-summary -- Phase 3 CVD shadow data.
+// Shows whether CVD-confirmed trades outperform unconfirmed ones.
+// NOT gating execution yet -- shadow measurement only.
+
+const OF_MIN_N = 8; // n<8 cells show "collecting" instead of stats
+
+function ofVerdict(conf, unconf, delta) {
+  if (!conf || !unconf || conf.n < OF_MIN_N || unconf.n < OF_MIN_N) {
+    return { text: 'collecting', color: 'var(--qb-text-faint)' };
+  }
+  const dWR = delta?.winRateDelta ?? 0;
+  const dR  = conf.avgR != null && unconf.avgR != null ? conf.avgR - unconf.avgR : null;
+  if (dWR > 0.05 || (dR != null && dR > 0.1))  return { text: 'CVD adds edge', color: 'var(--qb-ok)' };
+  if (dWR < -0.05 || (dR != null && dR < -0.1)) return { text: 'CVD penalises', color: 'var(--qb-bad)' };
+  return { text: 'no edge yet', color: 'var(--qb-warn)' };
+}
+
+function OFMiniStat({ label, value, color }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <span style={{ fontSize: 7, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</span>
+      <span className="qb-mono" style={{ fontSize: 12, color: color || 'var(--qb-text-hi)', fontWeight: 500 }}>{value ?? '--'}</span>
+    </div>
+  );
+}
+
+function OFStatBox({ label, accent, s, minN = OF_MIN_N }) {
+  const collecting = !s || s.n < minN;
+  const wr   = s?.winRate ?? null;
+  const net  = s?.netPnl  ?? null;
+  const avgR = s?.avgR    ?? null;
+  return (
+    <div style={{
+      flex: 1, minWidth: 160, padding: '10px 14px',
+      background: 'var(--qb-bg-panel-hi)',
+      border: `1px solid ${collecting ? 'var(--qb-border)' : accent}`,
+      borderRadius: 4, opacity: collecting ? 0.65 : 1,
+    }}>
+      <div className="qb-mono" style={{ fontSize: 8, color: accent || 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
+        {label}
+      </div>
+      {collecting ? (
+        <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+          {s?.n != null ? `n=${s.n} -- collecting (need ${minN})` : 'collecting'}
+        </div>
+      ) : (
+        <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <OFMiniStat label="n"    value={s.n} />
+          <OFMiniStat label="WR"   value={wr  != null ? `${Math.round(wr * 100)}%` : '--'}
+            color={wr >= 0.55 ? 'var(--qb-ok)' : wr >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
+          <OFMiniStat label="net"  value={net  != null ? fmtUSD(net, true) : '--'}
+            color={net >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+          <OFMiniStat label="avgR" value={avgR != null ? `${avgR >= 0 ? '+' : ''}${avgR.toFixed(2)}R` : '--'}
+            color={avgR != null ? (avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)') : null} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OFTplCell({ s, minN = OF_MIN_N }) {
+  const collecting = !s || s.n < minN;
+  return (
+    <td style={{ padding: '5px 8px', textAlign: 'center', opacity: collecting ? 0.45 : 1 }}>
+      {collecting ? (
+        <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>
+          {s?.n != null ? `n=${s.n}` : '--'}
+        </span>
+      ) : (
+        <span className="qb-mono" style={{ fontSize: 9 }}>
+          <span style={{ color: 'var(--qb-text-mid)' }}>n={s.n} </span>
+          <span style={{ color: s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>
+            {Math.round(s.winRate * 100)}%
+          </span>
+          {' '}
+          <span style={{ color: s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>{fmtUSD(s.netPnl, true)}</span>
+          {s.avgR != null && (
+            <span style={{ color: s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>
+              {' '}{s.avgR >= 0 ? '+' : ''}{s.avgR.toFixed(2)}R
+            </span>
+          )}
+        </span>
+      )}
+    </td>
+  );
+}
+
+function OFSectionLabel({ children }) {
+  return (
+    <div className="qb-mono" style={{
+      fontSize: 8, color: 'var(--qb-text-faint)',
+      textTransform: 'uppercase', letterSpacing: 1.1,
+      padding: '10px 0 5px', marginTop: 4,
+      borderTop: '1px solid var(--qb-border)',
+    }}>{children}</div>
+  );
+}
+
+function OrderFlowPanel({ gridColumn = "1 / 4" }) {
+  const [data, setData]           = useState(null);
+  const [fetchError, setError]    = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [ready, setReady]         = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('orderflow-summary')).then((res) => res.json());
+        if (!alive) return;
+        if (r?.ok) { setData(r); setError(null); }
+        else { setData(null); setError(r?.error || 'endpoint error'); }
+      } catch (e) {
+        if (alive) { setData(null); setError(e.message); }
+      }
+      if (alive) { setLastFetch(new Date()); setReady(true); }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'Order Flow Confirmation',
+    subtitle: 'cvd shadow -- not gating yet -- measuring',
+    style: { gridColumn },
+  };
+
+  if (!ready) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '18px 14px' }}><Placeholder msg="Loading order-flow data..." /></div>
+    </Panel>
+  );
+
+  if (fetchError && !data) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '14px 16px' }}>
+        <PlaceholderError msg={`/api/orderflow-summary: ${fetchError}`} />
+      </div>
+    </Panel>
+  );
+
+  if (!data) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '14px 16px', minHeight: 100 }}>
+        <div style={{
+          padding: '10px 14px', background: 'var(--qb-bg-void)',
+          border: '1px solid var(--qb-border)', borderRadius: 4,
+          fontSize: 10, color: 'var(--qb-text-mid)', lineHeight: 1.7,
+        }}>
+          <div style={{ fontWeight: 600, color: 'var(--qb-text-hi)', marginBottom: 4 }}>
+            Collecting order-flow confirmation data
+          </div>
+          Needs resolved trades with CVD/footprint tags. Shadow records write on every
+          signal and are evaluated after trades close.
+          {lastFetch && (
+            <div style={{ marginTop: 6, fontSize: 8, color: 'var(--qb-text-faint)' }}>
+              Last checked: {lastFetch.toLocaleTimeString()}
+            </div>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+
+  // -- data is ready ---------------------------------------------------
+  const conf    = data.byConfirms.confirmed;
+  const unconf  = data.byConfirms.unconfirmed;
+  const delta   = data.byConfirms.delta;
+  const divB    = data.byDivergence.bearish;
+  const divBull = data.byDivergence.bullish;
+  const divNone = data.byDivergence.none;
+  const ftrust  = data.fullTrustVsLow.fullTrust;
+  const ltrust  = data.fullTrustVsLow.lowTrust;
+  const cov     = data.coverage;
+
+  // combine bearish + bullish divergence
+  const divN    = (divB?.n ?? 0) + (divBull?.n ?? 0);
+  const divWins = (divB?.wins ?? 0) + (divBull?.wins ?? 0);
+  const divNet  = (divB?.netPnl ?? 0) + (divBull?.netPnl ?? 0);
+  const divWR   = divN > 0 ? divWins / divN : null;
+  const divAvgR = divN > 0
+    ? (((divB?.avgR ?? 0) * (divB?.n ?? 0) + (divBull?.avgR ?? 0) * (divBull?.n ?? 0)) / divN)
+    : null;
+  const divCombined = { n: divN, wins: divWins, netPnl: divNet, winRate: divWR, avgR: divAvgR };
+
+  const verdict  = ofVerdict(conf, unconf, delta);
+  const dAvgR    = conf.avgR != null && unconf.avgR != null ? conf.avgR - unconf.avgR : null;
+  const tplRows  = TEMPLATE_ORDER.filter((t) => data.byTemplate[t]);
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 0 }}>
+
+        {/* coverage + freshness */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
+          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
+            {cov.totalClosed} closed trades
+            <span style={{ color: 'var(--qb-text-mid)' }}> ({cov.withCvdShadow} with CVD shadow, {cov.coveragePct}%)</span>
+          </span>
+          {cov.coveragePct < 50 && (
+            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)' }}>low coverage -- data still accumulating</span>
+          )}
+          <span style={{ flex: 1 }} />
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>shadow data -- not gating execution</span>
+          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 8 }}>{lastFetch.toLocaleTimeString()}</span>}
+        </div>
+
+        {/* ---- 1. SUMMARY BAR ------------------------------------------- */}
+        <OFSectionLabel>1 -- CVD Confirmation Overview</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <OFStatBox label="CVD Confirmed (slope = direction)" accent="var(--qb-ok)" s={conf} />
+          <OFStatBox label="CVD Unconfirmed (slope opposes)" accent="var(--qb-bad)" s={unconf} />
+
+          {/* edge verdict card */}
+          <div style={{
+            flex: 1, minWidth: 180, padding: '10px 14px',
+            background: 'var(--qb-bg-panel-hi)',
+            border: `1px solid ${verdict.color}`,
+            borderRadius: 4,
+          }}>
+            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
+              Edge (confirmed - unconfirmed)
+            </div>
+            <div className="qb-mono" style={{ fontSize: 15, fontWeight: 700, color: verdict.color, marginBottom: 6, letterSpacing: 0.4 }}>
+              {verdict.text.toUpperCase()}
+            </div>
+            {delta && conf.n >= OF_MIN_N && unconf.n >= OF_MIN_N ? (
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <OFMiniStat label="delta WR"
+                  value={`${delta.winRateDelta >= 0 ? '+' : ''}${(delta.winRateDelta * 100).toFixed(1)}%`}
+                  color={delta.winRateDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+                {dAvgR != null && (
+                  <OFMiniStat label="delta avgR"
+                    value={`${dAvgR >= 0 ? '+' : ''}${dAvgR.toFixed(2)}R`}
+                    color={dAvgR > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+                )}
+                <OFMiniStat label="delta net"
+                  value={fmtUSD(delta.netPnlDelta, true)}
+                  color={delta.netPnlDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+              </div>
+            ) : (
+              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
+                Need n&ge;{OF_MIN_N} per side. Confirmed: {conf.n} | Unconfirmed: {unconf.n}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ---- 2. PER-TEMPLATE TABLE ------------------------------------- */}
+        <OFSectionLabel>2 -- By Template -- which setups benefit from CVD?</OFSectionLabel>
+        {tplRows.length === 0 ? (
+          <Placeholder msg="No per-template data yet." />
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+              <thead>
+                <tr style={{ color: 'var(--qb-text-faint)' }}>
+                  {['Template', 'Confirmed  n / WR / net / avgR', 'Unconfirmed  n / WR / net / avgR', 'Delta WR'].map((h, i) => (
+                    <th key={h} className="qb-mono" style={{
+                      padding: '3px 8px 6px', borderBottom: '1px solid var(--qb-border)',
+                      fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4,
+                      textAlign: i === 0 ? 'left' : 'center',
+                    }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tplRows.map((t) => {
+                  const row  = data.byTemplate[t];
+                  const meta = TEMPLATE_DISPLAY[t];
+                  const c    = row.confirmed;
+                  const u    = row.unconfirmed;
+                  const hasC = c.n >= OF_MIN_N;
+                  const hasU = u.n >= OF_MIN_N;
+                  const dWR  = hasC && hasU ? c.winRate - u.winRate : null;
+                  return (
+                    <tr key={t} style={{ borderBottom: '1px solid var(--qb-border)' }}>
+                      <td style={{ padding: '5px 8px', color: 'var(--qb-text-hi)', whiteSpace: 'nowrap' }}>
+                        <span style={{ marginRight: 5, fontSize: 11 }}>{meta?.glyph || '.'}</span>
+                        <span style={{ fontSize: 9 }}>{meta?.label || t}</span>
+                      </td>
+                      <OFTplCell s={c} />
+                      <OFTplCell s={u} />
+                      <td style={{ padding: '5px 8px', textAlign: 'center' }}>
+                        {dWR != null ? (
+                          <span className="qb-mono" style={{
+                            fontSize: 10, fontWeight: 600,
+                            color: dWR > 0.04 ? 'var(--qb-ok)' : dWR < -0.04 ? 'var(--qb-bad)' : 'var(--qb-text-mid)',
+                          }}>
+                            {dWR >= 0 ? '+' : ''}{(dWR * 100).toFixed(1)}%
+                          </span>
+                        ) : <span style={{ color: 'var(--qb-text-faint)' }}>--</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* ---- 3. CVD DIVERGENCE SECTION --------------------------------- */}
+        <OFSectionLabel>3 -- CVD Divergence -- hollow-move trades vs clean entries</OFSectionLabel>
+        <div style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginBottom: 8, lineHeight: 1.5 }}>
+          Bearish div: price made new high but CVD did not (hollow LONG). Bullish div: price made new low but CVD did not (hollow SHORT).
+          Theory: divergent-tagged entries should underperform clean entries -- negative delta WR confirms the filter is worth using.
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <OFStatBox label="Any divergence (bearish + bullish combined)" accent="var(--qb-warn)" s={divCombined} />
+          <OFStatBox label="No divergence (clean)" accent="var(--qb-accent)" s={divNone} />
+          {divCombined.n >= OF_MIN_N && (divNone?.n ?? 0) >= OF_MIN_N && (() => {
+            const dWRDiv = divCombined.winRate - divNone.winRate;
+            const dRDiv  = divCombined.avgR != null && divNone.avgR != null ? divCombined.avgR - divNone.avgR : null;
+            return (
+              <div style={{
+                flex: 1, minWidth: 140, padding: '10px 14px',
+                background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4,
+              }}>
+                <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>
+                  Divergent vs clean delta
+                </div>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <OFMiniStat label="delta WR"
+                    value={`${(dWRDiv * 100) >= 0 ? '+' : ''}${(dWRDiv * 100).toFixed(1)}%`}
+                    color={dWRDiv < 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+                  {dRDiv != null && (
+                    <OFMiniStat label="delta avgR"
+                      value={`${dRDiv >= 0 ? '+' : ''}${dRDiv.toFixed(2)}R`}
+                      color={dRDiv < 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+                  )}
+                </div>
+                <div style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 5 }}>
+                  negative = divergent trades underperform clean (theory confirmed)
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+          {[{ label: 'Bearish divergence', s: divB }, { label: 'Bullish divergence', s: divBull }].map(({ label, s }) => {
+            const ok = s && s.n >= 3;
+            return (
+              <div key={label} style={{
+                flex: 1, minWidth: 120, padding: '6px 10px',
+                background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 3,
+                opacity: ok ? 1 : 0.5,
+              }}>
+                <div className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>{label}</div>
+                <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)' }}>
+                  {!ok
+                    ? `n=${s?.n ?? 0}`
+                    : `n=${s.n}  ${Math.round(s.winRate * 100)}% WR  ${fmtUSD(s.netPnl, true)}` +
+                      (s.avgR != null ? `  ${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R` : '')
+                  }
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ---- 4. FULL-TRUST INSTRUMENTS (footprint-capable) -------------- */}
+        <OFSectionLabel>4 -- Premium instruments (BTC / indices / Gold) -- CVD full-trust only</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <OFStatBox label="Full-trust -- CVD confirmed" accent="var(--qb-ok)" s={ftrust?.confirmed} />
+          <OFStatBox label="Full-trust -- CVD unconfirmed" accent="var(--qb-bad)" s={ftrust?.unconfirmed} />
+          <OFStatBox label="Full-trust -- all trades" accent="var(--qb-text-mid)" s={ftrust?.all} />
+          <OFStatBox label="Low-trust FX -- all combined" accent="var(--qb-text-faint)" s={ltrust} />
+        </div>
+        <div style={{ marginTop: 4, fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+          Footprint absorption / exhaustion data (Path 2) not yet implemented -- showing CVD split by instrument trust level.
+        </div>
+
+        {/* ---- 5. INSTRUMENT TRUST NOTE ----------------------------------- */}
+        <div className="qb-mono" style={{
+          marginTop: 8, padding: '6px 10px',
+          background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 3,
+          fontSize: 8, color: 'var(--qb-text-faint)', lineHeight: 1.7,
+        }}>
+          Order-flow data is{' '}
+          <span style={{ color: 'var(--qb-text-mid)' }}>full-trust</span>{' '}
+          on BTC, ETH, XAUUSD, NAS, US100, US500, SP500 (tick-accurate volume).
+          {' '}FX pairs are{' '}
+          <span style={{ color: 'var(--qb-warn)' }}>low-trust / excluded</span>
+          {' '}-- broker volume is not real tick data and does not reflect bid/ask delta. Do not interpret FX order-flow stats as meaningful.
+        </div>
+
+      </div>
+    </Panel>
+  );
+}
+
 
 // =====================================================================
 // 16 · ACTIVITY FEED  (v13.1 — collapsible)
@@ -4455,6 +4853,9 @@ function MobileLayout({
             )}
             {card("min(64vh, 520px)",
               <EntryStyleComparisonPanel gridColumn="auto" />
+            )}
+            {card("min(72vh, 580px)",
+              <OrderFlowPanel gridColumn="auto" />
             )}
           </>
         )}
