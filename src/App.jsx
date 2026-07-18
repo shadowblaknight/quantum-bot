@@ -4031,7 +4031,7 @@ function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
   const panelProps = {
     title: 'Order Flow Confirmation',
     subtitle: 'cvd shadow -- not gating yet -- measuring',
-    style: { gridColumn, minHeight: '440px', ...(style || {}) },
+    style: { gridColumn, ...(style || {}) },
   };
 
   if (!ready) return (
@@ -4098,7 +4098,7 @@ function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
 
   return (
     <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 0 }}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
 
         {/* coverage + freshness */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
@@ -4859,7 +4859,7 @@ function MobileLayout({
             {card("min(64vh, 520px)",
               <EntryStyleComparisonPanel gridColumn="auto" />
             )}
-            {card("min(72vh, 580px)",
+            {card("auto",
               <OrderFlowPanel gridColumn="auto" />
             )}
           </>
