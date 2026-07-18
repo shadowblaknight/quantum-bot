@@ -198,8 +198,8 @@ const getAssetById = (id) => ASSET_CATALOG.find((a) => a.id === id) || null;
 
 const GLOBAL_STYLES = `
   * { box-sizing: border-box; }
-  html, body, #root { margin:0; padding:0; height:100%; background: var(--qb-bg-void); color: var(--qb-text-hi); font-family: var(--qb-font-sans); -webkit-font-smoothing: antialiased; }
-  body { overflow: hidden; }
+  html, body, #root { margin:0; padding:0; min-height:100%; background: var(--qb-bg-void); color: var(--qb-text-hi); font-family: var(--qb-font-sans); -webkit-font-smoothing: antialiased; }
+  
   .qb-mono { font-family: var(--qb-font-mono); font-variant-numeric: tabular-nums; }
   .qb-serif { font-family: var(--qb-font-serif); }
   .qb-panel { background: var(--qb-bg-panel); border: 1px solid var(--qb-border); border-radius: 6px; }
@@ -450,11 +450,11 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
   return (
     <div style={{
-      width: "100vw", height: "100vh",
+      width: "100vw", minHeight: "100vh",
       background: "var(--qb-bg-void)",
       display: "grid",
-      gridTemplateRows: "auto auto 1fr auto",
-      overflow: "hidden",
+      gridTemplateRows: "auto auto auto auto",
+      overflow: "visible",
     }}>
 
       <DashboardHeader
@@ -481,7 +481,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         padding: 14,
         display: "grid",
         gridTemplateColumns: "1fr 1fr 1fr",
-        gridTemplateRows: "minmax(240px, auto) minmax(240px, 1fr) minmax(240px, auto)",
+        gridTemplateRows: "minmax(240px, auto) minmax(240px, auto) minmax(240px, auto)",
         // v14: full-width panels (Day-vs-Swing, Immediate-vs-Retest) flow into
         // implicit rows 4+. Without an auto-row size they collapse to zero height
         // (their inner content is height:100% of an undefined row). Give every
