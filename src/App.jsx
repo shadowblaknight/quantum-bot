@@ -486,7 +486,7 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         // implicit rows 4+. Without an auto-row size they collapse to zero height
         // (their inner content is height:100% of an undefined row). Give every
         // implicit row a real minimum so added panels actually render.
-        gridAutoRows: "minmax(240px, auto)",
+        gridAutoRows: "minmax(40px, auto)",
         gap: 10, overflow: "auto",
       }}>
         <AccountSafetyPanel
@@ -2417,7 +2417,7 @@ function TradeDataPanel({ gridColumn = "1 / 4" }) {
   const ctrlStyle = { background: "var(--qb-bg-panel-hi)", color: "var(--qb-text-hi)", border: "1px solid var(--qb-border)", borderRadius: 4, padding: "3px 6px", fontFamily: "var(--qb-font-mono)", fontSize: 11 };
 
   return (
-    <Panel title="Trade Data" subtitle="view & purge recognition records" style={{ gridColumn }}>
+    <Panel title="Trade Data" subtitle="view & purge recognition records" style={{ gridColumn }} collapsible panelId="trade-data" defaultCollapsed={true}>
       <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
         {error && <PlaceholderError msg={`trade data: ${error}`} />}
         {!error && (
@@ -2533,6 +2533,7 @@ function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
     title: "Immediate vs Retest",
     subtitle: "shadow EV · reaction + orb + ICT templates · not live gating",
     style: { gridColumn },
+    collapsible: true, panelId: 'entry-style', defaultCollapsed: false,
   };
 
   // ── NOT READY state — renders a clearly visible collecting badge ──────────
@@ -2887,6 +2888,7 @@ function PerfRankingPanel({ gridColumn = "1 / 4" }) {
     title:    "Performance Ranking",
     subtitle: "deduped · recognition-memory ∪ ledger · real P&L",
     style: { gridColumn },
+    collapsible: true, panelId: 'perf-ranking', defaultCollapsed: false,
   };
 
   if (!ready) return (
@@ -3791,7 +3793,7 @@ function SessionHeatmapPanel({ gridColumn = "1 / 4" }) {
     : TEMPLATE_ORDER;
 
   return (
-    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn }}>
+    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn }} collapsible panelId="session-heatmap" defaultCollapsed={false}>
       <div style={{ padding: 10, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
 
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
@@ -4027,6 +4029,7 @@ function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
     title: 'Order Flow Confirmation',
     subtitle: 'cvd shadow -- not gating yet -- measuring',
     style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'order-flow', defaultCollapsed: false,
   };
 
   if (!ready) return (
@@ -4398,14 +4401,28 @@ function ActivityRow({ entry }) {
 // 17 · PANEL FRAME + PLACEHOLDERS
 // =====================================================================
 
-function Panel({ title, subtitle, children, style }) {
+function Panel({ title, subtitle, children, style, collapsible, panelId, defaultCollapsed }) {
+  const [collapsed, setCollapsed] = useState(() => {
+    if (!collapsible || !panelId) return false;
+    try { const s = localStorage.getItem('qb_panel_' + panelId); if (s !== null) return s === 'true'; } catch (_) {}
+    return defaultCollapsed === true;
+  });
+  const toggle = collapsible ? () => setCollapsed(c => {
+    const next = !c; try { localStorage.setItem('qb_panel_' + panelId, String(next)); } catch (_) {} return next;
+  }) : undefined;
   return (
     <div className="qb-panel" style={{ display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0, ...(style || {}) }}>
-      <div style={{
-        padding: "10px 14px",
-        borderBottom: "1px solid var(--qb-border)",
-        display: "flex", alignItems: "baseline", gap: 12,
-      }}>
+      <div
+        style={{
+          padding: "10px 14px",
+          borderBottom: collapsed ? "none" : "1px solid var(--qb-border)",
+          display: "flex", alignItems: "center", gap: 12,
+          cursor: collapsible ? "pointer" : undefined,
+          userSelect: collapsible ? "none" : undefined,
+        }}
+        onClick={toggle}
+      >
+        {collapsible && <span style={{ fontSize: 9, color: "var(--qb-text-faint)", lineHeight: 1, flexShrink: 0, marginRight: 2 }}>{collapsed ? "▸" : "▾"}</span>}
         <span className="qb-serif" style={{ fontSize: 14, color: "var(--qb-text-hi)", letterSpacing: 0.2 }}>
           {title}
         </span>
@@ -4415,7 +4432,7 @@ function Panel({ title, subtitle, children, style }) {
           </span>
         )}
       </div>
-      <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
+      {!collapsed && <div style={{ flex: 1, minHeight: 0 }}>{children}</div>}
     </div>
   );
 }
@@ -4839,10 +4856,10 @@ function MobileLayout({
             {card("min(52vh, 400px)",
               <ORBComparePanel gridColumn="auto" />
             )}
-            {card("min(60vh, 480px)",
+            {card("auto",
               <TradeDataPanel gridColumn="auto" />
             )}
-            {card("min(68vh, 560px)",
+            {card("auto",
               <PerfRankingPanel gridColumn="auto" />
             )}
             {card("min(40vh, 300px)",
@@ -4851,7 +4868,7 @@ function MobileLayout({
             {card("min(60vh, 480px)",
               <AlexgSignalsPanel gridColumn="auto" />
             )}
-            {card("min(64vh, 520px)",
+            {card("auto",
               <EntryStyleComparisonPanel gridColumn="auto" />
             )}
             {card("auto",
