@@ -3791,8 +3791,8 @@ function SessionHeatmapPanel({ gridColumn = "1 / 4" }) {
     : TEMPLATE_ORDER;
 
   return (
-    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn, minHeight: '440px' }}>
-      <div style={{ padding: 10, height: '100%', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn }}>
+      <div style={{ padding: 10, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
 
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           {[{ id: 'pnl', label: 'Net P&L' }, { id: 'wr', label: 'Win %' }].map((opt) => (
