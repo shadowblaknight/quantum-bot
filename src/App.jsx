@@ -549,16 +549,11 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         <AlexgHeartbeatPanel />
         <AlexgSignalsPanel />
 
-        {/* --- v15.3 + v15.7 . Session heatmap + Order Flow - single grid cell --- */}
-        <div style={{ gridColumn: "1 / 4", display: "flex", flexDirection: "column", gap: 0 }}>
-          <SessionHeatmapPanel gridColumn="auto" />
-          <div style={{ height: 24, display: "flex", alignItems: "center", gap: 8, padding: "0 2px" }}>
-            <div style={{ flex: 1, height: 1, background: "var(--qb-border)" }} />
-            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)", letterSpacing: 1, textTransform: "uppercase" }}>order flow confirmation</span>
-            <div style={{ flex: 1, height: 1, background: "var(--qb-border)" }} />
-          </div>
-          <OrderFlowPanel gridColumn="auto" />
-        </div>
+        {/* ─── v15.3 · Session performance heatmap (full width) ─── */}
+        <SessionHeatmapPanel />
+
+        {/* ─── v15.7 · Order Flow Confirmation shadow panel (full width) ─── */}
+        <OrderFlowPanel style={{ marginTop: 20 }} />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -4031,7 +4026,7 @@ function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
   const panelProps = {
     title: 'Order Flow Confirmation',
     subtitle: 'cvd shadow -- not gating yet -- measuring',
-    style: { gridColumn, ...(style || {}) },
+    style: { gridColumn, minHeight: '1100px', ...(style || {}) },
   };
 
   if (!ready) return (
@@ -4098,7 +4093,7 @@ function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
 
   return (
     <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
+      <div style={{ padding: 12, height: '100%', overflow: 'auto' }}>
 
         {/* coverage + freshness */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
