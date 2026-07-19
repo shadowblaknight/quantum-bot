@@ -263,18 +263,27 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                 lStr := lStr + (vwapOk ? "VWP✓ " : "VWP✗ ")
             rvolTag = volUnavail ? "RVOL:n/a " : (not na(rvolCur) ? "RVOL:" + str.tostring(rvolCur, "0.0") + "× " : "")
 
-            // Entry / SL geometry (identical to live ORB)
-            orbEntryP = orbBrokeUp ? orbH : orbL
+            // Entry / SL geometry — IMMEDIATE PATH
+            // emitEntry = close: the actual market fill reference for an immediate
+            // (at-market) order. slDist and TPs anchor to emitEntry, not the OR edge,
+            // so TP1 is never on the wrong side of the fill price.
+            // Bug fixed: previously orbSLDist = |orbEntryP − orbSLP| and TPs anchored
+            // to orbEntryP. When (close − orbH) > orbSLDist on a LONG, tp1 landed below
+            // the fill. Mirrors the qb-reaction slDist-anchor fix.
+            orbEntryP = orbBrokeUp ? orbH : orbL   // OR edge: SL placement reference only
             orbBuf    = math.max(0.3 * atrVal, 0.10 * h1ATR)
             orbSLP    = orbBrokeUp ? orbL - orbBuf : orbH + orbBuf
-            orbSLDist = math.abs(orbEntryP - orbSLP)
+            emitEntry = close                       // market fill reference
+            orbSLDist = math.abs(emitEntry - orbSLP)   // true risk: fill → SL
             orbSLH1   = orbSLDist / h1ATR
 
             if orbSLDist > 0 and orbSLH1 >= slMinH1ATR and orbSLH1 <= slMaxH1ATR
                 if allPass
-                    orbT1 = orbBrokeUp ? orbEntryP + orbSLDist * 1.0 : orbEntryP - orbSLDist * 1.0
-                    orbT2 = orbBrokeUp ? orbEntryP + orbSLDist * 2.0 : orbEntryP - orbSLDist * 2.0
-                    orbT3 = orbBrokeUp ? orbEntryP + orbSLDist * 3.0 : orbEntryP - orbSLDist * 3.0
+                    orbT1 = orbBrokeUp ? emitEntry + orbSLDist * 1.0 : emitEntry - orbSLDist * 1.0
+                    orbT2 = orbBrokeUp ? emitEntry + orbSLDist * 2.0 : emitEntry - orbSLDist * 2.0
+                    orbT3 = orbBrokeUp ? emitEntry + orbSLDist * 3.0 : emitEntry - orbSLDist * 3.0
+                    slOk  = orbBrokeUp ? orbSLP < emitEntry : orbSLP > emitEntry
+                    tpOk  = orbBrokeUp ? orbT1  > emitEntry : orbT1  < emitEntry
                     htfTier  = orbHtfOk ? "A" : "B"
                     htfAlign = orbHtfOk ? 1 : 0
                     confStr  = "orb-pro-" + (orbHtfOk ? "withbias" : "counter")
@@ -284,16 +293,16 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                         // Counter-trend breakout + retest mode → queue for pullback
                         orbPendingRetest := true
                         orbBreakDir      := orbSDir
-                    else
+                    else if slOk and tpOk
                         // Fire: HTF-aligned always immediate; counter-trend if retest disabled
                         orbHasFired  := true
                         orbFireBar   := bar_index
-                        orbFireEntry := orbEntryP
+                        orbFireEntry := emitEntry
                         orbFireSL    := orbSLP
                         orbFireTP3   := orbT3
-                        alert(f_buildAlertPro(orbDir, orbEntryP, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, orbWATR, htfTier, htfAlign, confStr, lStr, close, orbEntryP, "immediate"), alert.freq_once_per_bar)
+                        alert(f_buildAlertPro(orbDir, emitEntry, orbSLP, orbT1, orbT2, orbT3, orbH, orbL, _orbSession, orbWATR, htfTier, htfAlign, confStr, lStr, close, orbEntryP, "immediate"), alert.freq_once_per_bar)
                         if showPosBox
-                            f_drawPosBox(orbEntryP, orbSLP, orbT3)
+                            f_drawPosBox(emitEntry, orbSLP, orbT3)
 
             // Filter labels at every qualifying breakout bar (PASS or FAIL)
             if showFilterLabels and (useRvol or useCandleQuality or useVwap)

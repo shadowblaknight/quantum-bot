@@ -699,13 +699,24 @@ module.exports = async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid direction' });
   }
   const _isLong = p.direction === 'LONG';
-  if (_isLong ? (sl >= entry || tp1 <= entry) : (sl <= entry || tp1 >= entry)) {
+  // v15.8: validate TP/SL sides against the ROUTING entry — the price the order
+  // actually fills at — not p.entry. For immediate signals p.immediateEntry is the
+  // fill reference; for retest p.retestEntry; fallback is p.entry.
+  // Independent catch for the immediate-path slDist mis-anchor bug: even if Pine
+  // sends entry = OR edge, the guard will reject a TP that lands on the wrong side
+  // of the actual fill price.
+  const _guardImmE = parseFloat(p.immediateEntry);
+  const _guardRetE = parseFloat(p.retestEntry);
+  const guardEntry = p.actualStyle === 'immediate' && isFinite(_guardImmE) ? _guardImmE
+                   : p.actualStyle === 'retest'    && isFinite(_guardRetE) ? _guardRetE
+                   : entry;
+  if (_isLong ? (sl >= guardEntry || tp1 <= guardEntry) : (sl <= guardEntry || tp1 >= guardEntry)) {
     return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
   }
-  if (tp2 !== null && (_isLong ? tp2 <= entry : tp2 >= entry)) {
+  if (tp2 !== null && (_isLong ? tp2 <= guardEntry : tp2 >= guardEntry)) {
     return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
   }
-  if (tp3 !== null && (_isLong ? tp3 <= entry : tp3 >= entry)) {
+  if (tp3 !== null && (_isLong ? tp3 <= guardEntry : tp3 >= guardEntry)) {
     return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
   }
 
