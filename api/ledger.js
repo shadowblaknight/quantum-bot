@@ -76,6 +76,7 @@ function buildLedgerRecord({ state, matchedPending, positionDeals, positionId })
 
   return {
     id:          `trade_${state.asset}_${positionId}`,
+    dedupeKey:   matchedPending?.dedupeKey || null,
     asset:       state.asset,
     symbol:      entryDeal ? entryDeal.symbol : null,
     direction:   state.direction,

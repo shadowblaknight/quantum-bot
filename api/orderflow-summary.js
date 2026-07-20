@@ -103,7 +103,7 @@ module.exports = async (req, res) => {
     const joined = ledger
       .filter(t => t.outcome && t.outcome !== 'OPEN')
       .map(t => {
-        const sh = shadowMap.get(t.id) || null;
+        const sh = (t.dedupeKey ? shadowMap.get(t.dedupeKey) : null) || null;
         return {
           id:           t.id,
           template:     t.template  || 'unknown',

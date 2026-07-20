@@ -588,6 +588,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       brokerOrderId: placement.orderId, comment, positionId: null,
       entryType, execKind: useMarket ? 'market' : 'limit',
       htfTier: p.htfTier || null,
+      dedupeKey,
       v13: true, pilotRulesApplied: decision.rulesApplied,
     };
     await addPendingSetup(assetId, pendingRecord);
