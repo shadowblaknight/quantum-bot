@@ -52,6 +52,10 @@
     "api/ledger.js": {
       "memory": 512,
       "maxDuration": 60
+    },
+    "api/session-context-summary.js": {
+      "memory": 512,
+      "maxDuration": 30
     }
   },
   "crons": [

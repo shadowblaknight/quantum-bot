@@ -233,6 +233,17 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   } catch (_ofErr) {}
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ── PHASE 4 SESSION-CONTEXT SHADOW (read-only) ───────────────────────────
+  // Captures session levels (Asian/London/prevDay) and coincidence metrics at
+  // signal time. Stores orbEntryP (retestEntry) for orb/orb-pro so future
+  // analyses can test the OR edge rather than the fill price.
+  // Entirely isolated: try/catch, fire-and-forget, no downstream reads.
+  try {
+    const { writeSessionCtxShadow } = require('./session-context-shadow');
+    writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {});
+  } catch (_scErr) {}
+  // ─────────────────────────────────────────────────────────────────────────
+
   // 6. Bounded fetch
   const [positions, capital] = await Promise.all([
     withTimeout(fetchPositions(), 1500, []),
