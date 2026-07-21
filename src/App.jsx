@@ -579,6 +579,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+
+      {/* ─── v15.7 · Analyst Sidebar ─── */}
+      <AnalystSidebar />
     </div>
   );
 }
@@ -5072,5 +5075,524 @@ function MobileActivity({ activity }) {
         )}
       </div>
     </Panel>
+  );
+}
+
+// =====================================================================
+// ANALYST SIDEBAR  v15.7
+// =====================================================================
+// Fixed right panel — backdrop-filter blur, 380px desktop / full-width mobile.
+// Toggle button always visible bottom-right. Slide transition.
+// GET /api/analyst serves the cached brief. Refresh button forces ?refresh=1.
+// Entirely read-only — no write paths, no rule mutations.
+
+const ANALYST_SECTIONS = ["health", "anomalies", "keepers", "bleeders", "collecting", "recommendations"];
+
+const HEALTH_COLORS = {
+  "healthy":     { fg: "var(--qb-ok)",   bg: "var(--qb-ok-soft)",   label: "HEALTHY" },
+  "broken-write":{ fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "BROKEN" },
+  "broken-join": { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "JOIN BROKEN" },
+  "no-evaluator":{ fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "NO EVALUATOR" },
+  "stale":       { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "STALE" },
+};
+
+const SEVERITY_COLORS = {
+  warn: { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)" },
+  info: { fg: "var(--qb-text-mid)", bg: "var(--qb-bg-panel-hi)" },
+};
+
+function AnalystSidebar() {
+  const [open, setOpen]     = useState(false);
+  const [brief, setBrief]   = useState(null);
+  const [loading, setLoad]  = useState(false);
+  const [err, setErr]       = useState(null);
+  const [section, setSection] = useState("health");
+
+  const load = useCallback(async (force = false) => {
+    setLoad(true);
+    setErr(null);
+    try {
+      const url = force ? "/api/analyst?refresh=1" : "/api/analyst";
+      const res = await fetch(url).then(r => r.json());
+      if (res.ok) setBrief(res);
+      else setErr(res.error || "endpoint error");
+    } catch (e) {
+      setErr(e.message || "fetch failed");
+    } finally {
+      setLoad(false);
+    }
+  }, []);
+
+  // Load on first open; don't auto-refresh on subsequent opens (use cache)
+  const hasLoaded = useRef(false);
+  useEffect(() => {
+    if (open && !hasLoaded.current) {
+      hasLoaded.current = true;
+      load(false);
+    }
+  }, [open, load]);
+
+  const unhealthyCount = brief
+    ? Object.values(brief.shadowHealth || {}).filter(h => h.statusCode !== "healthy").length
+    : 0;
+  const anomalyCount = brief?.anomalies?.length || 0;
+
+  return (
+    <>
+      {/* Toggle button — always visible */}
+      <button
+        onClick={() => setOpen(v => !v)}
+        title="Analyst Sidebar"
+        style={{
+          position: "fixed", bottom: 22, right: open ? 396 : 16,
+          zIndex: 1001, width: 42, height: 42,
+          borderRadius: "50%",
+          background: open ? "var(--qb-accent)" : "var(--qb-bg-panel)",
+          border: `1px solid ${open ? "var(--qb-accent)" : "var(--qb-border-hi)"}`,
+          color: open ? "#06070a" : "var(--qb-text-mid)",
+          fontSize: 18, cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+          transition: "right 280ms cubic-bezier(.4,0,.2,1), background 180ms, border-color 180ms",
+        }}
+      >
+        {open ? "×" : "⚡"}
+        {/* Badge for broken health or anomalies */}
+        {!open && (unhealthyCount + anomalyCount) > 0 && (
+          <span style={{
+            position: "absolute", top: -4, right: -4,
+            width: 16, height: 16, borderRadius: "50%",
+            background: "var(--qb-bad)", border: "2px solid var(--qb-bg-void)",
+            fontSize: 9, color: "white", fontWeight: 700,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            {Math.min(9, unhealthyCount + anomalyCount)}
+          </span>
+        )}
+      </button>
+
+      {/* Sidebar panel */}
+      <div style={{
+        position: "fixed", top: 0, right: 0, bottom: 0,
+        width: 380,
+        zIndex: 1000,
+        transform: open ? "translateX(0)" : "translateX(100%)",
+        transition: "transform 280ms cubic-bezier(.4,0,.2,1)",
+        display: "flex", flexDirection: "column",
+        background: "rgba(6,7,10,0.94)",
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
+        borderLeft: "1px solid var(--qb-border-hi)",
+        boxShadow: "-8px 0 32px rgba(0,0,0,0.4)",
+      }}>
+        {/* Header */}
+        <div style={{
+          padding: "14px 16px 10px",
+          borderBottom: "1px solid var(--qb-border)",
+          flexShrink: 0,
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span className="qb-serif" style={{ fontSize: 15, color: "var(--qb-text-hi)" }}>
+            Analyst
+          </span>
+          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", letterSpacing: 1, textTransform: "uppercase" }}>
+            read-only
+          </span>
+          {brief?._fromCache && (
+            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-lo)", marginLeft: "auto" }}>
+              cached · {brief.generatedAt ? Math.round((Date.now() - brief.generatedAt) / 60000) + "m ago" : ""}
+            </span>
+          )}
+        </div>
+
+        {/* Section tabs */}
+        <div style={{
+          display: "flex", gap: 0,
+          borderBottom: "1px solid var(--qb-border)",
+          overflowX: "auto", flexShrink: 0,
+        }}>
+          {ANALYST_SECTIONS.map(s => {
+            const badge =
+              s === "health"          ? (unhealthyCount > 0 ? unhealthyCount : null) :
+              s === "anomalies"       ? (anomalyCount > 0 ? anomalyCount : null) :
+              s === "keepers"         ? (brief?.perf?.keepers?.length || null) :
+              s === "bleeders"        ? (brief?.perf?.bleeders?.length || null) :
+              s === "recommendations" ? (brief?.recommendations?.length || null) :
+              null;
+            return (
+              <button key={s} onClick={() => setSection(s)} className="qb-mono" style={{
+                flex: "1 1 0", minWidth: 50,
+                padding: "7px 6px", fontSize: 9, letterSpacing: 0.5,
+                textTransform: "uppercase",
+                background: "transparent",
+                border: "none",
+                borderBottom: section === s ? "2px solid var(--qb-accent)" : "2px solid transparent",
+                color: section === s ? "var(--qb-accent)" : "var(--qb-text-faint)",
+                cursor: "pointer",
+                position: "relative",
+              }}>
+                {s}
+                {badge != null && (
+                  <span style={{
+                    position: "absolute", top: 3, right: 3,
+                    width: 12, height: 12, borderRadius: "50%",
+                    background: s === "bleeders" || s === "anomalies" ? "var(--qb-bad)" : "var(--qb-accent)",
+                    fontSize: 7, color: "#06070a", fontWeight: 700,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    {badge > 9 ? "9+" : badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {loading && <AnalystLoading />}
+          {!loading && err && <AnalystError msg={err} onRetry={() => load(false)} />}
+          {!loading && !err && !brief && (
+            <div style={{ padding: 20, textAlign: "center", fontSize: 11, color: "var(--qb-text-lo)" }}>
+              No data yet.
+            </div>
+          )}
+          {!loading && !err && brief && (
+            <>
+              {section === "health"          && <AnalystHealthSection  health={brief.shadowHealth} sources={brief.sources} />}
+              {section === "anomalies"       && <AnalystAnomaliesSection anomalies={brief.anomalies} />}
+              {section === "keepers"         && <AnalystKeepersBleeder items={brief.perf?.keepers || []} kind="keeper" />}
+              {section === "bleeders"        && <AnalystKeepersBleeder items={brief.perf?.bleeders || []} kind="bleeder" />}
+              {section === "collecting"      && <AnalystCollecting items={brief.perf?.collecting || []} />}
+              {section === "recommendations" && <AnalystRecommendations recs={brief.recommendations || []} />}
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          flexShrink: 0,
+          padding: "8px 12px",
+          borderTop: "1px solid var(--qb-border)",
+          display: "flex", alignItems: "center", gap: 10,
+          background: "rgba(6,7,10,0.6)",
+        }}>
+          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", flex: 1 }}>
+            {brief?.generatedAt
+              ? `Generated ${new Date(brief.generatedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} UTC`
+              : "—"}
+          </span>
+          <button
+            onClick={() => load(true)}
+            disabled={loading}
+            className="qb-mono"
+            style={{
+              background: "transparent",
+              border: "1px solid var(--qb-border)",
+              borderRadius: 3,
+              color: loading ? "var(--qb-text-lo)" : "var(--qb-text-mid)",
+              fontSize: 10, padding: "4px 10px",
+              cursor: loading ? "not-allowed" : "pointer",
+              letterSpacing: 0.5, textTransform: "uppercase",
+            }}
+          >
+            {loading ? "loading…" : "↺ refresh"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Analyst sub-sections ──────────────────────────────────────────────────────
+
+function AnalystLoading() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 0" }}>
+      {[1, 2, 3].map(i => (
+        <div key={i} className="qb-pulse" style={{
+          height: 52, borderRadius: 4,
+          background: "var(--qb-bg-panel-hi)",
+          border: "1px solid var(--qb-border)",
+        }} />
+      ))}
+    </div>
+  );
+}
+
+function AnalystError({ msg, onRetry }) {
+  return (
+    <div style={{
+      padding: "12px 14px", borderRadius: 4,
+      background: "var(--qb-bad-soft)", border: "1px solid var(--qb-bad)",
+      fontSize: 11, color: "var(--qb-bad)",
+      display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <span className="qb-mono">▲ {msg}</span>
+      <button onClick={onRetry} className="qb-mono" style={{
+        alignSelf: "flex-start", background: "transparent",
+        border: "1px solid var(--qb-bad)", color: "var(--qb-bad)",
+        borderRadius: 3, padding: "4px 10px", fontSize: 10,
+        cursor: "pointer", textTransform: "uppercase", letterSpacing: 0.5,
+      }}>retry</button>
+    </div>
+  );
+}
+
+function AnalystHealthSection({ health, sources }) {
+  const entries = Object.entries(health || {});
+  if (!entries.length) return <Placeholder msg="No health data." />;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <AnalystLabel>SHADOW SYSTEMS</AnalystLabel>
+      {entries.map(([sysName, h]) => {
+        const cfg = HEALTH_COLORS[h.statusCode] || HEALTH_COLORS["healthy"];
+        return (
+          <div key={sysName} className="qb-cell" style={{ padding: "9px 11px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span style={{
+                fontSize: 8, fontWeight: 700, letterSpacing: 0.8, padding: "1px 5px",
+                borderRadius: 2, background: cfg.bg, color: cfg.fg, fontFamily: "var(--qb-font-mono)",
+                textTransform: "uppercase", flexShrink: 0,
+              }}>{cfg.label}</span>
+              <span style={{ fontSize: 11, color: "var(--qb-text-hi)", fontWeight: 500, flex: 1, minWidth: 0,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {h.label}
+              </span>
+            </div>
+            <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", lineHeight: 1.6 }}>
+              written {h.written} · joined {h.joined} · resolved {h.resolved}
+              {h.ageHours != null && ` · last signal ${h.ageHours}h ago`}
+            </div>
+            {h.statusCode !== "healthy" && (
+              <div className="qb-mono" style={{ fontSize: 9, color: cfg.fg, marginTop: 3, lineHeight: 1.4 }}>
+                {h.status}
+              </div>
+            )}
+            {h.neededForVerdict != null && h.neededForVerdict > 0 && (
+              <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", marginTop: 2 }}>
+                {h.neededForVerdict} more resolved records to first n=8 verdict (largest bucket: {h.maxBucketN})
+              </div>
+            )}
+            {h.neededForVerdict === 0 && (
+              <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-ok)", marginTop: 2 }}>
+                ● n≥8 reached — verdicts available
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <AnalystLabel style={{ marginTop: 6 }}>DATA SOURCES</AnalystLabel>
+      {Object.entries(sources || {}).map(([src, s]) => (
+        <div key={src} className="qb-mono" style={{
+          fontSize: 9, display: "flex", justifyContent: "space-between",
+          padding: "3px 0", borderBottom: "1px solid var(--qb-border)",
+          color: s.available ? "var(--qb-text-mid)" : "var(--qb-warn)",
+        }}>
+          <span>{src}</span>
+          <span>{s.available ? "ok" : `unavailable: ${s.error || "?"}`}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AnalystAnomaliesSection({ anomalies }) {
+  if (!anomalies?.length) {
+    return (
+      <div style={{ padding: "18px 0", textAlign: "center" }}>
+        <span style={{ fontSize: 22 }}>✓</span>
+        <div style={{ fontSize: 11, color: "var(--qb-ok)", marginTop: 6 }}>No anomalies detected.</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <AnalystLabel>{anomalies.length} ANOMAL{anomalies.length === 1 ? "Y" : "IES"}</AnalystLabel>
+      {anomalies.map((a, i) => {
+        const cfg = SEVERITY_COLORS[a.severity] || SEVERITY_COLORS.info;
+        return (
+          <div key={i} style={{
+            padding: "8px 10px", borderRadius: 4,
+            background: cfg.bg, border: `1px solid ${cfg.fg}22`,
+          }}>
+            <div className="qb-mono" style={{
+              fontSize: 9, fontWeight: 700, color: cfg.fg,
+              textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 3,
+            }}>
+              [{a.severity?.toUpperCase() || "INFO"}] {a.code}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--qb-text-hi)", lineHeight: 1.5 }}>
+              {a.message}
+            </div>
+            {a.tradeIds?.length > 0 && (
+              <div className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-lo)", marginTop: 4 }}>
+                {a.tradeIds.join(", ")}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AnalystKeepersBleeder({ items, kind }) {
+  if (!items?.length) {
+    return <Placeholder msg={`No ${kind}s above n=8 threshold.`} />;
+  }
+  const isKeeper  = kind === "keeper";
+  const accentFg  = isKeeper ? "var(--qb-ok)"  : "var(--qb-bad)";
+  const accentBg  = isKeeper ? "var(--qb-ok-soft)" : "var(--qb-bad-soft)";
+  const label     = isKeeper ? "KEEPERS" : "BLEEDERS";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <AnalystLabel>{label} (n≥{8})</AnalystLabel>
+      {items.map((item, i) => {
+        const belowBE = item.wrVsBE != null && item.wrVsBE < 0;
+        return (
+          <div key={i} className="qb-cell" style={{ padding: "9px 11px" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
+              <span style={{ fontSize: 11, color: "var(--qb-text-hi)", fontWeight: 600 }}>
+                {item.template}
+              </span>
+              {item.tier && (
+                <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)" }}>
+                  tier {item.tier}
+                </span>
+              )}
+              {item.session && (
+                <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)" }}>
+                  {item.session}
+                </span>
+              )}
+              <span className="qb-mono" style={{ fontSize: 9, marginLeft: "auto", color: "var(--qb-text-lo)" }}>
+                n={item.n}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <AnalystStat label="WR" value={fmtPct((item.winRate || 0) * 100, 1, false)} color={accentFg} />
+              {item.breakEvenWR != null && (
+                <AnalystStat label="BE" value={fmtPct(item.breakEvenWR * 100, 1, false)} color="var(--qb-text-lo)" />
+              )}
+              <AnalystStat label="net" value={fmtUSD(item.netPnl, true)} color={item.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"} />
+              {item.avgR != null && (
+                <AnalystStat label="avgR" value={(item.avgR >= 0 ? "+" : "") + item.avgR.toFixed(2)} color={item.avgR >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"} />
+              )}
+            </div>
+            {belowBE && !isKeeper && (
+              <div className="qb-mono" style={{ fontSize: 8, color: "var(--qb-bad)", marginTop: 4 }}>
+                WR below break-even by {fmtPct(Math.abs(item.wrVsBE) * 100, 1, false)}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AnalystCollecting({ items }) {
+  if (!items?.length) return <Placeholder msg="No collecting buckets." />;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <AnalystLabel>COLLECTING (n&lt;8 — not ranked)</AnalystLabel>
+      <div className="qb-mono" style={{
+        fontSize: 9, color: "var(--qb-text-lo)", marginBottom: 4, lineHeight: 1.4,
+      }}>
+        Data accumulating. Figures shown for reference only — not actionable until n≥8.
+      </div>
+      {items.map((item, i) => (
+        <div key={i} className="qb-cell" style={{ padding: "8px 10px", opacity: 0.6 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 3 }}>
+            <span style={{ fontSize: 10, color: "var(--qb-text-mid)" }}>
+              {item.template}
+              {item.tier ? ` ×${item.tier}` : ""}
+              {item.session ? ` ×${item.session}` : ""}
+            </span>
+            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)", marginLeft: "auto" }}>
+              n={item.n} — need {Math.max(0, 8 - item.n)} more
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <AnalystStat label="WR" value={fmtPct((item.winRate || 0) * 100, 1, false)} color="var(--qb-text-lo)" />
+            <AnalystStat label="net" value={fmtUSD(item.netPnl, true)} color="var(--qb-text-lo)" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AnalystRecommendations({ recs }) {
+  if (!recs?.length) return <Placeholder msg="No recommendations." />;
+  const typeColor = {
+    bleeder:       "var(--qb-bad)",
+    keeper:        "var(--qb-ok)",
+    "shadow-health": "var(--qb-warn)",
+    "dead-template": "var(--qb-warn)",
+    "fires-no-trades": "var(--qb-warn)",
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <AnalystLabel>{recs.length} RECOMMENDATION{recs.length !== 1 ? "S" : ""}</AnalystLabel>
+      {recs.map((rec, i) => {
+        const c = typeColor[rec.type] || "var(--qb-text-mid)";
+        return (
+          <div key={i} style={{
+            padding: "9px 11px", borderRadius: 4,
+            background: "var(--qb-bg-panel-hi)",
+            border: "1px solid var(--qb-border)",
+            borderLeft: `3px solid ${c}`,
+          }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 5 }}>
+              <span className="qb-mono" style={{
+                fontSize: 8, fontWeight: 700, letterSpacing: 0.8, padding: "1px 5px",
+                borderRadius: 2, color: "#06070a",
+                background: rec.tag === "CONFIRMED" ? c : "var(--qb-text-lo)",
+                textTransform: "uppercase", flexShrink: 0,
+              }}>{rec.tag}</span>
+              <span className="qb-mono" style={{
+                fontSize: 8, color: c, textTransform: "uppercase", letterSpacing: 0.6,
+              }}>{rec.type}</span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--qb-text-hi)", lineHeight: 1.55 }}>
+              {rec.message}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Micro helpers ─────────────────────────────────────────────────────────────
+
+function AnalystLabel({ children, style }) {
+  return (
+    <div className="qb-mono" style={{
+      fontSize: 8, letterSpacing: 1.2, textTransform: "uppercase",
+      color: "var(--qb-text-faint)", paddingBottom: 3,
+      borderBottom: "1px solid var(--qb-border)",
+      ...(style || {}),
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function AnalystStat({ label, value, color }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <span style={{ fontSize: 7, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 0.8, fontFamily: "var(--qb-font-mono)" }}>
+        {label}
+      </span>
+      <span className="qb-mono" style={{ fontSize: 11, color: color || "var(--qb-text-mid)", fontWeight: 500 }}>
+        {value}
+      </span>
+    </div>
   );
 }
