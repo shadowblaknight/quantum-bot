@@ -233,19 +233,11 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   } catch (_ofErr) {}
   // ─────────────────────────────────────────────────────────────────────────
 
-  // ── PHASE 4 SESSION-CONTEXT SHADOW (read-only) ───────────────────────────
-  // Captures session levels (Asian/London/prevDay) and coincidence metrics at
-  // signal time. Stores orbEntryP (retestEntry) for orb/orb-pro so future
-  // analyses can test the OR edge rather than the fill price.
-  // Entirely isolated: try/catch, fire-and-forget, no downstream reads.
-  try {
-    const { writeSessionCtxShadow } = require('./session-context-shadow');
-    const { waitUntil } = require('@vercel/functions');
-    // Register independently with waitUntil so Vercel keeps the invocation alive
-    // until the MetaAPI fetch + Redis write complete, regardless of when
-    // processSignalBackground itself resolves.
-    waitUntil(writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {}));
-  } catch (_scErr) {}
+  // ── PHASE 4 SESSION-CONTEXT SHADOW ───────────────────────────────────────
+  // Registered directly with _waitUntil in the main handler (see below), NOT
+  // here. waitUntil() called from inside background async code is a no-op —
+  // Vercel captures the lifecycle set before res is sent. Keeping this block
+  // empty prevents a double-call; the main handler owns the registration.
   // ─────────────────────────────────────────────────────────────────────────
 
   // 6. Bounded fetch
@@ -766,7 +758,20 @@ module.exports = async (req, res) => {
           await markExecuted(dedupeKey, { status: 'failed', failedAt: Date.now() }, 60);
         })
     );
+    // Session-context shadow needs a live MetaAPI candle fetch and must be
+    // registered here \u2014 NOT inside processSignalBackground \u2014 so Vercel includes
+    // it in the lifecycle set captured before the response is sent.
+    try {
+      const { writeSessionCtxShadow } = require('./session-context-shadow');
+      _waitUntil(writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {}));
+    } catch (_scErr) {}
   } else {
+    // Local / dev fallback: Node keeps the process alive for pending promises,
+    // so a plain fire-and-forget is sufficient.
+    try {
+      const { writeSessionCtxShadow } = require('./session-context-shadow');
+      writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {});
+    } catch (_scErr) {}
     try {
       await processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 });
       if (!res.headersSent) res.status(200).json({ ok: true, dedupeKey, ms: Date.now() - t0 });

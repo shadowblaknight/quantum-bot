@@ -136,9 +136,11 @@ async function computeShadowHealth(r, ledger, summaries) {
       } catch (_) {}
     }
 
-    // Compute "how many more resolved records before first n=8 verdict"
+    // maxBucketN: largest bucket the summary has seen (for display only).
+    // neededForVerdict is computed from joined below — not from summary buckets,
+    // since the summary joins on dedupeKey and can only see joined records.
     let maxBucketN     = 0;
-    let neededForVerdict = null;
+    let neededForVerdict = null; // set after status classification
     const sm = summaries[sys.name];
     if (sm && !sm._unavailable) {
       if (sys.name === 'entrystyle' && sm.byTemplateSession) {
@@ -160,7 +162,6 @@ async function computeShadowHealth(r, ledger, summaries) {
         ];
         for (const n of cands) if (n != null && n > maxBucketN) maxBucketN = n;
       }
-      neededForVerdict = Math.max(0, MIN_N - maxBucketN);
     }
 
     // Status classification
@@ -177,10 +178,20 @@ async function computeShadowHealth(r, ledger, summaries) {
     } else if (sys.resolvedField && joined > 0 && resolved === 0) {
       status     = 'EVALUATOR NOT RUNNING';
       statusCode = 'no-evaluator';
+    } else if (written > 0 && joined > 0 && joined < MIN_N) {
+      // Resolving fine but the ledger join is thin — pre-fix trades lack dedupeKey.
+      // Verdicts gate on joined (what the summary can actually use), not resolved.
+      status     = `COLLECTING — resolving fine, but only ${joined} records can join the ledger (pre-fix trades lack dedupeKey)`;
+      statusCode = 'collecting-low-join';
     } else {
       status     = 'HEALTHY — collecting';
       statusCode = 'healthy';
     }
+
+    // neededForVerdict keys off JOINED records, not summary bucket sizes.
+    // The summary endpoint joins on dedupeKey; resolved-but-unjoined records
+    // feed analysis that the summary cannot see.
+    neededForVerdict = Math.max(0, MIN_N - joined);
 
     health[sys.name] = {
       label: sys.label,
@@ -215,12 +226,32 @@ async function computeShadowHealth(r, ledger, summaries) {
   }
 
   const regMatched = regSm?.matchedToLedger ?? 0;
-  // Largest bucket from byRegime
+  // Largest per-regime matched count (was using wrong field names — fixed to matchedToLedger)
   let regMaxN = 0;
   if (regSm?.byRegime) {
     for (const row of regSm.byRegime) {
-      if ((row?.trades?.length || row?.total || 0) > regMaxN) {
-        regMaxN = row?.trades?.length || row?.total || 0;
+      const n = row?.matchedToLedger ?? 0;
+      if (n > regMaxN) regMaxN = n;
+    }
+  }
+
+  // Validation verdict: if the detector would have blocked trades that were actually
+  // winners (detectorWouldHaveSaved < 0 on a gated bucket with n >= 15), flag it.
+  if (regCode === 'healthy' && regSm?.byRegime) {
+    for (const row of regSm.byRegime) {
+      const saved = row.detectorWouldHaveSaved ?? 0;
+      const gatedN = row.gatedTrades ?? 0;
+      if (saved < 0 && gatedN >= 15) {
+        const net      = Math.abs(row.gatedNetPnl ?? 0);
+        const actions  = Object.values(row.byAction || {});
+        const skipAct  = actions.find(a => a.wouldAction === 'skip' || a.wouldAction === 'block');
+        const bucketN  = skipAct?.matchedCount || gatedN;
+        const bucketWR = bucketN > 0 && skipAct
+          ? ((skipAct.wins || 0) / bucketN * 100).toFixed(0) + '%'
+          : '?';
+        regStatus = `VALIDATION FAILED — would block winners (${row.regime}-skip n=${gatedN}, WR=${bucketWR}, net=+$${net.toFixed(2)}). Shadow only; do not gate.`;
+        regCode   = 'validation-failed';
+        break;
       }
     }
   }

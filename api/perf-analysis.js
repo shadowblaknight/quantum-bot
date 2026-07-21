@@ -218,7 +218,12 @@ module.exports = async (req, res) => {
       else                      watchlist.push(item);
     }
 
-    for (const [k, b] of Object.entries(byTemplateTier))    classify(b, k, 'template×tier');
+    // 'untiered' is an ERA (htfTier was null before ~Jul 8), not a real tier bucket.
+    // Exclude it from keepers/bleeders so pre-July volume doesn't masquerade as a signal.
+    for (const [k, b] of Object.entries(byTemplateTier)) {
+      if (b.tier === 'untiered') continue;
+      classify(b, k, 'template×tier');
+    }
     for (const [k, b] of Object.entries(byTemplateSession)) classify(b, k, 'template×session');
 
     // sort: bleeders worst-first, keepers best-first, watchlist most-data-first

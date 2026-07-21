@@ -5092,11 +5092,13 @@ function MobileActivity({ activity }) {
 const ANALYST_SECTIONS = ["health", "anomalies", "keepers", "bleeders", "collecting", "recommendations"];
 
 const HEALTH_COLORS = {
-  "healthy":     { fg: "var(--qb-ok)",   bg: "var(--qb-ok-soft)",   label: "HEALTHY" },
-  "broken-write":{ fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "BROKEN" },
-  "broken-join": { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "JOIN BROKEN" },
-  "no-evaluator":{ fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "NO EVALUATOR" },
-  "stale":       { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "STALE" },
+  "healthy":            { fg: "var(--qb-ok)",   bg: "var(--qb-ok-soft)",   label: "HEALTHY" },
+  "broken-write":       { fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "BROKEN" },
+  "broken-join":        { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "JOIN BROKEN" },
+  "no-evaluator":       { fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "NO EVALUATOR" },
+  "stale":              { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "STALE" },
+  "collecting-low-join":{ fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "LOW JOIN" },
+  "validation-failed":  { fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "FAILED" },
 };
 
 const SEVERITY_COLORS = {
