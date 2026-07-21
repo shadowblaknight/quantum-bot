@@ -4916,6 +4916,9 @@ function MobileLayout({
       {settingsOpen && (
         <SettingsModal theme={theme} setTheme={setTheme} resolver={resolver} onClose={() => setSettingsOpen(false)} />
       )}
+
+      {/* ─── v15.7 · Analyst Sidebar (mobile — full-width drawer) ─── */}
+      <AnalystSidebar mobile />
     </div>
   );
 }
@@ -5101,7 +5104,7 @@ const SEVERITY_COLORS = {
   info: { fg: "var(--qb-text-mid)", bg: "var(--qb-bg-panel-hi)" },
 };
 
-function AnalystSidebar() {
+function AnalystSidebar({ mobile = false }) {
   const [open, setOpen]     = useState(false);
   const [brief, setBrief]   = useState(null);
   const [loading, setLoad]  = useState(false);
@@ -5144,7 +5147,7 @@ function AnalystSidebar() {
         onClick={() => setOpen(v => !v)}
         title="Analyst Sidebar"
         style={{
-          position: "fixed", bottom: 22, right: open ? 396 : 16,
+          position: "fixed", bottom: 22, right: (!mobile && open) ? 396 : 16,
           zIndex: 1001, width: 42, height: 42,
           borderRadius: "50%",
           background: open ? "var(--qb-accent)" : "var(--qb-bg-panel)",
@@ -5174,7 +5177,7 @@ function AnalystSidebar() {
       {/* Sidebar panel */}
       <div style={{
         position: "fixed", top: 0, right: 0, bottom: 0,
-        width: 380,
+        width: mobile ? "100vw" : 380,
         zIndex: 1000,
         transform: open ? "translateX(0)" : "translateX(100%)",
         transition: "transform 280ms cubic-bezier(.4,0,.2,1)",
@@ -5199,9 +5202,20 @@ function AnalystSidebar() {
             read-only
           </span>
           {brief?._fromCache && (
-            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-lo)", marginLeft: "auto" }}>
+            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-lo)", marginLeft: mobile ? undefined : "auto" }}>
               cached · {brief.generatedAt ? Math.round((Date.now() - brief.generatedAt) / 60000) + "m ago" : ""}
             </span>
+          )}
+          {mobile && (
+            <button
+              onClick={() => setOpen(false)}
+              style={{
+                marginLeft: "auto", background: "transparent",
+                border: "1px solid var(--qb-border)", borderRadius: 3,
+                color: "var(--qb-text-mid)", fontSize: 12,
+                padding: "3px 10px", cursor: "pointer",
+              }}
+            >✕</button>
           )}
         </div>
 
@@ -5261,9 +5275,9 @@ function AnalystSidebar() {
             <>
               {section === "health"          && <AnalystHealthSection  health={brief.shadowHealth} sources={brief.sources} />}
               {section === "anomalies"       && <AnalystAnomaliesSection anomalies={brief.anomalies} />}
-              {section === "keepers"         && <AnalystKeepersBleeder items={brief.perf?.keepers || []} kind="keeper" />}
-              {section === "bleeders"        && <AnalystKeepersBleeder items={brief.perf?.bleeders || []} kind="bleeder" />}
-              {section === "collecting"      && <AnalystCollecting items={brief.perf?.collecting || []} />}
+              {section === "keepers"         && <AnalystKeepersBleeder items={brief.perf?.keepers   || []} kind="keeper"  perf={brief.perf} />}
+              {section === "bleeders"        && <AnalystKeepersBleeder items={brief.perf?.bleeders  || []} kind="bleeder" perf={brief.perf} />}
+              {section === "collecting"      && <AnalystCollecting items={brief.perf?.collecting || []} perf={brief.perf} />}
               {section === "recommendations" && <AnalystRecommendations recs={brief.recommendations || []} />}
             </>
           )}
@@ -5439,7 +5453,24 @@ function AnalystAnomaliesSection({ anomalies }) {
   );
 }
 
-function AnalystKeepersBleeder({ items, kind }) {
+function AnalystKeepersBleeder({ items, kind, perf }) {
+  if (perf?.available === false) {
+    return (
+      <div style={{
+        padding: "12px 14px", borderRadius: 4,
+        background: "var(--qb-bg-panel-hi)", border: "1px solid var(--qb-border)",
+      }}>
+        <div className="qb-mono" style={{ fontSize: 10, color: "var(--qb-warn)" }}>
+          data source unavailable
+        </div>
+        {perf?.error && (
+          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", marginTop: 4 }}>
+            {perf.error}
+          </div>
+        )}
+      </div>
+    );
+  }
   if (!items?.length) {
     return <Placeholder msg={`No ${kind}s above n=8 threshold.`} />;
   }
@@ -5495,7 +5526,24 @@ function AnalystKeepersBleeder({ items, kind }) {
   );
 }
 
-function AnalystCollecting({ items }) {
+function AnalystCollecting({ items, perf }) {
+  if (perf?.available === false) {
+    return (
+      <div style={{
+        padding: "12px 14px", borderRadius: 4,
+        background: "var(--qb-bg-panel-hi)", border: "1px solid var(--qb-border)",
+      }}>
+        <div className="qb-mono" style={{ fontSize: 10, color: "var(--qb-warn)" }}>
+          data source unavailable
+        </div>
+        {perf?.error && (
+          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", marginTop: 4 }}>
+            {perf.error}
+          </div>
+        )}
+      </div>
+    );
+  }
   if (!items?.length) return <Placeholder msg="No collecting buckets." />;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

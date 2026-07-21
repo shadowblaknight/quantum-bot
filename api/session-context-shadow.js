@@ -23,10 +23,30 @@ const { getRedis, safeParse } = require('./_lib');
 
 const SC_SHADOW_KEY       = (id) => `v14:sessionctx:shadow:${id}`;
 const SC_SHADOW_INDEX_KEY = 'v14:sessionctx:shadow:index';
+const SC_ERROR_KEY        = 'v14:sessionctx:errors';
 const SC_SHADOW_INDEX_CAP = 5000;
 const SC_SHADOW_TTL_SEC   = 30 * 24 * 3600; // 30 days
+const SC_ERROR_CAP        = 20;
 
 const LIQ_THRESHOLD = 0.25; // ATR multiplier for coincidence test
+
+// ── Error trail (non-throwing, best-effort) ───────────────────────────────────
+async function pushError(r, phase, msg) {
+  try {
+    const raw  = await r.get(SC_ERROR_KEY).catch(() => null);
+    const prev = safeParse(raw);
+    const list = Array.isArray(prev) ? prev : [];
+    list.unshift({ ts: Date.now(), phase, error: String(msg).slice(0, 400) });
+    await r.set(SC_ERROR_KEY, JSON.stringify(list.slice(0, SC_ERROR_CAP)), { ex: SC_SHADOW_TTL_SEC });
+  } catch (_) {}
+}
+
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
 
 // ── Session level extraction from H1 candles ─────────────────────────────────
 // Each candle: { time: ISO-string, open, high, low, close, volume }
@@ -109,15 +129,28 @@ async function writeSessionCtxShadow(p, dedupeKey, assetId) {
   const ts = typeof p.timestamp === 'number' ? p.timestamp
            : parseInt(p.timestamp, 10) || Date.now();
 
-  // Fetch H1 candles covering 3 days (72 bars) — enough for prevDay + today's sessions
+  // Fetch H1 candles covering 3 days (72 bars) — enough for prevDay + today's sessions.
+  // 5s timeout prevents blocking if MetaAPI is slow or the semaphore is congested.
   let candles = [];
   try {
     const { fetchCandles } = require('./candle-source');
-    const result = await fetchCandles(assetId, '1h', 72);
+    const result = await withTimeout(
+      fetchCandles(assetId, '1h', 72),
+      5000,
+      { candles: [], error: 'candle-fetch-timeout' }
+    );
     candles = (result && result.candles) ? result.candles : [];
-  } catch (_) {}
+    if (!candles.length) {
+      await pushError(r, 'candle-fetch-empty', result?.error || 'no-error-field');
+    }
+  } catch (e) {
+    await pushError(r, 'candle-fetch-throw', e?.message || String(e));
+  }
 
-  if (candles.length < 5) return; // not enough data to compute any level
+  if (candles.length < 5) {
+    if (candles.length > 0) await pushError(r, 'candle-count', `only ${candles.length} bars`);
+    return;
+  }
 
   // Compute session levels
   const { prevDayHigh, prevDayLow, asianHigh, asianLow, londonHigh, londonLow, londonDirection }
@@ -138,7 +171,11 @@ async function writeSessionCtxShadow(p, dedupeKey, assetId) {
                   : isFinite(_pE)        ? _pE
                   : null;
 
-  if (testLevel == null) return;
+  if (testLevel == null) {
+    await pushError(r, 'no-test-level',
+      `template=${p.template} retE=${p.retestEntry} immE=${p.immediateEntry} entry=${p.entry}`);
+    return;
+  }
 
   // Nearest level and coincidence
   const levels = { prevDayHigh, prevDayLow, asianHigh, asianLow, londonHigh, londonLow };
@@ -188,7 +225,10 @@ async function writeSessionCtxShadow(p, dedupeKey, assetId) {
 
   try {
     await r.set(SC_SHADOW_KEY(dedupeKey), JSON.stringify(record), { ex: SC_SHADOW_TTL_SEC });
-  } catch (_) { return; }
+  } catch (e) {
+    await pushError(r, 'redis-record-write', e?.message || String(e));
+    return;
+  }
 
   try {
     const raw = await r.get(SC_SHADOW_INDEX_KEY).catch(() => null);
@@ -201,7 +241,9 @@ async function writeSessionCtxShadow(p, dedupeKey, assetId) {
       JSON.stringify(filtered.slice(0, SC_SHADOW_INDEX_CAP)),
       { ex: SC_SHADOW_TTL_SEC }
     );
-  } catch (_) {}
+  } catch (e) {
+    await pushError(r, 'redis-index-write', e?.message || String(e));
+  }
 }
 
-module.exports = { writeSessionCtxShadow, SC_SHADOW_KEY, SC_SHADOW_INDEX_KEY, SC_SHADOW_TTL_SEC };
+module.exports = { writeSessionCtxShadow, SC_SHADOW_KEY, SC_SHADOW_INDEX_KEY, SC_SHADOW_TTL_SEC, SC_ERROR_KEY };

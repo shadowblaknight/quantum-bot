@@ -18,7 +18,8 @@ const { applyCors, getRedis, safeParse, selfBase } = require('./_lib');
 const CACHE_KEY        = 'v14:analyst:brief:latest';
 const GROWTH_KEY       = 'v14:analyst:shadow:prev-counts';
 const CACHE_TTL_SEC    = 30 * 60;   // 30 minutes
-const FETCH_TIMEOUT_MS = 12_000;    // per sub-endpoint
+const FETCH_TIMEOUT_MS = 15_000;    // per light sub-endpoint
+const HEAVY_TIMEOUT_MS = 25_000;    // perf-analysis + perf-ranking (large payloads)
 const MIN_N            = 8;
 
 // ── Shadow system registry ───────────────────────────────────────────────────
@@ -55,10 +56,10 @@ const SHADOW_SYSTEMS = [
 ];
 
 // ── Safe fetch with timeout ──────────────────────────────────────────────────
-async function fetchEndpoint(path) {
+async function fetchEndpoint(path, timeoutMs = FETCH_TIMEOUT_MS) {
   const base = selfBase();
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${base}/api/${path}`, {
       signal:  ctrl.signal,
@@ -165,7 +166,7 @@ async function computeShadowHealth(r, ledger, summaries) {
     // Status classification
     let status, statusCode;
     if (written === 0) {
-      status     = 'WRITE BROKEN — Pine not emitting, or alerts not recreated';
+      status     = 'WRITE BROKEN — no records written; check the write path and any Pine field dependency';
       statusCode = 'broken-write';
     } else if (ageMs != null && ageMs > 48 * 3600_000) {
       status     = `STALE — no signals in ${Math.round(ageMs / 3600_000)}h`;
@@ -464,23 +465,24 @@ module.exports = async (req, res) => {
       }
     }
 
-    // ── Load in parallel ──────────────────────────────────────────────────────
+    // ── Load in parallel — light and heavy endpoints concurrently ────────────
+    // perf-analysis and perf-ranking pull full trade arrays and are heavier;
+    // they get a longer individual timeout. All six run concurrently.
     const [
-      ledger,
-      perfAnalysis,
-      perfRanking,
-      entrystyleSummary,
-      orderflowSummary,
-      sessionCtxSummary,
-      regimeSummary,
+      [ledger, entrystyleSummary, orderflowSummary, sessionCtxSummary, regimeSummary],
+      [perfAnalysis, perfRanking],
     ] = await Promise.all([
-      loadLedger(r).catch(() => []),
-      fetchEndpoint('perf-analysis'),
-      fetchEndpoint('perf-ranking'),
-      fetchEndpoint('entrystyle-summary'),
-      fetchEndpoint('orderflow-summary'),
-      fetchEndpoint('session-context-summary'),
-      fetchEndpoint('regime-detector?action=shadow-summary'),
+      Promise.all([
+        loadLedger(r).catch(() => []),
+        fetchEndpoint('entrystyle-summary'),
+        fetchEndpoint('orderflow-summary'),
+        fetchEndpoint('session-context-summary'),
+        fetchEndpoint('regime-detector?action=shadow-summary'),
+      ]),
+      Promise.all([
+        fetchEndpoint('perf-analysis', HEAVY_TIMEOUT_MS),
+        fetchEndpoint('perf-ranking',  HEAVY_TIMEOUT_MS),
+      ]),
     ]);
 
     const summaries = {

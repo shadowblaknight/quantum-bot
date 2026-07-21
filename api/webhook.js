@@ -240,7 +240,11 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // Entirely isolated: try/catch, fire-and-forget, no downstream reads.
   try {
     const { writeSessionCtxShadow } = require('./session-context-shadow');
-    writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {});
+    const { waitUntil } = require('@vercel/functions');
+    // Register independently with waitUntil so Vercel keeps the invocation alive
+    // until the MetaAPI fetch + Redis write complete, regardless of when
+    // processSignalBackground itself resolves.
+    waitUntil(writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {}));
   } catch (_scErr) {}
   // ─────────────────────────────────────────────────────────────────────────
 
