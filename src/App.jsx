@@ -5391,7 +5391,7 @@ function AnalystHealthSection({ health, sources }) {
                 {h.neededForVerdict} more resolved records to first n=8 verdict (largest bucket: {h.maxBucketN})
               </div>
             )}
-            {h.neededForVerdict === 0 && (
+            {h.neededForVerdict === 0 && h.statusCode !== "validation-failed" && (
               <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-ok)", marginTop: 2 }}>
                 ● n≥8 reached — verdicts available
               </div>

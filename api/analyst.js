@@ -438,8 +438,22 @@ function computeRecommendations(perfAnalysis, shadowHealth, anomalies) {
   }
 
   // From shadow health issues
+  // 'collecting-low-join' is historical (pre-dedupeKey trades) and not actionable — skip.
+  const ACTION_CODES = new Set(['broken-write', 'broken-join', 'no-evaluator', 'validation-failed']);
   for (const [sysName, h] of Object.entries(shadowHealth || {})) {
-    if (h.statusCode !== 'healthy') {
+    if (!ACTION_CODES.has(h.statusCode)) continue;
+    if (h.statusCode === 'validation-failed') {
+      // Extract the key stats from the status string for a clean, non-generic message.
+      // Status format: "VALIDATION FAILED — would block winners (REGIME-skip n=N, WR=X%, net=+$Y). Shadow only; do not gate."
+      const m = h.status.match(/\(([^)]+)\)/);
+      const detail = m ? m[1] : h.status;
+      recs.push({
+        type:    'shadow-health',
+        tag:     'CONFIRMED',
+        message: `Regime Detector VALIDATION FAILED — the trades it would skip are profitable (${detail}). Keep in shadow; do not gate. Consider shelving.`,
+        evidence: { written: h.written, joined: h.joined, resolved: h.resolved },
+      });
+    } else {
       recs.push({
         type:    'shadow-health',
         tag:     'CONFIRMED',
