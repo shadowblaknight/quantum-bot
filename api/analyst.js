@@ -411,17 +411,71 @@ async function checkShadowGrowth(r) {
 }
 
 // ── D. Recommendations ───────────────────────────────────────────────────────
-function computeRecommendations(perfAnalysis, shadowHealth, anomalies) {
+
+// Per-instrument breakdown for a keeper/bleeder bucket, sourced from perf-ranking trades.
+// Trades must have: template, session, htfTier, asset, netPnl, outcome.
+// Returns rows sorted worst-first (most negative netPnl first) for the expanded sidebar list.
+function computeInstrumentBreakdown(bucket, allTrades) {
+  if (!Array.isArray(allTrades) || !allTrades.length) return [];
+  const matches = allTrades.filter(t => {
+    if (t.template !== bucket.template) return false;
+    if (bucket.session != null) return t.session === bucket.session;
+    if (bucket.tier   != null) {
+      const tr = t.htfTier === 'A' ? 'A' : t.htfTier === 'B' ? 'B' : 'untiered';
+      return tr === bucket.tier;
+    }
+    return false;
+  });
+  const byAsset = {};
+  for (const t of matches) {
+    const asset = (t.asset || 'unknown').toLowerCase();
+    if (!byAsset[asset]) byAsset[asset] = { asset, n: 0, wins: 0, losses: 0, netPnl: 0 };
+    const s = byAsset[asset];
+    s.n++;
+    s.netPnl += t.netPnl || 0;
+    if      (t.outcome === 'WIN')  s.wins++;
+    else if (t.outcome === 'LOSS') s.losses++;
+  }
+  return Object.values(byAsset)
+    .map(s => ({
+      asset:        s.asset,
+      n:            s.n,
+      wins:         s.wins,
+      losses:       s.losses,
+      netPnl:       Math.round(s.netPnl * 100) / 100,
+      winRate:      s.n > 0 ? s.wins / s.n : 0,
+      insufficient: s.n < MIN_N,
+    }))
+    .sort((a, b) => a.netPnl - b.netPnl);
+}
+
+function computeRecommendations(perfAnalysis, shadowHealth, anomalies, rankingTrades) {
   const recs = [];
+  // Signed integer dollars for instrument-level message text (explicit sign, no decimals).
+  const fmtI = (v) => (v >= 0 ? '+$' : '-$') + Math.round(Math.abs(v));
 
   // From perf-analysis bleeders
   for (const b of (perfAnalysis?.bleeders || [])) {
     if (b.n < MIN_N) continue;  // never recommend from sub-8 bucket
-    const tag = b.n >= MIN_N && b.wrVsBE != null ? 'CONFIRMED' : 'SUGGESTIVE';
+    const tag          = b.n >= MIN_N && b.wrVsBE != null ? 'CONFIRMED' : 'SUGGESTIVE';
+    const byInstrument = computeInstrumentBreakdown(b, rankingTrades);
+    let message;
+    if (byInstrument.length > 0) {
+      const losers  = byInstrument.filter(i => i.netPnl < 0);
+      const winners = byInstrument.filter(i => i.netPnl > 0).sort((a, b) => b.netPnl - a.netPnl);
+      const dim     = `${b.template}${b.tier ? '×' + b.tier : ''}${b.session ? '×' + b.session : ''}`;
+      message = `Bleeder: ${dim} — n=${b.n}, net ${usd(b.netPnl)}.`;
+      if (losers.length)  message += ` Loss concentrated in: ${losers.map(i => `${i.asset} (n=${i.n}, ${fmtI(i.netPnl)})`).join(', ')}.`;
+      if (winners.length) message += ` PROFITABLE within this bucket: ${winners.map(i => `${i.asset} (n=${i.n}, ${fmtI(i.netPnl)})`).join(', ')}.`;
+      message += ' Restrict the losing instruments, not the whole bucket.';
+    } else {
+      message = `Bleeder: ${b.template}${b.tier ? '×' + b.tier : ''}${b.session ? '×' + b.session : ''} — n=${b.n}, WR=${pct(b.winRate)}, BE=${pct(b.breakEvenWR)}, net=${usd(b.netPnl)}. Consider restricting.`;
+    }
     recs.push({
       type:    'bleeder',
       tag,
-      message: `Bleeder: ${b.template}${b.tier ? '×' + b.tier : ''}${b.session ? '×' + b.session : ''} — n=${b.n}, WR=${pct(b.winRate)}, BE=${pct(b.breakEvenWR)}, net=${usd(b.netPnl)}. Consider restricting.`,
+      message,
+      byInstrument,
       evidence: { n: b.n, winRate: b.winRate, breakEvenWR: b.breakEvenWR, netPnl: b.netPnl },
     });
   }
@@ -429,10 +483,27 @@ function computeRecommendations(perfAnalysis, shadowHealth, anomalies) {
   // From perf-analysis keepers
   for (const k of (perfAnalysis?.keepers || [])) {
     if (k.n < MIN_N) continue;
+    const byInstrument = computeInstrumentBreakdown(k, rankingTrades);
+    let message;
+    if (byInstrument.length > 0) {
+      const winners = byInstrument.filter(i => i.netPnl > 0).sort((a, b) => b.netPnl - a.netPnl);
+      const losers  = byInstrument.filter(i => i.netPnl < 0);
+      const dim     = `${k.template}${k.tier ? '×' + k.tier : ''}${k.session ? '×' + k.session : ''}`;
+      message = `Keeper: ${dim} — n=${k.n}, net ${usd(k.netPnl)}.`;
+      if (winners.length) message += ` Strongest: ${winners.map(i => `${i.asset} (n=${i.n}, ${fmtI(i.netPnl)})`).join(', ')}.`;
+      if (losers.length)  message += ` Weak within bucket: ${losers.map(i => `${i.asset} (n=${i.n}${i.insufficient ? ', n<8' : ''}, ${fmtI(i.netPnl)})`).join(', ')}.`;
+      const topTwo = winners.slice(0, 2).map(i => i.asset);
+      message += topTwo.length > 0
+        ? ` Protect this setup, especially ${topTwo.join(', ')}.`
+        : ' Protect this setup.';
+    } else {
+      message = `Keeper: ${k.template}${k.tier ? '×' + k.tier : ''}${k.session ? '×' + k.session : ''} — n=${k.n}, WR=${pct(k.winRate)}, net=${usd(k.netPnl)}. Protect this setup.`;
+    }
     recs.push({
       type:    'keeper',
       tag:     'CONFIRMED',
-      message: `Keeper: ${k.template}${k.tier ? '×' + k.tier : ''}${k.session ? '×' + k.session : ''} — n=${k.n}, WR=${pct(k.winRate)}, net=${usd(k.netPnl)}. Protect this setup.`,
+      message,
+      byInstrument,
       evidence: { n: k.n, winRate: k.winRate, netPnl: k.netPnl },
     });
   }
@@ -576,7 +647,8 @@ module.exports = async (req, res) => {
       .map(([tmpl, s]) => ({ template: tmpl, ...s }));
 
     // ── D. Recommendations ────────────────────────────────────────────────────
-    const recommendations = computeRecommendations(perfAnalysis, shadowHealth, anomalies);
+    const rankingTrades   = perfRanking?.trades || [];
+    const recommendations = computeRecommendations(perfAnalysis, shadowHealth, anomalies, rankingTrades);
 
     // ── Source availability map ───────────────────────────────────────────────
     const sources = {

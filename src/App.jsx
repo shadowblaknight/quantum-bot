@@ -5578,19 +5578,22 @@ function AnalystCollecting({ items, perf }) {
 }
 
 function AnalystRecommendations({ recs }) {
+  const [expanded, setExpanded] = React.useState({});
   if (!recs?.length) return <Placeholder msg="No recommendations." />;
   const typeColor = {
-    bleeder:       "var(--qb-bad)",
-    keeper:        "var(--qb-ok)",
-    "shadow-health": "var(--qb-warn)",
-    "dead-template": "var(--qb-warn)",
+    bleeder:           "var(--qb-bad)",
+    keeper:            "var(--qb-ok)",
+    "shadow-health":   "var(--qb-warn)",
+    "dead-template":   "var(--qb-warn)",
     "fires-no-trades": "var(--qb-warn)",
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <AnalystLabel>{recs.length} RECOMMENDATION{recs.length !== 1 ? "S" : ""}</AnalystLabel>
       {recs.map((rec, i) => {
-        const c = typeColor[rec.type] || "var(--qb-text-mid)";
+        const c            = typeColor[rec.type] || "var(--qb-text-mid)";
+        const isOpen       = !!expanded[i];
+        const hasBreakdown = Array.isArray(rec.byInstrument) && rec.byInstrument.length > 0;
         return (
           <div key={i} style={{
             padding: "9px 11px", borderRadius: 4,
@@ -5612,6 +5615,56 @@ function AnalystRecommendations({ recs }) {
             <div style={{ fontSize: 10, color: "var(--qb-text-hi)", lineHeight: 1.55 }}>
               {rec.message}
             </div>
+            {hasBreakdown && (
+              <button
+                onClick={() => setExpanded(prev => ({ ...prev, [i]: !isOpen }))}
+                style={{
+                  marginTop: 5, background: "none", border: "none", cursor: "pointer",
+                  padding: 0, fontSize: 9, color: "var(--qb-text-lo)",
+                  fontFamily: "var(--qb-font-mono)", letterSpacing: 0.4,
+                }}
+              >
+                {isOpen ? "▴ hide" : "▾ by instrument"}
+              </button>
+            )}
+            {isOpen && hasBreakdown && (
+              <div style={{ marginTop: 5, display: "flex", flexDirection: "column", gap: 2 }}>
+                {rec.byInstrument.map((inst, j) => (
+                  <div key={j} className="qb-mono" style={{
+                    display: "flex", gap: 8, alignItems: "center", fontSize: 9,
+                    padding: "3px 6px", borderRadius: 2,
+                    background: "var(--qb-bg-panel)",
+                    opacity: inst.insufficient ? 0.65 : 1,
+                  }}>
+                    <span style={{ minWidth: 64, color: "var(--qb-text-mid)", fontWeight: 600 }}>
+                      {inst.asset}
+                    </span>
+                    <span style={{ color: "var(--qb-text-lo)" }}>
+                      n={inst.n}{inst.insufficient ? "★" : ""}
+                    </span>
+                    <span style={{ color: "var(--qb-text-faint)" }}>
+                      {inst.wins}W/{inst.losses}L
+                    </span>
+                    <span style={{
+                      marginLeft: "auto",
+                      color: inst.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)",
+                    }}>
+                      {inst.netPnl >= 0 ? "+" : ""}{inst.netPnl.toFixed(2)}
+                    </span>
+                    <span style={{ color: "var(--qb-text-lo)" }}>
+                      {(inst.winRate * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                ))}
+                {rec.byInstrument.some(inst => inst.insufficient) && (
+                  <div className="qb-mono" style={{
+                    fontSize: 8, color: "var(--qb-text-faint)", marginTop: 2,
+                  }}>
+                    ★ n&lt;8 — insufficient data, do not restrict on this sample
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         );
       })}
