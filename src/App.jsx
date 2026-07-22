@@ -5578,7 +5578,7 @@ function AnalystCollecting({ items, perf }) {
 }
 
 function AnalystRecommendations({ recs }) {
-  const [expanded, setExpanded] = React.useState({});
+  const [expanded, setExpanded] = useState({});
   if (!recs?.length) return <Placeholder msg="No recommendations." />;
   const typeColor = {
     bleeder:           "var(--qb-bad)",
