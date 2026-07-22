@@ -2,7 +2,7 @@
 /* eslint-disable */
 // api/session-context-shadow.js  v15.7
 // Captures session-level context at signal time for each fired trade.
-// Called fire-and-forget from processSignalBackground (Phase 4) in webhook.js.
+// Registered with _waitUntil in the main webhook handler (not inside processSignalBackground).
 // Writes go to Redis only; never touches live execution state; cannot gate trades.
 //
 // Stored fields:
@@ -129,13 +129,16 @@ async function writeSessionCtxShadow(p, dedupeKey, assetId) {
   const ts = typeof p.timestamp === 'number' ? p.timestamp
            : parseInt(p.timestamp, 10) || Date.now();
 
-  // Fetch H1 candles covering 3 days (72 bars) — enough for prevDay + today's sessions.
-  // 5s timeout prevents blocking if MetaAPI is slow or the semaphore is congested.
+  // Fetch 4h candles covering 3 days (18 bars) — enough for prevDay + today's sessions.
+  // H1 from MetaAPI only returns 3 bars (account plan limit), so we use 4h which the
+  // watcher already caches (300 bars, instant cache hit at signal time). extractSessionLevels
+  // filters by UTC hour and works correctly with 4h bars: Asian (00:00+04:00 bars),
+  // London (08:00 bar), prevDay (yesterday's six 4h bars). ATR is 4h-based, not 1h.
   let candles = [];
   try {
     const { fetchCandles } = require('./candle-source');
     const result = await withTimeout(
-      fetchCandles(assetId, '1h', 72),
+      fetchCandles(assetId, '4h', 18),
       5000,
       { candles: [], error: 'candle-fetch-timeout' }
     );
