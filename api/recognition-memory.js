@@ -198,14 +198,42 @@ async function findSimilarTrades({ asset, direction, mode, session, contributing
   );
 
   if (candidates.length === 0) {
-    return { matches: [], summary: emptySummary(), totalConsidered: 0 };
+    return { matches: [], summary: emptySummary(), totalConsidered: 0, preFixExcluded: 0 };
+  }
+
+  // Exclude preFix-flagged trades from the neighbour set (read-time filter only).
+  // The preFix flag lives in the ledger (v14:ledger:trade:{id}); recognition-memory
+  // records (v12:trades:closed:{id}) are not modified or removed here.
+  // We cross-reference only the already-filtered candidates (10–40 trades), not all 500.
+  // Fail-open: if the pipeline throws, all candidates are kept so advice still fires.
+  let filteredCandidates = candidates;
+  let preFixExcluded = 0;
+  const r = getRedis();
+  if (r && candidates.length > 0) {
+    try {
+      const pipe = r.pipeline();
+      for (const t of candidates) pipe.get(`v14:ledger:trade:${t.id}`);
+      const results = await pipe.exec();
+      filteredCandidates = candidates.filter((t, i) => {
+        const raw = results[i];
+        const led = raw ? (typeof raw === 'string' ? safeParse(raw) : raw) : null;
+        if (led && led.preFix === true) { preFixExcluded++; return false; }
+        return true;
+      });
+    } catch (_) {
+      // fall-open: use unfiltered candidates
+    }
+  }
+
+  if (filteredCandidates.length === 0) {
+    return { matches: [], summary: emptySummary(), totalConsidered: candidates.length, preFixExcluded };
   }
 
   const currentTactics = new Set(contributingTactics || []);
   const currentTFs = new Set(timeframesInPlay || []);
 
   // Compute similarity for each candidate
-  const scored = candidates.map((t) => {
+  const scored = filteredCandidates.map((t) => {
     const candidateTactics = new Set(t.contributingTactics || []);
     const candidateTFs = new Set(t.timeframesInPlay || []);
 
@@ -263,6 +291,7 @@ async function findSimilarTrades({ asset, direction, mode, session, contributing
     matches: topK,
     summary,
     totalConsidered: candidates.length,
+    preFixExcluded,
   };
 }
 

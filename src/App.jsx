@@ -554,6 +554,21 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         {/* ─── v15.7 · Order Flow Confirmation shadow panel (full width) ─── */}
         <OrderFlowPanel />
+
+        {/* ─── v15.8 · Session Context shadow panel (full width) ─── */}
+        <SessionCtxPanel />
+
+        {/* ─── v15.8 · Wick Ratio shadow panel (full width) ─── */}
+        <WickRatioPanel />
+
+        {/* ─── v15.8 · Signal Gating Control Panel (full width) ─── */}
+        <GatingPanel />
+
+        {/* ─── v15.8 · Instrument Heatmap (full width) ─── */}
+        <InstrumentHeatmapPanel />
+
+        {/* ─── v15.8 · Trend vs Counter-Trend Heatmap (full width) ─── */}
+        <TrendHeatmapPanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -5697,5 +5712,869 @@ function AnalystStat({ label, value, color }) {
         {value}
       </span>
     </div>
+  );
+}
+
+// =====================================================================
+// 15d · SESSION-CONTEXT SHADOW PANEL  (v15.8 Part 1)
+// =====================================================================
+// Reads /api/session-context-summary.
+// Shows three splits: liqCoincidence, withPriorSession, asianPosition.
+// n < 8 cells suppressed and shown as "collecting".
+
+const SC_MIN_N = 8;
+
+function ScStatCell({ label, s }) {
+  const thin = !s || s.n < SC_MIN_N;
+  return (
+    <div style={{
+      flex: 1, minWidth: 140, padding: '10px 14px',
+      background: 'var(--qb-bg-panel-hi)',
+      border: `1px solid ${thin ? 'var(--qb-border)' : 'var(--qb-border-hi)'}`,
+      borderRadius: 4, opacity: thin ? 0.65 : 1,
+    }}>
+      <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
+        {label}
+      </div>
+      {thin ? (
+        <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+          {s?.n != null ? `n=${s.n} — collecting (need ${SC_MIN_N})` : 'collecting'}
+        </div>
+      ) : (
+        <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <OFMiniStat label="n"    value={s.n} />
+          <OFMiniStat label="WR"   value={s.winRate != null ? `${Math.round(s.winRate * 100)}%` : '--'}
+            color={s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
+          <OFMiniStat label="net"  value={s.netPnl  != null ? fmtUSD(s.netPnl, true) : '--'}
+            color={s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+          <OFMiniStat label="avgR" value={s.avgR    != null ? `${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R` : '--'}
+            color={s.avgR != null ? (s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)') : null} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScDeltaBadge({ a, b }) {
+  if (!a || !b || a.n < SC_MIN_N || b.n < SC_MIN_N) return null;
+  const dWR = a.winRate - b.winRate;
+  return (
+    <span className="qb-mono" style={{
+      fontSize: 9, fontWeight: 600, marginLeft: 8,
+      color: Math.abs(dWR) < 0.04 ? 'var(--qb-text-faint)' : dWR > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)',
+    }}>
+      ({dWR >= 0 ? '+' : ''}{(dWR * 100).toFixed(1)}% WR delta)
+    </span>
+  );
+}
+
+function SessionCtxPanel({ gridColumn = '1 / 4', style }) {
+  const [data, setData]           = useState(null);
+  const [fetchError, setError]    = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [ready, setReady]         = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('session-context-summary')).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok) { setData(r); setError(null); }
+        else { setData(null); setError(r?.error || 'endpoint error'); }
+      } catch (e) {
+        if (alive) { setData(null); setError(e.message); }
+      }
+      if (alive) { setLastFetch(new Date()); setReady(true); }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'Session Context',
+    subtitle: 'liq · asian · london — shadow only',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'session-ctx', defaultCollapsed: false,
+  };
+
+  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading session context..." /></div></Panel>;
+  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/session-context-summary: ${fetchError}`} /></div></Panel>;
+
+  if (!data) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '14px 16px' }}>
+        <div style={{ padding: '10px 14px', background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 4, fontSize: 10, color: 'var(--qb-text-mid)' }}>
+          <div style={{ fontWeight: 600, color: 'var(--qb-text-hi)', marginBottom: 4 }}>Collecting session context data</div>
+          Shadow records write on every signal. n≥8 required per bucket before stats are shown.
+        </div>
+      </div>
+    </Panel>
+  );
+
+  const cov = data.coverage;
+  const liq = data.byLiqCoincidence;
+  const wps = data.byWithPriorSession;
+  const ap  = data.byAsianPosition;
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* coverage bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
+          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
+            {cov.totalClosed} closed trades
+            <span style={{ color: 'var(--qb-text-mid)' }}> ({cov.withScShadow} with session shadow, {cov.coveragePct}%)</span>
+          </span>
+          {cov.coveragePct < 50 && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)' }}>low coverage — accumulating</span>}
+          <span style={{ flex: 1 }} />
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>shadow data — not gating execution</span>
+          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
+        </div>
+
+        {/* 1. Liquidity coincidence */}
+        <OFSectionLabel>1 — Liquidity Coincidence (entry within 0.25 ATR of prior-session high/low)</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <ScStatCell label="Coincident (liq sweep)" s={liq?.coincident} />
+          <ScStatCell label="Non-coincident"          s={liq?.nonCoincident} />
+          {liq?.delta && (
+            <div style={{ flex: 1, minWidth: 140, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4 }}>
+              <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>coincident delta</div>
+              <OFMiniStat label="delta WR" value={`${liq.delta.winRateDelta >= 0 ? '+' : ''}${(liq.delta.winRateDelta * 100).toFixed(1)}%`}
+                color={Math.abs(liq.delta.winRateDelta) < 0.04 ? 'var(--qb-text-faint)' : liq.delta.winRateDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+            </div>
+          )}
+        </div>
+
+        {/* 2. With prior session direction */}
+        <OFSectionLabel>2 — Prior Session Direction (trade agrees with prior session's bias)</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <ScStatCell label="With prior session"    s={wps?.withSession} />
+          <ScStatCell label="Against prior session" s={wps?.againstSession} />
+          {wps?.delta && (
+            <div style={{ flex: 1, minWidth: 140, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4 }}>
+              <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>with vs against delta</div>
+              <OFMiniStat label="delta WR" value={`${wps.delta.winRateDelta >= 0 ? '+' : ''}${(wps.delta.winRateDelta * 100).toFixed(1)}%`}
+                color={Math.abs(wps.delta.winRateDelta) < 0.04 ? 'var(--qb-text-faint)' : wps.delta.winRateDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+            </div>
+          )}
+        </div>
+
+        {/* 3. Asian range position */}
+        <OFSectionLabel>3 — Asian Range Position at Signal</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {['above', 'inside', 'below'].map(pos => (
+            <ScStatCell key={pos} label={`${pos} Asian range`} s={ap?.[pos]} />
+          ))}
+        </div>
+
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15e · WICK RATIO SHADOW PANEL  (v15.8 Part 2)
+// =====================================================================
+// Reads /api/wickratio-summary.
+// Shows band table + full-trust vs FX split.
+// Note: Pine OHLC not yet emitted until Pine scripts are updated.
+
+const WR_BANDS = ['0.00-0.25', '0.25-0.50', '0.50-0.75', '0.75-1.00'];
+const WR_BAND_LABEL = { '0.00-0.25': 'tight body (0–25%)', '0.25-0.50': 'moderate wick (25–50%)', '0.50-0.75': 'dominant wick (50–75%)', '0.75-1.00': 'doji / full wick (75–100%)' };
+
+function WrCell({ s, minN = 8 }) {
+  const thin = !s || s.n < minN;
+  return (
+    <td style={{ padding: '5px 10px', textAlign: 'center', opacity: thin ? 0.4 : 1 }}>
+      {thin ? (
+        <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>
+          {s?.n != null ? `n=${s.n}` : '--'}
+        </span>
+      ) : (
+        <span className="qb-mono" style={{ fontSize: 9 }}>
+          <span style={{ color: 'var(--qb-text-mid)' }}>n={s.n} </span>
+          <span style={{ color: s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>
+            {Math.round(s.winRate * 100)}%
+          </span>
+          {' '}
+          <span style={{ color: s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>{fmtUSD(s.netPnl, true)}</span>
+        </span>
+      )}
+    </td>
+  );
+}
+
+function WickRatioPanel({ gridColumn = '1 / 4', style }) {
+  const [data, setData]           = useState(null);
+  const [fetchError, setError]    = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [ready, setReady]         = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('wickratio-summary')).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok) { setData(r); setError(null); }
+        else { setData(null); setError(r?.error || 'endpoint error'); }
+      } catch (e) {
+        if (alive) { setData(null); setError(e.message); }
+      }
+      if (alive) { setLastFetch(new Date()); setReady(true); }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'Wick Ratio',
+    subtitle: 'signal bar structure — shadow only, testing in-sample signal',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'wick-ratio', defaultCollapsed: true,
+  };
+
+  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading wick ratio data..." /></div></Panel>;
+  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/wickratio-summary: ${fetchError}`} /></div></Panel>;
+
+  const cov = data?.coverage;
+  const pineReady = cov?.withBarData > 0;
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* status bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
+          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
+            {cov?.totalClosed ?? 0} closed trades ·
+            {' '}{cov?.withWrShadow ?? 0} with wick shadow ·
+            {' '}{cov?.coveragePct ?? 0}% coverage
+          </span>
+          {!pineReady && (
+            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', fontStyle: 'italic' }}>
+              Pine OHLC not yet emitted — deploy updated Pine scripts to start accumulating wick data
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
+        </div>
+
+        {!pineReady ? (
+          <div style={{ padding: '14px 0', fontSize: 9, lineHeight: 1.75, borderLeft: '3px solid var(--qb-warn)', paddingLeft: 12, marginBottom: 10 }}>
+            <div style={{ fontWeight: 700, color: 'var(--qb-warn)', marginBottom: 6, fontSize: 10 }}>
+              ⚠ MANUAL USER STEP REQUIRED — wickRatio is not collecting data yet
+            </div>
+            <div style={{ color: 'var(--qb-text-hi)', marginBottom: 6 }}>
+              Shadow records are being written ({cov?.totalShadows ?? 0} so far) but all of them store <strong>null</strong> for wickRatio because the TradingView alerts are still firing the <em>old</em> Pine scripts that do not emit <code>barOpen</code>/<code>barHigh</code>/<code>barLow</code>/<code>barClose</code>.
+            </div>
+            <div style={{ color: 'var(--qb-text-hi)', marginBottom: 6 }}>
+              <strong>To fix this you must manually:</strong>
+            </div>
+            <ol style={{ margin: '0 0 0 16px', padding: 0, color: 'var(--qb-text-mid)' }}>
+              <li>Open TradingView and navigate to the chart where <strong>qb-orb-pro</strong> and <strong>qb-reaction</strong> are loaded.</li>
+              <li>Open the Alerts panel. Find and <strong>delete</strong> every alert created from qb-orb-pro and qb-reaction.</li>
+              <li>In the Pine editor, reload each script (the updated versions in this deploy already contain the OHLC fields).</li>
+              <li><strong>Recreate</strong> all alerts from the reloaded scripts. The new alerts will fire payloads that include barOpen/barHigh/barLow/barClose.</li>
+            </ol>
+            <div style={{ marginTop: 8, color: 'var(--qb-text-faint)', fontSize: 8 }}>
+              Until alerts are recreated, this panel cannot display wick ratio bands. Existing null records are harmless — they will be skipped in the coverage count once real data arrives.
+            </div>
+          </div>
+        ) : (
+          <>
+            <OFSectionLabel>Band breakdown — all assets</OFSectionLabel>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+                <thead>
+                  <tr style={{ color: 'var(--qb-text-faint)' }}>
+                    {['Band', 'All trades', 'Full-trust (BTC/XAUUSD/US500/NAS)', 'FX only'].map((h, i) => (
+                      <th key={h} style={{ padding: '3px 10px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i === 0 ? 'left' : 'center' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {WR_BANDS.map(band => (
+                    <tr key={band} style={{ borderBottom: '1px solid var(--qb-border)' }}>
+                      <td style={{ padding: '5px 10px', color: 'var(--qb-text-hi)', fontSize: 9 }}>{WR_BAND_LABEL[band]}</td>
+                      <WrCell s={data.byBand[band]} />
+                      <WrCell s={data.byBandFullTrust[band]} />
+                      <WrCell s={data.byBandFx[band]} />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 8, fontStyle: 'italic' }}>
+              shadow only — testing whether in-sample wick signal holds forward. Do not gate on n&lt;{data.minN} buckets.
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15f · GATING CONTROL PANEL  (v15.8 Part 3)
+// =====================================================================
+// Reads GET /api/gating-rules. Writes POST /api/gating-rules.
+// G6: toggle only on explicit confirmed user click. Never auto-triggers.
+// Shows ORB×BTC and ORB×NAS100 as OFF on load (seeded from hardcoded blocks).
+
+const GATING_SESSION_LABEL = (s) => s === '*' ? 'Any Session' : (SESSION_LABELS[s] || s);
+
+function GatingPanel({ gridColumn = '1 / 4', style }) {
+  const [rules, setRules]           = useState(null);
+  const [loading, setLoading]       = useState(false);
+  const [saving, setSaving]         = useState(null); // key being saved
+  const [fetchError, setError]      = useState(null);
+  const [confirm, setConfirm]       = useState(null); // { key, template, session, instrument, newOn }
+  const [addMode, setAddMode]       = useState(false);
+  const [addForm, setAddForm]       = useState({ template: 'orb', session: '*', instrument: '' });
+  const [lastFetch, setLastFetch]   = useState(null);
+
+  const loadRules = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(API('gating-rules')).then(res => res.json());
+      if (r?.ok) { setRules(r.rules); setError(null); }
+      else setError(r?.error || 'endpoint error');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+      setLastFetch(new Date());
+    }
+  }, []);
+
+  useEffect(() => { loadRules(); }, [loadRules]);
+
+  const handleToggle = useCallback((rule, newOn) => {
+    // First click: show confirmation
+    setConfirm({ key: rule.key, template: rule.template, session: rule.session, instrument: rule.instrument, newOn });
+  }, []);
+
+  const handleConfirm = useCallback(async () => {
+    if (!confirm) return;
+    setSaving(confirm.key);
+    setConfirm(null);
+    try {
+      const r = await fetch(API('gating-rules'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: confirm.template, session: confirm.session, instrument: confirm.instrument, on: confirm.newOn }),
+      }).then(res => res.json());
+      if (r?.ok) await loadRules();
+      else setError(r?.error || 'save failed');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(null);
+    }
+  }, [confirm, loadRules]);
+
+  const handleAddRule = useCallback(async () => {
+    if (!addForm.instrument.trim()) return;
+    setSaving('add');
+    try {
+      const r = await fetch(API('gating-rules'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: addForm.template, session: addForm.session, instrument: addForm.instrument.trim().toLowerCase(), on: false }),
+      }).then(res => res.json());
+      if (r?.ok) { setAddMode(false); setAddForm({ template: 'orb', session: '*', instrument: '' }); await loadRules(); }
+      else setError(r?.error || 'add failed');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(null);
+    }
+  }, [addForm, loadRules]);
+
+  const panelProps = {
+    title: 'Signal Gating',
+    subtitle: 'template × instrument control — writes flags only, never trades',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'gating-control', defaultCollapsed: false,
+  };
+
+  const onRules  = (rules || []).filter(r => r.on !== false);
+  const offRules = (rules || []).filter(r => r.on === false);
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* safety callout */}
+        <div style={{ padding: '7px 12px', background: 'var(--qb-warn-soft)', border: '1px solid var(--qb-warn)', borderRadius: 3, marginBottom: 10 }}>
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', textTransform: 'uppercase', letterSpacing: 0.8 }}>
+            G6 — gating flag writes only. Never places, closes, or modifies trades. Each toggle requires explicit confirmation.
+          </span>
+        </div>
+
+        {fetchError && <div style={{ marginBottom: 8 }}><PlaceholderError msg={fetchError} /></div>}
+
+        {/* confirmation dialog */}
+        {confirm && (
+          <div style={{ padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '2px solid var(--qb-warn)', borderRadius: 4, marginBottom: 10 }}>
+            <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-warn)', marginBottom: 6 }}>
+              Confirm: set {confirm.template.toUpperCase()} × {confirm.instrument.toUpperCase()} × {GATING_SESSION_LABEL(confirm.session)} to <strong>{confirm.newOn ? 'ON (allow)' : 'OFF (block)'}</strong>?
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={handleConfirm}
+                style={{ padding: '5px 14px', background: confirm.newOn ? 'var(--qb-ok-soft)' : 'var(--qb-bad-soft)', border: `1px solid ${confirm.newOn ? 'var(--qb-ok)' : 'var(--qb-bad)'}`, borderRadius: 3, cursor: 'pointer', fontSize: 10, color: confirm.newOn ? 'var(--qb-ok)' : 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)' }}>
+                Confirm {confirm.newOn ? 'ALLOW' : 'BLOCK'}
+              </button>
+              <button onClick={() => setConfirm(null)} style={{ padding: '5px 14px', background: 'transparent', border: '1px solid var(--qb-border)', borderRadius: 3, cursor: 'pointer', fontSize: 10, color: 'var(--qb-text-mid)', fontFamily: 'var(--qb-font-mono)' }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {loading && !rules ? (
+          <Placeholder msg="Loading gating rules..." />
+        ) : (
+          <>
+            {/* BLOCKED rules */}
+            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-bad)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+              Blocked ({offRules.length})
+            </div>
+            {offRules.length === 0 ? (
+              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic', marginBottom: 10 }}>No blocked combinations.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+                {offRules.map(rule => (
+                  <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3 }}>
+                    <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-hi)', flex: 1 }}>
+                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{rule.instrument.toUpperCase()}</strong>
+                      {' '}<span style={{ color: 'var(--qb-text-faint)' }}>({GATING_SESSION_LABEL(rule.session)} session)</span>
+                    </span>
+                    <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-bad)', fontWeight: 700, minWidth: 36 }}>OFF</span>
+                    {rule.updatedAt && <span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', minWidth: 80 }}>{new Date(rule.updatedAt).toLocaleString()}</span>}
+                    <button
+                      disabled={saving === rule.key}
+                      onClick={() => handleToggle(rule, true)}
+                      style={{ padding: '3px 10px', background: 'var(--qb-ok-soft)', border: '1px solid var(--qb-ok)', borderRadius: 3, cursor: saving === rule.key ? 'not-allowed' : 'pointer', fontSize: 9, color: 'var(--qb-ok)', fontFamily: 'var(--qb-font-mono)', opacity: saving === rule.key ? 0.5 : 1 }}>
+                      {saving === rule.key ? '…' : 'Enable'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* ALLOWED rules */}
+            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-mid)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+              Explicitly allowed ({onRules.length}) <span style={{ color: 'var(--qb-text-faint)', fontStyle: 'normal', textTransform: 'none', fontSize: 8 }}>— combinations without a rule are also allowed</span>
+            </div>
+            {onRules.length === 0 ? (
+              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic', marginBottom: 10 }}>No explicit allow rules (default: all combinations allowed).</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+                {onRules.map(rule => (
+                  <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 3 }}>
+                    <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-hi)', flex: 1 }}>
+                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{rule.instrument.toUpperCase()}</strong>
+                      {' '}<span style={{ color: 'var(--qb-text-faint)' }}>({GATING_SESSION_LABEL(rule.session)} session)</span>
+                    </span>
+                    <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-ok)', fontWeight: 700, minWidth: 36 }}>ON</span>
+                    {rule.updatedAt && <span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', minWidth: 80 }}>{new Date(rule.updatedAt).toLocaleString()}</span>}
+                    <button
+                      disabled={saving === rule.key}
+                      onClick={() => handleToggle(rule, false)}
+                      style={{ padding: '3px 10px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3, cursor: saving === rule.key ? 'not-allowed' : 'pointer', fontSize: 9, color: 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)', opacity: saving === rule.key ? 0.5 : 1 }}>
+                      {saving === rule.key ? '…' : 'Block'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Add rule */}
+            {!addMode ? (
+              <button onClick={() => setAddMode(true)} style={{ padding: '5px 14px', background: 'transparent', border: '1px solid var(--qb-border)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-text-mid)', fontFamily: 'var(--qb-font-mono)' }}>
+                + Add block rule
+              </button>
+            ) : (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', padding: '8px 10px', background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 3 }}>
+                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Template:</span>
+                <select value={addForm.template} onChange={e => setAddForm(f => ({ ...f, template: e.target.value }))} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
+                  {['orb','orb-pro','reaction','reaction-fvg','reaction-ifvg','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','alexg'].map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Session:</span>
+                <select value={addForm.session} onChange={e => setAddForm(f => ({ ...f, session: e.target.value }))} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
+                  {['*','ASIAN','LONDON','NY_AM','NY_PM','OVERLAP'].map(s => <option key={s} value={s}>{GATING_SESSION_LABEL(s)}</option>)}
+                </select>
+                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Instrument:</span>
+                <input value={addForm.instrument} onChange={e => setAddForm(f => ({ ...f, instrument: e.target.value }))} placeholder="e.g. gold" style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2, width: 80 }} />
+                <button onClick={handleAddRule} disabled={saving === 'add' || !addForm.instrument.trim()} style={{ padding: '4px 12px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)' }}>
+                  {saving === 'add' ? '…' : 'Add Block'}
+                </button>
+                <button onClick={() => setAddMode(false)} style={{ padding: '4px 12px', background: 'transparent', border: '1px solid var(--qb-border)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-text-mid)', fontFamily: 'var(--qb-font-mono)' }}>Cancel</button>
+              </div>
+            )}
+
+            <div style={{ marginTop: 8 }}>
+              <span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)' }}>
+                {lastFetch && `Last refresh: ${lastFetch.toLocaleTimeString()}`}
+                {' · '}Rules stored in Redis v14:gating:rules · changes logged to v14:gating:audit
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15g · INSTRUMENT HEATMAP  (v15.8 Part 4a)
+// =====================================================================
+// Template (rows) × session (cols) grid for a selected instrument.
+// Data from /api/perf-ranking. Cell coloring by WR or net PnL (toggle).
+// n < 8 cells are greyed. FX/NAS100 contamination note when applicable.
+
+const HEATMAP_SESSIONS = ['ASIAN', 'LONDON', 'NY_AM', 'NY_PM', 'OVERLAP'];
+const HEATMAP_SESSION_LABEL = { ASIAN: 'Asia', LONDON: 'London', NY_AM: 'NY AM', NY_PM: 'NY PM', OVERLAP: 'Overlap' };
+const HEATMAP_MIN_N = 5;
+
+function heatmapColor(v, min, max) {
+  if (v == null) return 'transparent';
+  if (max === min) return 'transparent';
+  const norm = (v - min) / (max - min); // 0 = worst, 1 = best
+  if (norm >= 0.6) return 'rgba(74,222,128,0.18)';
+  if (norm >= 0.4) return 'rgba(74,222,128,0.07)';
+  if (norm <= 0.15) return 'rgba(248,113,113,0.2)';
+  return 'transparent';
+}
+
+function InstrumentHeatmapPanel({ gridColumn = '1 / 4', style }) {
+  const [raw, setRaw]             = useState(null);
+  const [fetchError, setError]    = useState(null);
+  const [ready, setReady]         = useState(false);
+  const [instrument, setInstr]    = useState('xauusd');
+  const [metric, setMetric]       = useState('wr'); // 'wr' | 'net'
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('perf-ranking')).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok) { setRaw(r); setError(null); }
+        else setError(r?.error || 'endpoint error');
+      } catch (e) {
+        if (alive) setError(e.message);
+      }
+      if (alive) setReady(true);
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'Instrument Heatmap',
+    subtitle: 'template × session — filtered by instrument',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'instrument-heatmap', defaultCollapsed: true,
+  };
+
+  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading perf-ranking data..." /></div></Panel>;
+  if (fetchError) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={fetchError} /></div></Panel>;
+  if (!raw?.trades) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><Placeholder msg="No trade data." /></div></Panel>;
+
+  const allInstruments = [...new Set(raw.trades.map(t => (t.asset || '').toLowerCase()).filter(Boolean))].sort();
+
+  // Build matrix for selected instrument
+  const instrTrades = raw.trades.filter(t => (t.asset || '').toLowerCase() === instrument);
+  const matrix = {};
+  for (const t of instrTrades) {
+    const tmpl = t.template;
+    const sess = t.session;
+    if (!tmpl || !sess) continue;
+    if (!matrix[tmpl]) matrix[tmpl] = {};
+    if (!matrix[tmpl][sess]) matrix[tmpl][sess] = { n: 0, wins: 0, netPnl: 0, rList: [] };
+    const cell = matrix[tmpl][sess];
+    cell.n++;
+    if (t.outcome === 'WIN') cell.wins++;
+    cell.netPnl += t.netPnl || 0;
+    if (t.pnlR != null) cell.rList.push(t.pnlR);
+  }
+
+  const tplRows = TEMPLATE_ORDER.filter(t => matrix[t]);
+  const allVals = tplRows.flatMap(t => HEATMAP_SESSIONS.map(s => {
+    const c = matrix[t]?.[s];
+    if (!c || c.n < HEATMAP_MIN_N) return null;
+    return metric === 'wr' ? c.wins / c.n : c.netPnl;
+  }).filter(v => v != null));
+  const minV = allVals.length ? Math.min(...allVals) : 0;
+  const maxV = allVals.length ? Math.max(...allVals) : 1;
+
+  const isFxInstr = !['xauusd', 'gold', 'btcusd', 'btc', 'nas100', 'us500', 'spx500usd'].includes(instrument);
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* controls */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Instrument:</span>
+          <select value={instrument} onChange={e => setInstr(e.target.value)} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
+            {allInstruments.map(i => <option key={i} value={i}>{i}</option>)}
+          </select>
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Color by:</span>
+          {['wr', 'net'].map(m => (
+            <button key={m} onClick={() => setMetric(m)} style={{ padding: '3px 8px', fontSize: 8, fontFamily: 'var(--qb-font-mono)', border: `1px solid ${metric === m ? 'var(--qb-accent)' : 'var(--qb-border)'}`, background: metric === m ? 'var(--qb-accent-soft)' : 'transparent', color: metric === m ? 'var(--qb-accent)' : 'var(--qb-text-mid)', borderRadius: 2, cursor: 'pointer' }}>
+              {m === 'wr' ? 'Win Rate' : 'Net $'}
+            </button>
+          ))}
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 'auto' }}>
+            {instrTrades.length} trades for {instrument}
+          </span>
+        </div>
+
+        {isFxInstr && (
+          <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', marginBottom: 6 }}>
+            FX instrument — pre-fix preFix trades may be included; use excludePreFix filter in perf-analysis for clean signal.
+          </div>
+        )}
+
+        {tplRows.length === 0 ? (
+          <Placeholder msg={`No trades for ${instrument}.`} />
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+              <thead>
+                <tr>
+                  <th style={{ padding: '4px 10px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, color: 'var(--qb-text-faint)', textAlign: 'left' }}>Template</th>
+                  {HEATMAP_SESSIONS.map(s => (
+                    <th key={s} style={{ padding: '4px 8px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, color: 'var(--qb-text-faint)', textAlign: 'center' }}>{HEATMAP_SESSION_LABEL[s]}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tplRows.map(tmpl => {
+                  const meta = TEMPLATE_DISPLAY[tmpl];
+                  return (
+                    <tr key={tmpl} style={{ borderBottom: '1px solid var(--qb-border)' }}>
+                      <td style={{ padding: '4px 10px', color: 'var(--qb-text-hi)', whiteSpace: 'nowrap' }}>
+                        <span style={{ marginRight: 4, fontSize: 10 }}>{meta?.glyph || ''}</span>
+                        <span style={{ fontSize: 9 }}>{meta?.label || tmpl}</span>
+                      </td>
+                      {HEATMAP_SESSIONS.map(sess => {
+                        const cell = matrix[tmpl]?.[sess];
+                        if (!cell || cell.n === 0) return <td key={sess} style={{ padding: '4px 8px', textAlign: 'center' }}><span style={{ color: 'var(--qb-text-faint)', fontSize: 8 }}>—</span></td>;
+                        const thin = cell.n < HEATMAP_MIN_N;
+                        const wr   = cell.n > 0 ? cell.wins / cell.n : null;
+                        const val  = metric === 'wr' ? wr : cell.netPnl;
+                        const bg   = thin ? 'transparent' : heatmapColor(val, minV, maxV);
+                        return (
+                          <td key={sess} style={{ padding: '4px 8px', textAlign: 'center', background: bg, opacity: thin ? 0.45 : 1 }}>
+                            <div className="qb-mono" style={{ fontSize: 8, lineHeight: 1.6 }}>
+                              <div style={{ color: 'var(--qb-text-lo)' }}>n={cell.n}{thin ? '★' : ''}</div>
+                              {!thin && (
+                                <>
+                                  <div style={{ color: wr >= 0.55 ? 'var(--qb-ok)' : wr >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>{Math.round(wr * 100)}%</div>
+                                  <div style={{ color: cell.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)', fontSize: 7 }}>{fmtUSD(cell.netPnl, true)}</div>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', marginTop: 6 }}>
+              ★ n&lt;{HEATMAP_MIN_N} — insufficient sample, greyed. Counts from perf-ranking (includes preFix trades for FX/NAS100).
+            </div>
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15h · TREND VS COUNTER-TREND HEATMAP  (v15.8 Part 4b)
+// =====================================================================
+// Classifies TREND/COUNTER using static Daily HTF rule per asset.
+// Caveat labeled: htfTrend is static per asset across the ledger era.
+// Per-asset grid: TREND vs COUNTER breakdown by template.
+
+function TrendHeatmapPanel({ gridColumn = '1 / 4', style }) {
+  const [raw, setRaw]           = useState(null);
+  const [fetchError, setError]  = useState(null);
+  const [ready, setReady]       = useState(false);
+  const [selectedAsset, setSel] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        // Uses /api/trend-heatmap which computes Daily 20/50 EMA per trade at openedAt.
+        // Falls back to perf-ranking if trend-heatmap is unavailable.
+        const r = await fetch(API('trend-heatmap')).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok) { setRaw(r); setError(null); }
+        else setError(r?.error || 'endpoint error');
+      } catch (e) {
+        if (alive) setError(e.message);
+      }
+      if (alive) setReady(true);
+    };
+    load();
+    const id = setInterval(load, 30 * 60 * 1000); // 30 min (endpoint caches 1h)
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'Trend vs Counter-Trend',
+    subtitle: 'daily 20/50 EMA per trade at entry — not a static map',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'trend-heatmap', defaultCollapsed: true,
+  };
+
+  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading trend classification..." /></div></Panel>;
+  if (fetchError) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={fetchError} /></div></Panel>;
+  if (!raw?.trades) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><Placeholder msg="No trade data." /></div></Panel>;
+
+  // Server has already classified each trade as TREND / COUNTER / UNCLEAR / EXCLUDED
+  const allTrades     = raw.trades;
+  const classifiedTrades = allTrades.filter(t => t.trendClass !== 'EXCLUDED');
+  const excludedTrades   = allTrades.filter(t => t.trendClass === 'EXCLUDED');
+  const unclearTrades    = classifiedTrades.filter(t => t.trendClass === 'UNCLEAR');
+
+  // Asset selector — only assets with at least one TREND or COUNTER trade
+  const classifiableAssets = [...new Set(
+    classifiedTrades
+      .filter(t => t.trendClass === 'TREND' || t.trendClass === 'COUNTER')
+      .map(t => (t.asset || '').toLowerCase())
+  )].sort();
+
+  const activeAsset = selectedAsset || classifiableAssets[0] || null;
+  const assetTrades = activeAsset ? classifiedTrades.filter(t => (t.asset || '').toLowerCase() === activeAsset) : [];
+  const trendTrades   = assetTrades.filter(t => t.trendClass === 'TREND');
+  const counterTrades = assetTrades.filter(t => t.trendClass === 'COUNTER');
+
+  function miniStats(trades) {
+    const n    = trades.length;
+    const wins = trades.filter(t => t.outcome === 'WIN').length;
+    const net  = trades.reduce((s, t) => s + (t.netPnl || 0), 0);
+    return { n, wins, winRate: n > 0 ? wins / n : null, net };
+  }
+
+  const tplKeys = TEMPLATE_ORDER.filter(t => assetTrades.some(x => x.template === t));
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* rule + caveat */}
+        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', marginBottom: 8, lineHeight: 1.6 }}>
+          Rule: Daily 20/50 EMA at each trade's openedAt — up = close&gt;ema50 AND ema20&gt;ema50; down = inverse; else unclear.
+          {raw.caveat && <span> {raw.caveat}</span>}
+        </div>
+
+        {/* coverage bar */}
+        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginBottom: 8 }}>
+          {raw.classifiedCount} classified · {raw.excludedCount} excluded (recog-only or &lt;60 bars before entry) · {unclearTrades.length} unclear (mixed EMA state)
+        </div>
+
+        {/* asset selector */}
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Asset:</span>
+          {classifiableAssets.map(a => (
+            <button key={a} onClick={() => setSel(a)} style={{ padding: '3px 8px', fontSize: 9, fontFamily: 'var(--qb-font-mono)', border: `1px solid ${activeAsset === a ? 'var(--qb-accent)' : 'var(--qb-border)'}`, background: activeAsset === a ? 'var(--qb-accent-soft)' : 'transparent', color: activeAsset === a ? 'var(--qb-accent)' : 'var(--qb-text-mid)', borderRadius: 2, cursor: 'pointer', textTransform: 'uppercase' }}>
+              {a}
+            </button>
+          ))}
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 8 }}>
+            {excludedTrades.length} excluded (FX + recog-only + insufficient bars)
+          </span>
+        </div>
+
+        {activeAsset && (
+          <>
+            {/* summary row */}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+              {[{ label: 'TREND', trades: trendTrades }, { label: 'COUNTER-TREND', trades: counterTrades }].map(({ label, trades }) => {
+                const s = miniStats(trades);
+                return (
+                  <div key={label} style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4, opacity: s.n < HEATMAP_MIN_N ? 0.55 : 1 }}>
+                    <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>{label}</div>
+                    {s.n < HEATMAP_MIN_N ? (
+                      <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>n={s.n} — collecting (need {HEATMAP_MIN_N})</div>
+                    ) : (
+                      <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                        <OFMiniStat label="n" value={s.n} />
+                        <OFMiniStat label="WR" value={`${Math.round(s.winRate * 100)}%`} color={s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
+                        <OFMiniStat label="net" value={fmtUSD(s.net, true)} color={s.net >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* per-template breakdown */}
+            {tplKeys.length > 0 && (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ borderCollapse: 'collapse', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+                  <thead>
+                    <tr>
+                      {['Template', 'TREND  n / WR / net', 'COUNTER  n / WR / net'].map((h, i) => (
+                        <th key={h} style={{ padding: '3px 8px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, color: 'var(--qb-text-faint)', textAlign: i === 0 ? 'left' : 'center' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tplKeys.map(tmpl => {
+                      const trd  = miniStats(trendTrades.filter(t => t.template === tmpl));
+                      const ctr  = miniStats(counterTrades.filter(t => t.template === tmpl));
+                      const meta = TEMPLATE_DISPLAY[tmpl];
+                      return (
+                        <tr key={tmpl} style={{ borderBottom: '1px solid var(--qb-border)' }}>
+                          <td style={{ padding: '4px 8px', color: 'var(--qb-text-hi)' }}>
+                            <span style={{ marginRight: 5, fontSize: 10 }}>{meta?.glyph || ''}</span>
+                            <span>{meta?.label || tmpl}</span>
+                          </td>
+                          {[trd, ctr].map((s, idx) => (
+                            <td key={idx} style={{ padding: '4px 8px', textAlign: 'center', opacity: s.n < HEATMAP_MIN_N ? 0.4 : 1 }}>
+                              {s.n < HEATMAP_MIN_N ? (
+                                <span style={{ color: 'var(--qb-text-faint)' }}>n={s.n}</span>
+                              ) : (
+                                <span>
+                                  <span style={{ color: 'var(--qb-text-mid)' }}>n={s.n} </span>
+                                  <span style={{ color: s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>{Math.round(s.winRate * 100)}%</span>
+                                  {' '}
+                                  <span style={{ color: s.net >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)', fontSize: 8 }}>{fmtUSD(s.net, true)}</span>
+                                </span>
+                              )}
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', marginTop: 6 }}>
+                  Note: for assets that stayed in the same trend state across the entire ledger era (e.g. gold=DOWN throughout), TREND classification ≈ direction — treat these cells as directional analysis, not true HTF-trend signal.
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Panel>
   );
 }

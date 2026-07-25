@@ -680,13 +680,45 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true, executed: false, reason: 'template-disabled', template: p.template });
   }
 
-  // Per-template instrument block — returns 200 so TradingView does not retry.
-  // Blocks only the specific template/instrument combination; other templates on
-  // the same instrument and the same template on other instruments are unaffected.
-  const _blockedInstruments = TEMPLATE_INSTRUMENT_BLOCKS[p.template];
-  if (_blockedInstruments && _blockedInstruments.includes(assetId)) {
-    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: 'template-instrument-blocked' }); } catch (_) {}
-    return res.status(200).json({ ok: true, executed: false, reason: 'template-instrument-blocked', template: p.template, asset: assetId });
+  // Per-template instrument block.
+  // Primary: gating-store (Redis, user-configurable via /api/gating-rules).
+  // Fallback: TEMPLATE_INSTRUMENT_BLOCKS hardcoded constant if store is unreachable.
+  // Returns 200 so TradingView does not retry.
+  {
+    let _gateResult = null;  // null = allowed; { blocked, ruleKey, updatedBy } = blocked
+    let _gateFallback = false;
+    try {
+      const { isGated } = require('./gating-store');
+      _gateResult = await isGated(p.template, p.activeSession || '*', assetId);
+    } catch (_gateErr) {
+      // Store unreachable — apply hardcoded fallback AND log loudly.
+      // A silent fallback could quietly re-enable a user-set block if Redis hiccups.
+      _gateFallback = true;
+      const _bl = TEMPLATE_INSTRUMENT_BLOCKS[p.template];
+      if (_bl && _bl.includes(assetId)) {
+        _gateResult = { blocked: true, ruleKey: `${p.template}|*|${assetId}`, fallback: true };
+      }
+      // Loud logging: write typed error to Redis (best-effort) + Telegram
+      const _fallbackMsg = `GATING FALLBACK: Redis threw (${(_gateErr && _gateErr.message) || 'unknown'}) for ${p.template}×${assetId} — applied hardcoded fallback. User-set rules NOT consulted.`;
+      try {
+        const _rErr = getRedis();
+        if (_rErr) {
+          await _rErr.lpush('v14:gating:errors', JSON.stringify({ ts: Date.now(), error: _fallbackMsg, template: p.template, assetId, dedupeKey: `${assetId}:${p.template}:${p.direction}:${p.timestamp}` }));
+          await _rErr.ltrim('v14:gating:errors', 0, 49);
+        }
+      } catch (_) {}
+      try { sendOnce(`gating-fallback:${p.template}:${assetId}`, `⚠️ ${_fallbackMsg}`); } catch (_) {}
+    }
+    if (_gateResult?.blocked) {
+      // Build descriptive reason: includes template, session used, and instrument.
+      const _ruleKeyParts = (_gateResult.ruleKey || '').split('|');
+      const _gatedSess    = _ruleKeyParts[1] || '*';
+      const _gateReason   = _gateFallback
+        ? 'template-instrument-blocked'
+        : `gated: user-disabled ${p.template}×${_gatedSess}×${assetId}`;
+      try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: _gateReason, gatedBy: _gateResult.updatedBy || null }); } catch (_) {}
+      return res.status(200).json({ ok: true, executed: false, reason: _gateReason, template: p.template, asset: assetId });
+    }
   }
 
   // 9. Parse numerics (fast) — fail fast on a malformed payload
@@ -765,6 +797,13 @@ module.exports = async (req, res) => {
       const { writeSessionCtxShadow } = require('./session-context-shadow');
       _waitUntil(writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {}));
     } catch (_scErr) {}
+    // Wick-ratio shadow \u2014 capture signal bar OHLC (from Pine payload).
+    // barOpen/barHigh/barLow/barClose absent until Pine scripts updated:
+    // records store hasBarData:false until then.
+    try {
+      const { writeWickRatioShadow } = require('./wickratio-shadow');
+      _waitUntil(writeWickRatioShadow(p, dedupeKey, assetId).catch(() => {}));
+    } catch (_wrErr) {}
   } else {
     // Local / dev fallback: Node keeps the process alive for pending promises,
     // so a plain fire-and-forget is sufficient.
@@ -772,6 +811,10 @@ module.exports = async (req, res) => {
       const { writeSessionCtxShadow } = require('./session-context-shadow');
       writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {});
     } catch (_scErr) {}
+    try {
+      const { writeWickRatioShadow } = require('./wickratio-shadow');
+      writeWickRatioShadow(p, dedupeKey, assetId).catch(() => {});
+    } catch (_wrErr) {}
     try {
       await processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 });
       if (!res.headersSent) res.status(200).json({ ok: true, dedupeKey, ms: Date.now() - t0 });

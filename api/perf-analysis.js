@@ -27,6 +27,18 @@ const LEDGER_TRADE_KEY = (id) => `v14:ledger:trade:${id}`;
 const PR_MIN_N         = 8;
 const EXCL             = new Set(['unknown', 'legacy', 'legacy-unknown']);
 
+// ─── pre-fix exclusion constants ──────────────────────────────────────────────
+// ATR_FIX_DATE: set to UTC ISO string once the peak-vs-average ATR target-scaling
+// fix ships. While null, ALL recog-only FX/NAS100 trades are treated as pre-fix
+// under the reconOnly gap rule (no ledger record to check the preFix field on).
+// Also update in the one-shot flag script (prefix_write.js) on the same deploy.
+// Example once deployed: const ATR_FIX_DATE = '2026-08-15T00:00:00Z';
+const ATR_FIX_DATE        = null; // ← SET ON DEPLOY
+const ATR_MISMATCH_ASSETS = new Set([
+  'eurusd','gbpusd','usdjpy','usdchf','audusd','nzdusd','usdcad','eurjpy','gbpjpy',
+  'nas100',
+]);
+
 // ─── session (UTC) ────────────────────────────────────────────────────────────
 function classifySession(openedAt) {
   if (!openedAt) return 'UNKNOWN';
@@ -73,18 +85,20 @@ function mergeRecord(ledger, recog) {
   const l = ledger, g = recog;
   const openedAt = l?.openedAt ?? g?.openedAt ?? null;
   return {
-    id:        l?.id        ?? g?.id,
-    asset:     l?.asset     ?? g?.asset     ?? 'unknown',
-    direction: l?.direction ?? g?.direction ?? null,
-    template:  l?.template  || g?.template  || 'unknown',
-    session:   classifySession(openedAt),
-    htfTier:   l?.htfTier   ?? g?.htfTier   ?? null,
-    netPnl:    l?.netPnl    ?? g?.pnl       ?? 0,
-    pnlR:      l?.pnlR      ?? g?.pnlR      ?? null,
-    outcome:   l?.outcome   ?? g?.outcome   ?? 'BREAKEVEN',
+    id:           l?.id        ?? g?.id,
+    asset:        l?.asset     ?? g?.asset     ?? 'unknown',
+    direction:    l?.direction ?? g?.direction ?? null,
+    template:     l?.template  || g?.template  || 'unknown',
+    session:      classifySession(openedAt),
+    htfTier:      l?.htfTier   ?? g?.htfTier   ?? null,
+    netPnl:       l?.netPnl    ?? g?.pnl       ?? 0,
+    pnlR:         l?.pnlR      ?? g?.pnlR      ?? null,
+    outcome:      l?.outcome   ?? g?.outcome   ?? 'BREAKEVEN',
     openedAt,
-    closedAt:  l?.closedAt  ?? g?.closedAt  ?? null,
-    _source:   l && g ? 'both' : l ? 'ledger' : 'recog',
+    closedAt:     l?.closedAt  ?? g?.closedAt  ?? null,
+    _source:      l && g ? 'both' : l ? 'ledger' : 'recog',
+    preFix:       l?.preFix       ?? false,
+    preFixReason: l?.preFixReason ?? null,
   };
 }
 
@@ -163,26 +177,86 @@ module.exports = async (req, res) => {
     // template-quality filter (same as perf-ranking)
     const trades = allMerged.filter(t => t.template && !EXCL.has(t.template));
 
+    // ─── excludePreFix filter ─────────────────────────────────────────────────
+    // When ?excludePreFix=1:
+    //   (a) exclude ledger trades flagged preFix:true
+    //   (b) exclude recog-only FX/NAS100 trades (no ledger → can't check preFix flag;
+    //       all such trades are excluded while ATR_FIX_DATE=null — Correction 2 gap rule)
+    // Default OFF — existing behaviour unchanged when param absent or falsy.
+    const excludePreFix = req.query?.excludePreFix === '1' || req.query?.excludePreFix === 'true';
+
+    let activeTrades            = trades;
+    let preFixLedgerExcluded    = 0;
+    let preFixReconOnlyExcluded = 0;
+    const exclByTT  = {};  // template×tier  → {preFixN, reconOnlyN}
+    const exclByTS  = {};  // template×session → {preFixN, reconOnlyN}
+    const exclByTST = {};  // template×session×tier → {preFixN, reconOnlyN}
+
+    if (excludePreFix) {
+      const clean = [], excluded = [];
+      const atrFixMs = ATR_FIX_DATE ? new Date(ATR_FIX_DATE).getTime() : null;
+      for (const t of trades) {
+        const isFlaggedLedger = t.preFix === true;
+        const openMs = t.openedAt ? new Date(t.openedAt).getTime() : null;
+        const isBeforeAtrFix = atrFixMs === null || (openMs !== null && openMs < atrFixMs);
+        const isReconOnlyGap = t._source === 'recog'
+          && ATR_MISMATCH_ASSETS.has((t.asset || '').toLowerCase())
+          && isBeforeAtrFix;
+        if (isFlaggedLedger || isReconOnlyGap) {
+          excluded.push({ ...t, _exclLedger: isFlaggedLedger, _exclRecon: !isFlaggedLedger });
+          if (isFlaggedLedger) preFixLedgerExcluded++;
+          else                 preFixReconOnlyExcluded++;
+        } else {
+          clean.push(t);
+        }
+      }
+      activeTrades = clean;
+      for (const t of excluded) {
+        const ttKey  = `${t.template}|${tier(t.htfTier)}`;
+        const tsKey  = `${t.template}|${t.session}`;
+        const tstKey = `${t.template}|${t.session}|${tier(t.htfTier)}`;
+        for (const [dict, key] of [[exclByTT, ttKey], [exclByTS, tsKey], [exclByTST, tstKey]]) {
+          if (!dict[key]) dict[key] = { preFixN: 0, reconOnlyN: 0 };
+          if (t._exclLedger) dict[key].preFixN++;
+          else               dict[key].reconOnlyN++;
+        }
+      }
+    }
+
     // ── 1. template × tier ────────────────────────────────────────────────────
     const byTemplateTier = {};
-    for (const [k, ts] of Object.entries(groupBy(trades, t => `${t.template}|${tier(t.htfTier)}`))) {
+    for (const [k, ts] of Object.entries(groupBy(activeTrades, t => `${t.template}|${tier(t.htfTier)}`))) {
       const [tmpl, tr] = k.split('|');
       const stats = computeStats(ts);
       byTemplateTier[k] = { template: tmpl, tier: tr, ...stats, verdict: verdictOf(stats) };
     }
+    if (excludePreFix) {
+      for (const [k, b] of Object.entries(byTemplateTier)) {
+        const e = exclByTT[k] || { preFixN: 0, reconOnlyN: 0 };
+        b.preFixExcluded = e.preFixN;
+        b.reconOnlyExcluded = e.reconOnlyN;
+      }
+    }
 
     // ── 2. template × session ─────────────────────────────────────────────────
     const byTemplateSession = {};
-    for (const [k, ts] of Object.entries(groupBy(trades, t => `${t.template}|${t.session}`))) {
+    for (const [k, ts] of Object.entries(groupBy(activeTrades, t => `${t.template}|${t.session}`))) {
       const [tmpl, sess] = k.split('|');
       const stats = computeStats(ts);
       byTemplateSession[k] = { template: tmpl, session: sess, ...stats, verdict: verdictOf(stats) };
+    }
+    if (excludePreFix) {
+      for (const [k, b] of Object.entries(byTemplateSession)) {
+        const e = exclByTS[k] || { preFixN: 0, reconOnlyN: 0 };
+        b.preFixExcluded = e.preFixN;
+        b.reconOnlyExcluded = e.reconOnlyN;
+      }
     }
 
     // ── 3. template × session × tier (finest; may be thin — see verdict) ──────
     const byTemplateSessionTier = {};
     for (const [k, ts] of Object.entries(
-      groupBy(trades, t => `${t.template}|${t.session}|${tier(t.htfTier)}`)
+      groupBy(activeTrades, t => `${t.template}|${t.session}|${tier(t.htfTier)}`)
     )) {
       const parts = k.split('|');
       const stats = computeStats(ts);
@@ -190,6 +264,13 @@ module.exports = async (req, res) => {
         template: parts[0], session: parts[1], tier: parts[2],
         ...stats, verdict: verdictOf(stats),
       };
+    }
+    if (excludePreFix) {
+      for (const [k, b] of Object.entries(byTemplateSessionTier)) {
+        const e = exclByTST[k] || { preFixN: 0, reconOnlyN: 0 };
+        b.preFixExcluded = e.preFixN;
+        b.reconOnlyExcluded = e.reconOnlyN;
+      }
     }
 
     // ── 4 & 5. bleeders / keepers / watchlist ────────────────────────────────
@@ -234,6 +315,17 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       ok:          true,
       generatedAt: Date.now(),
+      preFixFilter: excludePreFix ? {
+        enabled:           true,
+        ledgerExcluded:    preFixLedgerExcluded,
+        reconOnlyExcluded: preFixReconOnlyExcluded,
+        totalExcluded:     preFixLedgerExcluded + preFixReconOnlyExcluded,
+        atrFixDate:        ATR_FIX_DATE,
+        reconOnlyRule:     ATR_FIX_DATE
+          ? `recog-only FX/NAS100 opened before ${ATR_FIX_DATE} excluded`
+          : 'all recog-only FX/NAS100 excluded (ATR_FIX_DATE not set)',
+        activeN:           activeTrades.length,
+      } : { enabled: false },
       reconciliation: {
         recogInput:  recogFiltered.length,
         ledgerInput: ledgerFiltered.length,

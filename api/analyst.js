@@ -53,6 +53,15 @@ const SHADOW_SYSTEMS = [
     resolvedField: null,
     resolvedViaLedger: true,
   },
+  {
+    name:          'wickratio',
+    label:         'Wick Ratio (signal bar structure)',
+    indexKey:      'v14:wickratio:shadow:index',
+    recordKey:     (id) => `v14:wickratio:shadow:${id}`,
+    idField:       'id',
+    resolvedField: null,
+    resolvedViaLedger: true,
+  },
 ];
 
 // ── Safe fetch with timeout ──────────────────────────────────────────────────
@@ -570,10 +579,11 @@ module.exports = async (req, res) => {
     const r = getRedis();
     if (!r) return res.status(503).json({ ok: false, error: 'no-redis' });
 
-    const refresh = req.query?.refresh === '1';
+    const refresh       = req.query?.refresh === '1';
+    const excludePreFix = req.query?.excludePreFix === '1' || req.query?.excludePreFix === 'true';
 
-    // Serve from cache unless refresh requested
-    if (!refresh) {
+    // excludePreFix always bypasses cache (cached brief was computed without the filter)
+    if (!refresh && !excludePreFix) {
       const cached = await r.get(CACHE_KEY).catch(() => null);
       const brief  = cached ? (typeof cached === 'string' ? safeParse(cached) : cached) : null;
       if (brief?.generatedAt && (Date.now() - brief.generatedAt) < CACHE_TTL_SEC * 1000) {
@@ -585,7 +595,7 @@ module.exports = async (req, res) => {
     // perf-analysis and perf-ranking pull full trade arrays and are heavier;
     // they get a longer individual timeout. All six run concurrently.
     const [
-      [ledger, entrystyleSummary, orderflowSummary, sessionCtxSummary, regimeSummary],
+      [ledger, entrystyleSummary, orderflowSummary, sessionCtxSummary, regimeSummary, wickratioSummary],
       [perfAnalysis, perfRanking],
     ] = await Promise.all([
       Promise.all([
@@ -594,9 +604,10 @@ module.exports = async (req, res) => {
         fetchEndpoint('orderflow-summary'),
         fetchEndpoint('session-context-summary'),
         fetchEndpoint('regime-detector?action=shadow-summary'),
+        fetchEndpoint('wickratio-summary'),
       ]),
       Promise.all([
-        fetchEndpoint('perf-analysis', HEAVY_TIMEOUT_MS),
+        fetchEndpoint(`perf-analysis${excludePreFix ? '?excludePreFix=1' : ''}`, HEAVY_TIMEOUT_MS),
         fetchEndpoint('perf-ranking',  HEAVY_TIMEOUT_MS),
       ]),
     ]);
@@ -605,6 +616,7 @@ module.exports = async (req, res) => {
       entrystyle: entrystyleSummary,
       orderflow:  orderflowSummary,
       sessionctx: sessionCtxSummary,
+      wickratio:  wickratioSummary,
       regime:     regimeSummary,
     };
 
@@ -614,9 +626,26 @@ module.exports = async (req, res) => {
     // ── Anomaly 6: growth check ───────────────────────────────────────────────
     const growthAnomalies = await checkShadowGrowth(r);
 
+    // ── Anomaly 7: gating fallback errors ────────────────────────────────────
+    // v14:gating:errors is an LPUSH list written by webhook.js when the gating-store
+    // throws and falls back to hardcoded TEMPLATE_INSTRUMENT_BLOCKS.
+    // Any entry here means user-set Redis rules were NOT consulted for at least one signal.
+    const gatingFallbackAnomalies = await (async () => {
+      try {
+        const errs = await r.lrange('v14:gating:errors', 0, 4).catch(() => []);
+        if (!errs || !errs.length) return [];
+        const first = safeParse(errs[0]) || {};
+        return [{
+          code:     'gating-fallback-fired',
+          severity: 'warn',
+          message:  `Gating store Redis fallback fired ${errs.length} time(s) — user-set block rules were NOT consulted. Most recent: ${first.error || JSON.stringify(first)}`,
+        }];
+      } catch (_) { return []; }
+    })();
+
     // ── C. Anomaly detection ──────────────────────────────────────────────────
     const baseAnomalies = computeAnomalies(ledger, perfRanking);
-    const anomalies     = [...baseAnomalies, ...growthAnomalies];
+    const anomalies     = [...baseAnomalies, ...growthAnomalies, ...gatingFallbackAnomalies];
 
     // ── B. Performance ────────────────────────────────────────────────────────
     // Template stats (netPnl ranking + profitFactor ranking) from perf-ranking trades
