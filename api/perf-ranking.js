@@ -148,3 +148,8 @@ module.exports = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// Named exports: let other endpoints load trade data without an internal HTTP call.
+module.exports.loadAllLedger   = loadAllLedger;
+module.exports.mergeRecord     = mergeRecord;
+module.exports.classifySession = classifySession;
