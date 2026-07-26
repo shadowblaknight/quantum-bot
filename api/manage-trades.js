@@ -43,9 +43,48 @@ const USE_TRAILING_STOP = true;  // trail at 1×ATR once 2R+ profit and 2 TPs hi
 // ===== Position management state =====
 const POSITION_STATE_KEY = (positionId) => `v12:position:${positionId}:state`;
 
+// ===== Manage-trades error log =====
+const MT_ERRORS_KEY = 'v14:managetrades:errors';
+const MT_ERRORS_CAP = 50;
+
 // ===== Trading enabled gate =====
 function isTradingEnabled() {
   return process.env.QB_TRADING_ENABLED === 'true';
+}
+
+async function logMTError(obj) {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.lpush(MT_ERRORS_KEY, JSON.stringify({ ts: Date.now(), ...obj }));
+    await r.ltrim(MT_ERRORS_KEY, 0, MT_ERRORS_CAP - 1);
+  } catch (_) {}
+}
+
+// Re-reads a single open position's stopLoss from MetaAPI after a modify,
+// to verify the broker actually applied the change. Returns the SL as a
+// number, or null if the position is gone (closed) or the fetch failed.
+// Hard-capped at 5 s so a slow broker never stalls the manage tick.
+async function fetchPositionSL(positionId) {
+  const token     = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  const region    = process.env.METAAPI_REGION || 'london';
+  const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/positions`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, {
+      headers: { 'auth-token': token, 'Accept': 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const list = await resp.json();
+    const pos  = Array.isArray(list) ? list.find(p => p.id === positionId) : null;
+    return pos ? (typeof pos.stopLoss === 'number' ? pos.stopLoss : null) : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // =================================================================
@@ -406,33 +445,111 @@ async function managePosition(position) {
   }
 
   if (USE_SL_RATCHET && chosen) {
-    const modifyResult = await modifyPosition(position.id, chosen.price, finalTPPrice, asset);
-    if (modifyResult.ok) {
-      state.slMoves.push({ atTP: chosen.name, newSL: chosen.price, ts: Date.now() });
-      actions.push({ action: 'sl-move', newSL: chosen.price, at: chosen.name, ok: true });
-      await pushCommentary(asset, 'sl-moved',
-        `SL locked at ${chosen.name} @ ${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}`);
-      // Telegram ONLY when the lock deepens to a NEW TP — reporting the REAL
-      // guaranteed dollars from that stop level (never an ideal/unrealized figure).
-      if (state.lockedTP !== chosen.name) {
-        state.lockedTP = chosen.name;
-        const rMult = Math.abs(chosen.price - state.entry) / initialSLForR;
-        const lockedDollars = signedDollarsForLeg(asset, state.entry, chosen.price, direction, position.volume);
-        const ridingTo = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
-        try {
-          await sendOnce(`tplock:${position.id}:${chosen.name}`,
-            `\u{1F3AF} <b>${chosen.name} LOCKED \u2014 ${asset.toUpperCase()}</b>\n\n` +
-            `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} \u00b7 stop now at ${chosen.name} <code>${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)\n` +
-            (lockedDollars != null ? `Locked in: <b>${lockedDollars >= 0 ? '+' : ''}$${lockedDollars.toFixed(2)}</b> guaranteed if stopped\n` : '') +
-            (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
-        } catch (_) {}
+    // Pre-submit: broker minimum stop distance.
+    // assetMeta.brokerMinStopDist is the minimum PRICE distance from market
+    // the broker requires for stops (e.g. 50 pts for BTC). The app's internal
+    // stopBuffer (~14 pts for BTC) is far below the broker minimum -- submitting
+    // inside it returns MetaAPI HTTP 200 but the broker silently rejects it.
+    // Detect this before submitting and clamp to the nearest valid level if viable.
+    const minStopDist = (assetMeta && assetMeta.brokerMinStopDist) || 0;
+    let slCandidate  = chosen.price;
+    let slClamped    = false;
+    let skipRatchet  = false;
+
+    if (minStopDist > 0) {
+      const distFromMarket = isLong ? currentPrice - slCandidate : slCandidate - currentPrice;
+      if (distFromMarket < minStopDist) {
+        const raw     = isLong
+          ? currentPrice - minStopDist - pipSz
+          : currentPrice + minStopDist + pipSz;
+        const clamped = roundToPipSize(raw, pipSz, 'nearest');
+        const clampedImproves    = curSL == null
+          ? (isLong ? clamped > state.entry : clamped < state.entry)
+          : (isLong ? clamped > curSL : clamped < curSL);
+        const clampedOnProfitSide = isLong ? clamped > state.entry : clamped < state.entry;
+        if (clampedImproves && clampedOnProfitSide) {
+          slCandidate = clamped;
+          slClamped   = true;
+          actions.push({ action: 'sl-clamp', tpName: chosen.name, proposed: chosen.price, clamped, minStopDist });
+          await pushCommentary(asset, 'sl-clamped',
+            `SL clamped from ${chosen.price.toFixed(2)} to ${clamped.toFixed(2)} (broker min-stop ${minStopDist} pts)`);
+        } else {
+          skipRatchet = true;
+          actions.push({ action: 'sl-skip', reason: 'inside-broker-min-stop-unclamped', tpName: chosen.name, proposed: chosen.price, distFromMarket, minStopDist });
+          await pushCommentary(asset, 'sl-skip',
+            `SL-lock SKIPPED: ${chosen.price.toFixed(2)} is ${distFromMarket.toFixed(2)} pts from market (min ${minStopDist}) -- clamp not viable`);
+          await logMTError({ type: 'sl-skip-unclamped', asset, positionId: position.id, tpName: chosen.name, proposed: chosen.price, distFromMarket, minStopDist });
+          try {
+            await sendOnce(`sllock-skip:${position.id}:${chosen.name}`,
+              `⚠️ <b>${chosen.name} hit but SL-lock SKIPPED — ${asset.toUpperCase()}</b>\n\n` +
+              `Proposed SL <code>${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}</code> is ${distFromMarket.toFixed(2)} pts from market\n` +
+              `Broker minimum: ${minStopDist} pts — clamp would not improve on current SL\n` +
+              `<b>Position unprotected at this TP level. Intervene manually.</b>`);
+          } catch (_) {}
+        }
       }
-    } else {
-      actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: chosen.price });
-      await pushCommentary(asset, 'sl-move-rejected',
-        `SL lock to ${chosen.name} rejected (retries next tick): ${modifyResult.error.slice(0, 70)}`);
+    }
+
+    if (!skipRatchet) {
+      const modifyResult = await modifyPosition(position.id, slCandidate, finalTPPrice, asset);
+      if (modifyResult.ok) {
+        // Post-submit verification.
+        // MetaAPI HTTP 200 = order QUEUED, not broker-confirmed. MT5 can still
+        // reject after accepting (INVALID_STOPS, etc.). Wait 1 s for the
+        // broker round-trip then re-read the actual SL to confirm it landed.
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const slAfter    = await fetchPositionSL(position.id);
+        // null = position closed during the wait, or verify fetch failed.
+        // Treated as "unverified" -- no Telegram until confirmed on next tick.
+        const slTol      = Math.max(pipSz * 3, 1.0);
+        const slVerified = slAfter !== null && Math.abs(slAfter - slCandidate) <= slTol;
+
+        if (slVerified) {
+          state.slMoves.push({ atTP: chosen.name, newSL: slCandidate, clamped: slClamped, ts: Date.now() });
+          actions.push({ action: 'sl-move', newSL: slCandidate, at: chosen.name, ok: true, verified: true, clamped: slClamped });
+          await pushCommentary(asset, 'sl-moved',
+            `SL locked at ${chosen.name} @ ${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}${slClamped ? ' (clamped)' : ''}`);
+          if (state.lockedTP !== chosen.name) {
+            state.lockedTP = chosen.name;
+            const rMult        = Math.abs(slCandidate - state.entry) / initialSLForR;
+            const lockedDollars = signedDollarsForLeg(asset, state.entry, slCandidate, direction, position.volume);
+            const ridingTo      = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
+            try {
+              await sendOnce(`tplock:${position.id}:${chosen.name}`,
+                `\u{1F3AF} <b>${chosen.name} LOCKED — ${asset.toUpperCase()}</b>\n\n` +
+                `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · stop now at ${chosen.name} <code>${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)${slClamped ? ' ⚠️ clamped' : ''}\n` +
+                (lockedDollars != null ? `Locked in: <b>${lockedDollars >= 0 ? '+' : ''}$${lockedDollars.toFixed(2)}</b> guaranteed if stopped\n` : '') +
+                (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
+            } catch (_) {}
+          }
+        } else if (slAfter === null) {
+          // Position closed while waiting, or verify fetch timed out.
+          // No state write, no Telegram -- next tick will resolve.
+          actions.push({ action: 'sl-unverified', submittedSL: slCandidate, tpName: chosen.name });
+          await pushCommentary(asset, 'sl-unverified',
+            `SL-lock unverified after submit (position closed or broker unreachable) -- check MT5`);
+        } else {
+          // Got a response but SL value did not change at the broker.
+          const errDetail = `submitted ${slCandidate.toFixed(2)}, broker shows ${slAfter.toFixed(2)}`;
+          actions.push({ action: 'sl-rejected', error: `broker-verify-failed: ${errDetail}`, submittedSL: slCandidate, brokerSL: slAfter });
+          await pushCommentary(asset, 'sl-rejected', `SL-lock rejected by broker: ${errDetail}`);
+          await logMTError({ type: 'sl-verify-failed', asset, positionId: position.id, tpName: chosen.name, submittedSL: slCandidate, brokerSL: slAfter });
+          try {
+            await sendOnce(`sllock-rejected:${position.id}:${chosen.name}`,
+              `⚠️ <b>${chosen.name} hit but SL-lock REJECTED — ${asset.toUpperCase()}</b>\n\n` +
+              `Submitted: <code>${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}</code>\n` +
+              `Broker shows: <code>${slAfter.toFixed(slAfter > 100 ? 2 : 5)}</code>\n` +
+              `<b>Position is UNPROTECTED. Manual intervention required.</b>`);
+          } catch (_) {}
+        }
+      } else {
+        actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: slCandidate });
+        await pushCommentary(asset, 'sl-move-rejected',
+          `SL lock to ${chosen.name} rejected (retries next tick): ${modifyResult.error.slice(0, 70)}`);
+      }
     }
   }
+
 
   await setPositionState(position.id, state);
 
@@ -503,7 +620,41 @@ async function detectAndProcessClosed(currentOpenIds) {
 
     const pendingList = await getPendingSetups(state.asset);
     const matchedPending = pendingList.find((p) => p.id === state.pendingId);
-    if (!matchedPending) continue;
+    if (!matchedPending) {
+      // FALLBACK: pending setup was cleared before close detection ran.
+      // Reconstruct from position state + broker deals so the trade is not
+      // silently lost from ledger, recognition memory, and daily P&L.
+      const tradeId      = `trade_${state.asset}_${positionId}`;
+      const alreadyDone  = await r.get(`v14:ledger:trade:${tradeId}`).catch(() => null);
+      const hasExitDeal  = positionDeals.some(d => d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT');
+      if (!alreadyDone && hasExitDeal) {
+        const reconstructed = {
+          id: tradeId, asset: state.asset, direction: state.direction,
+          template: null, style: null, mode: null, session: null,
+          tpsHit: state.tpsHit || [],
+          maxTP: (state.tpsHit || []).reduce((m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0),
+          pnl: totalPnL, riskDollars: null,
+          openedAt: state.createdAt, closedAt: Date.now(),
+          reconstructedClose: true, synthetic: false,
+        };
+        try { await storeClosedTrade(reconstructed); } catch (_) {}
+        try { await writeLedgerRecord({ state, matchedPending: null, positionDeals, positionId, extraFlags: { reconstructedClose: true } }); } catch (_) {}
+        try { await addDailyPnL(totalPnL); } catch (_) {}
+        recordings.push({ positionId, asset: state.asset, pnl: totalPnL, stored: true, reconstructedClose: true });
+        await updatePendingSetup(state.asset, state.pendingId, { status: 'closed', finalPnL: totalPnL, closedAt: Date.now() }).catch(() => {});
+        const outcome = totalPnL > 0.5 ? '✓ WIN' : totalPnL < -0.5 ? '✗ LOSS' : '— BE';
+        await pushCommentary(state.asset, 'trade-closed',
+          `${outcome} — ${state.direction} closed (reconstructed): ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
+        try {
+          await notifyTradeClosed({
+            asset: state.asset, direction: state.direction, totalPnL,
+            tpsHit: state.tpsHit || [], positionId,
+            openedAt: state.createdAt, closedAt: Date.now(),
+          });
+        } catch (_) {}
+      }
+      continue;
+    }
 
     const closedTrade = {
       id: `trade_${state.asset}_${positionId}`,
@@ -660,12 +811,122 @@ async function runManageTick() {
   return result;
 }
 
+
+// ── Backfill helpers for orphaned closed positions ────────────────────────────
+// An orphaned position is one where detectAndProcessClosed ran AFTER the pending
+// setup was already cleared, causing ledger/recognition writes to be skipped.
+// Call action=backfill-orphaned to recover those trades from MetaAPI history.
+
+async function fetchOrphanedDeals(positionIds) {
+  const token     = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  const region    = process.env.METAAPI_REGION || 'london';
+  const since     = new Date(Date.now() - 30 * 86400000).toISOString();
+  const until     = new Date().toISOString();
+  const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/history-deals/time/${since}/${until}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const resp = await fetch(url, {
+      headers: { 'auth-token': token, 'Accept': 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) { const t = await resp.text().catch(() => ''); throw new Error(`MetaAPI ${resp.status}: ${t.slice(0, 120)}`); }
+    const deals  = await resp.json();
+    if (!Array.isArray(deals)) throw new Error('non-array from MetaAPI history');
+    const wanted = new Set(positionIds.map(String));
+    const byPos  = {};
+    for (const d of deals) {
+      if (!d.positionId || !wanted.has(String(d.positionId))) continue;
+      if (d.type === 'DEAL_TYPE_BALANCE' || d.type === 'DEAL_TYPE_CREDIT') continue;
+      (byPos[String(d.positionId)] = byPos[String(d.positionId)] || []).push(d);
+    }
+    return byPos;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
+async function backfillOrphanedPositions(positionIds) {
+  const r = getRedis();
+  if (!r) throw new Error('no-redis');
+  const dealsByPos = await fetchOrphanedDeals(positionIds);
+  const results    = [];
+
+  for (const positionId of positionIds) {
+    const deals = dealsByPos[String(positionId)];
+    if (!deals || deals.length === 0) {
+      results.push({ positionId, status: 'no-deals-in-30d' });
+      continue;
+    }
+    // Guard: require at least one exit deal. Without one the position is still
+    // open and pnl would be 0 — writing a close record would be premature.
+    const hasExit = deals.some(d => d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT');
+    if (!hasExit) {
+      results.push({ positionId, status: 'position-still-open' });
+      continue;
+    }
+    const stateRaw = await r.get(POSITION_STATE_KEY(positionId)).catch(() => null);
+    const state    = safeParse(stateRaw);
+    if (!state) {
+      results.push({ positionId, status: 'no-position-state' });
+      continue;
+    }
+    const tradeId    = `trade_${state.asset}_${positionId}`;
+    const existLedger = await r.get(`v14:ledger:trade:${tradeId}`).catch(() => null);
+    if (existLedger) {
+      results.push({ positionId, status: 'already-in-ledger', tradeId });
+      continue;
+    }
+    const totalPnL = deals.reduce((s, d) => s + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
+    const closed   = {
+      id: tradeId, asset: state.asset, direction: state.direction,
+      template: null, style: null, mode: null, session: null,
+      tpsHit: state.tpsHit || [],
+      maxTP: (state.tpsHit || []).reduce((m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0),
+      pnl: totalPnL, riskDollars: null,
+      openedAt: state.createdAt, closedAt: Date.now(),
+      reconstructedClose: true, synthetic: false,
+    };
+    let recogOk = false;
+    try { await storeClosedTrade(closed); recogOk = true; } catch (_) {}
+    let ledgerResult;
+    try {
+      ledgerResult = await writeLedgerRecord({
+        state, matchedPending: null, positionDeals: deals, positionId,
+        extraFlags: { reconstructedClose: true },
+      });
+    } catch (e) {
+      ledgerResult = { error: e.message };
+    }
+    try { await addDailyPnL(totalPnL); } catch (_) {}
+    results.push({
+      positionId, status: 'backfilled', tradeId,
+      asset: state.asset, pnl: Math.round(totalPnL * 100) / 100,
+      tpsHit: state.tpsHit || [], recogOk, ledger: ledgerResult,
+    });
+  }
+  return results;
+}
+
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   try {
     const action = (req.query && req.query.action) || '';
     if (action === 'today-pnl') {
       return res.status(200).json(await getTodayRealized());
+    }
+    if (action === 'backfill-orphaned') {
+      const key = String((req.query && req.query.key) || '');
+      if (!process.env.WEBHOOK_API_KEY || key !== process.env.WEBHOOK_API_KEY) {
+        return res.status(401).json({ ok: false, error: 'unauthorized -- pass ?key=WEBHOOK_API_KEY' });
+      }
+      const rawIds = req.query.ids
+        ? String(req.query.ids).split(',').map(s => s.trim()).filter(Boolean)
+        : ['307572483', '300390977'];
+      return res.status(200).json({ ok: true, results: await backfillOrphanedPositions(rawIds) });
     }
     const result = await runManageTick();
     return res.status(200).json(result);
@@ -674,6 +935,7 @@ module.exports = async (req, res) => {
   }
 };
 
-module.exports.runManageTick = runManageTick;
-module.exports.getTodayRealized = getTodayRealized;
-module.exports.managePosition = managePosition;
+module.exports.runManageTick             = runManageTick;
+module.exports.getTodayRealized          = getTodayRealized;
+module.exports.managePosition            = managePosition;
+module.exports.backfillOrphanedPositions = backfillOrphanedPositions;

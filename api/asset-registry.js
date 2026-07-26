@@ -200,6 +200,10 @@ const ASSETS = [
     dollarPerPipPerLot: 10,
     typicalSpreadPips: 30,
     typicalH1ATR: 4,
+    // Minimum price distance from market the broker requires for stop orders.
+    // Used by manage-trades SL ratchet to pre-validate before submitting.
+    // Override via BROKER_MIN_STOP_DIST_GOLD env var if broker's actual minimum differs.
+    brokerMinStopDist: parseInt(process.env.BROKER_MIN_STOP_DIST_GOLD, 10) || 2,
     preferredSessions: ['LONDON', 'OVERLAP', 'NEW_YORK'],
     aliases: [
       'XAUUSD', 'XAU/USD', 'XAUUSD.s', 'XAUUSD.r', 'XAUUSDm', 'XAUUSD#',
@@ -250,6 +254,11 @@ const ASSETS = [
     dollarPerPipPerLot: 1,
     typicalSpreadPips: 30,
     typicalH1ATR: 200,
+    // BTC MT5 minimum stop distance is typically 50–100 price points.
+    // The app's internal stopBuffer (~14 pts) is far below this — submitting a stop
+    // 14 pts from market returns HTTP 200 from MetaAPI but the broker silently rejects it.
+    // Override via BROKER_MIN_STOP_DIST_BTC if your broker's actual minimum differs.
+    brokerMinStopDist: parseInt(process.env.BROKER_MIN_STOP_DIST_BTC, 10) || 50,
     preferredSessions: ['ASIAN', 'LONDON', 'OVERLAP', 'NEW_YORK'], // 24/7
     tradesWeekends: true,
     aliases: [
@@ -317,6 +326,7 @@ const ASSETS = [
     dollarPerPipPerLot: 1,
     typicalSpreadPips: 1.5,
     typicalH1ATR: 60,
+    brokerMinStopDist: parseInt(process.env.BROKER_MIN_STOP_DIST_NAS100, 10) || 5,
     preferredSessions: ['NEW_YORK', 'OVERLAP'],
     aliases: [
       'NAS100', 'NDX100', 'NDXUSD', 'NDX', 'USTEC', 'USTEC.cash',

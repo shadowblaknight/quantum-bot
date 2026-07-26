@@ -37,7 +37,7 @@ function parseTemplateFromComment(comment) {
 
 // ── build a ledger record from live-close context ─────────────────────
 // Called only when we have the full in-scope variables from detectAndProcessClosed.
-function buildLedgerRecord({ state, matchedPending, positionDeals, positionId }) {
+function buildLedgerRecord({ state, matchedPending, positionDeals, positionId, extraFlags }) {
   const entryDeal = positionDeals.find(d => d.entryType === 'DEAL_ENTRY_IN');
   const exitDeals = positionDeals.filter(d =>
     d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT'
@@ -112,6 +112,7 @@ function buildLedgerRecord({ state, matchedPending, positionDeals, positionId })
     accountCurrencyExchangeRate:
       (exitDeal || entryDeal || {}).accountCurrencyExchangeRate || null,
     _backfilled: false,
+    ...( extraFlags || {} ),
   };
 }
 
