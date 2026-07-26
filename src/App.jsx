@@ -6026,7 +6026,8 @@ function WickRatioPanel({ gridColumn = '1 / 4', style }) {
 // G6: toggle only on explicit confirmed user click. Never auto-triggers.
 // Shows ORB×BTC and ORB×NAS100 as OFF on load (seeded from hardcoded blocks).
 
-const GATING_SESSION_LABEL = (s) => s === '*' ? 'Any Session' : (SESSION_LABELS[s] || s);
+const GATING_SESSION_LABEL     = (s) => s === '*' ? 'Any Session' : (SESSION_LABELS[s] || s);
+const GATING_INSTRUMENT_LABEL  = (i) => i === '*' ? 'ALL instruments' : i.toUpperCase();
 
 function GatingPanel({ gridColumn = '1 / 4', style }) {
   const [rules, setRules]           = useState(null);
@@ -6153,7 +6154,7 @@ function GatingPanel({ gridColumn = '1 / 4', style }) {
                 {offRules.map(rule => (
                   <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3 }}>
                     <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-hi)', flex: 1 }}>
-                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{rule.instrument.toUpperCase()}</strong>
+                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{GATING_INSTRUMENT_LABEL(rule.instrument)}</strong>
                       {' '}<span style={{ color: 'var(--qb-text-faint)' }}>({GATING_SESSION_LABEL(rule.session)} session)</span>
                     </span>
                     <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-bad)', fontWeight: 700, minWidth: 36 }}>OFF</span>
@@ -6180,7 +6181,7 @@ function GatingPanel({ gridColumn = '1 / 4', style }) {
                 {onRules.map(rule => (
                   <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 3 }}>
                     <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-hi)', flex: 1 }}>
-                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{rule.instrument.toUpperCase()}</strong>
+                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{GATING_INSTRUMENT_LABEL(rule.instrument)}</strong>
                       {' '}<span style={{ color: 'var(--qb-text-faint)' }}>({GATING_SESSION_LABEL(rule.session)} session)</span>
                     </span>
                     <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-ok)', fontWeight: 700, minWidth: 36 }}>ON</span>
@@ -6212,7 +6213,11 @@ function GatingPanel({ gridColumn = '1 / 4', style }) {
                   {['*','ASIAN','LONDON','NY_AM','NY_PM','OVERLAP'].map(s => <option key={s} value={s}>{GATING_SESSION_LABEL(s)}</option>)}
                 </select>
                 <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Instrument:</span>
-                <input value={addForm.instrument} onChange={e => setAddForm(f => ({ ...f, instrument: e.target.value }))} placeholder="e.g. gold" style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2, width: 80 }} />
+                <select value={addForm.instrument} onChange={e => setAddForm(f => ({ ...f, instrument: e.target.value }))} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
+                  <option value="">— pick —</option>
+                  <option value="*">* (ALL instruments)</option>
+                  {['gold','btc','nas100','us500','eurusd','gbpusd','usdjpy'].map(i => <option key={i} value={i}>{i}</option>)}
+                </select>
                 <button onClick={handleAddRule} disabled={saving === 'add' || !addForm.instrument.trim()} style={{ padding: '4px 12px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)' }}>
                   {saving === 'add' ? '…' : 'Add Block'}
                 </button>

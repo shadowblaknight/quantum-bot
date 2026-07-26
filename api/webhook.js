@@ -686,36 +686,36 @@ module.exports = async (req, res) => {
   // Returns 200 so TradingView does not retry.
   {
     let _gateResult = null;  // null = allowed; { blocked, ruleKey, updatedBy } = blocked
-    let _gateFallback = false;
     try {
       const { isGated } = require('./gating-store');
       _gateResult = await isGated(p.template, p.activeSession || '*', assetId);
     } catch (_gateErr) {
-      // Store unreachable — apply hardcoded fallback AND log loudly.
-      // A silent fallback could quietly re-enable a user-set block if Redis hiccups.
-      _gateFallback = true;
-      const _bl = TEMPLATE_INSTRUMENT_BLOCKS[p.template];
-      if (_bl && _bl.includes(assetId)) {
-        _gateResult = { blocked: true, ruleKey: `${p.template}|*|${assetId}`, fallback: true };
-      }
-      // Loud logging: write typed error to Redis (best-effort) + Telegram
-      const _fallbackMsg = `GATING FALLBACK: Redis threw (${(_gateErr && _gateErr.message) || 'unknown'}) for ${p.template}×${assetId} — applied hardcoded fallback. User-set rules NOT consulted.`;
+      // Redis unreachable — FAIL OPEN (signal allowed) and log loudly.
+      //
+      // RETIRED: TEMPLATE_INSTRUMENT_BLOCKS is no longer applied here. Applying
+      // it would silently override an explicit user enable (e.g. user un-blocks
+      // ORB×BTC in the panel; Redis hiccups; hardcoded constant re-blocks it with
+      // no trace). There must be ONE source of truth: the Redis store.
+      //
+      // Trade-off: during a Redis outage a previously-user-blocked combo could fire.
+      // That is the lesser evil compared to silently overriding an explicit user
+      // enable. The loud log + Telegram alert below ensures the operator knows.
+      const _fallbackMsg = `GATING FALLBACK: Redis threw (${(_gateErr && _gateErr.message) || 'unknown'}) for ${p.template}×${assetId} — FAILING OPEN (signal allowed). Fix Redis immediately; user-set blocks are NOT being enforced.`;
       try {
         const _rErr = getRedis();
         if (_rErr) {
-          await _rErr.lpush('v14:gating:errors', JSON.stringify({ ts: Date.now(), error: _fallbackMsg, template: p.template, assetId, dedupeKey: `${assetId}:${p.template}:${p.direction}:${p.timestamp}` }));
+          await _rErr.lpush('v14:gating:errors', JSON.stringify({ ts: Date.now(), error: _fallbackMsg, template: p.template, assetId, failOpen: true, dedupeKey: `${assetId}:${p.template}:${p.direction}:${p.timestamp}` }));
           await _rErr.ltrim('v14:gating:errors', 0, 49);
         }
       } catch (_) {}
       try { sendOnce(`gating-fallback:${p.template}:${assetId}`, `⚠️ ${_fallbackMsg}`); } catch (_) {}
+      // _gateResult remains null → signal passes
     }
     if (_gateResult?.blocked) {
       // Build descriptive reason: includes template, session used, and instrument.
       const _ruleKeyParts = (_gateResult.ruleKey || '').split('|');
       const _gatedSess    = _ruleKeyParts[1] || '*';
-      const _gateReason   = _gateFallback
-        ? 'template-instrument-blocked'
-        : `gated: user-disabled ${p.template}×${_gatedSess}×${assetId}`;
+      const _gateReason   = `gated: user-disabled ${p.template}×${_gatedSess}×${assetId}`;
       try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: _gateReason, gatedBy: _gateResult.updatedBy || null }); } catch (_) {}
       return res.status(200).json({ ok: true, executed: false, reason: _gateReason, template: p.template, asset: assetId });
     }

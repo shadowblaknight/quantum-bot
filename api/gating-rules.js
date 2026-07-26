@@ -50,10 +50,13 @@ module.exports = async (req, res) => {
     if (typeof on !== 'boolean') {
       return res.status(400).json({ ok: false, error: 'on (boolean) is required' });
     }
-    const sess = (session && typeof session === 'string' && session.trim()) ? session.trim() : '*';
+    const sess  = (session && typeof session === 'string' && session.trim()) ? session.trim() : '*';
+    // Normalize instrument wildcard: "all" → "*" so panel and isGated() use the same key.
+    const rawInstr = instrument.trim().toLowerCase();
+    const instr = rawInstr === 'all' ? '*' : rawInstr;
 
     try {
-      const rule = await setRule(r, template.trim(), sess, instrument.trim().toLowerCase(), on, 'user');
+      const rule = await setRule(r, template.trim(), sess, instr, on, 'user');
       return res.status(200).json({ ok: true, rule });
     } catch (e) {
       return res.status(500).json({ ok: false, error: e.message });
@@ -71,10 +74,12 @@ module.exports = async (req, res) => {
     if (!template || !instrument) {
       return res.status(400).json({ ok: false, error: 'template and instrument are required' });
     }
-    const sess = (session && typeof session === 'string' && session.trim()) ? session.trim() : '*';
+    const sess     = (session && typeof session === 'string' && session.trim()) ? session.trim() : '*';
+    const rawDInstr = instrument.trim().toLowerCase();
+    const dInstr    = rawDInstr === 'all' ? '*' : rawDInstr;
 
     try {
-      const existed = await deleteRule(r, template.trim(), sess, instrument.trim().toLowerCase());
+      const existed = await deleteRule(r, template.trim(), sess, dInstr);
       return res.status(200).json({ ok: true, existed });
     } catch (e) {
       return res.status(500).json({ ok: false, error: e.message });

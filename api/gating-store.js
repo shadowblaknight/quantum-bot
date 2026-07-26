@@ -49,36 +49,60 @@ async function seedIfEmpty(r, rules) {
 }
 
 async function loadRules(r) {
-  const raw = await r.get(RULES_KEY).catch(() => null);
-  const rules = safeParse(raw) || {};
+  const raw   = await r.get(RULES_KEY).catch(() => null);
+  let rules   = safeParse(raw) || {};
+  // Migrate: instrument field "all" → "*" for key consistency.
+  // Before instrument wildcards were implemented, the panel stored "all" as a
+  // literal instrument name. isGated() now uses "*" for instrument wildcards.
+  let migrated = false;
+  for (const key of Object.keys(rules)) {
+    const parts = key.split('|');
+    if (parts.length === 3 && parts[2] === 'all') {
+      const newKey = `${parts[0]}|${parts[1]}|*`;
+      if (!(newKey in rules)) rules[newKey] = rules[key]; // don't clobber explicit *
+      delete rules[key];
+      migrated = true;
+    }
+  }
+  if (migrated) { await r.set(RULES_KEY, JSON.stringify(rules)).catch(() => {}); }
   return seedIfEmpty(r, rules);
 }
 
 // Returns null (allowed) or { blocked:true, ruleKey, updatedBy } (blocked).
-// Check order: exact key → wildcard session → null if no matching rule.
-// THROWS on Redis failure so the caller can fall back to hardcoded blocks safely.
+// THROWS on Redis failure so the caller (webhook.js) can fail open and log loudly.
+//
+// Match precedence — most specific first, first match wins:
+//   1. template|session|instrument  — exact
+//   2. template|session|*           — this session, ALL instruments
+//   3. template|*|instrument        — ANY session, this instrument
+//   4. template|*|*                 — ANY session, ALL instruments
+//
+// "First match wins" means a specific ENABLE overrides a broader DISABLE:
+//   orb|NY_AM|* = off  +  orb|NY_AM|gold = on  →  gold ALLOWED, others BLOCKED
+//   orb|*|btc   = on   +  orb|NY_AM|*    = off →  btc BLOCKED in NY_AM (session-specific
+//                                                   wins over any-session by precedence)
 async function isGated(template, session, instrument) {
   const r = getRedis();
   if (!r) throw new Error('gating-store: no-redis');
 
-  // loadRules may throw — caller (webhook.js) must catch and apply hardcoded fallback.
+  // loadRules may throw — caller must catch
   const rules = await loadRules(r);
 
-  const exactKey    = ruleKey(template, session,   instrument);
-  const wildcardKey = ruleKey(template, '*',        instrument);
+  const candidates = [
+    ruleKey(template, session, instrument), // level 1: exact
+    ruleKey(template, session, '*'),         // level 2: session-specific, all instruments
+    ruleKey(template, '*',     instrument), // level 3: any session, specific instrument
+    ruleKey(template, '*',     '*'),         // level 4: any session, all instruments
+  ];
 
-  let matchedKey = null;
-  let rule       = null;
-  if (rules[exactKey] !== undefined) {
-    matchedKey = exactKey;
-    rule       = rules[exactKey];
-  } else if (rules[wildcardKey] !== undefined) {
-    matchedKey = wildcardKey;
-    rule       = rules[wildcardKey];
+  for (const key of candidates) {
+    const rule = rules[key];
+    if (rule === undefined) continue;         // no rule at this level → try next
+    if (rule.on === false)
+      return { blocked: true, ruleKey: key, updatedBy: rule.updatedBy || null };
+    return null; // rule.on !== false → explicitly allowed at this level, stop
   }
-
-  if (!rule || rule.on !== false) return null; // no rule, or rule says allowed
-  return { blocked: true, ruleKey: matchedKey, updatedBy: rule.updatedBy || null };
+  return null; // no rule found → allowed by default
 }
 
 // Returns all rules as an array for the API response.
