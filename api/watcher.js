@@ -434,7 +434,12 @@ async function processAsset(asset, account, openPositions) {
         riskPercent: 0.01,
       });
 
-      const recMultiplier = getSizeMultiplier(recognition.summary.advice);
+      // SHADOW MODE — advisor runs and is logged; it does NOT influence lot sizing.
+      // Re-influence gate: restore advisorMultiplier → recMultiplier only after the
+      // shadow log shows n≥8 clean neighbours per bucket predicting outcome correctly.
+      // See v14:shadow:advice:{setupId} for the per-signal record.
+      const advisorMultiplier = getSizeMultiplier(recognition.summary.advice);
+      const recMultiplier = 1.0;
       const recommendedLot = Math.max(0.01, Math.round(sizing.suggestedLot * recMultiplier * 100) / 100);
 
       const expiry = SETUP_EXPIRY_MS[cohResult.setup.mode] || SETUP_EXPIRY_MS.DAY;
@@ -449,6 +454,7 @@ async function processAsset(asset, account, openPositions) {
           baseLot: sizing.suggestedLot,
           recommendedLot,
           baseRisk: sizing.riskDollars,
+          advisorMultiplier,
         },
         plannedEntry: cohResult.setup.entry,
         slPrice: cohResult.setup.sl,
@@ -460,6 +466,34 @@ async function processAsset(asset, account, openPositions) {
       };
 
       await addPendingSetup(asset, pendingSetup);
+
+      // Step 4 shadow log: write signal-time advice before any execution path sees it.
+      // This is the proof point — the record is immutable after this write; outcome
+      // is appended at close time by detectAndProcessClosed.
+      try {
+        const _sr = getRedis();
+        if (_sr) {
+          const _shadow = {
+            setupId:         pendingSetup.id,
+            asset,
+            direction:       cohResult.setup.direction,
+            template:        cohResult.setup.templateName,
+            advice:          recognition.summary.advice,
+            matchCount:      recognition.summary.matchCount,
+            winRate:         recognition.summary.winRate,
+            confidence:      recognition.summary.confidence,
+            advisorMultiplier,
+            ts:              Date.now(),
+          };
+          await _sr.set(
+            `v14:shadow:advice:${pendingSetup.id}`,
+            JSON.stringify(_shadow),
+            { ex: 86400 * 90 }
+          );
+          await _sr.lpush('v14:shadow:index', JSON.stringify({ setupId: pendingSetup.id, ts: _shadow.ts, asset }));
+          await _sr.ltrim('v14:shadow:index', 0, 499);
+        }
+      } catch (_) {}
 
       intent = { type: 'NEW_PENDING', pendingSetup };
 

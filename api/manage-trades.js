@@ -703,6 +703,27 @@ async function detectAndProcessClosed(currentOpenIds) {
       console.error('[manage-trades] ledger write failed:', e.message);
     }
 
+    // Shadow close: stamp the signal-time advice record with actual outcome.
+    // Lets the shadow log compare advice→outcome without any post-hoc adjustment.
+    try {
+      const _shadowKey = `v14:shadow:advice:${matchedPending.id}`;
+      const _shadowRaw = await r.get(_shadowKey).catch(() => null);
+      const _shadow = _shadowRaw
+        ? (typeof _shadowRaw === 'string' ? safeParse(_shadowRaw) : _shadowRaw)
+        : null;
+      if (_shadow && !_shadow.closedAt) {
+        const _outcome     = totalPnL > 0.5 ? 'WIN' : totalPnL < -0.5 ? 'LOSS' : 'BREAKEVEN';
+        const _riskDollars = matchedPending.sizing?.baseRisk;
+        await r.set(_shadowKey, JSON.stringify({
+          ..._shadow,
+          outcome:   _outcome,
+          netPnl:    Math.round(totalPnL * 100) / 100,
+          pnlR:      (_riskDollars > 0) ? Math.round(totalPnL / _riskDollars * 100) / 100 : null,
+          closedAt:  Date.now(),
+        }), { ex: 86400 * 90 }).catch(() => {});
+      }
+    } catch (_) {}
+
     // v1.3: NEW — contribute to today's realized P&L
     // Without this, dashboard's "Today realized" stays at $0 forever.
     try {

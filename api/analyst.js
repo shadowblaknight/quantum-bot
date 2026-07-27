@@ -62,6 +62,16 @@ const SHADOW_SYSTEMS = [
     resolvedField: null,
     resolvedViaLedger: true,
   },
+  {
+    name:          'shadowadvice',
+    label:         'Recognition Advisor (shadow mode)',
+    indexKey:      'v14:shadow:index',
+    recordKey:     (id) => `v14:shadow:advice:${id}`,
+    idField:       'setupId',
+    resolvedField: 'closedAt',
+    resolvedViaLedger: false,
+    selfResolving: true,   // resolved via closedAt, not ledger dedupeKey
+  },
 ];
 
 // ── Safe fetch with timeout ──────────────────────────────────────────────────
@@ -116,8 +126,15 @@ async function computeShadowHealth(r, ledger, summaries) {
   const health = {};
 
   for (const sys of SHADOW_SYSTEMS) {
-    const idxRaw = await r.get(sys.indexKey).catch(() => null);
-    const idx    = safeParse(idxRaw) || [];
+    // shadowadvice index is a Redis LPUSH list; all others are GET (JSON array).
+    let idx;
+    if (sys.selfResolving) {
+      const listRaw = await r.lrange(sys.indexKey, 0, 499).catch(() => []);
+      idx = (listRaw || []).map(e => typeof e === 'string' ? safeParse(e) : e).filter(Boolean);
+    } else {
+      const idxRaw = await r.get(sys.indexKey).catch(() => null);
+      idx = safeParse(idxRaw) || [];
+    }
     const written    = idx.length;
     const lastEntry  = idx[0] || null;   // index is newest-first
     const lastWriteTs = lastEntry?.ts || null;
@@ -134,12 +151,20 @@ async function computeShadowHealth(r, ledger, summaries) {
         for (const raw of raws) {
           const rec = raw ? (typeof raw === 'string' ? safeParse(raw) : raw) : null;
           if (!rec) continue;
-          const key = rec.id;
-          if (closedKeys.has(key)) joined++;
-          if (sys.resolvedViaLedger) {
-            if (closedKeys.has(key)) resolved++;
-          } else if (sys.resolvedField && rec[sys.resolvedField] != null) {
-            resolved++;
+          if (sys.selfResolving) {
+            // Self-resolving: outcome is stamped directly on the record (no ledger join).
+            if (sys.resolvedField && rec[sys.resolvedField] != null) {
+              resolved++;
+              joined++;  // joined = resolved for self-resolving systems
+            }
+          } else {
+            const key = rec.id;
+            if (closedKeys.has(key)) joined++;
+            if (sys.resolvedViaLedger) {
+              if (closedKeys.has(key)) resolved++;
+            } else if (sys.resolvedField && rec[sys.resolvedField] != null) {
+              resolved++;
+            }
           }
         }
       } catch (_) {}
@@ -170,6 +195,10 @@ async function computeShadowHealth(r, ledger, summaries) {
           sm.byWithPriorSession?.againstSession?.n,
         ];
         for (const n of cands) if (n != null && n > maxBucketN) maxBucketN = n;
+      } else if (sys.name === 'shadowadvice' && sm?.byConfidence) {
+        for (const cell of Object.values(sm.byConfidence)) {
+          if ((cell?.n || 0) > maxBucketN) maxBucketN = cell.n;
+        }
       }
     }
 
@@ -181,7 +210,10 @@ async function computeShadowHealth(r, ledger, summaries) {
     } else if (ageMs != null && ageMs > 48 * 3600_000) {
       status     = `STALE — no signals in ${Math.round(ageMs / 3600_000)}h`;
       statusCode = 'stale';
-    } else if (written > 0 && joined === 0) {
+    } else if (sys.selfResolving && written > 0 && resolved === 0) {
+      status     = 'COLLECTING — signals written, no closed trades yet; will populate as trades close';
+      statusCode = 'collecting';
+    } else if (written > 0 && joined === 0 && !sys.selfResolving) {
       status     = 'JOIN BROKEN — dedupeKey missing on historical trades (new trades will populate)';
       statusCode = 'broken-join';
     } else if (sys.resolvedField && joined > 0 && resolved === 0) {
@@ -190,7 +222,7 @@ async function computeShadowHealth(r, ledger, summaries) {
     } else if (written > 0 && joined > 0 && joined < MIN_N) {
       // Resolving fine but the ledger join is thin — pre-fix trades lack dedupeKey.
       // Verdicts gate on joined (what the summary can actually use), not resolved.
-      status     = `COLLECTING — resolving fine, but only ${joined} records can join the ledger (pre-fix trades lack dedupeKey)`;
+      status     = `COLLECTING — resolving fine, but only ${joined} record(s) resolved so far (need ${MIN_N} per bucket)`;
       statusCode = 'collecting-low-join';
     } else {
       status     = 'HEALTHY — collecting';
@@ -595,7 +627,7 @@ module.exports = async (req, res) => {
     // perf-analysis and perf-ranking pull full trade arrays and are heavier;
     // they get a longer individual timeout. All six run concurrently.
     const [
-      [ledger, entrystyleSummary, orderflowSummary, sessionCtxSummary, regimeSummary, wickratioSummary],
+      [ledger, entrystyleSummary, orderflowSummary, sessionCtxSummary, regimeSummary, wickratioSummary, shadowAdviceSummary],
       [perfAnalysis, perfRanking],
     ] = await Promise.all([
       Promise.all([
@@ -605,6 +637,7 @@ module.exports = async (req, res) => {
         fetchEndpoint('session-context-summary'),
         fetchEndpoint('regime-detector?action=shadow-summary'),
         fetchEndpoint('wickratio-summary'),
+        fetchEndpoint('shadow-advice-summary'),
       ]),
       Promise.all([
         fetchEndpoint(`perf-analysis${excludePreFix ? '?excludePreFix=1' : ''}`, HEAVY_TIMEOUT_MS),
@@ -613,11 +646,12 @@ module.exports = async (req, res) => {
     ]);
 
     const summaries = {
-      entrystyle: entrystyleSummary,
-      orderflow:  orderflowSummary,
-      sessionctx: sessionCtxSummary,
-      wickratio:  wickratioSummary,
-      regime:     regimeSummary,
+      entrystyle:   entrystyleSummary,
+      orderflow:    orderflowSummary,
+      sessionctx:   sessionCtxSummary,
+      wickratio:    wickratioSummary,
+      shadowadvice: shadowAdviceSummary,
+      regime:       regimeSummary,
     };
 
     // ── A. Shadow health ──────────────────────────────────────────────────────
@@ -685,8 +719,9 @@ module.exports = async (req, res) => {
       perfRanking:      { available: !perfRanking._unavailable,     error: perfRanking._unavailable     ? perfRanking.error     : null },
       entrystyle:       { available: !entrystyleSummary._unavailable, error: entrystyleSummary._unavailable ? entrystyleSummary.error : null },
       orderflow:        { available: !orderflowSummary._unavailable,  error: orderflowSummary._unavailable  ? orderflowSummary.error  : null },
-      sessionCtx:       { available: !sessionCtxSummary._unavailable, error: sessionCtxSummary._unavailable ? sessionCtxSummary.error : null },
-      regime:           { available: !regimeSummary._unavailable,     error: regimeSummary._unavailable     ? regimeSummary.error     : null },
+      sessionCtx:       { available: !sessionCtxSummary._unavailable,   error: sessionCtxSummary._unavailable   ? sessionCtxSummary.error   : null },
+      shadowadvice:     { available: !shadowAdviceSummary._unavailable, error: shadowAdviceSummary._unavailable ? shadowAdviceSummary.error : null },
+      regime:           { available: !regimeSummary._unavailable,       error: regimeSummary._unavailable       ? regimeSummary.error       : null },
     };
 
     // ── Assemble brief ────────────────────────────────────────────────────────

@@ -569,6 +569,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
 
         {/* ─── v15.8 · Trend vs Counter-Trend Heatmap (full width) ─── */}
         <TrendHeatmapPanel />
+
+        {/* ─── v15.9 · Recognition Advisor shadow log (full width) ─── */}
+        <ShadowAdvicePanel />
       </div>
 
       <ActivityFeed activity={activity} />
@@ -4892,6 +4895,9 @@ function MobileLayout({
             {card("auto",
               <OrderFlowPanel gridColumn="auto" />
             )}
+            {card("auto",
+              <ShadowAdvicePanel gridColumn="auto" />
+            )}
           </>
         )}
 
@@ -6014,6 +6020,281 @@ function WickRatioPanel({ gridColumn = '1 / 4', style }) {
             </div>
           </>
         )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15g · SHADOW-ADVICE PANEL  (v15.9)
+// =====================================================================
+// Reads /api/shadow-advice-summary.
+// Shows whether the recognition-memory advisor predicts outcomes.
+// recMultiplier is hardcoded 1.0 in watcher.js — advice does NOT influence
+// lot sizing. This panel reports what the shadow log has accumulated.
+// Desktop: full-width grid cell. Mobile: stats tab. Never gates execution.
+
+const SA_MIN_N = 8;
+
+function SaStatBox({ label, s, accent }) {
+  const thin = !s || s.insufficient;
+  return (
+    <div style={{
+      flex: 1, minWidth: 160, padding: '10px 14px',
+      background: 'var(--qb-bg-panel-hi)',
+      border: `1px solid ${thin ? 'var(--qb-border)' : (accent || 'var(--qb-border-hi)')}`,
+      borderRadius: 4, opacity: thin ? 0.65 : 1,
+    }}>
+      <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
+        {label}
+      </div>
+      {thin ? (
+        <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+          {s?.n != null ? `n=${s.n} — collecting (need ${SA_MIN_N})` : 'collecting'}
+        </div>
+      ) : (
+        <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <OFMiniStat label="n"    value={s.n} />
+          <OFMiniStat label="WR"   value={`${Math.round(s.winRate * 100)}%`}
+            color={s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
+          <OFMiniStat label="net"  value={fmtUSD(s.netPnl, true)}
+            color={s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+          {s.avgR != null && (
+            <OFMiniStat label="avgR" value={`${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R`}
+              color={s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShadowAdvicePanel({ gridColumn = '1 / 4', style }) {
+  const [data, setData]           = useState(null);
+  const [fetchError, setError]    = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [ready, setReady]         = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('shadow-advice-summary')).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok) { setData(r); setError(null); }
+        else { setData(null); setError(r?.error || 'endpoint error'); }
+      } catch (e) {
+        if (alive) { setData(null); setError(e.message); }
+      }
+      if (alive) { setLastFetch(new Date()); setReady(true); }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'Recognition Advisor',
+    subtitle: 'shadow mode — recMultiplier = 1.0 — measuring only',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'shadow-advice', defaultCollapsed: false,
+  };
+
+  if (!ready) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '18px 14px' }}><Placeholder msg="Loading shadow-advice data..." /></div>
+    </Panel>
+  );
+
+  if (fetchError && !data) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '14px 16px' }}>
+        <PlaceholderError msg={`/api/shadow-advice-summary: ${fetchError}`} />
+      </div>
+    </Panel>
+  );
+
+  if (!data) return (
+    <Panel {...panelProps}>
+      <div style={{ padding: '14px 16px', minHeight: 100 }}>
+        <div style={{
+          padding: '10px 14px', background: 'var(--qb-bg-void)',
+          border: '1px solid var(--qb-border)', borderRadius: 4,
+          fontSize: 10, color: 'var(--qb-text-mid)', lineHeight: 1.7,
+        }}>
+          <div style={{ fontWeight: 600, color: 'var(--qb-text-hi)', marginBottom: 4 }}>
+            Collecting recognition-memory shadow data
+          </div>
+          Shadow records write on every signal. Outcomes stamp at trade close.
+          {lastFetch && (
+            <div style={{ marginTop: 6, fontSize: 8, color: 'var(--qb-text-faint)' }}>
+              Last checked: {lastFetch.toLocaleTimeString()}
+            </div>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+
+  const cov    = data.coverage    || {};
+  const byConf = data.byConfidence || {};
+  const byMult = data.byMultiplierBucket || {};
+  const byAD   = data.byAssetDirection  || {};
+
+  const confKeys = Object.keys(byConf).sort();
+  const multKeys = Object.keys(byMult).sort((a, b) => parseFloat(a) - parseFloat(b));
+  const adKeys   = Object.keys(byAD).sort();
+
+  const anyReadable      = confKeys.some(k => !(byConf[k]?.insufficient));
+  const maxResolvedBucket = confKeys.reduce((m, k) => Math.max(m, byConf[k]?.n || 0), 0);
+  const gateNeeded       = Math.max(0, SA_MIN_N - maxResolvedBucket);
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* ── STATUS banner ────────────────────────────────────────────────── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          padding: '7px 10px', marginBottom: 10,
+          background: 'var(--qb-bg-void)',
+          border: '1px solid var(--qb-border)', borderRadius: 4,
+        }}>
+          <span className="qb-mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--qb-warn)', letterSpacing: 0.8 }}>
+            SHADOW MODE
+          </span>
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-mid)' }}>
+            recMultiplier = 1.0 — advisor runs and logs on every signal; lot sizing is unaffected
+          </span>
+          <span style={{ flex: 1 }} />
+          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
+        </div>
+
+        {/* ── COVERAGE ─────────────────────────────────────────────────────── */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap', marginBottom: 8 }}>
+          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
+            {cov.written ?? 0} signals written
+            <span style={{ color: 'var(--qb-text-mid)' }}>
+              {' '}({cov.resolved ?? 0} resolved, {cov.open ?? 0} open)
+            </span>
+          </span>
+          <span style={{ flex: 1 }} />
+          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>shadow data — not gating execution</span>
+        </div>
+
+        {/* ── 1. VERDICT ───────────────────────────────────────────────────── */}
+        <OFSectionLabel>1 — Verdict: does confidence predict outcome?</OFSectionLabel>
+        {confKeys.length === 0 ? (
+          <div style={{ padding: '10px 14px', background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 4,
+            fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+            No resolved trades yet — verdict not readable
+          </div>
+        ) : !anyReadable ? (
+          <div>
+            <div style={{ padding: '10px 14px', marginBottom: 8, background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 4,
+              fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
+              NOT YET READABLE — all confidence buckets have n &lt; {SA_MIN_N}. Accumulating.
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {confKeys.map(k => <SaStatBox key={k} label={`confidence: ${k}`} s={byConf[k]} />)}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {confKeys.map(k => {
+              const s = byConf[k];
+              const accent = s.insufficient ? undefined
+                : s.winRate >= 0.55 ? 'var(--qb-ok)'
+                : s.winRate >= 0.45 ? 'var(--qb-warn)'
+                : 'var(--qb-bad)';
+              return <SaStatBox key={k} label={`confidence: ${k}`} s={s} accent={accent} />;
+            })}
+          </div>
+        )}
+
+        {/* ── 2. RE-INFLUENCE GATE ─────────────────────────────────────────── */}
+        <OFSectionLabel>2 — Re-influence gate</OFSectionLabel>
+        <div style={{
+          padding: '10px 14px',
+          background: 'var(--qb-bg-void)',
+          border: `1px solid ${anyReadable ? 'var(--qb-ok)' : 'var(--qb-border)'}`,
+          borderRadius: 4, fontSize: 9, lineHeight: 1.7,
+        }}>
+          <div className="qb-mono" style={{ fontWeight: 600, marginBottom: 4,
+            color: anyReadable ? 'var(--qb-ok)' : 'var(--qb-text-mid)' }}>
+            {anyReadable
+              ? 'GATE CONDITION MET for some buckets — verify all buckets before re-influencing'
+              : `GATE LOCKED — need n ≥ ${SA_MIN_N} per confidence bucket`}
+          </div>
+          <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>
+            Gate opens when: every confidence bucket reaches n ≥ {SA_MIN_N} clean resolved trades.
+            <br />
+            Current: {cov.resolved ?? 0} resolved total · best bucket n = {maxResolvedBucket}
+            {!anyReadable && ` · need ${gateNeeded} more in top bucket`}
+          </div>
+          <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 6, fontStyle: 'italic' }}>
+            Re-influence is a one-line code change in watcher.js — never a UI toggle.
+          </div>
+        </div>
+
+        {/* ── 3. By advisorMultiplier bucket ───────────────────────────────── */}
+        {multKeys.length > 0 && (
+          <>
+            <OFSectionLabel>3 — By advisor multiplier (getSizeMultiplier output)</OFSectionLabel>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {multKeys.map(k => <SaStatBox key={k} label={`×${k}`} s={byMult[k]} />)}
+            </div>
+          </>
+        )}
+
+        {/* ── 4. Per asset × direction ─────────────────────────────────────── */}
+        {adKeys.length > 0 && (
+          <>
+            <OFSectionLabel>4 — Per asset × direction</OFSectionLabel>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+                <thead>
+                  <tr>
+                    {['asset:dir', 'n', 'WR', 'avgR', 'net P&L'].map(h => (
+                      <th key={h} style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--qb-border)', color: 'var(--qb-text-faint)', fontWeight: 400 }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {adKeys.map(k => {
+                    const s = byAD[k];
+                    return (
+                      <tr key={k} style={{ opacity: s.insufficient ? 0.5 : 1 }}>
+                        <td style={{ padding: '4px 8px', color: 'var(--qb-text-hi)' }}>{k}</td>
+                        <td style={{ padding: '4px 8px', color: 'var(--qb-text-mid)' }}>{s.n}</td>
+                        <td style={{ padding: '4px 8px',
+                          color: s.insufficient ? 'var(--qb-text-faint)'
+                            : s.winRate >= 0.55 ? 'var(--qb-ok)'
+                            : s.winRate >= 0.45 ? 'var(--qb-warn)'
+                            : 'var(--qb-bad)' }}>
+                          {s.insufficient ? '—' : `${Math.round(s.winRate * 100)}%`}
+                        </td>
+                        <td style={{ padding: '4px 8px',
+                          color: s.insufficient ? 'var(--qb-text-faint)'
+                            : s.avgR != null ? (s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)') : 'var(--qb-text-faint)' }}>
+                          {s.insufficient ? '—' : s.avgR != null ? `${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R` : '—'}
+                        </td>
+                        <td style={{ padding: '4px 8px',
+                          color: s.insufficient ? 'var(--qb-text-faint)'
+                            : s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>
+                          {s.insufficient ? '—' : fmtUSD(s.netPnl, true)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
       </div>
     </Panel>
   );
