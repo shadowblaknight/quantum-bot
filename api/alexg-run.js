@@ -184,8 +184,9 @@ async function runAlexg(opts = {}) {
     const pip = (meta && meta.pipSize) || 0.0001;
     const zone = plan.zone;
 
-    // set-and-forget LIMIT at the AOI retest edge; recompute RR from THIS entry
-    const entryRaw = isLong ? zone.hi : zone.lo;
+    // H4 rejection confirmed → entry is at current market price (plan.entry = live 1h close).
+    // Zone-edge LIMIT otherwise — retest at AOI near edge.
+    const entryRaw = (plan.h4RejectionConfirmed && plan.entry != null) ? plan.entry : (isLong ? zone.hi : zone.lo);
     const slRaw = plan.sl, tpRaw = plan.tp;
     const risk = Math.abs(entryRaw - slRaw);
     const rr = risk > 0 ? (isLong ? (tpRaw - entryRaw) : (entryRaw - tpRaw)) / risk : null;
@@ -218,20 +219,24 @@ async function runAlexg(opts = {}) {
       continue;
     }
 
-    // ── place the limit (set-and-forget retest at the AOI edge) ──
-    let placement, entryTypeFinal = 'retest', execKindFinal = 'limit';
-    try { placement = await D.execute.placeLimitOrder(brokerSymbol, dir, lot, rEntry, rSL, rTP, comment); }
-    catch (e) { placement = { ok: false, error: e.message }; }
-
-    // Inside-zone fallback: if price is already at/through the AOI, a retest limit
-    // sits on the wrong side of market and the broker rejects it INVALID_PRICE.
-    // Enter at MARKET instead — for a long the fill is at/below zone.hi, for a
-    // short at/above zone.lo, so RR can only improve vs the planned retest. SL/TP
-    // are unchanged, so risk is preserved. (Needs placeMarketOrder, now in execute.)
-    if (!placement.ok && /INVALID_PRICE/i.test(String(placement.error || '')) && D.execute.placeMarketOrder) {
+    // ── place: MARKET for confirmed H4 rejection; LIMIT (zone-edge retest) otherwise ──
+    let placement, entryTypeFinal, execKindFinal;
+    if (plan.h4RejectionConfirmed && D.execute.placeMarketOrder) {
+      // H4 closed through the zone edge — confirmed rejection, enter at market immediately
+      entryTypeFinal = 'h4-rejection'; execKindFinal = 'market';
       try { placement = await D.execute.placeMarketOrder(brokerSymbol, dir, lot, rSL, rTP, comment); }
       catch (e) { placement = { ok: false, error: e.message }; }
-      if (placement.ok) { entryTypeFinal = 'immediate'; execKindFinal = 'market'; }
+    } else {
+      // No confirmed H4 rejection yet — zone-edge LIMIT (set-and-forget retest)
+      entryTypeFinal = 'retest'; execKindFinal = 'limit';
+      try { placement = await D.execute.placeLimitOrder(brokerSymbol, dir, lot, rEntry, rSL, rTP, comment); }
+      catch (e) { placement = { ok: false, error: e.message }; }
+      // Inside-zone fallback: INVALID_PRICE means price already moved through the zone edge
+      if (!placement.ok && /INVALID_PRICE/i.test(String(placement.error || '')) && D.execute.placeMarketOrder) {
+        try { placement = await D.execute.placeMarketOrder(brokerSymbol, dir, lot, rSL, rTP, comment); }
+        catch (e) { placement = { ok: false, error: e.message }; }
+        if (placement.ok) { entryTypeFinal = 'immediate'; execKindFinal = 'market'; }
+      }
     }
 
     if (!placement.ok) {

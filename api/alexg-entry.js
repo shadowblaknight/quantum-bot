@@ -291,14 +291,30 @@ async function evaluateEntry(asset, opts) {
   }
   if (!chosen) notes.push('no LTF shows shift + engulfing at the AOI — no entry');
 
+  // H4 zone rejection: last completed H4 candle's high entered the zone AND its close
+  // went back through the zone edge — confirmed rejection. Fires entrySignal for an
+  // immediate MARKET entry without needing a full CHoCH + engulf sequence.
+  let h4RejectionConfirmed = false;
+  if (zone && direction) {
+    const _h4c = candidates.find((c) => c.tf === '4h');
+    if (_h4c && _h4c.candles && _h4c.candles.length >= 1) {
+      const _last4 = _h4c.candles[_h4c.candles.length - 1];
+      h4RejectionConfirmed = direction === 'short'
+        ? _last4.high >= zone.lo && _last4.close < zone.lo
+        : _last4.low  <= zone.hi && _last4.close > zone.hi;
+    }
+  }
+  if (h4RejectionConfirmed && !chosen) notes.push('H4 rejection confirmed — zone touched, close through edge — immediate market entry');
+
   return {
     asset,
     direction, tradeType: loc.tradeType,
     locationOK: true,
     activeZone: zone,
-    entrySignal: !!chosen,
+    entrySignal: !!chosen || h4RejectionConfirmed,
+    h4RejectionConfirmed,
     highRisk: chosen ? !!(chosen.shift && chosen.shift.highRisk) : false,
-    triggerTF: chosen ? chosen.tf : null,
+    triggerTF: chosen ? chosen.tf : (h4RejectionConfirmed ? '4h' : null),
     shift: chosen ? { tf: chosen.tf, brokenLevel: chosen.shift.brokenLevel, origin: chosen.shift.origin } : null,
     engulfing: chosen ? { tf: chosen.engulfTF || chosen.tf, idx: chosen.engulfing.idx, kind: chosen.engulfing.kind } : null,
     candidates: candidates.map((c) => ({
