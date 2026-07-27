@@ -199,7 +199,7 @@ async function evaluateEligibility(asset, opts = {}) {
   // (a setup), not dead consolidation — so we DON'T skip. If both are flat, or
   // the Weekly is unknown, we skip (conservative).
   const dChop = dA.consolidating;
-  const wTrending = wA.ok && wA.er != null && wA.er >= CFG.wTrendER;
+  const wTrending = wA.ok && wA.er != null && (wA.er >= CFG.wTrendER || (wA.er >= 0.10 && wA.trend !== 'flat'));
   let consolidating;
   if (dChop && wTrending) consolidating = false;       // D chop within W trend => allowed (retracement)
   else consolidating = dChop;                          // else trust the D read

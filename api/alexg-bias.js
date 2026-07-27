@@ -224,9 +224,15 @@ async function evaluateBias(asset, opts = {}) {
   const tw = sw.trend, td = sd.trend, th4 = sh4.trend;
 
   // Sync — must be CONSECUTIVE timeframes (l.84-88).
+  // Fallback: if W is clearly directional and D is unclear (daily retracement), allow a
+  // W-led swing unless H4 is actively opposing the weekly direction.
   let inSync = [], tradeType = null, direction = null;
   if (agree(tw, td)) { inSync = ['W', 'D']; tradeType = 'swing'; direction = tw === 'bull' ? 'long' : 'short'; }
   else if (agree(td, th4)) { inSync = ['D', '4h']; tradeType = 'day'; direction = td === 'bull' ? 'long' : 'short'; }
+  else if ((tw === 'bull' || tw === 'bear') && td === 'unclear') {
+    const _wOpp = tw === 'bull' ? 'bear' : 'bull';
+    if (th4 !== _wOpp) { inSync = ['W']; tradeType = 'swing'; direction = tw === 'bull' ? 'long' : 'short'; }
+  }
 
   const fullStack = agree(tw, td) && agree(td, th4);
 
@@ -240,6 +246,9 @@ async function evaluateBias(asset, opts = {}) {
   if (tradeType === 'swing' && (th4 === 'bull' || th4 === 'bear') && ((direction === 'long') !== (th4 === 'bull'))) {
     awaitingPullback = true;
     notes.push(`W+D ${direction} but 4hr is ${th4} — the 4hr pullback is the entry path into the ${direction === 'long' ? 'demand' : 'supply'} AOI`);
+  }
+  if (tradeType === 'swing' && inSync.length === 1 && inSync[0] === 'W') {
+    notes.push(`W-only ${direction}: D unclear (daily retracement), H4 ${th4} non-opposing — entry at W zone edge`);
   }
   if (!tradeType) notes.push(`no 2 consecutive timeframes in sync (W:${tw} D:${td} 4h:${th4})`);
   if (sw.shift) notes.push(`W: ${sw.shift}`);
