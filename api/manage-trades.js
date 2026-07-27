@@ -373,11 +373,19 @@ async function managePosition(position) {
   const initialSLForR = Math.abs(state.entry - matchedPending.slPrice) || 1;
   const finalIdx = tpLevels.length - 1;
 
+  // Hoisted here so the TP-detection Telegram can reference stopBuffer.
+  const pipSz      = (assetMeta && assetMeta.pipSize) || (currentPrice > 100 ? 0.01 : 0.0001);
+  // Proportional buffer: 25% of SL, floored at 2 pips, capped at 8 pips.
+  // Replaces the old flat 8-pip floor that blocked ratcheting on tight-stop trades
+  // (orb-pro 10-pip SL: old buffer = 8 pip, new = 2.4 pip; 20-pip SL: 4.9 pip; 32-pip+ = 8 pip).
+  const stopBuffer = Math.min(Math.max(initialSLForR * 0.25, pipSz * 2), pipSz * 8);
+
   // ─── TP TOUCH DETECTION (wick-aware, CONFIRMED) ──────────────────
   // A TP counts as hit only when price trades a confirmation buffer BEYOND it —
   // not a bare wick that instantly reverses. (A 1-tick stab that bounces used to
   // record a "hit" and yank the stop to breakeven, strangling a winner.) The
-  // notification is DEFERRED until after the ratchet so it reports the REAL stop.
+  // TP-hit Telegram fires immediately at detection (see sendOnce below each push).
+  // The SL-lock Telegram (tplock:...) fires separately, only after broker verification.
   const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || 0.10); // 0.1R beyond the TP
   let finalTouched = false;
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
@@ -397,6 +405,16 @@ async function managePosition(position) {
       const rMult = Math.abs(tpPrice - state.entry) / initialSLForR;
       await pushCommentary(asset, 'tp-hit',
         `${tpName} confirmed @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} (${rMult.toFixed(1)}R)`);
+      // TP-hit Telegram: fires at detection, BEFORE and SEPARATE FROM the lock attempt.
+      // Ensures the user is always notified even when the ratchet can't lock immediately
+      // (e.g. price bounced back within the stop-buffer window).
+      try {
+        const tpEmoji = tpName === 'TP1' ? '🥉' : tpName === 'TP2' ? '🥈' : '🥇';
+        await sendOnce(`tp-confirmed:${position.id}:${tpName}`,
+          `${tpEmoji} <b>${tpName} CONFIRMED — ${asset.toUpperCase()}</b>\n\n` +
+          `${isLong ? '🟢' : '🔴'} ${direction} · <code>${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)\n` +
+          `SL lock will fire once price clears TP by >${(stopBuffer / pipSz).toFixed(1)} pips`);
+      } catch (_) {}
     }
   }
 
@@ -423,8 +441,7 @@ async function managePosition(position) {
   // broker-valid stop (beyond market by the min-stop buffer). If price has retraced
   // above every hit TP, the stop simply WAITS where it is — it never hands the win
   // back to entry. A reversal into a locked TP is a real win at that TP.
-  const pipSz = (assetMeta && assetMeta.pipSize) || (currentPrice > 100 ? 0.01 : 0.0001);
-  const stopBuffer = Math.max(pipSz * 8, initialSLForR * 0.05);
+  // (pipSz and stopBuffer hoisted above TP detection — see declarations above the loop.)
   const curSL = (typeof position.stopLoss === 'number' && position.stopLoss > 0) ? position.stopLoss : null;
 
   // hit TP rungs (exclude the final/close rung), deepest-profit first
