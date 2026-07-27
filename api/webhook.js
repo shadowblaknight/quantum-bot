@@ -721,6 +721,26 @@ module.exports = async (req, res) => {
     }
   }
 
+  // REACTION_IMMEDIATE_ONLY: reaction-family retest (limit) entries are suppressed by default.
+  // Redis key v14:config:reaction-immediate-only — '1' = on (retests blocked, default when missing),
+  // '0' = off (restores retest entries without redeploy).
+  // Only fires when template ∈ {reaction, reaction-fvg, reaction-ifvg} AND actualStyle === 'retest'.
+  // Immediate entries and all other templates are untouched.
+  if (['reaction', 'reaction-fvg', 'reaction-ifvg'].includes(p.template) && p.actualStyle === 'retest') {
+    let _rxnImmOnly = '1'; // default: on
+    try {
+      const _rxnR = getRedis();
+      if (_rxnR) {
+        const _rxnV = await _rxnR.get('v14:config:reaction-immediate-only');
+        if (_rxnV != null) _rxnImmOnly = String(_rxnV);
+      }
+    } catch (_) {}
+    if (_rxnImmOnly !== '0') {
+      try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: 'rxn-retest-suppressed' }); } catch (_) {}
+      return res.status(200).json({ ok: true, executed: false, reason: 'rxn-retest-suppressed', template: p.template, asset: assetId });
+    }
+  }
+
   // 9. Parse numerics (fast) — fail fast on a malformed payload
   const entry = parseFloat(p.entry);
   const sl    = parseFloat(p.sl);
