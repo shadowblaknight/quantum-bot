@@ -6707,8 +6707,8 @@ function TrendHeatmapPanel({ gridColumn = '1 / 4', style }) {
     let alive = true;
     const load = async () => {
       try {
-        // Uses /api/trend-heatmap which computes Daily 20/50 EMA per trade at openedAt.
-        // Falls back to perf-ranking if trend-heatmap is unavailable.
+        // Uses /api/trend-heatmap which computes H4 20/50 EMA per trade at openedAt.
+        // (Daily EMA unavailable: MetaAPI caps this account at ~50 1d bars.)
         const r = await fetch(API('trend-heatmap')).then(res => res.json());
         if (!alive) return;
         if (r?.ok) { setRaw(r); setError(null); }
@@ -6725,7 +6725,7 @@ function TrendHeatmapPanel({ gridColumn = '1 / 4', style }) {
 
   const panelProps = {
     title: 'Trend vs Counter-Trend',
-    subtitle: 'daily 20/50 EMA per trade at entry — not a static map',
+    subtitle: 'H4 20/50 EMA per trade at entry — not a static map',
     style: { gridColumn, ...(style || {}) },
     collapsible: true, panelId: 'trend-heatmap', defaultCollapsed: true,
   };
@@ -6767,7 +6767,7 @@ function TrendHeatmapPanel({ gridColumn = '1 / 4', style }) {
 
         {/* rule + caveat */}
         <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', marginBottom: 8, lineHeight: 1.6 }}>
-          Rule: Daily 20/50 EMA at each trade's openedAt — up = close&gt;ema50 AND ema20&gt;ema50; down = inverse; else unclear.
+          Rule: {raw.rule || 'H4 20/50 EMA'} at each trade's openedAt — up = close&gt;ema50 AND ema20&gt;ema50; down = inverse; else unclear.
           {raw.caveat && <span> {raw.caveat}</span>}
         </div>
 

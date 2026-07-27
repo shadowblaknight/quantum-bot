@@ -1,30 +1,42 @@
 'use strict';
 /* eslint-disable */
-// api/trend-heatmap.js  v15.9
+// api/trend-heatmap.js  v15.9.1
 // GET /api/trend-heatmap
 //
 // Classifies each closed ledger / perf-ranking trade as TREND, COUNTER, UNCLEAR,
-// or EXCLUDED using the ACTUAL Daily 20/50 EMA at each trade's openedAt timestamp.
+// or EXCLUDED using the H4 20/50 EMA at each trade's openedAt timestamp.
 //
-// Rule (same as scratchpad/trend_classify.js report):
+// WHY H4, NOT 1D:
+//   MetaAPI caps this account at ~50 daily bars per batch.  50 1d bars reach back
+//   only to ~June 4 (6–7 weeks), and the 20/50 EMA warm-up (50 bars) consumes the
+//   entire window — leaving exactly ONE valid EMA data point at the last bar.
+//   That makes Daily EMA classification impossible for any trade with an entry
+//   before that point, which is all 110 current trades (all July 2026).
+//   H4 candles: watcher already caches 300 H4 bars per asset (~April 1 → present,
+//   ~3 months of history).  EMA50 warms up in 50 H4 bars (~8 trading days) leaving
+//   250 valid EMA points.  All current trades (July 6+) have 200+ H4 bars before
+//   their entry — full coverage with no synthetic data.
+//
+// Rule:
 //   up    = lastClose > ema50 AND ema20 > ema50
 //   down  = lastClose < ema50 AND ema20 < ema50
 //   else  = unclear
 //
-// TREND  = trade direction agrees with htfTrend (LONG in up-trend, SHORT in down-trend)
-// COUNTER = trade direction opposes htfTrend
+// TREND  = trade direction agrees with htfBias (LONG in up-bias, SHORT in down-bias)
+// COUNTER = trade direction opposes htfBias
 // UNCLEAR = EMA state is mixed at entry time
-// EXCLUDED = recog-only trade (_source==='recog'), or < 60 daily bars before trade date,
-//            or 1d candle cache unavailable
+// EXCLUDED = recog-only trade (_source==='recog'), or < 50 H4 bars before entry,
+//            or H4 cache unavailable
 //
-// Why NOT a static map: gold/BTC trend shifts over time; a frozen constant will
-// mislabel trend↔counter as markets move.
+// Why NOT a static map: gold/BTC bias shifts over time; a frozen constant silently
+// mislabels trend↔counter as markets move.
 //
-// Cache: results cached in Redis for 1 h (1d candles are watcher-cached).
+// Cache: results cached in Redis for 1 h.
 //
-// v15.9 change: loads trade data directly from Redis instead of self-calling
-// /api/perf-ranking via HTTP — Vercel serverless functions cannot reliably call
-// themselves (cascading cold-starts + shared timeout budget).
+// v15.9.1: switched from 1d to 4h candles (MetaAPI daily-bar ceiling fix).
+//          EMA_MIN_BARS lowered from 60 to 50 (matches EMA50 warm-up period).
+// v15.9:   loads trade data directly from Redis (no self-HTTP, avoids cascading
+//          cold-starts and shared timeout budget).
 
 const { applyCors, getRedis, safeParse } = require('./_lib');
 const { getAllTrades }                    = require('./recognition-memory');
@@ -32,7 +44,8 @@ const { loadAllLedger, mergeRecord, classifySession } = require('./perf-ranking'
 
 const CACHE_KEY     = 'v14:trend-heatmap:cache';
 const CACHE_TTL_SEC = 3600; // 1 h
-const EMA_MIN_BARS  = 60;   // minimum bars before trade date to classify
+const CANDLE_TF     = '4h'; // H4: ~300 bars cached (~3 months); daily (1d) tops out at 50 bars on this account
+const EMA_MIN_BARS  = 50;   // must equal or exceed EMA50 period — matches H4 warm-up
 
 const EXCL_TEMPLATES = new Set(['unknown', 'legacy', 'legacy-unknown']);
 
@@ -134,10 +147,10 @@ module.exports = async (req, res) => {
     const uniqueAssets = [...new Set(trades.map(t => (t.asset || '').toLowerCase()).filter(Boolean))];
     const emaSeriesByAsset = {};
 
-    // Fetch in parallel; 300-bar limit paginates up to 6 pages via candle-source
+    // H4: watcher already populates this cache; 300 bars ~ April 1 → present.
     await Promise.all(uniqueAssets.map(async (assetId) => {
       try {
-        const result = await fetchCandles(assetId, '1d', 300);
+        const result = await fetchCandles(assetId, CANDLE_TF, 300);
         if (result?.candles?.length) {
           emaSeriesByAsset[assetId] = buildEmaTimeSeries(result.candles);
         }
@@ -150,33 +163,33 @@ module.exports = async (req, res) => {
       const openedAtMs = t.openedAt ? new Date(t.openedAt).getTime() : null;
 
       if (t._source === 'recog') {
-        return { ...t, htfTrend: null, trendClass: 'EXCLUDED', excludeReason: 'recog-only' };
+        return { ...t, htfBias: null, trendClass: 'EXCLUDED', excludeReason: 'recog-only' };
       }
       if (!openedAtMs) {
-        return { ...t, htfTrend: null, trendClass: 'EXCLUDED', excludeReason: 'no-openedAt' };
+        return { ...t, htfBias: null, trendClass: 'EXCLUDED', excludeReason: 'no-openedAt' };
       }
 
       const emaSeries = emaSeriesByAsset[assetId];
       if (!emaSeries || emaSeries.length === 0) {
-        return { ...t, htfTrend: null, trendClass: 'EXCLUDED', excludeReason: 'no-candle-cache' };
+        return { ...t, htfBias: null, trendClass: 'EXCLUDED', excludeReason: 'no-candle-cache' };
       }
 
       const barsBeforeEntry = emaSeries.filter(b => b.barTs < openedAtMs).length;
       if (barsBeforeEntry < EMA_MIN_BARS) {
-        return { ...t, htfTrend: null, trendClass: 'EXCLUDED', excludeReason: `only-${barsBeforeEntry}-bars-before-entry` };
+        return { ...t, htfBias: null, trendClass: 'EXCLUDED', excludeReason: `only-${barsBeforeEntry}-h4-bars-before-entry` };
       }
 
-      const bar      = findBarAtEntry(emaSeries, openedAtMs);
-      const htfTrend = classifyTrend(bar);
-      const dir      = t.direction;
+      const bar     = findBarAtEntry(emaSeries, openedAtMs);
+      const htfBias = classifyTrend(bar);
+      const dir     = t.direction;
 
       let trendClass = 'UNCLEAR';
-      if (htfTrend === 'UP'   && dir === 'LONG')  trendClass = 'TREND';
-      if (htfTrend === 'UP'   && dir === 'SHORT') trendClass = 'COUNTER';
-      if (htfTrend === 'DOWN' && dir === 'SHORT') trendClass = 'TREND';
-      if (htfTrend === 'DOWN' && dir === 'LONG')  trendClass = 'COUNTER';
+      if (htfBias === 'UP'   && dir === 'LONG')  trendClass = 'TREND';
+      if (htfBias === 'UP'   && dir === 'SHORT') trendClass = 'COUNTER';
+      if (htfBias === 'DOWN' && dir === 'SHORT') trendClass = 'TREND';
+      if (htfBias === 'DOWN' && dir === 'LONG')  trendClass = 'COUNTER';
 
-      return { ...t, htfTrend, trendClass, excludeReason: null };
+      return { ...t, htfBias, trendClass, excludeReason: null };
     });
 
     // ── 4. Aggregate ──────────────────────────────────────────────────────────
@@ -201,14 +214,15 @@ module.exports = async (req, res) => {
     const brief = {
       ok:              true,
       generatedAt:     Date.now(),
-      rule:            'Daily 20/50 EMA: up=close>ema50 AND ema20>ema50; down=inverse; else unclear',
+      rule:            'H4 20/50 EMA: up=close>ema50 AND ema20>ema50; down=inverse; else unclear',
+      tf:              CANDLE_TF,
       minBarsRequired: EMA_MIN_BARS,
       total:           classified.length,
       classifiedCount: classifiedTrades.length,
       excludedCount,
       byClass,
       trades:          classified,
-      caveat:          'htfTrend computed per-trade at openedAt from 1d candle cache — but watcher caches one batch and EMAs shift daily. Trend state is approximate for old trades if cache was repopulated after entry.',
+      caveat:          'H4 20/50 EMA — faster-responding than Daily EMA; a trend flip that takes several daily bars may appear within one day on H4. MetaAPI caps this account at ~50 daily bars (6 weeks) making daily EMA classification impossible for the current trade set.',
     };
 
     await r.set(CACHE_KEY, JSON.stringify(brief), { ex: CACHE_TTL_SEC }).catch(() => {});
