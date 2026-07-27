@@ -36,6 +36,12 @@ const SL_FIXED_PIPS_MODES    = new Set(['fixed-pips', 'fixed', 'pips', 'fixed_pi
 const SL_FIXED_DOLLARS_MODES = new Set(['fixed-dollars', 'dollars', 'fixed_dollars', 'fixed-usd']);
 const LOT_FIXED_MODES        = new Set(['fixed', 'fixed-lot', 'fixed_lot', 'manual']);
 
+// RESIZE_TO_FIT_RISK: when true (default), a signal whose computed risk exceeds
+// maxRisk is resized DOWN to fit rather than rejected. Lot is floored to lot step
+// so placed risk never exceeds the cap. If the floored lot < broker minimum, the
+// signal is still rejected ("risk-cap unreachable"). Set false to restore old skip behavior.
+const RESIZE_TO_FIT_RISK = true;
+
 // ───── Defaults ──────────────────────────────────────────────────────
 
 const DEFAULT_RULES = {
@@ -452,16 +458,34 @@ async function applyRulesToSignal({
   if (finalLot > prof.maxLot) finalLot = prof.maxLot;
   finalLot = Math.max(0.01, Math.round(finalLot * 100) / 100);
 
+  let _resizedToFitRisk = false, _resizedFromLot = null;
   if (assetMeta && assetMeta.pipSize && assetMeta.dollarPerPipPerLot) {
     const pips = finalSLDistance / assetMeta.pipSize;
     const actualRisk = pips * assetMeta.dollarPerPipPerLot * finalLot;
     const maxRiskDollars = capital * (rules.account.maxRiskPerTradePct / 100);
     if (actualRisk > maxRiskDollars * 1.05) {
-      return {
-        allow: false,
-        reason: `risk-exceeds-max ($${actualRisk.toFixed(2)} > $${maxRiskDollars.toFixed(2)})`,
-        actualRisk, maxRiskDollars,
-      };
+      if (!RESIZE_TO_FIT_RISK) {
+        return {
+          allow: false,
+          reason: `risk-exceeds-max ($${actualRisk.toFixed(2)} > $${maxRiskDollars.toFixed(2)})`,
+          actualRisk, maxRiskDollars,
+        };
+      }
+      // newLot = maxRisk / (pips × pipValue), floored to lot step so placed risk ≤ cap.
+      const LOT_STEP   = assetMeta.lotStep || 0.01;
+      const MIN_LOT    = assetMeta.minLot  || 0.01;
+      const rawResized = maxRiskDollars / (pips * assetMeta.dollarPerPipPerLot);
+      const resizedLot = Math.round(Math.floor(rawResized / LOT_STEP) * LOT_STEP * 100) / 100;
+      if (resizedLot < MIN_LOT) {
+        return {
+          allow: false,
+          reason: `risk-cap unreachable: min lot exceeds max risk (min ${MIN_LOT} lot → $${(MIN_LOT * pips * assetMeta.dollarPerPipPerLot).toFixed(2)}, cap $${maxRiskDollars.toFixed(2)})`,
+          actualRisk, maxRiskDollars,
+        };
+      }
+      _resizedFromLot = finalLot;
+      finalLot = resizedLot;
+      _resizedToFitRisk = true;
     }
   }
 
@@ -488,6 +512,7 @@ async function applyRulesToSignal({
       modeLotMultiplier: preset.lotMultiplier, templateLotMultiplier: tmplOverride.lotMultiplier,
       htfTier: htfTier || null, htfBiasAlign: htfBiasAlign != null ? htfBiasAlign : null, tierLotMultiplier: tierMult,
       tradingMode: rules.tradingMode || 'auto',
+      resizedToFitRisk: _resizedToFitRisk, resizedFromLot: _resizedFromLot,
     },
   };
 }
