@@ -6773,8 +6773,32 @@ function TrendHeatmapPanel({ gridColumn = '1 / 4', style }) {
 
         {/* coverage bar */}
         <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginBottom: 8 }}>
-          {raw.classifiedCount} classified · {raw.excludedCount} excluded (recog-only or &lt;60 bars before entry) · {unclearTrades.length} unclear (mixed EMA state)
+          {raw.classifiedCount} classified · {raw.excludedCount} excluded (recog-only or &lt;{raw.minBarsRequired || 50} H4 bars before entry) · {unclearTrades.length} unclear (mixed EMA state)
         </div>
+
+        {/* global byClass summary — TREND / COUNTER / UNCLEAR across all assets */}
+        {raw.byClass && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            {['TREND', 'COUNTER', 'UNCLEAR'].map(cls => {
+              const s = raw.byClass[cls] || {};
+              const hasData = s.n >= (HEATMAP_MIN_N || 8);
+              return (
+                <div key={cls} style={{ flex: 1, minWidth: 120, padding: '8px 12px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4, opacity: hasData ? 1 : 0.55 }}>
+                  <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 }}>{cls}</div>
+                  {!hasData ? (
+                    <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>n={s.n || 0} — collecting</div>
+                  ) : (
+                    <div className="qb-mono" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                      <OFMiniStat label="n"   value={s.n} />
+                      <OFMiniStat label="WR"  value={`${Math.round((s.winRate || 0) * 100)}%`} color={(s.winRate || 0) >= 0.55 ? 'var(--qb-ok)' : (s.winRate || 0) >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
+                      <OFMiniStat label="net" value={fmtUSD(s.netPnl, true)} color={(s.netPnl || 0) >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* asset selector */}
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
