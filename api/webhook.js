@@ -599,6 +599,44 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       v13: true, pilotRulesApplied: decision.rulesApplied,
     };
     await addPendingSetup(assetId, pendingRecord);
+
+    // Shadow write: log recognition advice at signal time using the same pendingRecord.id
+    // that manage-trades.js stamps with the outcome at close — this is the join key.
+    // Runs in its own try/catch so a recognition failure never blocks the trade record.
+    try {
+      const { findSimilarTrades, getSizeMultiplier } = require('./recognition-memory');
+      const _recog = await findSimilarTrades({
+        assetId,
+        direction:           p.direction,
+        template:            p.template,
+        session:             p.window || (p.swept ? `swept ${p.swept}` : 'unknown'),
+        contributingTactics: [p.template],
+        timeframesInPlay:    [p.timeframe],
+        newsFeature:         null,
+      });
+      const _adv = _recog && _recog.summary;
+      if (_adv) {
+        const _advisorMultiplier = getSizeMultiplier(_adv.advice);
+        const _sr = getRedis();
+        if (_sr) {
+          const _shadow = {
+            setupId:           pendingRecord.id,
+            asset:             assetId,
+            direction:         p.direction,
+            template:          p.template,
+            advice:            _adv.advice,
+            matchCount:        _adv.matchCount,
+            winRate:           _adv.winRate,
+            confidence:        _adv.confidence,
+            advisorMultiplier: _advisorMultiplier,
+            ts:                Date.now(),
+          };
+          await _sr.set(`v14:shadow:advice:${pendingRecord.id}`, JSON.stringify(_shadow), { ex: 86400 * 90 });
+          await _sr.lpush('v14:shadow:index', JSON.stringify({ setupId: pendingRecord.id, ts: _shadow.ts, asset: assetId }));
+          await _sr.ltrim('v14:shadow:index', 0, 499);
+        }
+      }
+    } catch (_) {}
   } catch (e) { console.error('[webhook] pending setup write failed:', e.message); }
 
   await logActivity({
