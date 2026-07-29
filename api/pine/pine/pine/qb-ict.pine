@@ -2044,6 +2044,9 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
             orbDir  = orbBrokeUp ? "LONG" : "SHORT"
             orbSDir = orbBrokeUp ? 1 : -1
             orbHtfConfirms = (h1B == orbSDir) or (h4B == orbSDir)
+            // D1 veto: if Daily EMA bias actively opposes the breakout direction, skip
+            // the session entirely (no trade, no retest queue). Neutral D1 (hdB==0) passes.
+            orbD1Veto      = htfUseD and not na(hdB) and hdB != 0 and hdB == -orbSDir
             orbEntryP = orbBrokeUp ? orbH : orbL
             orbBuf    = math.max(0.3 * atrVal, 0.10 * h1ATR)
             orbSLP    = orbBrokeUp ? orbL - orbBuf : orbH + orbBuf
@@ -2053,7 +2056,10 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                 orbT1 = orbBrokeUp ? orbEntryP + orbSLDist * 1.0 : orbEntryP - orbSLDist * 1.0
                 orbT2 = orbBrokeUp ? orbEntryP + orbSLDist * 2.0 : orbEntryP - orbSLDist * 2.0
                 orbT3 = orbBrokeUp ? orbEntryP + orbSLDist * 3.0 : orbEntryP - orbSLDist * 3.0
-                if orbHtfConfirms
+                if orbD1Veto
+                    // D1 structure opposes — consume session silently, no signal fired
+                    orbHasFired := true
+                else if orbHtfConfirms
                     orbHasFired := true
                     activeSignalDir := orbSDir
                     activeSetupId   := 7
