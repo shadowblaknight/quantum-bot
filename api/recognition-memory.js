@@ -159,14 +159,17 @@ async function getAllTrades(limit = 1000) {
     const indexRaw = await r.get(TRADE_INDEX_KEY).catch(() => null);
     const index = safeParse(indexRaw) || [];
     const ids = index.slice(0, limit).map((e) => e.id);
+    if (!ids.length) return [];
 
-    const trades = [];
-    for (const id of ids) {
-      const raw = await r.get(TRADE_KEY(id)).catch(() => null);
-      const t = safeParse(raw);
-      if (t) trades.push(t);
-    }
-    return trades;
+    const pipe = r.pipeline();
+    for (const id of ids) pipe.get(TRADE_KEY(id));
+    const results = await pipe.exec();
+    return results
+      .map((raw) => {
+        const v = raw ? (typeof raw === 'string' ? safeParse(raw) : raw) : null;
+        return v && typeof v === 'object' ? v : null;
+      })
+      .filter(Boolean);
   } catch (e) {
     return [];
   }
