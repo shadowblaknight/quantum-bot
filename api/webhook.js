@@ -58,6 +58,14 @@ const DISABLED_TEMPLATES = ['ote-continuation'];
 // Set to false to restore silver-bullet retest entries.
 const SB_IMMEDIATE_ONLY = true;
 
+// REACTION_RETEST_BLOCK: reaction templates fire when price is AT the zone, so a
+// pending limit either sits above market (→ INVALID_PRICE) or misses the move.
+// Recognition memory drill: retest entries on reaction templates = 72% loss rate in
+// the short-hold bucket (≤33 min). Explicit retest payloads (actualStyle='retest') are
+// already converted to immediate in the sync handler; this catches pre-v15.7 fallthrough.
+// Set to false to restore reaction retest (limit) entries.
+const REACTION_RETEST_BLOCK = true;
+
 // ── Per-template instrument blocklist ────────────────────────────────────────
 // ORB bleeds on BTC and NAS100 (wide opening ranges → far stops → fakeouts).
 // All other templates on those instruments remain fully active.
@@ -65,6 +73,14 @@ const SB_IMMEDIATE_ONLY = true;
 const TEMPLATE_INSTRUMENT_BLOCKS = {
   'orb': ['btc', 'nas100'],
 };
+
+// ── Session-open cooldown ─────────────────────────────────────────────────
+// Recognition memory simulation: NY 13:30 open catches only losses (0W/4L).
+// London 08:00 was removed — it blocked ORB/ORB-pro wins that are designed to
+// fire at London open. NY-only window is safe but small; kept for now.
+// To disable: set to 0.
+const SESSION_OPEN_COOLDOWN_MINS = 15;
+
 function _escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function withTimeout(promise, ms, fallback) {
@@ -178,6 +194,26 @@ async function bgSkip({ dedupeKey, pineTicker, template, reason, extras = {}, no
 
 // The heavy pipeline. Runs AFTER TradingView has been acked. NEVER touches res.
 async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 }) {
+  // ── SESSION OPEN COOLDOWN ─────────────────────────────────────────────────
+  // Block signals fired within SESSION_OPEN_COOLDOWN_MINS of London (08:00 UTC)
+  // or NY (13:30 UTC). Checked before shadows/positions so no wasted work.
+  if (SESSION_OPEN_COOLDOWN_MINS > 0) {
+    const _d   = new Date(p.timestamp || Date.now());
+    const _hm  = _d.getUTCHours() * 60 + _d.getUTCMinutes();
+    const _opens = [{ label: 'NY-13:30', hm: 810 }];
+    const _hit  = _opens.find(o => (_hm - o.hm + 1440) % 1440 < SESSION_OPEN_COOLDOWN_MINS);
+    if (_hit) {
+      const _minsIn = (_hm - _hit.hm + 1440) % 1440;
+      return bgSkip({
+        dedupeKey, pineTicker, template: p.template,
+        reason: `session-open-cooldown:${_hit.label}+${_minsIn}min`,
+        extras: { assetId, direction: p.direction },
+        notify: true,
+      });
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   // ── PHASE 1 REGIME SHADOW (read-only) ────────────────────────────────────
   // Assess market regime and write what the detector WOULD have done.
   // Entirely isolated: wrapped in try/catch, hard-capped at 2.5s, no variable
@@ -498,6 +534,20 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     return bgSkip({
       dedupeKey, pineTicker, template: p.template,
       reason: 'sb-retest-suppressed',
+      extras: { assetId, direction: p.direction },
+      notify: false,
+    });
+  }
+
+  // REACTION_RETEST_BLOCK: reaction templates execute on the bar they fire — a limit
+  // order to "wait for a retest" has 72% loss rate in recognition memory (short-hold
+  // bucket). Explicit actualStyle='retest' is already patched to 'immediate' in the
+  // sync handler; this catches the pre-v15.7 geometry-probe fallthrough path.
+  if (REACTION_RETEST_BLOCK && REACTION_TEMPLATES.includes(p.template) && !useMarket) {
+    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction, reason: 'reaction-retest-suppressed', entryType }); } catch (_) {}
+    return bgSkip({
+      dedupeKey, pineTicker, template: p.template,
+      reason: 'reaction-retest-suppressed',
       extras: { assetId, direction: p.direction },
       notify: false,
     });

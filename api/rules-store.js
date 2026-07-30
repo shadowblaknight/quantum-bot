@@ -53,6 +53,11 @@ const DEFAULT_RULES = {
   // counter-bias / retest "tier B" signals). Set below 1.0 to size B trades down.
   tierBLotMultiplier: 1.0,
 
+  // v15.7: tier-A lot multiplier. Recognition memory shows Tier A (HTF-aligned) at
+  // 45.6% WR vs Tier B at 55.3% over 268 trades — EMA(20) bias lags real structure.
+  // 0.75 = size Tier A to 75% of nominal lot. 1.0 = no change (same as before).
+  tierALotMultiplier: 0.75,
+
   account: {
     maxDailyLossPct: 5.0,
     maxConcurrentPositions: 5,
@@ -448,10 +453,11 @@ async function applyRulesToSignal({
       finalLot = prof.fixedLot;
     }
   }
-  // v14: tier multiplier. Tier B (counter-bias / retest) can be sized down via
-  // rules.tierBLotMultiplier. DEFAULT 1.0 = NO change — your lot input is honored
-  // untouched unless you deliberately set this below 1.0 in settings.
-  const tierMult = (htfTier === 'B') ? (rules.tierBLotMultiplier != null ? rules.tierBLotMultiplier : 1.0) : 1.0;
+  // v14/v15.7: tier multiplier. B sized down via tierBLotMultiplier; A sized down via
+  // tierALotMultiplier (default 0.75 — A WR 45.6% vs B 55.3% over 268 trades).
+  const tierMult = htfTier === 'B' ? (rules.tierBLotMultiplier ?? 1.0)
+                 : htfTier === 'A' ? (rules.tierALotMultiplier ?? 1.0)
+                 : 1.0;
   finalLot = finalLot * (preset.lotMultiplier || 1.0) * (tmplOverride.lotMultiplier || 1.0) * tierMult;
   // v14 regime: shrink size in elevated/crisis (1.0 = no change in NORMAL).
   finalLot = finalLot * regimeSizeMult;

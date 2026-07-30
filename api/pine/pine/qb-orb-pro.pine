@@ -96,6 +96,7 @@ f_htfBias(int emaLen, int atrLen) =>
 
 [h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
 [h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[hdB, hdATR] = request.security(syminfo.tickerid, "D",   f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
 
 atrVal = ta.atr(atrLength)
 
@@ -238,7 +239,8 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
         if orbBrokeUp or orbBrokeDown
             orbDir  = orbBrokeUp ? "LONG" : "SHORT"
             orbSDir = orbBrokeUp ? 1 : -1
-            orbHtfOk = (h1B == orbSDir) or (h4B == orbSDir)
+            orbHtfOk  = (h1B == orbSDir) or (h4B == orbSDir)
+            orbD1Veto = not na(hdB) and hdB != 0 and hdB == -orbSDir
 
             // Filter (a): RVOL
             rvolPass = (not useRvol) or volUnavail or (not na(rvolCur) and rvolCur >= rvolMult)
@@ -288,13 +290,20 @@ if orbEnabled and barstate.isconfirmed and orbArmed and not orbHasFired and inOr
                     htfAlign = orbHtfOk ? 1 : 0
                     confStr  = "orb-pro-" + (orbHtfOk ? "withbias" : "counter")
 
-                    // Filter (e): retest toggle
-                    if useRetestEntry and not orbHtfOk
+                    // D1 veto: daily EMA opposes breakout → skip session entirely
+                    if orbD1Veto
+                        orbHasFired := true
+                    // Filter (e): retest toggle — counter-trend always queues for retest
+                    else if useRetestEntry and not orbHtfOk
                         // Counter-trend breakout + retest mode → queue for pullback
                         orbPendingRetest := true
                         orbBreakDir      := orbSDir
+                    else if not orbHtfOk
+                        // Counter-trend + retest disabled → still force retest (matches main ORB)
+                        orbPendingRetest := true
+                        orbBreakDir      := orbSDir
                     else if slOk and tpOk
-                        // Fire: HTF-aligned always immediate; counter-trend if retest disabled
+                        // Fire: HTF-aligned (Tier A) immediate only
                         orbHasFired  := true
                         orbFireBar   := bar_index
                         orbFireEntry := emitEntry
@@ -365,7 +374,7 @@ var table stTbl = na
 
 if showStatusTable and barstate.islast and atrVal > 0
     if na(stTbl)
-        stTbl := table.new(position.top_right, 2, 7,
+        stTbl := table.new(position.top_right, 2, 8,
             bgcolor      = color.new(color.black, 70),
             border_color = color.new(color.gray,  60),
             border_width = 1,
@@ -408,8 +417,14 @@ if showStatusTable and barstate.islast and atrVal > 0
     table.cell(stTbl, 0, 5, "H4 bias",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
     table.cell(stTbl, 1, 5, h4BiasStr,  text_color=color.new(h4Col, 0),       text_size=size.tiny, text_halign=text.align_right)
 
+    // D1 bias
+    hdBiasStr = hdB == 1 ? "LONG" : hdB == -1 ? "SHORT" : "NEUT"
+    hdCol     = hdB == 1 ? C_BULL : hdB == -1 ? C_BEAR : color.gray
+    table.cell(stTbl, 0, 6, "D1 bias",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 6, hdBiasStr,  text_color=color.new(hdCol, 0),       text_size=size.tiny, text_halign=text.align_right)
+
     // Filter pack active
     filterPack = (useRvol ? "RVOL " : "") + (useCandleQuality ? "CLS " : "") + (useVwap ? "VWP " : "") + (useRetestEntry ? "RETEST" : "")
     fpStr = str.length(filterPack) > 0 ? filterPack : "none"
-    table.cell(stTbl, 0, 6, "Filters",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 6, fpStr,      text_color=color.new(color.gray, 0),  text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 7, "Filters",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 7, fpStr,      text_color=color.new(color.gray, 0),  text_size=size.tiny, text_halign=text.align_right)
