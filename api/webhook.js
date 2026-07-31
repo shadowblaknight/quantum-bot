@@ -466,8 +466,20 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
                      : entry;
 
   const rEntry = _roundTick(routingEntry, pipSz, 'nearest');
-  const rSL    = _roundTick(finalSL, pipSz, isLong ? 'down' : 'up');
+  let   rSL    = _roundTick(finalSL, pipSz, isLong ? 'down' : 'up');
   const rTP    = brokerTP != null ? _roundTick(brokerTP, pipSz, isLong ? 'down' : 'up') : null;
+
+  // Minimum stop distance guard: MT5 brokers enforce a per-symbol stopsLevel that
+  // defines how far SL must be from entry. Tight FVG entries (e.g. EURUSD am-ifvg
+  // with a 5-pip gap) produce SLs within this freeze zone → INVALID_STOPS rejection.
+  // Expand SL outward to the floor. Lot is unchanged (risk increases slightly, but
+  // the alternative is the trade being dropped entirely with no notification).
+  const _minStopDist = (assetMeta.minStopPips || 0) * pipSz;
+  if (_minStopDist > 0 && Math.abs(rSL - rEntry) < _minStopDist) {
+    const _prevSL = rSL;
+    rSL = _roundTick(isLong ? rEntry - _minStopDist : rEntry + _minStopDist, pipSz, isLong ? 'down' : 'up');
+    try { await logActivity({ type: 'sl-expanded-min-stop', asset: assetId, template: p.template, direction: p.direction, from: _prevSL, to: rSL, minStopPips: assetMeta.minStopPips }); } catch (_) {}
+  }
 
   // v15.7: route MARKET vs LIMIT by actualStyle when present; fall back to geometry probe.
   //   immediate -> ORDER_TYPE_BUY/SELL  (fill now, no geometry check)
@@ -527,17 +539,14 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     } catch (_) { /* candle fetch failed -- fall through to limit; broker is final guard */ }
   }
 
-  // SB_IMMEDIATE_ONLY: silver-bullet retest (limit) entries are net -$188 vs
-  // immediate entries at +$51. Block retest entries until the entry logic improves.
-  // Set SB_IMMEDIATE_ONLY = false to restore retest entries.
+  // SB_IMMEDIATE_ONLY: silver-bullet retest (limit) entries are converted to
+  // immediate market fills. A pending limit at the FVG edge is never placed —
+  // price fills NOW at market. This avoids missed entries when price is already
+  // past the FVG by the time the limit would trigger.
   if (SB_IMMEDIATE_ONLY && p.template === 'silver-bullet' && !useMarket) {
-    try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction, reason: 'sb-retest-suppressed', entryType: 'retest' }); } catch (_) {}
-    return bgSkip({
-      dedupeKey, pineTicker, template: p.template,
-      reason: 'sb-retest-suppressed',
-      extras: { assetId, direction: p.direction },
-      notify: false,
-    });
+    useMarket  = true;
+    entryType  = 'immediate';
+    try { await logActivity({ type: 'sb-retest-to-immediate', asset: assetId, template: p.template, direction: p.direction, note: 'retest converted to market fill' }); } catch (_) {}
   }
 
   // REACTION_RETEST_BLOCK: reaction templates execute on the bar they fire — a limit

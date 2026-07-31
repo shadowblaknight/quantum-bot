@@ -26,6 +26,7 @@ const ASSETS = [
     dollarPerPipPerLot: 10,
     typicalSpreadPips: 0.8,
     typicalH1ATR: 0.0008,
+    minStopPips: 10,   // MT5 stopsLevel floor — prevents INVALID_STOPS on tight FVG entries
     preferredSessions: ['LONDON', 'OVERLAP', 'NEW_YORK'],
     aliases: [
       'EURUSD', 'EUR/USD', 'EURUSD.s', 'EURUSD.r', 'EURUSDm', 'EURUSD#',
@@ -43,6 +44,7 @@ const ASSETS = [
     dollarPerPipPerLot: 10,
     typicalSpreadPips: 1.2,
     typicalH1ATR: 0.0011,
+    minStopPips: 10,
     preferredSessions: ['LONDON', 'OVERLAP', 'NEW_YORK'],
     aliases: [
       'GBPUSD', 'GBP/USD', 'GBPUSD.s', 'GBPUSD.r', 'GBPUSDm', 'GBPUSD#',
@@ -60,6 +62,7 @@ const ASSETS = [
     dollarPerPipPerLot: 6.7, // approx, varies with USD/JPY rate
     typicalSpreadPips: 0.9,
     typicalH1ATR: 0.08,
+    minStopPips: 10,
     preferredSessions: ['ASIAN', 'LONDON', 'NEW_YORK'],
     aliases: [
       'USDJPY', 'USD/JPY', 'USDJPY.s', 'USDJPY.r', 'USDJPYm', 'USDJPY#',
@@ -76,6 +79,7 @@ const ASSETS = [
     dollarPerPipPerLot: 11,
     typicalSpreadPips: 1.5,
     typicalH1ATR: 0.0008,
+    minStopPips: 10,
     preferredSessions: ['LONDON', 'NEW_YORK'],
     aliases: [
       'USDCHF', 'USD/CHF', 'USDCHF.s', 'USDCHF.r', 'USDCHFm', 'USDCHF#',
@@ -92,6 +96,7 @@ const ASSETS = [
     dollarPerPipPerLot: 10,
     typicalSpreadPips: 1.0,
     typicalH1ATR: 0.0007,
+    minStopPips: 10,
     preferredSessions: ['ASIAN', 'LONDON'],
     aliases: [
       'AUDUSD', 'AUD/USD', 'AUDUSD.s', 'AUDUSD.r', 'AUDUSDm', 'AUDUSD#',
@@ -108,6 +113,7 @@ const ASSETS = [
     dollarPerPipPerLot: 10,
     typicalSpreadPips: 1.5,
     typicalH1ATR: 0.0007,
+    minStopPips: 10,
     preferredSessions: ['ASIAN', 'LONDON'],
     aliases: [
       'NZDUSD', 'NZD/USD', 'NZDUSD.s', 'NZDUSD.r', 'NZDUSDm', 'NZDUSD#',
