@@ -47,7 +47,18 @@ async function storeClosedTrade(trade) {
   const r = getRedis();
   if (!r) return { error: 'redis unavailable' };
 
-  const fv = buildFeatureVector(trade);
+  // Fuzzy-join signal quality record (15-min window) written by the live gate
+  let quality = null;
+  try {
+    const { lookupQualityForTrade } = require('./signal-quality');
+    quality = await lookupQualityForTrade(
+      trade.asset,
+      trade.template || (trade.contributingTactics || [])[0] || null,
+      trade.openedAt,
+    );
+  } catch (_) {}
+
+  const fv = buildFeatureVector(trade, quality);
 
   try {
     await r.set(TRADE_KEY(trade.id), JSON.stringify(fv));
@@ -96,7 +107,8 @@ async function deleteTrade(id) {
 
 // Build feature vector from a closed trade record.
 // Trade record comes from execute.js (entry context) joined with manage-trades.js (exit).
-function buildFeatureVector(trade) {
+// quality is the optional signal-quality gate record from v15:squality (may be null).
+function buildFeatureVector(trade, quality) {
   const tactics = (trade.contributingTactics || []).slice().sort();   // sorted for stable comparison
   const tfs = (trade.timeframesInPlay || []).slice().sort();
 
@@ -144,6 +156,16 @@ function buildFeatureVector(trade) {
     closedAt: trade.closedAt,
     holdTimeMinutes,
     synthetic: trade.synthetic || false,
+    // Signal quality fields (joined from live gate record via 15-min fuzzy window)
+    wickRatio:        quality?.wick?.wickRatio        ?? null,
+    withPriorSession: quality?.session?.withPriorSession ?? null,
+    asianPosition:    quality?.session?.asianPosition ?? null,
+    liqCoincidence:   quality?.session?.liqCoincidence ?? null,
+    cvdConfirms:      quality?.cvd?.cvdConfirms       ?? null,
+    cvdLowTrust:      quality?.cvd?.cvdLowTrust       ?? null,
+    cvdDivergence:    quality?.cvd?.cvdDivergence     ?? null,
+    cvdSlope:         quality?.cvd?.cvdSlope          ?? null,
+    qualityTier:      quality?.qualityTier            ?? null,
   };
 }
 

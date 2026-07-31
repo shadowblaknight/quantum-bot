@@ -552,14 +552,8 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         {/* ─── v15.3 · Session performance heatmap (full width) ─── */}
         <SessionHeatmapPanel />
 
-        {/* ─── v15.7 · Order Flow Confirmation shadow panel (full width) ─── */}
-        <OrderFlowPanel />
-
-        {/* ─── v15.8 · Session Context shadow panel (full width) ─── */}
-        <SessionCtxPanel />
-
-        {/* ─── v15.8 · Wick Ratio shadow panel (full width) ─── */}
-        <WickRatioPanel />
+        {/* ─── v16.0 · Signal Quality Panel — live gates (CVD + session + wick) ─── */}
+        <SignalQualityPanel />
 
         {/* ─── v15.8 · Signal Gating Control Panel (full width) ─── */}
         <GatingPanel />
@@ -6020,6 +6014,259 @@ function WickRatioPanel({ gridColumn = '1 / 4', style }) {
             </div>
           </>
         )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15f-LIVE · SIGNAL QUALITY PANEL  (v16.0)
+// =====================================================================
+// Combines CVD, session context, and wick ratio into one live gate panel.
+// Gates block execution — this is NOT shadow-only.
+// Gate toggles POST to /api/signal-quality-summary (G6: config only, no trades).
+// WR stats are derived from recognition-memory fuzzy-join (15-min window).
+
+function SQGateToggle({ label, description, enabled, loading, onToggle }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 12, padding: '8px 14px',
+      background: 'var(--qb-bg-panel-hi)', borderRadius: 4,
+      border: `1px solid ${enabled ? 'var(--qb-accent)' : 'var(--qb-border)'}`,
+      opacity: loading ? 0.6 : 1,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div className="qb-mono" style={{ fontSize: 10, fontWeight: 700, color: enabled ? 'var(--qb-accent)' : 'var(--qb-text-mid)' }}>
+          {label}
+        </div>
+        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 2 }}>
+          {description}
+        </div>
+      </div>
+      <button
+        disabled={loading}
+        onClick={onToggle}
+        style={{
+          padding: '4px 12px', borderRadius: 3, border: 'none', cursor: loading ? 'default' : 'pointer',
+          background: enabled ? 'var(--qb-accent)' : 'var(--qb-border-hi)',
+          color: enabled ? '#fff' : 'var(--qb-text-faint)',
+          fontFamily: 'var(--qb-font-mono)', fontSize: 9, fontWeight: 700,
+          minWidth: 42,
+        }}
+      >
+        {loading ? '…' : (enabled ? 'ON' : 'OFF')}
+      </button>
+    </div>
+  );
+}
+
+function SQTierRow({ tier, s, highlight }) {
+  const pct = s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—';
+  const color = s?.winRate == null ? 'var(--qb-text-faint)'
+              : s.winRate >= 0.55 ? 'var(--qb-green)'
+              : s.winRate >= 0.45 ? 'var(--qb-text-hi)'
+              : 'var(--qb-red)';
+  return (
+    <tr style={{ borderBottom: '1px solid var(--qb-border)', background: highlight ? 'var(--qb-bg-panel-hi)' : 'transparent' }}>
+      <td style={{ padding: '5px 10px', color: 'var(--qb-text-hi)', fontWeight: 700 }}>{tier}</td>
+      <td style={{ padding: '5px 10px', color, fontWeight: 700 }}>{pct}</td>
+      <td style={{ padding: '5px 10px', color: 'var(--qb-text-mid)' }}>{s?.wins ?? 0}W / {s?.losses ?? 0}L</td>
+      <td style={{ padding: '5px 10px', color: 'var(--qb-text-faint)' }}>n={s?.n ?? 0}</td>
+      <td style={{ padding: '5px 10px', color: 'var(--qb-text-faint)', fontSize: 8 }}>{s?.label || ''}</td>
+    </tr>
+  );
+}
+
+function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
+  const [data, setData]       = useState(null);
+  const [fetchError, setError] = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [ready, setReady]     = useState(false);
+  const [toggling, setToggling] = useState(null);
+
+  const load = async (alive = { current: true }) => {
+    try {
+      const r = await fetch(API('signal-quality-summary')).then(res => res.json());
+      if (!alive.current) return;
+      if (r?.ok) { setData(r); setError(null); }
+      else { setData(null); setError(r?.error || 'endpoint error'); }
+    } catch (e) {
+      if (alive.current) { setData(null); setError(e.message); }
+    }
+    if (alive.current) { setLastFetch(new Date()); setReady(true); }
+  };
+
+  useEffect(() => {
+    const alive = { current: true };
+    load(alive);
+    const id = setInterval(() => load(alive), 5 * 60 * 1000);
+    return () => { alive.current = false; clearInterval(id); };
+  }, []);
+
+  const toggleGate = async (field, currentValue) => {
+    setToggling(field);
+    try {
+      await fetch(API('signal-quality-summary'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [field]: !currentValue }),
+      });
+      const alive = { current: true };
+      await load(alive);
+    } catch (_) {}
+    setToggling(null);
+  };
+
+  const panelProps = {
+    title: 'Signal Quality Gates',
+    subtitle: 'live — wick ratio · session context · CVD confirmation',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'signal-quality', defaultCollapsed: false,
+  };
+
+  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading signal quality data..." /></div></Panel>;
+  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/signal-quality-summary: ${fetchError}`} /></div></Panel>;
+
+  const cfg = data?.config || {};
+  const cov = data?.sqCoverage || {};
+  const ts  = data?.tierStats  || {};
+  const pvb = data?.passedVsBlocked || {};
+  const sig = data?.recentSignals   || [];
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12, overflow: 'auto' }}>
+
+        {/* status bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap', marginBottom: 12 }}>
+          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
+            {cov.totalSQSignals ?? 0} signals evaluated ·
+            {' '}{cov.passedSignals ?? 0} passed ·
+            {' '}{cov.blockedSignals ?? 0} blocked ·
+            {' '}{cov.withSQRecord ?? 0}/{cov.totalClosedTrades ?? 0} closed trades joined
+          </span>
+          <span style={{ flex: 1 }} />
+          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
+        </div>
+
+        {/* gate toggles */}
+        <OFSectionLabel>Gate controls (live — toggles block real placements)</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+          <SQGateToggle
+            label="WICK GATE"
+            description={`block when wick ratio > ${Math.round((cfg.wickThreshold ?? 0.5) * 100)}% (0% WR historically)`}
+            enabled={cfg.wickGateEnabled ?? true}
+            loading={toggling === 'wickGateEnabled'}
+            onToggle={() => toggleGate('wickGateEnabled', cfg.wickGateEnabled ?? true)}
+          />
+          <SQGateToggle
+            label="SESSION GATE"
+            description="block when direction opposes London close / Asian bias (27.3% WR)"
+            enabled={cfg.sessionGateEnabled ?? true}
+            loading={toggling === 'sessionGateEnabled'}
+            onToggle={() => toggleGate('sessionGateEnabled', cfg.sessionGateEnabled ?? true)}
+          />
+          <SQGateToggle
+            label="CVD GATE"
+            description="block when CVD is low-trust AND shows counter-divergence (20% WR)"
+            enabled={cfg.cvdGateEnabled ?? true}
+            loading={toggling === 'cvdGateEnabled'}
+            onToggle={() => toggleGate('cvdGateEnabled', cfg.cvdGateEnabled ?? true)}
+          />
+        </div>
+
+        {/* WR by quality tier */}
+        <OFSectionLabel>Win rate by quality tier (recognition memory join)</OFSectionLabel>
+        <div style={{ overflowX: 'auto', marginBottom: 16 }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+            <thead>
+              <tr style={{ color: 'var(--qb-text-faint)' }}>
+                {['Tier', 'WR', 'W / L', 'n', 'Description'].map((h, i) => (
+                  <th key={h} style={{ padding: '3px 10px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i === 0 ? 'left' : 'left' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {['A', 'B', 'C', 'D', 'unknown'].map(tier => (
+                <SQTierRow key={tier} tier={tier} s={ts[tier]} highlight={tier === 'A' || tier === 'B'} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* passed vs blocked */}
+        {(pvb.passed?.n > 0 || pvb.blocked?.n > 0) && (
+          <>
+            <OFSectionLabel>Passed vs blocked — closed trade outcomes</OFSectionLabel>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+              {[
+                { label: 'PASSED', s: pvb.passed,  accent: 'var(--qb-green)' },
+                { label: 'BLOCKED', s: pvb.blocked, accent: 'var(--qb-red)' },
+              ].map(({ label, s, accent }) => (
+                <div key={label} style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: `1px solid ${accent}`, borderRadius: 4 }}>
+                  <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>{label}</div>
+                  <div className="qb-mono" style={{ fontSize: 20, fontWeight: 700, color: accent }}>
+                    {s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—'}
+                  </div>
+                  <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginTop: 3 }}>
+                    {s?.wins ?? 0}W / {s?.losses ?? 0}L · n={s?.n ?? 0}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* recent signals log */}
+        <OFSectionLabel>Recent signals — live gate evaluation log</OFSectionLabel>
+        {sig.length === 0 ? (
+          <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)', padding: '10px 0' }}>
+            No signals evaluated yet — gates will populate as Pine alerts fire.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+              <thead>
+                <tr style={{ color: 'var(--qb-text-faint)' }}>
+                  {['Time (UTC)', 'Asset', 'Template', 'Dir', 'Tier', 'Wick', 'Session', 'CVD', 'Result'].map(h => (
+                    <th key={h} style={{ padding: '3px 8px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4, textAlign: 'left' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sig.map(s => {
+                  const dt   = new Date(s.ts);
+                  const time = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')} ${dt.getUTCMonth()+1}/${dt.getUTCDate()}`;
+                  const passColor  = s.pass ? 'var(--qb-green)' : 'var(--qb-red)';
+                  const tierColor  = s.qualityTier === 'A' ? 'var(--qb-green)'
+                                   : s.qualityTier === 'B' ? 'var(--qb-accent)'
+                                   : s.qualityTier === 'C' ? 'var(--qb-warn)'
+                                   : 'var(--qb-red)';
+                  const fmtWick    = s.wickRatio      != null ? `${(s.wickRatio*100).toFixed(0)}%` : '—';
+                  const fmtSession = s.withPriorSession === true ? '✓' : s.withPriorSession === false ? '✗' : '—';
+                  const fmtCVD     = s.cvdLowTrust === false ? '✓'
+                                   : s.cvdLowTrust === true  ? (s.cvdDivergence && s.cvdDivergence !== 'none' ? '✗' : '~') : '—';
+                  return (
+                    <tr key={s.id} style={{ borderBottom: '1px solid var(--qb-border)' }}>
+                      <td style={{ padding: '4px 8px', color: 'var(--qb-text-faint)' }}>{time}</td>
+                      <td style={{ padding: '4px 8px', color: 'var(--qb-text-hi)' }}>{s.assetId || '—'}</td>
+                      <td style={{ padding: '4px 8px', color: 'var(--qb-text-mid)' }}>{s.template || '—'}</td>
+                      <td style={{ padding: '4px 8px', color: s.direction === 'LONG' ? 'var(--qb-green)' : s.direction === 'SHORT' ? 'var(--qb-red)' : 'var(--qb-text-faint)' }}>{s.direction || '—'}</td>
+                      <td style={{ padding: '4px 8px', color: tierColor, fontWeight: 700 }}>{s.qualityTier || '—'}</td>
+                      <td style={{ padding: '4px 8px', color: s.wickRatio > 0.50 ? 'var(--qb-red)' : 'var(--qb-green)' }}>{fmtWick}</td>
+                      <td style={{ padding: '4px 8px', color: s.withPriorSession === false ? 'var(--qb-red)' : 'var(--qb-green)' }}>{fmtSession}</td>
+                      <td style={{ padding: '4px 8px', color: (s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none') ? 'var(--qb-red)' : 'var(--qb-green)' }}>{fmtCVD}</td>
+                      <td style={{ padding: '4px 8px', color: passColor, fontWeight: 700 }}>{s.pass ? 'PASS' : 'BLOCK'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 8, fontStyle: 'italic' }}>
+          live — signals blocked here never reach the broker. toggle gates above to adjust. wick threshold: {Math.round((cfg.wickThreshold ?? 0.5)*100)}%.
+        </div>
       </div>
     </Panel>
   );

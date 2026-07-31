@@ -57,6 +57,10 @@
       "memory": 512,
       "maxDuration": 30
     },
+    "api/signal-quality-summary.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
     "api/analyst.js": {
       "memory": 512,
       "maxDuration": 60

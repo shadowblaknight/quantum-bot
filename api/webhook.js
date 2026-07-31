@@ -16,6 +16,7 @@ const { applyRulesToSignal, logActivity, getTodaysPnL } = require('./rules-store
 const { addWatchedSetup } = require('./watched-setups');
 const { templateLabelMap, REACTION_TEMPLATES } = require('./_templates');
 const { evaluateReactionMTF, tfSetForMode } = require('./reaction-filter');
+const { evaluateSignalQuality }             = require('./signal-quality');
 const TEMPLATE_LABELS = templateLabelMap();
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -551,6 +552,22 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       extras: { assetId, direction: p.direction },
       notify: false,
     });
+  }
+
+  // v16.0 signal-quality gate: wick ratio > 50%, counter-session, or CVD low-trust+divergence.
+  // All three sub-gates are independently togglable via Redis config (v15:squality:config).
+  // Result is stored in Redis for recognition-memory to pick up when the trade closes.
+  {
+    const sq = await evaluateSignalQuality(p, assetId, dedupeKey).catch(() => ({ pass: true }));
+    if (!sq.pass) {
+      try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction, reason: `signal-quality-blocked`, blockedBy: sq.blockedBy, qualityTier: sq.qualityTier }); } catch (_) {}
+      return bgSkip({
+        dedupeKey, pineTicker, template: p.template,
+        reason: `signal-quality-blocked:${sq.blockedBy}`,
+        extras: { assetId, direction: p.direction, qualityTier: sq.qualityTier, blockedBy: sq.blockedBy },
+        notify: false,
+      });
+    }
   }
 
   // v14.1: one-line record of HOW this signal was routed and WHY, so a suspected
