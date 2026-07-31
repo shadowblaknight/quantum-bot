@@ -6061,14 +6061,31 @@ function SQGateToggle({ label, description, enabled, loading, onToggle }) {
 }
 
 function SQTierRow({ tier, s, highlight }) {
-  const pct = s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—';
-  const color = s?.winRate == null ? 'var(--qb-text-faint)'
-              : s.winRate >= 0.55 ? 'var(--qb-green)'
-              : s.winRate >= 0.45 ? 'var(--qb-text-hi)'
-              : 'var(--qb-red)';
+  const pct     = s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—';
+  const blocked = tier === 'C' || tier === 'D';
+  const color   = s?.winRate == null ? 'var(--qb-text-faint)'
+                : s.winRate >= 0.55  ? 'var(--qb-green)'
+                : s.winRate >= 0.45  ? 'var(--qb-text-hi)'
+                : 'var(--qb-red)';
+  const tierColor = tier === 'A' ? 'var(--qb-green)'
+                  : tier === 'B' ? 'var(--qb-accent)'
+                  : tier === 'C' ? 'var(--qb-warn)'
+                  : tier === 'D' ? 'var(--qb-red)'
+                  : 'var(--qb-text-faint)';
+  const rowBg = blocked   ? 'rgba(220,60,60,0.06)'
+              : highlight ? 'var(--qb-bg-panel-hi)'
+              : 'transparent';
   return (
-    <tr style={{ borderBottom: '1px solid var(--qb-border)', background: highlight ? 'var(--qb-bg-panel-hi)' : 'transparent' }}>
-      <td style={{ padding: '5px 10px', color: 'var(--qb-text-hi)', fontWeight: 700 }}>{tier}</td>
+    <tr style={{ borderBottom: '1px solid var(--qb-border)', background: rowBg }}>
+      <td style={{ padding: '5px 10px' }}>
+        <span style={{ color: tierColor, fontWeight: 700 }}>{tier}</span>
+        {!blocked && tier !== 'unknown' && (
+          <span style={{ fontSize: 7, color: 'var(--qb-green)', border: '1px solid var(--qb-green)', borderRadius: 2, padding: '1px 4px', marginLeft: 5, opacity: 0.7 }}>PASSES</span>
+        )}
+        {blocked && (
+          <span style={{ fontSize: 7, color: 'var(--qb-red)', border: '1px solid var(--qb-red)', borderRadius: 2, padding: '1px 4px', marginLeft: 5, opacity: 0.7 }}>BLOCKED</span>
+        )}
+      </td>
       <td style={{ padding: '5px 10px', color, fontWeight: 700 }}>{pct}</td>
       <td style={{ padding: '5px 10px', color: 'var(--qb-text-mid)' }}>{s?.wins ?? 0}W / {s?.losses ?? 0}L</td>
       <td style={{ padding: '5px 10px', color: 'var(--qb-text-faint)' }}>n={s?.n ?? 0}</td>
@@ -6176,7 +6193,7 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
         </div>
 
         {/* WR by quality tier */}
-        <OFSectionLabel>Win rate by quality tier (recognition memory join)</OFSectionLabel>
+        <OFSectionLabel>Win rate by quality tier — A/B pass execution · C/D blocked (recognition memory join)</OFSectionLabel>
         <div style={{ overflowX: 'auto', marginBottom: 16 }}>
           <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
             <thead>
@@ -6241,11 +6258,16 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
                   const tierColor  = s.qualityTier === 'A' ? 'var(--qb-green)'
                                    : s.qualityTier === 'B' ? 'var(--qb-accent)'
                                    : s.qualityTier === 'C' ? 'var(--qb-warn)'
-                                   : 'var(--qb-red)';
-                  const fmtWick    = s.wickRatio      != null ? `${(s.wickRatio*100).toFixed(0)}%` : '—';
+                                   : s.qualityTier === 'D' ? 'var(--qb-red)'
+                                   : 'var(--qb-text-faint)';
+                  const fmtWick    = s.wickRatio != null ? `${(s.wickRatio*100).toFixed(0)}%` : '—';
                   const fmtSession = s.withPriorSession === true ? '✓' : s.withPriorSession === false ? '✗' : '—';
                   const fmtCVD     = s.cvdLowTrust === false ? '✓'
                                    : s.cvdLowTrust === true  ? (s.cvdDivergence && s.cvdDivergence !== 'none' ? '✗' : '~') : '—';
+                  const wickColor    = s.wickRatio == null    ? 'var(--qb-text-faint)' : s.wickRatio > 0.50 ? 'var(--qb-red)' : 'var(--qb-green)';
+                  const sessionColor = s.withPriorSession == null ? 'var(--qb-text-faint)' : s.withPriorSession === false ? 'var(--qb-red)' : 'var(--qb-green)';
+                  const cvdBad       = s.cvdLowTrust === true && s.cvdDivergence && s.cvdDivergence !== 'none';
+                  const cvdColor     = s.cvdLowTrust == null  ? 'var(--qb-text-faint)' : cvdBad ? 'var(--qb-red)' : 'var(--qb-green)';
                   return (
                     <tr key={s.id} style={{ borderBottom: '1px solid var(--qb-border)' }}>
                       <td style={{ padding: '4px 8px', color: 'var(--qb-text-faint)' }}>{time}</td>
@@ -6253,9 +6275,9 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
                       <td style={{ padding: '4px 8px', color: 'var(--qb-text-mid)' }}>{s.template || '—'}</td>
                       <td style={{ padding: '4px 8px', color: s.direction === 'LONG' ? 'var(--qb-green)' : s.direction === 'SHORT' ? 'var(--qb-red)' : 'var(--qb-text-faint)' }}>{s.direction || '—'}</td>
                       <td style={{ padding: '4px 8px', color: tierColor, fontWeight: 700 }}>{s.qualityTier || '—'}</td>
-                      <td style={{ padding: '4px 8px', color: s.wickRatio > 0.50 ? 'var(--qb-red)' : 'var(--qb-green)' }}>{fmtWick}</td>
-                      <td style={{ padding: '4px 8px', color: s.withPriorSession === false ? 'var(--qb-red)' : 'var(--qb-green)' }}>{fmtSession}</td>
-                      <td style={{ padding: '4px 8px', color: (s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none') ? 'var(--qb-red)' : 'var(--qb-green)' }}>{fmtCVD}</td>
+                      <td style={{ padding: '4px 8px', color: wickColor }}>{fmtWick}</td>
+                      <td style={{ padding: '4px 8px', color: sessionColor }}>{fmtSession}</td>
+                      <td style={{ padding: '4px 8px', color: cvdColor }}>{fmtCVD}</td>
                       <td style={{ padding: '4px 8px', color: passColor, fontWeight: 700 }}>{s.pass ? 'PASS' : 'BLOCK'}</td>
                     </tr>
                   );

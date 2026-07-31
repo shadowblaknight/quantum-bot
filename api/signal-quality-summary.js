@@ -131,11 +131,11 @@ module.exports = async (req, res) => {
       tierStats[tier] = {
         ...st,
         label: {
-          A: 'A — all 3 green (wick ok · with-session · CVD confirms)',
-          B: 'B — 2 of 3 green',
-          C: 'C — 1 of 3 green',
-          D: 'D — none green (highest risk)',
-          unknown: 'No quality record (pre-v16 or shadow join miss)',
+          A: 'all gates pass + full data (highest confidence)',
+          B: 'passes gate — missing some data (benefit of doubt)',
+          C: '1 gate triggered → blocked',
+          D: '2+ gates triggered → blocked',
+          unknown: 'no quality record (pre-v16 or shadow join miss)',
         }[tier] || tier,
       };
     }
