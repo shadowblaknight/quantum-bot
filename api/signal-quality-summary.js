@@ -111,7 +111,7 @@ module.exports = async (req, res) => {
       );
       return {
         ...trade,
-        qualityTier:      match?.qualityTier || trade.qualityTier || null,
+        qualityTier:      trade.qualityTier || match?.qualityTier || null,
         blockedBy:        match?.blockedBy   || null,
         hasSQRecord:      !!match,
       };
