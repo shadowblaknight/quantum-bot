@@ -6060,6 +6060,195 @@ function SQGateToggle({ label, description, enabled, loading, onToggle }) {
   );
 }
 
+// ─── Signal Quality visual components ─────────────────────────────────────────
+
+const SQ_SESSIONS = [
+  { id:'asia',   label:'Asia',              start:0,  end:7,  bg:'rgba(99,102,241,0.12)', accent:'#818cf8' },
+  { id:'ldn-op', label:'London Open',       start:7,  end:9,  bg:'rgba(34,197,94,0.22)',  accent:'#4ade80' },
+  { id:'ldn',    label:'London',            start:9,  end:12, bg:'rgba(34,197,94,0.09)',  accent:'#4ade80' },
+  { id:'ny-op',  label:'NY Open',           start:13, end:16, bg:'rgba(251,146,60,0.22)', accent:'#fb923c' },
+  { id:'ny',     label:'NY',               start:16, end:20, bg:'rgba(251,146,60,0.09)', accent:'#fb923c' },
+  { id:'ny-pm',  label:'NY PM / LDN Close', start:20, end:22, bg:'rgba(251,146,60,0.05)', accent:'#fb923c' },
+];
+
+function sqSession(ts) {
+  const h = new Date(ts).getUTCHours();
+  return SQ_SESSIONS.find(s => h >= s.start && h < s.end)
+      || { id:'off', label:'Off-hours', bg:'transparent', accent:'#6b7280' };
+}
+
+function sqWickForm(ratio, direction) {
+  if (ratio == null) return { name:'No bar data',     color:'#6b7280' };
+  if (ratio < 0.12)  return { name:'Marubozu',        color:'#22c55e' };
+  if (ratio < 0.28)  return { name:'Small Wick',      color:'#4ade80' };
+  if (ratio < 0.50)  return { name:'Medium Wick',     color:'#facc15' };
+  if (ratio < 0.65)  return { name:'Doji',            color:'#f97316' };
+  if (ratio < 0.80)  return { name: direction === 'LONG' ? 'Hammer' : 'Shooting Star', color:'#ef4444' };
+  return                    { name:'Long-Legged Doji', color:'#dc2626' };
+}
+
+function SQMiniCandle({ wickRatio, direction, height = 36 }) {
+  const W = 14, isLong = direction !== 'SHORT';
+  const fill  = isLong ? '#22c55e' : '#ef4444';
+  const wr    = Math.min(0.95, Math.max(0, wickRatio ?? 0.1));
+  const total = wr * height;
+  const topW  = isLong ? total * 0.25 : total * 0.75;
+  const botW  = isLong ? total * 0.75 : total * 0.25;
+  const bodyH = Math.max(4, height - topW - botW);
+  const cx    = W / 2;
+  return (
+    <svg width={W} height={height} style={{ display:'block', flexShrink:0 }}>
+      <line x1={cx} y1={0}         x2={cx} y2={topW}          stroke={fill} strokeWidth={1.5} strokeLinecap="round" />
+      <rect x={cx-3.5} y={topW}    width={7} height={bodyH}   fill={fill}  rx={1} opacity={0.9} />
+      <line x1={cx} y1={topW+bodyH} x2={cx} y2={height}       stroke={fill} strokeWidth={1.5} strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SQSessionTimeline({ signals }) {
+  const now = Date.now(), DAY = 86_400_000;
+  const recent = signals.filter(s => now - s.ts < 7 * DAY);
+  const W = 760, H = 88, PL = 6, PR = 6, CW = W - PL - PR;
+  const hx     = h => PL + (h / 24) * CW;
+  const tColor = (tier, pass) => !pass ? '#ef4444' : tier === 'A' ? '#22c55e' : tier === 'B' ? '#f59e0b' : '#ef4444';
+  const nowH   = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+  return (
+    <div style={{ marginBottom:14 }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'auto', display:'block' }}>
+        {/* session bands */}
+        {SQ_SESSIONS.map(s => (
+          <rect key={s.id} x={hx(s.start)} y={2} width={hx(s.end)-hx(s.start)} height={H-20} fill={s.bg} rx={2} />
+        ))}
+        {/* session labels */}
+        {SQ_SESSIONS.map(s => s.label && (
+          <text key={`l${s.id}`} x={hx((s.start+s.end)/2)} y={14}
+            textAnchor="middle" fontSize={7} fontFamily="monospace" fill={s.accent} opacity={0.9}>{s.label}</text>
+        ))}
+        {/* hour grid */}
+        {[0,3,6,9,12,15,18,21].map(h => (
+          <g key={h}>
+            <line x1={hx(h)} y1={2} x2={hx(h)} y2={H-18} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+            <text x={hx(h)} y={H-4} textAnchor="middle" fontSize={6} fontFamily="monospace" fill="rgba(255,255,255,0.22)">{String(h).padStart(2,'0')}</text>
+          </g>
+        ))}
+        {/* signal dots — today at bottom, 6d ago at top */}
+        {recent.map(s => {
+          const hFrac  = new Date(s.ts).getUTCHours() + new Date(s.ts).getUTCMinutes()/60;
+          const dayIdx = Math.min(6, Math.floor((now - s.ts) / DAY));
+          const x = hx(hFrac);
+          const y = (H-22) - (dayIdx/6)*(H-42);
+          const c = tColor(s.qualityTier, s.pass);
+          return (
+            <g key={s.id}>
+              {!s.pass && <circle cx={x} cy={y} r={5.8} fill="none" stroke={c} strokeWidth={0.9} opacity={0.4} />}
+              <circle cx={x} cy={y} r={s.pass ? 4 : 3.5} fill={c} opacity={0.83} />
+            </g>
+          );
+        })}
+        {/* "now" marker */}
+        <line x1={hx(nowH)} y1={2} x2={hx(nowH)} y2={H-18} stroke="rgba(255,255,255,0.3)" strokeWidth={1} strokeDasharray="3,2" />
+      </svg>
+      <div style={{ display:'flex', gap:12, padding:'2px 6px', flexWrap:'wrap', alignItems:'center' }}>
+        {[['#22c55e','Tier A'],['#f59e0b','Tier B'],['#ef4444','Blocked']].map(([c,l]) => (
+          <div key={l} style={{ display:'flex', alignItems:'center', gap:3 }}>
+            <svg width={7} height={7}><circle cx={3.5} cy={3.5} r={3} fill={c} /></svg>
+            <span style={{ fontSize:7, fontFamily:'var(--qb-font-mono)', color:'var(--qb-text-faint)' }}>{l}</span>
+          </div>
+        ))}
+        <span style={{ fontSize:7, fontFamily:'var(--qb-font-mono)', color:'var(--qb-text-faint)', marginLeft:4 }}>dots = signals · today bottom · 7d ago top · dashed line = now</span>
+      </div>
+    </div>
+  );
+}
+
+function SQGateSparklines({ signals }) {
+  const recent = signals.slice(0, 30);
+  const gates = [
+    { label:'WICK',    desc:'Heavy wick filter',        test: s => s.wickRatio == null ? null : s.wickRatio <= 0.50 },
+    { label:'SESSION', desc:'Prior session alignment',  test: s => s.withPriorSession == null ? null : s.withPriorSession === true },
+    { label:'CVD',     desc:'Order flow confirmation',  test: s => s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none') },
+  ];
+  return (
+    <div style={{ display:'flex', gap:10, marginBottom:14, flexWrap:'wrap' }}>
+      {gates.map(g => {
+        const withData  = recent.filter(s => g.test(s) !== null);
+        const passCount = withData.filter(s => g.test(s) === true).length;
+        const pRate     = withData.length ? passCount / withData.length : null;
+        const color     = pRate == null ? '#6b7280' : pRate >= 0.70 ? '#22c55e' : pRate >= 0.50 ? '#f59e0b' : '#ef4444';
+        const bW        = 200 / Math.max(1, recent.length);
+        return (
+          <div key={g.label} style={{ flex:1, minWidth:130, padding:'8px 10px', background:'var(--qb-bg-panel-hi)', border:'1px solid var(--qb-border)', borderRadius:4 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
+              <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:'var(--qb-text-faint)', textTransform:'uppercase', letterSpacing:0.8 }}>{g.label}</span>
+              <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:14, fontWeight:700, color }}>{pRate != null ? `${(pRate*100).toFixed(0)}% clean` : '—'}</span>
+            </div>
+            <svg viewBox="0 0 200 14" style={{ width:'100%', height:14, display:'block', marginBottom:3 }}>
+              {recent.map((s,i) => {
+                const ok = g.test(s);
+                const c  = ok === null ? 'rgba(255,255,255,0.08)' : ok ? '#22c55e' : '#ef4444';
+                return <rect key={s.id} x={2+i*bW} y={1} width={Math.max(1.5,bW-1)} height={12} fill={c} opacity={0.75} rx={0.5} />;
+              })}
+            </svg>
+            <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:'var(--qb-text-faint)' }}>{g.desc} · last {recent.length} signals</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SQSignalCard({ s }) {
+  const sess   = sqSession(s.ts);
+  const wf     = sqWickForm(s.wickRatio, s.direction);
+  const dt     = new Date(s.ts);
+  const time   = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}`;
+  const date   = `${dt.getUTCMonth()+1}/${dt.getUTCDate()}`;
+  const isLong = s.direction !== 'SHORT';
+  const passC  = s.pass ? '#22c55e' : '#ef4444';
+  const tierC  = { A:'#22c55e', B:'#f59e0b', C:'#f97316', D:'#ef4444' }[s.qualityTier] || '#6b7280';
+  const wickOk = s.wickRatio == null ? null : s.wickRatio <= 0.50;
+  const sessOk = s.withPriorSession == null ? null : s.withPriorSession;
+  const cvdOk  = s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none');
+  const Dot    = ({ ok }) => (
+    <div style={{ width:5, height:5, borderRadius:'50%', flexShrink:0, background: ok === null ? '#374151' : ok ? '#22c55e' : '#ef4444' }} />
+  );
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', background:'var(--qb-bg-panel-hi)', border:`1px solid ${s.pass ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'}`, borderLeft:`3px solid ${passC}`, borderRadius:4 }}>
+      <SQMiniCandle wickRatio={s.wickRatio} direction={s.direction} height={36} />
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:2 }}>
+          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:10, fontWeight:700, color:'var(--qb-text-hi)' }}>{s.assetId}</span>
+          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color: isLong ? '#22c55e' : '#ef4444' }}>{s.direction}</span>
+          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:'var(--qb-text-faint)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', maxWidth:90 }}>{s.template}</span>
+        </div>
+        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:wf.color }}>
+          {wf.name}
+          {s.wickRatio != null && <span style={{ color:'var(--qb-text-faint)', marginLeft:4 }}>{(s.wickRatio*100).toFixed(0)}%</span>}
+        </div>
+      </div>
+      <div style={{ padding:'2px 6px', background:sess.bg, border:`1px solid ${sess.accent}50`, borderRadius:3, flexShrink:0 }}>
+        <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:sess.accent, whiteSpace:'nowrap' }}>{sess.label}</span>
+      </div>
+      <div style={{ display:'flex', flexDirection:'column', gap:3, flexShrink:0 }}>
+        {[['WICK', wickOk], ['SESS', sessOk], ['CVD', cvdOk]].map(([lbl, ok]) => (
+          <div key={lbl} style={{ display:'flex', alignItems:'center', gap:3 }}>
+            <Dot ok={ok} />
+            <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:6.5, color:'var(--qb-text-faint)' }}>{lbl}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ textAlign:'right', flexShrink:0 }}>
+        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:12, fontWeight:700, color:tierC }}>{s.qualityTier || '?'}</div>
+        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, fontWeight:700, color:passC }}>{s.pass ? 'PASS' : 'BLOCK'}</div>
+      </div>
+      <div style={{ textAlign:'right', flexShrink:0 }}>
+        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:'var(--qb-text-hi)' }}>{time}</div>
+        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:'var(--qb-text-faint)' }}>{date}</div>
+      </div>
+    </div>
+  );
+}
+
 function SQTierRow({ tier, s, highlight }) {
   const pct     = s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—';
   const blocked = tier === 'C' || tier === 'D';
@@ -6235,56 +6424,28 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
         )}
 
         {/* recent signals log */}
-        <OFSectionLabel>Recent signals — live gate evaluation log</OFSectionLabel>
+        {/* ── Gate health sparklines ── */}
+        <OFSectionLabel>Gate health — last 30 signals</OFSectionLabel>
+        <SQGateSparklines signals={sig} />
+
+        {/* ── 24h session timeline ── */}
+        <OFSectionLabel>24h signal map — session activity (last 7 days)</OFSectionLabel>
         {sig.length === 0 ? (
-          <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)', padding: '10px 0' }}>
+          <div className="qb-mono" style={{ fontSize:9, color:'var(--qb-text-faint)', padding:'10px 0' }}>
             No signals evaluated yet — gates will populate as Pine alerts fire.
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
-              <thead>
-                <tr style={{ color: 'var(--qb-text-faint)' }}>
-                  {['Time (UTC)', 'Asset', 'Template', 'Dir', 'Tier', 'Wick', 'Session', 'CVD', 'Result'].map(h => (
-                    <th key={h} style={{ padding: '3px 8px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4, textAlign: 'left' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sig.map(s => {
-                  const dt   = new Date(s.ts);
-                  const time = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')} ${dt.getUTCMonth()+1}/${dt.getUTCDate()}`;
-                  const passColor  = s.pass ? 'var(--qb-green)' : 'var(--qb-red)';
-                  const tierColor  = s.qualityTier === 'A' ? 'var(--qb-green)'
-                                   : s.qualityTier === 'B' ? 'var(--qb-accent)'
-                                   : s.qualityTier === 'C' ? 'var(--qb-warn)'
-                                   : s.qualityTier === 'D' ? 'var(--qb-red)'
-                                   : 'var(--qb-text-faint)';
-                  const fmtWick    = s.wickRatio != null ? `${(s.wickRatio*100).toFixed(0)}%` : '—';
-                  const fmtSession = s.withPriorSession === true ? '✓' : s.withPriorSession === false ? '✗' : '—';
-                  const fmtCVD     = s.cvdLowTrust === false ? '✓'
-                                   : s.cvdLowTrust === true  ? (s.cvdDivergence && s.cvdDivergence !== 'none' ? '✗' : '~') : '—';
-                  const wickColor    = s.wickRatio == null    ? 'var(--qb-text-faint)' : s.wickRatio > 0.50 ? 'var(--qb-red)' : 'var(--qb-green)';
-                  const sessionColor = s.withPriorSession == null ? 'var(--qb-text-faint)' : s.withPriorSession === false ? 'var(--qb-red)' : 'var(--qb-green)';
-                  const cvdBad       = s.cvdLowTrust === true && s.cvdDivergence && s.cvdDivergence !== 'none';
-                  const cvdColor     = s.cvdLowTrust == null  ? 'var(--qb-text-faint)' : cvdBad ? 'var(--qb-red)' : 'var(--qb-green)';
-                  return (
-                    <tr key={s.id} style={{ borderBottom: '1px solid var(--qb-border)' }}>
-                      <td style={{ padding: '4px 8px', color: 'var(--qb-text-faint)' }}>{time}</td>
-                      <td style={{ padding: '4px 8px', color: 'var(--qb-text-hi)' }}>{s.assetId || '—'}</td>
-                      <td style={{ padding: '4px 8px', color: 'var(--qb-text-mid)' }}>{s.template || '—'}</td>
-                      <td style={{ padding: '4px 8px', color: s.direction === 'LONG' ? 'var(--qb-green)' : s.direction === 'SHORT' ? 'var(--qb-red)' : 'var(--qb-text-faint)' }}>{s.direction || '—'}</td>
-                      <td style={{ padding: '4px 8px', color: tierColor, fontWeight: 700 }}>{s.qualityTier || '—'}</td>
-                      <td style={{ padding: '4px 8px', color: wickColor }}>{fmtWick}</td>
-                      <td style={{ padding: '4px 8px', color: sessionColor }}>{fmtSession}</td>
-                      <td style={{ padding: '4px 8px', color: cvdColor }}>{fmtCVD}</td>
-                      <td style={{ padding: '4px 8px', color: passColor, fontWeight: 700 }}>{s.pass ? 'PASS' : 'BLOCK'}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <SQSessionTimeline signals={sig} />
+        )}
+
+        {/* ── Signal feed ── */}
+        {sig.length > 0 && (
+          <>
+            <OFSectionLabel>Recent signals — gate evaluation feed</OFSectionLabel>
+            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+              {sig.slice(0, 20).map(s => <SQSignalCard key={s.id} s={s} />)}
+            </div>
+          </>
         )}
         <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 8, fontStyle: 'italic' }}>
           live — signals blocked here never reach the broker. toggle gates above to adjust. wick threshold: {Math.round((cfg.wickThreshold ?? 0.5)*100)}%.
