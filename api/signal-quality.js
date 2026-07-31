@@ -261,13 +261,23 @@ async function evaluateSignalQuality(p, assetId, dedupeKey) {
   const pass      = gates.length === 0;
   const blockedBy = gates.length ? gates.join(';') : null;
 
-  // Quality tier for recognition memory
-  const greenFlags = [
-    !wickResult.hasBarData || wickResult.wickRatio == null || wickResult.wickRatio <= 0.35,
-    sessionResult.withPriorSession === true,
-    cvdResult.hasCVDData && !cvdResult.cvdLowTrust,
-  ].filter(Boolean).length;
-  const qualityTier = greenFlags >= 3 ? 'A' : greenFlags >= 2 ? 'B' : greenFlags >= 1 ? 'C' : 'D';
+  // Quality tier aligned with gate results (not a green-flag count):
+  //   A = all enabled gates pass AND full data present (highest confidence)
+  //   B = all enabled gates pass BUT some data was missing (passes, less certain)
+  //   C = exactly 1 enabled gate triggered (blocked)
+  //   D = 2 or more enabled gates triggered (blocked)
+  // This means Tier A/B always pass execution; Tier C/D always block it.
+  const wickTriggered    = cfg.wickGateEnabled    && !wickResult.pass;
+  const sessionTriggered = cfg.sessionGateEnabled && !sessionResult.pass;
+  const cvdTriggered     = cfg.cvdGateEnabled     && !cvdResult.pass;
+  const triggeredCount   = [wickTriggered, sessionTriggered, cvdTriggered].filter(Boolean).length;
+  const hasAllData       = wickResult.hasBarData
+                        && sessionResult.withPriorSession !== null
+                        && cvdResult.hasCVDData;
+  const qualityTier = triggeredCount >= 2 ? 'D'
+                    : triggeredCount === 1 ? 'C'
+                    : hasAllData           ? 'A'
+                    : 'B';
 
   const quality = {
     pass,
