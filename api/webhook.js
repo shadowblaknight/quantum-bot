@@ -570,6 +570,31 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     const sq = await evaluateSignalQuality(p, assetId, dedupeKey).catch(() => ({ pass: true }));
     if (!sq.pass) {
       try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction, reason: `signal-quality-blocked`, blockedBy: sq.blockedBy, qualityTier: sq.qualityTier }); } catch (_) {}
+      // ── Telegram: rich blocked-signal notification ───────────────────────────
+      try {
+        const _dirEmoji = p.direction === 'LONG' ? '🟢' : '🔴';
+        const _tierCol  = sq.qualityTier === 'D' ? '🔴' : '🟠';
+        const _wickLine = sq.wick
+          ? (sq.wick.pass ? `✅ Wick gate — ${Math.round((sq.wick.wickRatio ?? 0) * 100)}% (ok)`
+                          : `❌ Wick gate — ${Math.round((sq.wick.wickRatio ?? 0) * 100)}% wick ratio (>50% → blocked)`)
+          : null;
+        const _sessLine = sq.session
+          ? (sq.session.pass ? `✅ Session gate — aligned with prior session`
+                             : `❌ Session gate — opposes London/prior session close`)
+          : null;
+        const _cvdLine  = sq.cvd
+          ? (sq.cvd.pass ? `✅ CVD gate — ok`
+                         : `❌ CVD gate — low-trust + ${sq.cvd.cvdDivergence || 'divergence'} divergence`)
+          : null;
+        const _gateLines = [_wickLine, _sessLine, _cvdLine].filter(Boolean).join('\n');
+        await sendOnce(`sq-blocked:${dedupeKey}`,
+          `🚫 <b>Signal BLOCKED — ${pineTicker}</b>\n\n` +
+          `${_dirEmoji} ${p.template} · ${p.direction}\n` +
+          `Tier: ${_tierCol} <b>${sq.qualityTier}</b> (${sq.qualityTier === 'D' ? '2+ gates triggered' : '1 gate triggered'})\n\n` +
+          `${_gateLines}\n\n` +
+          `<i>Trade will not be placed.</i>`);
+      } catch (_sqNotifyErr) {}
+      // ─────────────────────────────────────────────────────────────────────────
       return bgSkip({
         dedupeKey, pineTicker, template: p.template,
         reason: `signal-quality-blocked:${sq.blockedBy}`,
