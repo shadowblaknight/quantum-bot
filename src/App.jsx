@@ -555,6 +555,9 @@ function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
         {/* ─── v16.0 · Signal Quality Panel — live gates (CVD + session + wick) ─── */}
         <SignalQualityPanel />
 
+        {/* ─── v16.1 · NY Open Specialist — daily journal + context matcher ─── */}
+        <NYOpenPanel />
+
         {/* ─── v15.8 · Signal Gating Control Panel (full width) ─── */}
         <GatingPanel />
 
@@ -6013,6 +6016,277 @@ function WickRatioPanel({ gridColumn = '1 / 4', style }) {
               shadow only — testing whether in-sample wick signal holds forward. Do not gate on n&lt;{data.minN} buckets.
             </div>
           </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// =====================================================================
+// 15g · NY OPEN SPECIALIST PANEL  (v16.1)
+// =====================================================================
+// Daily journal for gold / us500 / nas100 at NY Open (13:00–16:00 UTC).
+// Templates: orb · orb-pro · am-ifvg · silver-bullet
+// Self-learning: after 14 closed sessions per asset, context-matcher activates.
+// Read-only panel — fetches /api/ny-session-summary every 2 minutes.
+
+const NY_ASSETS_ORDER = ['gold', 'us500', 'nas100'];
+const NY_ASSET_LABEL  = { gold: 'Gold', us500: 'SP500', nas100: 'NAS100' };
+const NY_ASSET_ICON   = { gold: '🥇', us500: '📈', nas100: '💻' };
+const NY_TMPL_GLYPH   = { orb: '🚀', 'orb-pro': '⚡', 'am-ifvg': '🌅', 'silver-bullet': '🥈' };
+
+function _nyOutcomeColor(outcome) {
+  if (outcome === 'WIN')       return '#10b981';
+  if (outcome === 'LOSS')      return '#f43f5e';
+  if (outcome === 'open')      return '#f59e0b';
+  if (outcome === 'no-signal') return 'var(--qb-text-faint)';
+  return 'var(--qb-text-mid)';
+}
+
+function _nyOutcomeBadge(outcome) {
+  const col = _nyOutcomeColor(outcome);
+  const label = outcome === 'WIN' ? 'WIN' : outcome === 'LOSS' ? 'LOSS' : outcome === 'open' ? 'OPEN' : '—';
+  return (
+    <span style={{
+      display: 'inline-block', padding: '1px 6px', borderRadius: 3, fontSize: 8.5,
+      fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5,
+      background: col + '22', color: col, border: `1px solid ${col}44`,
+    }}>{label}</span>
+  );
+}
+
+function NYCountdown({ nyOpenStatus, minsToOpen, nyIsLive }) {
+  const col = nyIsLive ? '#10b981' : '#f59e0b';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: nyIsLive ? '#10b98112' : '#f59e0b08', borderRadius: 6, border: `1px solid ${col}33` }}>
+      <span style={{ fontSize: 18 }}>🗽</span>
+      <div>
+        <div className="qb-mono" style={{ fontSize: 10, fontWeight: 700, color: col }}>NY OPEN {nyIsLive ? 'IS LIVE' : `— ${nyOpenStatus}`}</div>
+        <div className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-faint)', marginTop: 1 }}>
+          {nyIsLive ? '13:00–16:00 UTC window active' : minsToOpen > 0 ? `opens in ${minsToOpen} minutes (13:00 UTC)` : 'session closed — next opens tomorrow 13:00 UTC'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NYInstrumentCard({ asset, sessionData, stat, matcherState }) {
+  const outcome  = sessionData?.outcome || 'no-signal';
+  const col      = _nyOutcomeColor(outcome);
+  const template = sessionData?.lastSignalTemplate;
+  const dir      = sessionData?.lastSignalDirection;
+  const ctx      = sessionData;
+
+  return (
+    <div style={{
+      flex: 1, minWidth: 160, padding: '10px 14px', borderRadius: 8,
+      border: `1px solid ${col}44`,
+      background: outcome === 'WIN' ? '#10b98108' : outcome === 'LOSS' ? '#f43f5e08' : outcome === 'open' ? '#f59e0b08' : 'var(--qb-bg-panel-hi)',
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <span style={{ fontSize: 16 }}>{NY_ASSET_ICON[asset]}</span>
+        <span className="qb-mono" style={{ fontSize: 11, fontWeight: 700, color: 'var(--qb-text)' }}>{NY_ASSET_LABEL[asset]}</span>
+        <span style={{ flex: 1 }} />
+        {_nyOutcomeBadge(outcome)}
+      </div>
+
+      {/* Signal info */}
+      {template ? (
+        <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginBottom: 4 }}>
+          {NY_TMPL_GLYPH[template] || '•'} {template} · <span style={{ color: dir === 'LONG' ? '#10b981' : '#f43f5e' }}>{dir}</span>
+        </div>
+      ) : (
+        <div className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-faint)', marginBottom: 4 }}>no signal yet</div>
+      )}
+
+      {/* Context strip */}
+      {ctx && (
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 5 }}>
+          {ctx.sessionBias && (
+            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: ctx.sessionBias === 'bull' ? '#10b98118' : '#f43f5e18', color: ctx.sessionBias === 'bull' ? '#10b981' : '#f43f5e' }}>
+              London {ctx.sessionBias === 'bull' ? '↑' : '↓'}
+            </span>
+          )}
+          {ctx.vixRegime && (
+            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--qb-bg-void)', color: 'var(--qb-text-mid)', border: '1px solid var(--qb-border)' }}>
+              VIX {ctx.vixRegime}
+            </span>
+          )}
+          {ctx.hasMajorNews && (
+            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: '#f59e0b18', color: '#f59e0b', border: '1px solid #f59e0b33' }}>
+              news
+            </span>
+          )}
+          {ctx.cvdTrend && (
+            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--qb-bg-void)', color: ctx.cvdTrend === 'rising' ? '#10b981' : ctx.cvdTrend === 'falling' ? '#f43f5e' : 'var(--qb-text-faint)', border: '1px solid var(--qb-border)' }}>
+              CVD {ctx.cvdTrend}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Divider */}
+      <div style={{ borderTop: '1px solid var(--qb-border)', margin: '5px 0' }} />
+
+      {/* Stats (recent sessions) */}
+      {stat && stat.n > 0 ? (
+        <div className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-mid)' }}>
+          last {stat.n} sessions · <span style={{ color: stat.winRate >= 55 ? '#10b981' : stat.winRate >= 45 ? '#f59e0b' : '#f43f5e', fontWeight: 700 }}>{stat.winRate}%</span> WR
+          {' '}· <span style={{ color: stat.pnl >= 0 ? '#10b981' : '#f43f5e' }}>{stat.pnl >= 0 ? '+' : ''}{stat.pnl?.toFixed(2)}$</span>
+        </div>
+      ) : (
+        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>no session history</div>
+      )}
+
+      {/* Matcher */}
+      {matcherState && (
+        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 3 }}>
+          {matcherState.active ? `context matcher active` : `matcher in ${matcherState.need} sessions`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NYSessionHeatmap({ recentSessions }) {
+  if (!recentSessions || !recentSessions.length) return null;
+
+  // Group by date, then asset
+  const dateMap = {};
+  for (const s of recentSessions) {
+    if (!dateMap[s.date]) dateMap[s.date] = {};
+    dateMap[s.date][s.asset] = s;
+  }
+  const dates = Object.keys(dateMap).sort((a, b) => b.localeCompare(a)).slice(0, 15);
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 460 }}>
+        <thead>
+          <tr>
+            <th style={{ padding: '3px 8px', textAlign: 'left' }}>
+              <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>DATE</span>
+            </th>
+            {NY_ASSETS_ORDER.map(a => (
+              <th key={a} style={{ padding: '3px 8px', textAlign: 'center' }}>
+                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-mid)' }}>{NY_ASSET_ICON[a]} {NY_ASSET_LABEL[a]}</span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dates.map(date => (
+            <tr key={date} style={{ borderTop: '1px solid var(--qb-border)' }}>
+              <td style={{ padding: '4px 8px' }}>
+                <span className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-faint)' }}>{date}</span>
+              </td>
+              {NY_ASSETS_ORDER.map(asset => {
+                const s = dateMap[date][asset];
+                if (!s) return <td key={asset} style={{ padding: '4px 8px', textAlign: 'center' }}><span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)' }}>—</span></td>;
+                const col = _nyOutcomeColor(s.outcome);
+                const glph = NY_TMPL_GLYPH[s.lastSignalTemplate] || '•';
+                return (
+                  <td key={asset} style={{ padding: '4px 8px', textAlign: 'center' }}>
+                    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                      <span style={{ fontSize: 11 }}>{glph}</span>
+                      <span className="qb-mono" style={{ fontSize: 7.5, color: col, fontWeight: 700 }}>
+                        {s.outcome === 'WIN' ? 'W' : s.outcome === 'LOSS' ? 'L' : s.outcome === 'open' ? '~' : '—'}
+                        {s.pnl != null ? ` ${s.pnl >= 0 ? '+' : ''}${s.pnl.toFixed(0)}$` : ''}
+                      </span>
+                      {s.hasMajorNews && <span style={{ fontSize: 7, color: '#f59e0b' }}>📰</span>}
+                    </div>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function NYOpenPanel({ gridColumn = '1 / 4', style }) {
+  const [data, setData]           = useState(null);
+  const [fetchError, setError]    = useState(null);
+  const [ready, setReady]         = useState(false);
+  const [lastFetch, setLastFetch] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(API('ny-session-summary')).then(res => res.json());
+        if (!alive) return;
+        if (r?.ok !== false) { setData(r); setError(null); }
+        else { setData(null); setError(r?.error || 'endpoint error'); }
+      } catch (e) {
+        if (alive) { setData(null); setError(e.message); }
+      }
+      if (alive) { setLastFetch(new Date()); setReady(true); }
+    };
+    load();
+    const id = setInterval(load, 2 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const panelProps = {
+    title: 'NY Open Specialist',
+    subtitle: 'gold · sp500 · nas100 — orb · orb-pro · am-ifvg · silver-bullet · 13:00–16:00 UTC',
+    style: { gridColumn, ...(style || {}) },
+    collapsible: true, panelId: 'ny-open-specialist', defaultCollapsed: false,
+  };
+
+  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading NY Open journal..." /></div></Panel>;
+  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/ny-session-summary: ${fetchError}`} /></div></Panel>;
+
+  const today        = data?.todayStatus  || {};
+  const stats        = data?.stats        || {};
+  const matcherState = data?.matcherState || {};
+  const recentSes    = data?.recentSessions || [];
+  const totalSes     = data?.totalSessions ?? 0;
+
+  return (
+    <Panel {...panelProps}>
+      <div style={{ padding: 12 }}>
+
+        {/* NY Open countdown */}
+        <div style={{ marginBottom: 12 }}>
+          <NYCountdown
+            nyOpenStatus={data?.nyOpenStatus || '—'}
+            minsToOpen={data?.minsToOpen}
+            nyIsLive={data?.nyIsLive || false}
+          />
+        </div>
+
+        {/* Today's 3 instrument cards */}
+        <OFSectionLabel>Today's sessions — {data?.today || '—'}</OFSectionLabel>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+          {NY_ASSETS_ORDER.map(asset => (
+            <NYInstrumentCard
+              key={asset}
+              asset={asset}
+              sessionData={today[asset]}
+              stat={stats[asset]}
+              matcherState={matcherState[asset]}
+            />
+          ))}
+        </div>
+
+        {/* Session heatmap */}
+        <OFSectionLabel>Recent NY sessions — {totalSes} total in journal</OFSectionLabel>
+        {recentSes.length > 0
+          ? <NYSessionHeatmap recentSessions={recentSes} />
+          : <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)', padding: '8px 0' }}>
+              No sessions recorded yet. Journal starts building on the next qualifying NY Open signal on gold, sp500, or nas100.
+            </div>
+        }
+
+        {lastFetch && (
+          <div style={{ marginTop: 10 }}>
+            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>updated {lastFetch.toLocaleTimeString()}</span>
+          </div>
         )}
       </div>
     </Panel>

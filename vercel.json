@@ -61,6 +61,10 @@
       "memory": 512,
       "maxDuration": 30
     },
+    "api/ny-session-summary.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
     "api/analyst.js": {
       "memory": 512,
       "maxDuration": 60

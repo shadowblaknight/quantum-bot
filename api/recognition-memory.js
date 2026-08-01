@@ -73,6 +73,14 @@ async function storeClosedTrade(trade) {
       const trimmed = index.slice(0, 1000);
       await r.set(TRADE_INDEX_KEY, JSON.stringify(trimmed));
     }
+    // v16.1 — update NY Open Specialist session outcome when this trade closes
+    try {
+      const { isNYSpecialistSignal, updateNYOutcome } = require('./ny-session-journal');
+      if (fv.template && isNYSpecialistSignal(fv.asset, fv.template, fv.openedAt)) {
+        updateNYOutcome(fv.asset, fv.openedAt, fv.outcome, fv.pnl).catch(() => {});
+      }
+    } catch (_nyErr) {}
+
     return { ok: true, id: trade.id };
   } catch (e) {
     return { error: e.message };

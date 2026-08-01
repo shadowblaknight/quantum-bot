@@ -577,6 +577,16 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         notify: false,
       });
     }
+    // ── v16.1 NY Open Specialist journal (fire-and-forget) ───────────────────
+    try {
+      const { isNYSpecialistSignal, recordNYSignal } = require('./ny-session-journal');
+      if (isNYSpecialistSignal(assetId, p.template, p.timestamp || Date.now())) {
+        recordNYSignal(p, assetId, sq).then(nyCtx => {
+          if (nyCtx) logActivity({ type: 'ny-specialist-signal', asset: assetId, template: p.template, direction: p.direction, nyContext: nyCtx }).catch(() => {});
+        }).catch(() => {});
+      }
+    } catch (_nyJErr) {}
+    // ─────────────────────────────────────────────────────────────────────────
   }
 
   // v14.1: one-line record of HOW this signal was routed and WHY, so a suspected
