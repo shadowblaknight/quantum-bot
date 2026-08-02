@@ -1009,6 +1009,17 @@ async function forceRecordFromHistory(positionIds) {
       reconstructedClose: true, synthetic: false,
     };
 
+    // Enrich with SQ record — populates template + dedupeKey so the stored
+    // feature vector has correct tier and template performance data.
+    try {
+      const { lookupQualityForTrade } = require('./signal-quality');
+      const sq = await lookupQualityForTrade(asset, null, closed.openedAt, null);
+      if (sq) {
+        if (sq._template)   closed.template  = sq._template;
+        if (sq._dedupeKey)  closed.dedupeKey = sq._dedupeKey;
+      }
+    } catch (_) {}
+
     let recogOk = false;
     try { await storeClosedTrade(closed); recogOk = true; } catch (e) {
       results.push({ positionId, status: 'store-failed', error: e.message });

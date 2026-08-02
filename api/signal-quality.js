@@ -324,19 +324,24 @@ async function lookupQualityForTrade(assetId, template, openedAt, dedupeKey = nu
   try {
     if (dedupeKey) {
       const direct = safeParse(await r.get(SQ_KEY(dedupeKey)).catch(() => null));
-      if (direct) return direct;
+      if (direct) return { ...direct, _dedupeKey: dedupeKey };
     }
     const raw = await r.get(SQ_INDEX_KEY).catch(() => null);
     const idx = safeParse(raw);
     if (!Array.isArray(idx)) return null;
+    // When template is null (reconstructed trade), skip template filter — asset + time window
+    // is unambiguous since only one position per asset is allowed at a time.
     const match = idx.find(e =>
       e.assetId === assetId &&
-      e.template === template &&
+      (template == null || e.template === template) &&
       Math.abs(e.ts - openedAt) < 900_000   // 15-min window (fallback)
     );
     if (!match) return null;
     const recRaw = await r.get(SQ_KEY(match.id)).catch(() => null);
-    return safeParse(recRaw) || null;
+    const rec = safeParse(recRaw);
+    if (!rec) return null;
+    // Attach index metadata so callers can retrieve template + dedupeKey
+    return { ...rec, _template: match.template, _dedupeKey: match.id };
   } catch (_) { return null; }
 }
 

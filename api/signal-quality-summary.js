@@ -104,9 +104,11 @@ module.exports = async (req, res) => {
     const sqAll        = sqIndex; // full index for join
 
     const joined = closedTrades.map(trade => {
+      // Skip template filter when trade.template is null (reconstructed trades).
+      // Asset + 15-min window is unambiguous: one position per asset at a time.
       const match = sqAll.find(e =>
-        e.assetId   === trade.asset &&
-        e.template  === trade.template &&
+        e.assetId === trade.asset &&
+        (trade.template == null || e.template === trade.template) &&
         Math.abs(e.ts - trade.openedAt) < JOIN_TOL
       );
       return {
