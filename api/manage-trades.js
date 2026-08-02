@@ -963,7 +963,7 @@ async function backfillOrphanedPositions(positionIds) {
 // managePosition rejected the pending setup → no state → detectAndProcessClosed
 // silently dropped it). Works without position state — reconstructs from deals only.
 
-async function forceRecordFromHistory(positionIds) {
+async function forceRecordFromHistory(positionIds, overrides = {}) {
   const r = getRedis();
   if (!r) throw new Error('no-redis');
   const dealsByPos = await fetchOrphanedDeals(positionIds);
@@ -1009,14 +1009,18 @@ async function forceRecordFromHistory(positionIds) {
       reconstructedClose: true, synthetic: false,
     };
 
-    // Enrich with SQ record — populates template + dedupeKey so the stored
-    // feature vector has correct tier and template performance data.
+    // Apply caller-supplied overrides first (e.g. template passed via ?template= query param).
+    if (overrides.template)  closed.template  = overrides.template;
+    if (overrides.dedupeKey) closed.dedupeKey = overrides.dedupeKey;
+
+    // Enrich with SQ record to get dedupeKey (and template if not overridden).
+    // Uses provided template for a tighter join; falls back to asset+time only.
     try {
       const { lookupQualityForTrade } = require('./signal-quality');
-      const sq = await lookupQualityForTrade(asset, null, closed.openedAt, null);
+      const sq = await lookupQualityForTrade(asset, closed.template || null, closed.openedAt, closed.dedupeKey || null);
       if (sq) {
-        if (sq._template)   closed.template  = sq._template;
-        if (sq._dedupeKey)  closed.dedupeKey = sq._dedupeKey;
+        if (sq._template  && !closed.template)  closed.template  = sq._template;
+        if (sq._dedupeKey && !closed.dedupeKey) closed.dedupeKey = sq._dedupeKey;
       }
     } catch (_) {}
 
@@ -1062,7 +1066,10 @@ module.exports = async (req, res) => {
         ? String(req.query.ids).split(',').map(s => s.trim()).filter(Boolean)
         : [];
       if (!rawIds.length) return res.status(400).json({ ok: false, error: 'ids required' });
-      return res.status(200).json({ ok: true, results: await forceRecordFromHistory(rawIds) });
+      const overrides = {};
+      if (req.query.template) overrides.template  = String(req.query.template).trim();
+      if (req.query.dedupeKey) overrides.dedupeKey = String(req.query.dedupeKey).trim();
+      return res.status(200).json({ ok: true, results: await forceRecordFromHistory(rawIds, overrides) });
     }
     const result = await runManageTick();
     return res.status(200).json(result);
