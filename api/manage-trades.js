@@ -321,6 +321,7 @@ async function managePosition(position) {
       originalLot: position.volume,
       entry: position.openPrice,
       pendingId: matchedPending.id,
+      dedupeKey: matchedPending.dedupeKey || null,
       tpsHit: [],
       slMoves: [],
       partialCloses: [],
@@ -652,6 +653,7 @@ async function detectAndProcessClosed(currentOpenIds) {
           maxTP: (state.tpsHit || []).reduce((m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0),
           pnl: totalPnL, riskDollars: null,
           openedAt: state.createdAt, closedAt: Date.now(),
+          dedupeKey: state.dedupeKey || null,
           reconstructedClose: true, synthetic: false,
         };
         try { await storeClosedTrade(reconstructed); } catch (_) {}
@@ -708,6 +710,7 @@ async function detectAndProcessClosed(currentOpenIds) {
       enabledTools: null,
       openedAt: state.createdAt,
       closedAt: Date.now(),
+      dedupeKey: state.dedupeKey || null,
       synthetic: false,
     };
 
@@ -926,6 +929,7 @@ async function backfillOrphanedPositions(positionIds) {
       maxTP: (state.tpsHit || []).reduce((m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0),
       pnl: totalPnL, riskDollars: null,
       openedAt: state.createdAt, closedAt: Date.now(),
+      dedupeKey: state.dedupeKey || null,
       reconstructedClose: true, synthetic: false,
     };
     let recogOk = false;

@@ -313,20 +313,26 @@ async function evaluateSignalQuality(p, assetId, dedupeKey) {
 }
 
 // ── Quality lookup for recognition memory ────────────────────────────────────
-// Called by recognition-memory.js when storing a closed trade. Fuzzy-joins by
-// assetId + template + timestamp window (±15 min) to find the quality record.
+// Called by recognition-memory.js when storing a closed trade.
+// Tries direct lookup by dedupeKey first (exact, no timing issues — works for
+// limit orders that fill hours after the signal). Falls back to the ±15-min
+// fuzzy timestamp join for older trades that predate dedupeKey propagation.
 
-async function lookupQualityForTrade(assetId, template, openedAt) {
+async function lookupQualityForTrade(assetId, template, openedAt, dedupeKey = null) {
   const r = getRedis();
   if (!r) return null;
   try {
+    if (dedupeKey) {
+      const direct = safeParse(await r.get(SQ_KEY(dedupeKey)).catch(() => null));
+      if (direct) return direct;
+    }
     const raw = await r.get(SQ_INDEX_KEY).catch(() => null);
     const idx = safeParse(raw);
     if (!Array.isArray(idx)) return null;
     const match = idx.find(e =>
       e.assetId === assetId &&
       e.template === template &&
-      Math.abs(e.ts - openedAt) < 900_000   // 15-min window
+      Math.abs(e.ts - openedAt) < 900_000   // 15-min window (fallback)
     );
     if (!match) return null;
     const recRaw = await r.get(SQ_KEY(match.id)).catch(() => null);

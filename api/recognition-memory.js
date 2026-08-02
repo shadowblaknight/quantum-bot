@@ -55,6 +55,7 @@ async function storeClosedTrade(trade) {
       trade.asset,
       trade.template || (trade.contributingTactics || [])[0] || null,
       trade.openedAt,
+      trade.dedupeKey || null,
     );
   } catch (_) {}
 
