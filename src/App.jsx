@@ -6579,7 +6579,7 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
   useEffect(() => {
     const alive = { current: true };
     load(alive);
-    const id = setInterval(() => load(alive), 5 * 60 * 1000);
+    const id = setInterval(() => load(alive), 30 * 1000);
     return () => { alive.current = false; clearInterval(id); };
   }, []);
 
@@ -6675,24 +6675,30 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
         </div>
 
         {/* passed vs blocked */}
-        {(pvb.passed?.n > 0 || pvb.blocked?.n > 0) && (
+        {(pvb.passed?.n > 0 || (cov.blockedSignals ?? 0) > 0) && (
           <>
-            <OFSectionLabel>Passed vs blocked — closed trade outcomes</OFSectionLabel>
+            <OFSectionLabel>Gate outcomes — passed trades closed · blocked signals not placed</OFSectionLabel>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-              {[
-                { label: 'PASSED', s: pvb.passed,  accent: 'var(--qb-green)' },
-                { label: 'BLOCKED', s: pvb.blocked, accent: 'var(--qb-red)' },
-              ].map(({ label, s, accent }) => (
-                <div key={label} style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: `1px solid ${accent}`, borderRadius: 4 }}>
-                  <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>{label}</div>
-                  <div className="qb-mono" style={{ fontSize: 20, fontWeight: 700, color: accent }}>
-                    {s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—'}
-                  </div>
-                  <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginTop: 3 }}>
-                    {s?.wins ?? 0}W / {s?.losses ?? 0}L · n={s?.n ?? 0}
-                  </div>
+              {/* Passed — closed trades that went through the gate */}
+              <div style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-green)', borderRadius: 4 }}>
+                <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>PASSED → CLOSED</div>
+                <div className="qb-mono" style={{ fontSize: 20, fontWeight: 700, color: 'var(--qb-green)' }}>
+                  {pvb.passed?.winRate != null ? (pvb.passed.winRate * 100).toFixed(0) + '%' : '—'}
                 </div>
-              ))}
+                <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginTop: 3 }}>
+                  {pvb.passed?.wins ?? 0}W / {pvb.passed?.losses ?? 0}L · n={pvb.passed?.n ?? 0} closed
+                </div>
+              </div>
+              {/* Blocked — signals stopped at the gate, never placed */}
+              <div style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-red)', borderRadius: 4 }}>
+                <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>BLOCKED BY GATE</div>
+                <div className="qb-mono" style={{ fontSize: 20, fontWeight: 700, color: 'var(--qb-red)' }}>
+                  {cov.blockedSignals ?? 0}
+                </div>
+                <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginTop: 3 }}>
+                  signals not placed · no WR (never executed)
+                </div>
+              </div>
             </div>
           </>
         )}

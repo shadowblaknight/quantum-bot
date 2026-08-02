@@ -576,7 +576,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         const _tierCol  = sq.qualityTier === 'D' ? '🔴' : '🟠';
         const _wickLine = sq.wick
           ? (sq.wick.pass ? `✅ Wick gate — ${Math.round((sq.wick.wickRatio ?? 0) * 100)}% (ok)`
-                          : `❌ Wick gate — ${Math.round((sq.wick.wickRatio ?? 0) * 100)}% wick ratio (>50% → blocked)`)
+                          : `❌ Wick gate — ${Math.round((sq.wick.wickRatio ?? 0) * 100)}% wick ratio (&gt;50% → blocked)`)
           : null;
         const _sessLine = sq.session
           ? (sq.session.pass ? `✅ Session gate — aligned with prior session`
@@ -587,13 +587,18 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
                          : `❌ CVD gate — low-trust + ${sq.cvd.cvdDivergence || 'divergence'} divergence`)
           : null;
         const _gateLines = [_wickLine, _sessLine, _cvdLine].filter(Boolean).join('\n');
-        await sendOnce(`sq-blocked:${dedupeKey}`,
+        const _tgResult = await sendOnce(`sq-blocked:${dedupeKey}`,
           `🚫 <b>Signal BLOCKED — ${pineTicker}</b>\n\n` +
           `${_dirEmoji} ${p.template} · ${p.direction}\n` +
           `Tier: ${_tierCol} <b>${sq.qualityTier}</b> (${sq.qualityTier === 'D' ? '2+ gates triggered' : '1 gate triggered'})\n\n` +
           `${_gateLines}\n\n` +
           `<i>Trade will not be placed.</i>`);
-      } catch (_sqNotifyErr) {}
+        if (_tgResult && !_tgResult.sent) {
+          logActivity({ type: 'tg-blocked-notify-fail', reason: _tgResult.reason, dedupeKey }).catch(() => {});
+        }
+      } catch (_sqNotifyErr) {
+        logActivity({ type: 'tg-blocked-notify-error', error: _sqNotifyErr?.message }).catch(() => {});
+      }
       // ─────────────────────────────────────────────────────────────────────────
       return bgSkip({
         dedupeKey, pineTicker, template: p.template,
