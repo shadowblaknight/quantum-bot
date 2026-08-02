@@ -284,7 +284,11 @@ async function managePosition(position) {
       if (!p.setup || p.setup.direction !== direction) return false;
       const tps = p.tpLevels || [];
       if (tps.length === 0) return false;
-      return tps.every((tp) => (isLong ? tp.price > entry : tp.price < entry));
+      // Use some() not every() — large slippage (common on BTC/crypto) can push the
+      // actual fill past a tight TP1, making it appear on the wrong side and falsely
+      // rejecting the candidate. Requiring at least one reachable TP is sufficient;
+      // the direction check above already rules out opposite-direction confusion.
+      return tps.some((tp) => (isLong ? tp.price > entry : tp.price < entry));
     });
 
     if (candidates.length === 1) {
@@ -953,6 +957,74 @@ async function backfillOrphanedPositions(positionIds) {
   return results;
 }
 
+// ── Force-record from MetaAPI deal history ────────────────────────────────────
+// Recovery path for trades that were never stored in recognition memory because
+// position state was never created (e.g. BTC slippage pushed fill past TP1 →
+// managePosition rejected the pending setup → no state → detectAndProcessClosed
+// silently dropped it). Works without position state — reconstructs from deals only.
+
+async function forceRecordFromHistory(positionIds) {
+  const r = getRedis();
+  if (!r) throw new Error('no-redis');
+  const dealsByPos = await fetchOrphanedDeals(positionIds);
+  const results    = [];
+
+  for (const positionId of positionIds) {
+    const deals = dealsByPos[String(positionId)];
+    if (!deals || deals.length === 0) {
+      results.push({ positionId, status: 'no-deals-in-30d' });
+      continue;
+    }
+
+    const entryDeal = deals.find(d => d.entryType === 'DEAL_ENTRY_IN');
+    const exitDeal  = deals.find(d => d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT');
+    if (!exitDeal) {
+      results.push({ positionId, status: 'no-exit-deal' });
+      continue;
+    }
+
+    const totalPnL = deals.reduce((s, d) => s + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
+
+    const symb  = ((entryDeal || deals[0]) || {}).symbol || '';
+    const asset = symb ? await resolveAsset(symb).catch(() => null) : null;
+    if (!asset) {
+      results.push({ positionId, status: 'cannot-resolve-asset', symbol: symb });
+      continue;
+    }
+
+    // BUY deal at entry = LONG position
+    const direction = (!entryDeal || entryDeal.type === 'DEAL_TYPE_BUY') ? 'LONG' : 'SHORT';
+
+    const openedAt = entryDeal?.time ? new Date(entryDeal.time).getTime() : null;
+    const closedAt = exitDeal.time   ? new Date(exitDeal.time).getTime()  : Date.now();
+
+    const tradeId = `trade_${asset}_${positionId}`;
+    const closed  = {
+      id: tradeId, asset, direction,
+      template: null, style: null, mode: null, session: null,
+      tpsHit: [], maxTP: 0,
+      pnl: totalPnL, riskDollars: null,
+      openedAt: openedAt || closedAt, closedAt,
+      dedupeKey: null,
+      reconstructedClose: true, synthetic: false,
+    };
+
+    let recogOk = false;
+    try { await storeClosedTrade(closed); recogOk = true; } catch (e) {
+      results.push({ positionId, status: 'store-failed', error: e.message });
+      continue;
+    }
+
+    results.push({
+      positionId, status: 'recorded', tradeId,
+      asset, direction,
+      pnl:      Math.round(totalPnL * 100) / 100,
+      openedAt, closedAt, recogOk,
+    });
+  }
+  return results;
+}
+
 module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   try {
@@ -969,6 +1041,17 @@ module.exports = async (req, res) => {
         ? String(req.query.ids).split(',').map(s => s.trim()).filter(Boolean)
         : ['307572483', '300390977'];
       return res.status(200).json({ ok: true, results: await backfillOrphanedPositions(rawIds) });
+    }
+    if (action === 'force-record') {
+      const key = String((req.query && req.query.key) || '');
+      if (!process.env.WEBHOOK_API_KEY || key !== process.env.WEBHOOK_API_KEY) {
+        return res.status(401).json({ ok: false, error: 'unauthorized -- pass ?key=WEBHOOK_API_KEY' });
+      }
+      const rawIds = req.query.ids
+        ? String(req.query.ids).split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+      if (!rawIds.length) return res.status(400).json({ ok: false, error: 'ids required' });
+      return res.status(200).json({ ok: true, results: await forceRecordFromHistory(rawIds) });
     }
     const result = await runManageTick();
     return res.status(200).json(result);
