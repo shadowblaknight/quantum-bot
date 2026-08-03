@@ -60,6 +60,14 @@ function isNYSpecialistSignal(assetId, template, ts) {
   return min >= NY_UTC_START && min < NY_UTC_END;
 }
 
+// Like isNYSpecialistSignal but without the time-window check.
+// Used when updating outcome at trade close: fill time may be outside 13-16 UTC
+// (limit orders), but the session record was written at signal time so we still
+// need to update it.
+function isNYSpecialistTrade(assetId, template) {
+  return NY_ASSETS.has(assetId) && NY_TEMPLATES.has(template);
+}
+
 // ── VIX reader ────────────────────────────────────────────────────────────────
 
 async function _getVix(r) {
@@ -339,6 +347,7 @@ async function getNYPanelData() {
 
 module.exports = {
   isNYSpecialistSignal,
+  isNYSpecialistTrade,
   recordNYSignal,
   updateNYOutcome,
   getNYPanelData,

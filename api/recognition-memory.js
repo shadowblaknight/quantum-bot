@@ -76,8 +76,8 @@ async function storeClosedTrade(trade) {
     }
     // v16.1 — update NY Open Specialist session outcome when this trade closes
     try {
-      const { isNYSpecialistSignal, updateNYOutcome } = require('./ny-session-journal');
-      if (fv.template && isNYSpecialistSignal(fv.asset, fv.template, fv.openedAt)) {
+      const { isNYSpecialistTrade, updateNYOutcome } = require('./ny-session-journal');
+      if (fv.template && isNYSpecialistTrade(fv.asset, fv.template)) {
         updateNYOutcome(fv.asset, fv.openedAt, fv.outcome, fv.pnl).catch(() => {});
       }
     } catch (_nyErr) {}
