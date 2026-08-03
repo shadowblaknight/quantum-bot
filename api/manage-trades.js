@@ -633,7 +633,55 @@ async function detectAndProcessClosed(currentOpenIds) {
 
   for (const positionId of closed) {
     const state = await getPositionState(positionId);
-    if (!state) continue;
+
+    if (!state) {
+      // No position state — pending setup was never matched (invalidated by watcher,
+      // MetaAPI timing, signal gate blocked placement, etc.). Reconstruct from broker
+      // deals so the trade is never silently lost regardless of how state creation failed.
+      const noStateDeals = recentDeals.filter(d => d.positionId === positionId);
+      if (noStateDeals.length === 0) continue;
+      const nsEntry = noStateDeals.find(d => d.entryType === 'DEAL_ENTRY_IN');
+      const nsExit  = noStateDeals.find(d => d.entryType === 'DEAL_ENTRY_OUT' || d.entryType === 'DEAL_ENTRY_INOUT');
+      if (!nsExit) continue;
+      const nsSymbol = ((nsEntry || noStateDeals[0]).symbol || '').trim();
+      const nsAsset  = nsSymbol ? await resolveAsset(nsSymbol).catch(() => null) : null;
+      if (!nsAsset) continue;
+      const nsTradeId    = `trade_${nsAsset}_${positionId}`;
+      const nsAlreadyDone = await r.get(`v14:ledger:trade:${nsTradeId}`).catch(() => null);
+      if (nsAlreadyDone) continue;
+      const nsPnL       = noStateDeals.reduce((s, d) => s + (d.profit || 0) + (d.commission || 0) + (d.swap || 0), 0);
+      const nsDirection = (!nsEntry || nsEntry.type === 'DEAL_TYPE_BUY') ? 'LONG' : 'SHORT';
+      const nsOpenedAt  = nsEntry?.time ? new Date(nsEntry.time).getTime() : null;
+      const nsClosedAt  = nsExit.time   ? new Date(nsExit.time).getTime()  : Date.now();
+      const noStateTrade = {
+        id: nsTradeId, asset: nsAsset, direction: nsDirection,
+        template: null, style: null, mode: null, session: null,
+        tpsHit: [], maxTP: 0,
+        pnl: nsPnL, riskDollars: null,
+        openedAt: nsOpenedAt || nsClosedAt, closedAt: nsClosedAt,
+        dedupeKey: null,
+        reconstructedClose: true, noPositionState: true, synthetic: false,
+      };
+      try {
+        const { lookupQualityForTrade } = require('./signal-quality');
+        const sq = await lookupQualityForTrade(nsAsset, null, noStateTrade.openedAt, null);
+        if (sq) {
+          if (sq._template)  noStateTrade.template  = sq._template;
+          if (sq._dedupeKey) noStateTrade.dedupeKey = sq._dedupeKey;
+        }
+      } catch (_) {}
+      try { await storeClosedTrade(noStateTrade); } catch (_) {}
+      try { await addDailyPnL(nsPnL); } catch (_) {}
+      const nsOutcome = nsPnL > 0.5 ? '✓ WIN' : nsPnL < -0.5 ? '✗ LOSS' : '— BE';
+      recordings.push({ positionId, asset: nsAsset, pnl: nsPnL, stored: true, noPositionState: true });
+      await pushCommentary(nsAsset, 'trade-closed',
+        `${nsOutcome} — ${nsDirection} closed (no-state recovery): ${nsPnL >= 0 ? '+' : ''}$${nsPnL.toFixed(2)}`);
+      try {
+        await notifyTradeClosed({ asset: nsAsset, direction: nsDirection, totalPnL: nsPnL,
+          tpsHit: [], positionId, openedAt: noStateTrade.openedAt, closedAt: nsClosedAt });
+      } catch (_) {}
+      continue;
+    }
 
     const positionDeals = recentDeals.filter((d) => d.positionId === positionId);
     if (positionDeals.length === 0) continue;
