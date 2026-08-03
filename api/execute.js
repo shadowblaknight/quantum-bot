@@ -174,7 +174,10 @@ async function processAsset(asset, openPositions) {
   }
 
   const pendingList = await getPendingSetups(asset);
-  const placeable = pendingList.filter((p) => p.status === 'pending');
+  // Include place-failed so transient MetaAPI errors (429, timeout) get retried
+  // on the next tick while the kill zone is still active.
+  // Validation rejections use 'rejected-validation' and are never retried.
+  const placeable = pendingList.filter((p) => p.status === 'pending' || p.status === 'place-failed');
   if (placeable.length === 0) {
     return { ...result, skipped: 'no-pending' };
   }
