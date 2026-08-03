@@ -60,14 +60,49 @@ async function setConfig(patch) {
 
 // ── Wick ratio gate ───────────────────────────────────────────────────────────
 
-function evalWick(p, threshold) {
-  const o = parseFloat(p.barOpen),  h = parseFloat(p.barHigh);
-  const l = parseFloat(p.barLow),   c = parseFloat(p.barClose);
-  const hasBarData = [o,h,l,c].every(v => isFinite(v));
+// Maps Pine script timeframe strings to MetaAPI format.
+function normalizeTf(tf) {
+  if (!tf) return null;
+  const map = {
+    '1':'1m','3':'3m','5':'5m','10':'10m','15':'15m','30':'30m','45':'45m',
+    '60':'1h','120':'2h','180':'3h','240':'4h',
+    'D':'1d','W':'1w','M':'1mn',
+  };
+  const s = String(tf).trim();
+  return map[s] || (/^\d+[mhdwM]$/.test(s) ? s : null);
+}
+
+// Async so it can fall back to candle-source when the Pine alert omits OHLC.
+async function evalWick(p, threshold, assetId, ts) {
+  let o = parseFloat(p.barOpen),  h = parseFloat(p.barHigh);
+  let l = parseFloat(p.barLow),   c = parseFloat(p.barClose);
+  let hasBarData = [o, h, l, c].every(v => isFinite(v));
+  let barSource = 'payload';
+
+  // Fallback: fetch the signal bar from candle-source when payload lacks OHLC.
+  // Uses the signal's own timeframe so we get the exact bar that triggered it.
+  if (!hasBarData && assetId && (p.timeframe || p.tf)) {
+    try {
+      const { fetchCandles } = require('./candle-source');
+      const tf = normalizeTf(p.timeframe || p.tf);
+      if (tf) {
+        const result = await withTimeout(fetchCandles(assetId, tf, 10), 5000, { candles: [] });
+        const bars = (result && result.candles) || [];
+        // Last bar whose open time is at or before the signal timestamp
+        const bar = [...bars].reverse().find(b => new Date(b.time).getTime() <= ts);
+        if (bar) {
+          o = bar.open; h = bar.high; l = bar.low; c = bar.close;
+          hasBarData = [o, h, l, c].every(v => isFinite(v));
+          barSource = 'candle-source';
+        }
+      }
+    } catch (_) {}
+  }
+
   if (!hasBarData) return { pass: true, wickRatio: null, hasBarData: false };
 
   const range = h - l;
-  if (range <= 0) return { pass: true, wickRatio: null, hasBarData: true };
+  if (range <= 0) return { pass: true, wickRatio: null, hasBarData: true, barSource };
 
   const bodyTop   = Math.max(o, c);
   const bodyBot   = Math.min(o, c);
@@ -79,6 +114,7 @@ function evalWick(p, threshold) {
     pass,
     wickRatio: Math.round(wickRatio * 10000) / 10000,
     hasBarData: true,
+    barSource,
     blockedReason: pass ? null : `wick-${(wickRatio*100).toFixed(0)}%>threshold(${(threshold*100).toFixed(0)}%)`,
   };
 }
@@ -122,15 +158,19 @@ function extractSessionLevels(candles, ts) {
   const londonHigh = signalHour >= 12 ? hi(londonBars) : null;
   const londonLow  = signalHour >= 12 ? lo(londonBars) : null;
 
+  // One completed 4h bar (08:00-12:00 UTC) is all that exists for London.
+  // The old check >= 3 was impossible — London produces exactly one 4h bar/day.
   let londonDirection = null;
-  if (signalHour >= 12 && londonBars.length >= 3) {
-    londonDirection = londonBars[londonBars.length-1].close > londonBars[0].open
-      ? 'bull' : 'bear';
+  if (signalHour >= 12 && londonBars.length >= 1) {
+    const lClose = londonBars[londonBars.length - 1].close;
+    const lOpen  = londonBars[0].open;
+    londonDirection = lClose > lOpen ? 'bull' : 'bear';
   }
 
   return {
     prevDayHigh: hi(prevDayBars), prevDayLow: lo(prevDayBars),
-    asianHigh, asianLow, londonHigh, londonLow, londonDirection,
+    asianHigh, asianLow, asianBars,
+    londonHigh, londonLow, londonDirection,
   };
 }
 
@@ -149,29 +189,23 @@ async function evalSession(p, assetId, ts) {
     if (candles.length < 5) return { pass: true, withPriorSession: null, asianPosition: null, reason: 'no-candle-data' };
 
     const levels = extractSessionLevels(candles, ts);
-    const { asianHigh, asianLow, londonDirection, londonHigh, londonLow } = levels;
+    const { asianHigh, asianLow, asianBars, londonDirection, londonHigh, londonLow } = levels;
     const atr = computeATR(candles, ts);
 
-    // Determine withPriorSession
+    // withPriorSession — single pass, no duplication:
+    //   signal >= 12 UTC : London bar complete  → align with London close direction
+    //   signal 07-12 UTC : London bar in-flight → align with Asian session trend
+    //   signal < 07 UTC  : no prior data yet    → null (gate passes, no block)
     let withPriorSession = null;
-    if (londonDirection) {
+    if (londonDirection !== null) {
       withPriorSession = (dir === 'LONG' && londonDirection === 'bull')
                       || (dir === 'SHORT' && londonDirection === 'bear');
-    } else if (asianHigh != null && asianLow != null) {
-      const asianMid = (asianHigh + asianLow) / 2;
-      if (asianHigh - asianLow > 0) {
-        withPriorSession = (dir === 'LONG' && asianLow > asianLow)   // simplify: use direction vs midpoint
-                        || (dir === 'SHORT' && asianHigh < asianHigh);
-      }
-    }
-    // Re-derive withPriorSession correctly: compare trade direction to London close direction
-    // or Asian session bias
-    if (londonDirection) {
-      withPriorSession = (dir === 'LONG' && londonDirection === 'bull')
-                      || (dir === 'SHORT' && londonDirection === 'bear');
-    } else if (asianHigh != null && asianLow != null) {
-      // use London high/low vs Asian as momentum proxy — fallback: null (no block)
-      withPriorSession = null;
+    } else if (asianHigh !== null && asianLow !== null && asianBars.length >= 1) {
+      const asianOpen  = asianBars[0].open;
+      const asianClose = asianBars[asianBars.length - 1].close;
+      const asianTrend = asianClose > asianOpen ? 'bull' : 'bear';
+      withPriorSession = (dir === 'LONG' && asianTrend === 'bull')
+                      || (dir === 'SHORT' && asianTrend === 'bear');
     }
 
     // asianPosition
@@ -248,7 +282,7 @@ async function evaluateSignalQuality(p, assetId, dedupeKey) {
             : parseInt(p.timestamp, 10) || Date.now();
 
   const [wickResult, sessionResult, cvdResult] = await Promise.all([
-    Promise.resolve(evalWick(p, cfg.wickThreshold)),
+    evalWick(p, cfg.wickThreshold, assetId, ts),
     cfg.sessionGateEnabled ? evalSession(p, assetId, ts) : Promise.resolve({ pass: true }),
     Promise.resolve(evalCVD(p)),
   ]);
