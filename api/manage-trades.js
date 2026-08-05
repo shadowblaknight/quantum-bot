@@ -407,7 +407,10 @@ async function managePosition(position) {
     if (!state.tpsHit.includes(tpName)) {
       state.tpsHit.push(tpName);
       actions.push({ action: 'tp-hit', tpName, tpPrice });
-      const rMult = Math.abs(tpPrice - state.entry) / initialSLForR;
+      // Use the pre-stored rMultiple (computed from planned entry at signal time).
+      // This matches the order-placed notification and stays correct even when
+      // the actual fill has slippage vs the planned entry.
+      const rMult = tpLevels[i].rMultiple ?? (Math.abs(tpPrice - state.entry) / initialSLForR);
       await pushCommentary(asset, 'tp-hit',
         `${tpName} confirmed @ ${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)} (${rMult.toFixed(1)}R)`);
       // TP-hit Telegram: fires at detection, BEFORE and SEPARATE FROM the lock attempt.
@@ -447,7 +450,18 @@ async function managePosition(position) {
   // above every hit TP, the stop simply WAITS where it is — it never hands the win
   // back to entry. A reversal into a locked TP is a real win at that TP.
   // (pipSz and stopBuffer hoisted above TP detection — see declarations above the loop.)
-  const curSL = (typeof position.stopLoss === 'number' && position.stopLoss > 0) ? position.stopLoss : null;
+  // Use the better of broker-reported SL and the last SL we successfully verified.
+  // MetaAPI often serves a stale position.stopLoss on the tick immediately after a
+  // modify — using stateVerifiedSL as a floor prevents the ratchet from thinking
+  // the lock hasn't happened yet and firing a spurious SKIPPED on the next tick.
+  const brokerSL        = (typeof position.stopLoss === 'number' && position.stopLoss > 0) ? position.stopLoss : null;
+  const stateVerifiedSL = (typeof state.lastVerifiedSL === 'number' && isFinite(state.lastVerifiedSL)) ? state.lastVerifiedSL : null;
+  const curSL = (() => {
+    if (brokerSL == null && stateVerifiedSL == null) return null;
+    if (brokerSL == null)      return stateVerifiedSL;
+    if (stateVerifiedSL == null) return brokerSL;
+    return isLong ? Math.max(brokerSL, stateVerifiedSL) : Math.min(brokerSL, stateVerifiedSL);
+  })();
 
   // hit TP rungs (exclude the final/close rung), deepest-profit first
   const hitRungs = [];
@@ -531,15 +545,25 @@ async function managePosition(position) {
           actions.push({ action: 'sl-move', newSL: slCandidate, at: chosen.name, ok: true, verified: true, clamped: slClamped });
           await pushCommentary(asset, 'sl-moved',
             `SL locked at ${chosen.name} @ ${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}${slClamped ? ' (clamped)' : ''}`);
+          state.lastVerifiedSL = slCandidate;
           if (state.lockedTP !== chosen.name) {
             state.lockedTP = chosen.name;
-            const rMult        = Math.abs(slCandidate - state.entry) / initialSLForR;
+            // R from planned entry/SL so it matches the order-placed notification.
+            const plannedSLDist = Math.abs(matchedPending.plannedEntry - matchedPending.slPrice);
+            const rMult = plannedSLDist > 0
+              ? Math.abs(slCandidate - matchedPending.plannedEntry) / plannedSLDist
+              : (Math.abs(slCandidate - state.entry) / initialSLForR);
             const lockedDollars = signedDollarsForLeg(asset, state.entry, slCandidate, direction, position.volume);
             const ridingTo      = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
+            // When the SL was clamped, label it clearly — the stop is NOT at TP price.
+            const pFmt = (v) => v.toFixed(v > 100 ? 2 : 5);
+            const stopDesc = slClamped
+              ? `<code>${pFmt(slCandidate)}</code> ⚠️ clamped (${chosen.name} ${pFmt(chosen.price)} too close to market)`
+              : `${chosen.name} <code>${pFmt(slCandidate)}</code>`;
             try {
               await sendOnce(`tplock:${position.id}:${chosen.name}`,
                 `\u{1F3AF} <b>${chosen.name} LOCKED — ${asset.toUpperCase()}</b>\n\n` +
-                `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · stop now at ${chosen.name} <code>${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)${slClamped ? ' ⚠️ clamped' : ''}\n` +
+                `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · stop now at ${stopDesc} (${rMult.toFixed(1)}R)\n` +
                 (lockedDollars != null ? `Locked in: <b>${lockedDollars >= 0 ? '+' : ''}$${lockedDollars.toFixed(2)}</b> guaranteed if stopped\n` : '') +
                 (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
             } catch (_) {}
