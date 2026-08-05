@@ -849,21 +849,26 @@ async function detectAndProcessClosed(currentOpenIds) {
           ? state.slMoves[state.slMoves.length - 1].newSL
           : matchedPending.slPrice;
         await notifySLHit({
-          asset: state.asset,
-          direction: state.direction,
-          slPrice: lastSL,
+          asset:       state.asset,
+          direction:   state.direction,
+          slPrice:     lastSL,
           dollarsLost: totalPnL,
           positionId,
+          riskDollars: matchedPending.sizing?.baseRisk || null,
+          openedAt:    state.createdAt,
         });
       } else {
         await notifyTradeClosed({
-          asset: state.asset,
-          direction: state.direction,
+          asset:       state.asset,
+          direction:   state.direction,
           totalPnL,
           tpsHit,
           positionId,
-          openedAt: state.createdAt,
-          closedAt: Date.now(),
+          openedAt:    state.createdAt,
+          closedAt:    Date.now(),
+          template:    matchedPending.setup?.template   || null,
+          session:     matchedPending.setup?.session    || null,
+          riskDollars: matchedPending.sizing?.baseRisk  || null,
         });
       }
     } catch (_) {}

@@ -566,6 +566,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // v16.0 signal-quality gate: wick ratio > 50%, counter-session, or CVD low-trust+divergence.
   // All three sub-gates are independently togglable via Redis config (v15:squality:config).
   // Result is stored in Redis for recognition-memory to pick up when the trade closes.
+  let sqQualityTier = null; // captured outside the block so notifyTradePlaced can use it
   {
     const sq = await evaluateSignalQuality(p, assetId, dedupeKey).catch(() => ({ pass: true }));
     if (!sq.pass) {
@@ -616,6 +617,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         }).catch(() => {});
       }
     } catch (_nyJErr) {}
+    sqQualityTier = sq.qualityTier || null;
     // ─────────────────────────────────────────────────────────────────────────
   }
 
@@ -774,6 +776,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       ].filter((t) => t.price != null),
       riskDollars: Math.abs(entry - finalSL) * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot,
       brokerOrderId: placement.orderId, template: p.template,
+      qualityTier: sqQualityTier,
     });
   } catch (_) {}
 }
