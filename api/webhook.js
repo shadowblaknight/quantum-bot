@@ -80,7 +80,7 @@ const TEMPLATE_INSTRUMENT_BLOCKS = {
 // London 08:00 was removed — it blocked ORB/ORB-pro wins that are designed to
 // fire at London open. NY-only window is safe but small; kept for now.
 // To disable: set to 0.
-const SESSION_OPEN_COOLDOWN_MINS = 15;
+const SESSION_OPEN_COOLDOWN_MINS = 0; // was 15 — dropped: blocks ORB/ORB-PRO which fire exactly at NY open
 
 function _escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
@@ -825,6 +825,13 @@ module.exports = async (req, res) => {
     } catch (_) {}
     try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: `pine-skip: ${reason}` }); } catch (_) {}
     return res.status(200).json({ ok: true, skipped: true, reason });
+  }
+
+  // alexg is backend-only (cron via /api/alexg-run). It has no Pine script and
+  // must never be sent as a webhook signal. Return a clear 400 so accidental
+  // misconfiguration is caught immediately rather than silently misrouted.
+  if (p.template === 'alexg') {
+    return res.status(400).json({ ok: false, error: 'alexg is a backend-only strategy — it runs via its own cron (/api/alexg-run) and does not accept Pine webhook signals' });
   }
 
   if (!ACCEPTED_TEMPLATES.includes(p.template)) {

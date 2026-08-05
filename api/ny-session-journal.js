@@ -23,7 +23,7 @@
 const { getRedis, safeParse } = require('./_lib');
 
 const NY_ASSETS    = new Set(['gold', 'us500', 'nas100']);
-const NY_TEMPLATES = new Set(['orb', 'orb-pro', 'am-ifvg', 'silver-bullet']);
+const NY_TEMPLATES = new Set(['orb', 'orb-pro', 'am-ifvg', 'silver-bullet', 'alexg']);
 const NY_UTC_START = 13 * 60;   // 13:00 UTC
 const NY_UTC_END   = 16 * 60;   // 16:00 UTC
 const MATCH_MIN    = 14;        // sessions before matcher activates per asset

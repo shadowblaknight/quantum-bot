@@ -165,18 +165,32 @@ async function addPendingSetup(asset, pendingSetup) {
   const existing = await getPendingSetups(asset);
 
   // DEDUPLICATION GUARD
-  const tpriceAtr = pendingSetup.plannedEntry > 100 ? 1.5 : 0.0008; // gold vs eurusd-ish
+  // Tiered price tolerance: 1.5 pts was calibrated for gold but is near-zero for NAS100
+  // (ATR 80-200 pts). Tiers are set to ~0.15% of typical price for each asset class.
+  const _ep = pendingSetup.plannedEntry;
+  const tpriceAtr = _ep <    5 ? 0.0008  // forex majors (EUR/USD ~1.05, GBP/USD ~1.27)
+    : _ep <   30  ? 0.05                  // silver, low-price crosses
+    : _ep <  200  ? 0.5                   // JPY crosses (USD/JPY ~150, GBP/JPY ~190)
+    : _ep < 3000  ? 3.0                   // gold (~2400), platinum (~900)
+    : _ep < 8000  ? 8.0                   // US500 (~5500)
+    : _ep < 30000 ? 30.0                  // NAS100 (~19000)
+    : 150.0;                              // BTC (~70k), US30 (~38k)
+  // Webhook records set setup.template but NOT templateName (only the watcher's
+  // autonomous records use templateName). Compare via setup.template with templateName
+  // as fallback so two different templates at the same price are never false-deduplicated.
+  const _tmplOf = (ps) => (ps.setup && ps.setup.template) || ps.templateName || null;
   const activeStatuses = new Set(['pending', 'placed', 'filled']);
   const dup = existing.find((p) =>
     activeStatuses.has(p.status) &&
-    p.templateName === pendingSetup.templateName &&
+    _tmplOf(p) === _tmplOf(pendingSetup) &&
     p.setup?.direction === pendingSetup.setup?.direction &&
     Math.abs(p.plannedEntry - pendingSetup.plannedEntry) < tpriceAtr
   );
   if (dup) {
+    const _dupTmpl = _tmplOf(pendingSetup) || 'unknown';
     await pushCommentary(asset, 'setup-dedup',
-      `Skipped duplicate ${pendingSetup.templateName} ${pendingSetup.setup.direction} @ ${pendingSetup.plannedEntry.toFixed(2)} (matches existing ${dup.id})`,
-      'dedup-' + pendingSetup.templateName + '-' + pendingSetup.setup.direction
+      `Skipped duplicate ${_dupTmpl} ${pendingSetup.setup.direction} @ ${pendingSetup.plannedEntry.toFixed(2)} (matches existing ${dup.id})`,
+      'dedup-' + _dupTmpl + '-' + pendingSetup.setup.direction
     );
     return { skipped: 'duplicate', existingId: dup.id };
   }

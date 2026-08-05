@@ -192,6 +192,44 @@ async function runAlexg(opts = {}) {
     const rr = risk > 0 ? (isLong ? (tpRaw - entryRaw) : (entryRaw - tpRaw)) / risk : null;
     if (rr == null || rr < CFG.rrFloor) { summary.skipped.push({ asset, reason: `retest RR ${rr == null ? 'n/a' : rr.toFixed(2)} < ${CFG.rrFloor}` }); continue; }
 
+    const ts = Date.now(); // hoisted: shared by gates, pending record, and NY journal
+
+    // ── gating-store check (#3) ────────────────────────────────────────────────
+    // Mirrors the isGated() call in webhook.js so alexg respects user-configured
+    // template×session×instrument blocks without going through the webhook path.
+    {
+      let _gated = null;
+      const _gateSession = (plan.session && plan.session.window) || '*';
+      try {
+        const { isGated } = require('./gating-store');
+        _gated = await isGated('alexg', _gateSession, asset);
+      } catch (_gateErr) {
+        try { await D.rules.logActivity({ type: 'alexg-gating-fallback', asset, error: _gateErr && _gateErr.message, failOpen: true }); } catch (_) {}
+      }
+      if (_gated && _gated.blocked) {
+        summary.skipped.push({ asset, reason: `gated:${_gated.ruleKey}` });
+        continue;
+      }
+    }
+
+    // ── signal quality gate (#5) ───────────────────────────────────────────────
+    // alexg has no Pine OHLC — wick gate falls back to candle-source; CVD gate
+    // passes by default (hasCVDData:false). Fail open if the module is unavailable.
+    let _sqResult = { pass: true, qualityTier: null };
+    {
+      const _sqPayload = { direction: dir, template: 'alexg', timestamp: ts };
+      const _sqKey = `alexg:${asset}:${dir}:${ts}`;
+      try {
+        const { evaluateSignalQuality } = require('./signal-quality');
+        _sqResult = await evaluateSignalQuality(_sqPayload, asset, _sqKey);
+      } catch (_sqErr) { /* SQ unavailable — fail open */ }
+      if (!_sqResult.pass) {
+        summary.skipped.push({ asset, reason: `signal-quality-blocked:${_sqResult.blockedBy}`, qualityTier: _sqResult.qualityTier });
+        try { await D.rules.logActivity({ type: 'skip', asset, template: 'alexg', direction: dir, reason: `signal-quality-blocked:${_sqResult.blockedBy}`, qualityTier: _sqResult.qualityTier }); } catch (_) {}
+        continue;
+      }
+    }
+
     // ── sizing (instrument's own rules) ──
     const prof = D.rules.resolveProfile ? D.rules.resolveProfile(inst) : inst;
     const lot = sizeLot(prof, capital, rules.account.maxRiskPerTradePct, risk, meta, preset, tmplOverride);
@@ -208,7 +246,6 @@ async function runAlexg(opts = {}) {
     const rEntry = roundTick(entryRaw, pip, 'nearest');
     const rSL = roundTick(slRaw, pip, isLong ? 'down' : 'up');
     const rTP = roundTick(tpRaw, pip, isLong ? 'down' : 'up');
-    const ts = Date.now();
     const comment = `QB-V13-alexg-${dir}-${plan.triggerTF || 'na'}`.slice(0, 64);
     const style = plan.tradeType === 'swing' ? 'swing' : 'day';
     const rOf = (tp) => (risk > 0 ? Math.round(Math.abs(tp - rEntry) / risk * 10) / 10 : null);
@@ -222,6 +259,19 @@ async function runAlexg(opts = {}) {
     // ── place: MARKET for confirmed H4 rejection; LIMIT (zone-edge retest) otherwise ──
     let placement, entryTypeFinal, execKindFinal;
     if (plan.h4RejectionConfirmed && D.execute.placeMarketOrder) {
+      // Kill zone check (#4): H4 market entries go in at market price right now, so
+      // they must respect the same kill-zone gate that execute.js/tryPlace enforces
+      // for webhook market orders. Limit orders fill later at the zone edge and are exempt.
+      let _kzOk = true;
+      try {
+        const { checkKillZone } = require('./kill-zones');
+        const _kz = checkKillZone();
+        if (!_kz.inKillZone) {
+          _kzOk = false;
+          summary.skipped.push({ asset, reason: `h4-outside-kz:${_kz.name || 'none'}` });
+        }
+      } catch (_) { /* KZ unavailable — fail open */ }
+      if (!_kzOk) continue;
       // H4 closed through the zone edge — confirmed rejection, enter at market immediately
       entryTypeFinal = 'h4-rejection'; execKindFinal = 'market';
       try { placement = await D.execute.placeMarketOrder(brokerSymbol, dir, lot, rSL, rTP, comment); }
@@ -275,12 +325,25 @@ async function runAlexg(opts = {}) {
           tpLevels: [{ price: rTP, rMultiple: rOf(rTP), source: 'alexg-structure' }],
           riskDollars: (meta && meta.dollarPerPipPerLot && meta.pipSize) ? (meta.dollarPerPipPerLot / meta.pipSize) * risk * lot : null,
           brokerOrderId: placement.orderId, template: 'alexg',
+          qualityTier: _sqResult.qualityTier || null,
         });
       }
     } catch (_) {}
 
     liveCount++;
     summary.placed.push({ asset, dir, entry: rEntry, sl: rSL, tp: rTP, lot, rr: +rr.toFixed(2), grade: plan.grade.letter, orderId: placement.orderId });
+
+    // ── NY session journal (#10) ───────────────────────────────────────────────
+    // alexg trades gold/nas100/us500 — same NY assets as the ICT NY templates.
+    // Record a session entry when a trade is placed during the 13:00-16:00 UTC window
+    // so the NY specialist panel shows alexg performance alongside orb/silver-bullet.
+    try {
+      const { isNYSpecialistSignal, recordNYSignal } = require('./ny-session-journal');
+      if (isNYSpecialistSignal(asset, 'alexg', ts)) {
+        const _nyPayload = { direction: dir, template: 'alexg', timestamp: ts };
+        recordNYSignal(_nyPayload, asset, _sqResult).catch(() => {});
+      }
+    } catch (_nyErr) {}
   }
 
   return summary;
