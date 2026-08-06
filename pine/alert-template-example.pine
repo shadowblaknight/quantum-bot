@@ -1,0 +1,86 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERT MESSAGE TEMPLATE — how to wire session-context-v17 into any template
+// ───────────────────────────────────────────────────────────────────────────────
+// This file shows the EXACT alert message format for silver-bullet as a reference.
+// Apply the same pattern to: unicorn, turtle-soup, judas-swing, ote-continuation,
+// am-ifvg, orb, orb-pro, reaction, reaction-fvg, reaction-ifvg.
+//
+// STEP 1: paste the full session-context-v17.pine block into your indicator
+// STEP 2: replace your existing alert() / alertcondition() messages with the
+//         format below — only the gapDir line differs between LONG and SHORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+// ── Helper: build the session context suffix (same for LONG and SHORT) ────────
+// Call this with the correct gapDir argument per direction.
+
+_scSuffix(gapDirVal) =>
+    '"adrConsumed":"'  + str.tostring(_adrConsumed,  "#.####") + '",' +
+    '"gapAtr":"'       + str.tostring(_gapAtr,        "#.####") + '",' +
+    '"gapDir":"'       + str.tostring(gapDirVal)               + '",' +
+    '"priorDayPos":"'  + str.tostring(_priorDayPos)             + '",' +
+    '"hourUtc":"'      + str.tostring(_hourUtc)                 + '",' +
+    '"dayOfWeek":"'    + str.tostring(_dayOfWeek)               + '",' +
+    '"nearKeyTime":"'  + str.tostring(_nearKeyTime)             + '",' +
+    '"ibSide":"'       + _ibSideStr                             + '",' +
+    '"ibPosition":"'   + str.tostring(_ibPositionV,   "#.##")  + '",' +
+    '"first15mDir":"'  + str.tostring(_first15mDir)             + '"'
+
+
+// ── Silver-Bullet: LONG alert ────────────────────────────────────────────────
+// (replace your existing LONG alertcondition / alert message with this)
+
+if longCondition  // ← your existing trigger condition
+    alert(
+        '{"template":"silver-bullet",'          +
+        '"direction":"LONG",'                    +
+        '"session":"' + sessionName + '",'       +  // ← your existing session var
+        '"entry":"'   + str.tostring(entryPrice, "#.#####") + '",' +
+        '"sl":"'      + str.tostring(slPrice,    "#.#####") + '",' +
+        '"tp1":"'     + str.tostring(tp1Price,   "#.#####") + '",' +
+        '"tp2":"'     + str.tostring(tp2Price,   "#.#####") + '",' +
+        _scSuffix(_gapDirLong) +                // ← session context fields
+        '}',
+        alert.freq_once_per_bar_close
+    )
+
+
+// ── Silver-Bullet: SHORT alert ───────────────────────────────────────────────
+// Only change vs LONG: direction field + _gapDirShort instead of _gapDirLong
+
+if shortCondition  // ← your existing trigger condition
+    alert(
+        '{"template":"silver-bullet",'          +
+        '"direction":"SHORT",'                   +
+        '"session":"' + sessionName + '",'       +
+        '"entry":"'   + str.tostring(entryPrice, "#.#####") + '",' +
+        '"sl":"'      + str.tostring(slPrice,    "#.#####") + '",' +
+        '"tp1":"'     + str.tostring(tp1Price,   "#.#####") + '",' +
+        '"tp2":"'     + str.tostring(tp2Price,   "#.#####") + '",' +
+        _scSuffix(_gapDirShort) +               // ← gapDirShort for SHORT
+        '}',
+        alert.freq_once_per_bar_close
+    )
+
+
+// ── What each new field sends (example values) ───────────────────────────────
+//
+//  "adrConsumed": "0.4821"   → 48% of the daily ATR already consumed
+//  "gapAtr":      "0.1340"   → gap was 13% of ATR (tiny gap, likely to fill)
+//  "gapDir":      "-1"       → gap opened against the signal direction
+//  "priorDayPos": "1"        → today opened ABOVE prior day high (bullish structure)
+//  "hourUtc":     "14"       → signal fired at 14:xx UTC
+//  "dayOfWeek":   "2"        → Tuesday
+//  "nearKeyTime": "0"        → NOT near LBMA fix or COMEX open (gold-only check)
+//  "ibSide":      "low_first"→ IB low established before IB high (bullish IB)
+//  "ibPosition":  "0.73"     → price is at 73% of the IB range (above midpoint)
+//  "first15mDir": "1"        → first 15-min candle was bullish
+//
+// Server scoring for this example (NAS100 LONG):
+//   adrConsumed 0.48 → neutral (0)
+//   priorDayPos +1, LONG → +1
+//   gapAtr 0.13 (<0.3x), gapDir -1 → small gap opposite to signal → gap fills toward signal → +1
+//   ibSide low_first + ibPosition 0.73 (>0.5) → LONG aligned → +2
+//   first15mDir +1, LONG → +1
+//   ──────────────────
+//   sessionScore = 5 → grade: STRONG → qualityTier stays A if wick+CVD also pass

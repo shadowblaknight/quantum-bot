@@ -1,0 +1,197 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// SESSION CONTEXT v17 — Structural Fields for Signal Quality Gate
+// ───────────────────────────────────────────────────────────────────────────────
+// Paste this block into any template indicator ONCE, near the top after your
+// existing variable declarations. It auto-detects the instrument and computes
+// only the checks relevant to that instrument.
+//
+// Fields produced (add to every webhook alert JSON — see bottom of file):
+//   Universal  : adrConsumed, gapAtr, gapDir, priorDayPos, hourUtc, dayOfWeek
+//   Gold only  : nearKeyTime
+//   NAS100/US500: ibSide, ibPosition, first15mDir
+//
+// IMPORTANT: This snippet assumes an INTRADAY chart (1m–15m).
+//   Daily TF calls (request.security "D") work on any intraday chart.
+//   The IB tracking variables (var float) require bar-by-bar execution.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+// ── Instrument detection ──────────────────────────────────────────────────────
+
+_ticker   = str.upper(syminfo.ticker)
+_isGold   = str.contains(_ticker, "XAU")
+_isNas    = str.contains(_ticker, "NAS") or str.contains(_ticker, "NDX") or
+            str.contains(_ticker, "NQ")
+_isUs500  = str.contains(_ticker, "SPX") or str.contains(_ticker, "ES1") or
+            str.contains(_ticker, "US500") or str.contains(_ticker, "SP500") or
+            str.contains(_ticker, "SPY")
+_isBtc    = str.contains(_ticker, "BTC")
+_isIndex  = _isNas or _isUs500
+
+
+// ── Time ──────────────────────────────────────────────────────────────────────
+
+_hourUtc   = hour(time, "UTC")
+_minUtc    = minute(time, "UTC")
+_minOfDay  = _hourUtc * 60 + _minUtc
+
+// Pine dayofweek: 1=Sun, 2=Mon, ..., 7=Sat  →  convert to 0=Sun, 1=Mon, ..., 6=Sat
+_dayOfWeek = dayofweek(time, "UTC") - 1
+
+
+// ── Daily reference data ──────────────────────────────────────────────────────
+// request.security with "D" returns the current daily bar's value on any
+// intraday chart. [1] shifts back one completed day.
+
+_atr14d      = request.security(syminfo.tickerid, "D", ta.atr(14))
+_todayOpen   = request.security(syminfo.tickerid, "D", open)
+_todayHigh   = request.security(syminfo.tickerid, "D", high)
+_todayLow    = request.security(syminfo.tickerid, "D", low)
+_priorClose  = request.security(syminfo.tickerid, "D", close[1])
+_priorDayHi  = request.security(syminfo.tickerid, "D", high[1])
+_priorDayLo  = request.security(syminfo.tickerid, "D", low[1])
+
+
+// ── Universal: ADR consumed ───────────────────────────────────────────────────
+// Fraction of the 14-day ATR already consumed today (0.0 – 1.0+).
+// 0.40 = plenty of room. 0.70 = getting tight. 0.85+ = exhaustion zone.
+
+_adrConsumed = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
+
+
+// ── Universal: gap vs ATR ─────────────────────────────────────────────────────
+// gapAtr  : size of today's opening gap as a multiple of ATR (always positive).
+// gapSign : raw direction of gap (+1 = gapped up, -1 = gapped down, 0 = flat).
+// gapDir  : direction relative to the SIGNAL — computed separately per direction
+//           in the alert message (see alert section at the bottom).
+
+_gapRaw     = _todayOpen - _priorClose
+_gapAtr     = _atr14d > 0 ? math.abs(_gapRaw) / _atr14d : 0.0
+_gapSign    = _gapRaw > 0 ? 1 : _gapRaw < 0 ? -1 : 0
+
+// Pre-compute direction-relative gap for each possible signal direction:
+//   LONG  signal: gap up = gap in direction (+1), gap down = against (-1)
+//   SHORT signal: gap down = gap in direction (+1), gap up = against (-1)
+_gapDirLong  = _gapSign          //  +1 if gapped up (with long), -1 if down
+_gapDirShort = _gapSign * -1     //  +1 if gapped down (with short), -1 if up
+
+
+// ── Universal: prior day structural position ──────────────────────────────────
+// +1 = price opened above prior day high (bullish structure)
+//  0 = inside prior day range (neutral)
+// -1 = price opened below prior day low (bearish structure)
+// Uses _todayOpen so it's stable for the whole session.
+
+_priorDayPos = _todayOpen > _priorDayHi ? 1 : _todayOpen < _priorDayLo ? -1 : 0
+
+
+// ── Gold: institutional time anchors ─────────────────────────────────────────
+// LBMA AM fix: 10:30 GMT = 630 min ± 45 → window 585–675 min
+// COMEX open : 13:30 UTC = 810 min ± 45 → window 765–855 min
+// nearKeyTime = 1 when signal fires near either window, else 0.
+
+_nearKeyTime = _isGold and
+               ((_minOfDay >= 585 and _minOfDay <= 675) or    // LBMA AM fix ±45 min
+                (_minOfDay >= 765 and _minOfDay <= 855))  ?   // COMEX open  ±45 min
+               1 : 0
+
+
+// ── Indices: Initial Balance (first 60 min of RTH = 13:30–14:30 UTC) ─────────
+// Tracks which IB extreme formed first and where current price sits within
+// the IB range. Used only for NAS100 and US500.
+//
+// ibSide     : "low_first" | "high_first" | "null" (IB not yet complete)
+// ibPosition : 0.0 (at IB low) → 1.0 (at IB high) | -1 (IB not complete)
+
+_ibStart = 13 * 60 + 30   // 13:30 UTC in minutes
+_ibEnd   = 14 * 60 + 30   // 14:30 UTC
+
+_inIBWindow = _minOfDay >= _ibStart and _minOfDay < _ibEnd
+_postIB     = _minOfDay >= _ibEnd
+
+var float _ibHigh    = na
+var float _ibLow     = na
+var int   _ibHighBar = na
+var int   _ibLowBar  = na
+var bool  _ibDone    = false
+
+// Reset at start of each new day
+_newDay = ta.change(dayofmonth(time, "UTC")) != 0
+if _newDay
+    _ibHigh    := na
+    _ibLow     := na
+    _ibHighBar := na
+    _ibLowBar  := na
+    _ibDone    := false
+
+// Track IB high/low during and just after the window
+if _isIndex and (_inIBWindow or (_postIB and not _ibDone))
+    if na(_ibHigh) or high > _ibHigh
+        _ibHigh    := high
+        _ibHighBar := bar_index
+    if na(_ibLow) or low < _ibLow
+        _ibLow    := low
+        _ibLowBar := bar_index
+
+if _isIndex and _postIB and not na(_ibHigh) and not na(_ibLow)
+    _ibDone := true
+
+_ibSideStr    = _isIndex and _ibDone ?
+                (_ibLowBar < _ibHighBar ? "low_first" : "high_first") : "null"
+_ibPositionV  = _isIndex and _ibDone and (_ibHigh - _ibLow) > 0 ?
+                math.round((close - _ibLow) / (_ibHigh - _ibLow) * 100) / 100 : -1.0
+
+
+// ── Indices: first 15-min candle direction ────────────────────────────────────
+// Compares close at or after 13:45 UTC to the price at 13:30 UTC (RTH open).
+// Captures the direction of the first 15-min bar after session open.
+//   +1 = bullish first candle  (aligns with LONG  → +1 session score)
+//    0 = flat / not yet complete
+//   -1 = bearish first candle  (aligns with SHORT → +1 session score)
+//
+// Tracking the RTH open price across bars using a var:
+
+var float _rthOpenPrice = na
+
+if _newDay
+    _rthOpenPrice := na
+
+// Capture the first tick/bar at exactly 13:30 UTC
+if _isIndex and _minOfDay == _ibStart and na(_rthOpenPrice)
+    _rthOpenPrice := open
+
+// First 15-min direction is readable once we're past 13:45 UTC
+_first15mAvail = _isIndex and not na(_rthOpenPrice) and _minOfDay >= (_ibStart + 15)
+_first15mDir   = _first15mAvail ?
+                 (close > _rthOpenPrice ? 1 : close < _rthOpenPrice ? -1 : 0) : 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERT MESSAGE — add these fields to your existing webhook JSON
+// ───────────────────────────────────────────────────────────────────────────────
+// Copy the relevant block into your alertcondition() or alert() message string.
+// Replace YOUR_EXISTING_FIELDS with the rest of your payload.
+//
+// LONG alert example:
+// alert('{"template":"silver-bullet","direction":"LONG","entry":"' + str.tostring(close) + '",' +
+//   // ... YOUR_EXISTING_FIELDS (entry, sl, tp1, tp2, session, etc.) ...
+//   '"adrConsumed":"'  + str.tostring(_adrConsumed,  "#.####") + '",' +
+//   '"gapAtr":"'       + str.tostring(_gapAtr,       "#.####") + '",' +
+//   '"gapDir":"'       + str.tostring(_gapDirLong)              + '",' +
+//   '"priorDayPos":"'  + str.tostring(_priorDayPos)              + '",' +
+//   '"hourUtc":"'      + str.tostring(_hourUtc)                  + '",' +
+//   '"dayOfWeek":"'    + str.tostring(_dayOfWeek)                + '",' +
+//   // Gold only — safe to include on any chart (server ignores it for non-gold):
+//   '"nearKeyTime":"'  + str.tostring(_nearKeyTime)              + '",' +
+//   // Indices only — safe to include on any chart (server ignores for non-indices):
+//   '"ibSide":"'       + _ibSideStr                              + '",' +
+//   '"ibPosition":"'   + str.tostring(_ibPositionV,  "#.##")    + '",' +
+//   '"first15mDir":"'  + str.tostring(_first15mDir)              + '"' +
+//   '}')
+//
+// SHORT alert example — identical but use _gapDirShort instead of _gapDirLong:
+//   '"gapDir":"' + str.tostring(_gapDirShort) + '",' +
+//
+// TIP: ALL fields are safe to include on every instrument. The server only reads
+// the ones relevant to the asset (e.g. ibSide on forex is received but ignored).
+// ═══════════════════════════════════════════════════════════════════════════════

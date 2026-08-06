@@ -6439,7 +6439,11 @@ function SQGateSparklines({ signals }) {
   const recent = signals.slice(0, 30);
   const gates = [
     { label:'WICK',    desc:'Heavy wick filter',        test: s => s.wickRatio == null ? null : s.wickRatio <= 0.50 },
-    { label:'SESSION', desc:'Prior session alignment',  test: s => s.withPriorSession == null ? null : s.withPriorSession === true },
+    { label:'SESSION', desc:'Structural context scoring (ADR · gap · IB)', test: s => {
+      if (s.sessionGrade != null) return s.sessionGrade !== 'BLOCK' && s.sessionGrade !== 'ADVERSE';
+      if (s.withPriorSession != null) return s.withPriorSession === true;
+      return null;
+    }},
     { label:'CVD',     desc:'Order flow confirmation',  test: s => s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none') },
   ];
   return (
@@ -6471,24 +6475,119 @@ function SQGateSparklines({ signals }) {
   );
 }
 
+// ── Session v17 grade helpers ─────────────────────────────────────────────────
+
+const SQ_GRADE_META = {
+  STRONG:    { color:'#22c55e', bg:'#22c55e14', border:'#22c55e40', label:'STRONG'    },
+  FAVORABLE: { color:'#4ade80', bg:'#4ade8014', border:'#4ade8040', label:'FAVORABLE' },
+  NEUTRAL:   { color:'#94a3b8', bg:'#94a3b814', border:'#94a3b840', label:'NEUTRAL'   },
+  WEAK:      { color:'#f59e0b', bg:'#f59e0b14', border:'#f59e0b40', label:'WEAK'      },
+  ADVERSE:   { color:'#f97316', bg:'#f9731614', border:'#f9731640', label:'ADVERSE'   },
+  BLOCK:     { color:'#ef4444', bg:'#ef444414', border:'#ef444440', label:'BLOCK'     },
+};
+
+function sqGradeMeta(grade) {
+  return SQ_GRADE_META[grade] || { color:'#6b7280', bg:'#6b728014', border:'#6b728040', label: grade || '?' };
+}
+
+const SQ_CHECK_LABELS = {
+  'adr-room':              'ADR ok',
+  'adr-exhausted':         'ADR!',
+  'prior-day-aligned':     'PD ↑',
+  'prior-day-against':     'PD ↓',
+  'large-gap-aligned':     'gap ↑',
+  'large-gap-against':     'gap ↓',
+  'tiny-gap-fills':        'gap ~',
+  'ib-aligned':            'IB ✓',
+  'ib-against':            'IB ✗',
+  'ib-extended-against':   'IB !!',
+  'first15m-aligned':      '15m ✓',
+  'first15m-against':      '15m ✗',
+  'near-key-time':         'fix ✓',
+  'gold-monday':           'Mon ↓',
+  'gold-exhausted':        'exh !',
+  'btc-monday':            'Mon ↑',
+  'btc-weekend':           'wknd ↓',
+  'btc-power-hour':        'PH ✓',
+  'btc-drain-hour':        'drain ↓',
+};
+
+function SQCheckChips({ checks }) {
+  if (!checks || checks.length === 0) return null;
+  return (
+    <div style={{ display:'flex', gap:2, flexWrap:'wrap', marginTop:3 }}>
+      {checks.map((c, i) => {
+        const pos   = c.delta > 0;
+        const color = pos ? '#22c55e' : '#ef4444';
+        const label = SQ_CHECK_LABELS[c.name] || c.name;
+        return (
+          <div key={i} style={{
+            fontFamily:'var(--qb-font-mono)', fontSize:6, color,
+            background:`${color}12`, border:`1px solid ${color}30`,
+            borderRadius:2, padding:'0px 3px', whiteSpace:'nowrap', lineHeight:'1.6',
+          }}>
+            {c.delta > 0 ? '+' : ''}{c.delta} {label}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SQSessGrade({ grade, scoreAvailable, score }) {
+  // legacy path — Pine not yet migrated, no structural data
+  if (!grade && !scoreAvailable) {
+    return (
+      <div style={{
+        fontFamily:'var(--qb-font-mono)', fontSize:6, color:'#6b7280',
+        background:'rgba(107,114,128,0.10)', border:'1px solid rgba(107,114,128,0.25)',
+        borderRadius:2, padding:'1px 4px', whiteSpace:'nowrap', textAlign:'center',
+      }}>
+        LEGACY
+      </div>
+    );
+  }
+  const m = sqGradeMeta(grade);
+  return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:1 }}>
+      <div style={{
+        fontFamily:'var(--qb-font-mono)', fontSize:6, color:m.color,
+        background:m.bg, border:`1px solid ${m.border}`,
+        borderRadius:2, padding:'1px 4px', whiteSpace:'nowrap', letterSpacing:0.3, textAlign:'center',
+      }}>
+        {m.label}
+      </div>
+      {score != null && (
+        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:6, color:m.color, opacity:0.8 }}>
+          {score > 0 ? `+${score}` : score}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Signal card ────────────────────────────────────────────────────────────────
+
 function SQSignalCard({ s }) {
-  const sess   = sqSession(s.ts);
-  const wf     = sqWickForm(s.wickRatio, s.direction);
-  const dt     = new Date(s.ts);
-  const time   = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}`;
-  const date   = `${dt.getUTCMonth()+1}/${dt.getUTCDate()}`;
-  const isLong = s.direction !== 'SHORT';
-  const passC  = s.pass ? '#22c55e' : '#ef4444';
-  const tierC  = { A:'#22c55e', B:'#f59e0b', C:'#f97316', D:'#ef4444' }[s.qualityTier] || '#6b7280';
-  const wickOk = s.wickRatio == null ? null : s.wickRatio <= 0.50;
-  const sessOk = s.withPriorSession == null ? null : s.withPriorSession;
-  const cvdOk  = s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none');
-  const Dot    = ({ ok }) => (
+  const sess    = sqSession(s.ts);
+  const wf      = sqWickForm(s.wickRatio, s.direction);
+  const dt      = new Date(s.ts);
+  const time    = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}`;
+  const date    = `${dt.getUTCMonth()+1}/${dt.getUTCDate()}`;
+  const isLong  = s.direction !== 'SHORT';
+  const passC   = s.pass ? '#22c55e' : '#ef4444';
+  const tierC   = { A:'#22c55e', B:'#f59e0b', C:'#f97316', D:'#ef4444' }[s.qualityTier] || '#6b7280';
+  const wickOk  = s.wickRatio == null ? null : s.wickRatio <= 0.50;
+  const sessGrade = s.sessionGrade || null;
+  const cvdOk   = s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none');
+  const Dot     = ({ ok }) => (
     <div style={{ width:5, height:5, borderRadius:'50%', flexShrink:0, background: ok === null ? '#374151' : ok ? '#22c55e' : '#ef4444' }} />
   );
   return (
-    <div style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', background:'var(--qb-bg-panel-hi)', border:`1px solid ${s.pass ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'}`, borderLeft:`3px solid ${passC}`, borderRadius:4 }}>
-      <SQMiniCandle wickRatio={s.wickRatio} direction={s.direction} height={36} />
+    <div style={{ display:'flex', alignItems:'flex-start', gap:8, padding:'6px 10px', background:'var(--qb-bg-panel-hi)', border:`1px solid ${s.pass ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'}`, borderLeft:`3px solid ${passC}`, borderRadius:4 }}>
+      <div style={{ paddingTop:2 }}>
+        <SQMiniCandle wickRatio={s.wickRatio} direction={s.direction} height={36} />
+      </div>
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:2 }}>
           <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:10, fontWeight:700, color:'var(--qb-text-hi)' }}>{s.assetId}</span>
@@ -6499,21 +6598,35 @@ function SQSignalCard({ s }) {
           {wf.name}
           {s.wickRatio != null && <span style={{ color:'var(--qb-text-faint)', marginLeft:4 }}>{(s.wickRatio*100).toFixed(0)}%</span>}
         </div>
+        {s.scoreAvailable && <SQCheckChips checks={s.sessionChecks} />}
+        {s.adverseBy && !s.blockedBy && (
+          <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:6, color:'#f97316', marginTop:2, opacity:0.85 }}>
+            ⚠ {s.adverseBy}
+          </div>
+        )}
       </div>
-      <div style={{ padding:'2px 6px', background:sess.bg, border:`1px solid ${sess.accent}50`, borderRadius:3, flexShrink:0 }}>
+      <div style={{ padding:'2px 6px', background:sess.bg, border:`1px solid ${sess.accent}50`, borderRadius:3, flexShrink:0, alignSelf:'center' }}>
         <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:sess.accent, whiteSpace:'nowrap' }}>{sess.label}</span>
       </div>
-      <div style={{ display:'flex', flexDirection:'column', gap:3, flexShrink:0 }}>
-        {[['WICK', wickOk], ['SESS', sessOk], ['CVD', cvdOk]].map(([lbl, ok]) => (
-          <div key={lbl} style={{ display:'flex', alignItems:'center', gap:3 }}>
-            <Dot ok={ok} />
-            <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:6.5, color:'var(--qb-text-faint)' }}>{lbl}</span>
-          </div>
-        ))}
+      <div style={{ display:'flex', flexDirection:'column', gap:4, flexShrink:0, alignItems:'flex-start' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:3 }}>
+          <Dot ok={wickOk} />
+          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:6.5, color:'var(--qb-text-faint)' }}>WICK</span>
+        </div>
+        <SQSessGrade grade={sessGrade} scoreAvailable={s.scoreAvailable} score={s.sessionScore} />
+        <div style={{ display:'flex', alignItems:'center', gap:3 }}>
+          <Dot ok={cvdOk} />
+          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:6.5, color:'var(--qb-text-faint)' }}>CVD</span>
+        </div>
       </div>
       <div style={{ textAlign:'right', flexShrink:0 }}>
         <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:12, fontWeight:700, color:tierC }}>{s.qualityTier || '?'}</div>
         <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, fontWeight:700, color:passC }}>{s.pass ? 'PASS' : 'BLOCK'}</div>
+        {s.blockedBy && (
+          <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:6, color:'#ef4444', marginTop:1, maxWidth:60, wordBreak:'break-word', textAlign:'right', opacity:0.75 }}>
+            {s.blockedBy}
+          </div>
+        )}
       </div>
       <div style={{ textAlign:'right', flexShrink:0 }}>
         <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:'var(--qb-text-hi)' }}>{time}</div>
@@ -6641,7 +6754,7 @@ function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
           />
           <SQGateToggle
             label="SESSION GATE"
-            description="block when direction opposes London close / Asian bias (27.3% WR)"
+            description="structural: ADR exhaustion · gap vs ATR · IB alignment · prior day position (6-grade)"
             enabled={cfg.sessionGateEnabled ?? true}
             loading={toggling === 'sessionGateEnabled'}
             onToggle={() => toggleGate('sessionGateEnabled', cfg.sessionGateEnabled ?? true)}

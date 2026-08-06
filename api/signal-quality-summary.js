@@ -84,18 +84,25 @@ module.exports = async (req, res) => {
     const recentSignals = recentIdx.slice(0, 50).map(e => {
       const rec = sqRecordMap.get(e.id);
       return {
-        id:          e.id,
-        ts:          e.ts,
-        assetId:     e.assetId,
-        template:    e.template,
-        direction:   rec?.direction || null,
-        pass:        e.pass,
-        qualityTier: e.qualityTier,
-        blockedBy:   e.blockedBy || null,
-        wickRatio:   rec?.wick?.wickRatio ?? null,
+        id:             e.id,
+        ts:             e.ts,
+        assetId:        e.assetId,
+        template:       e.template,
+        direction:      rec?.direction || null,
+        pass:           e.pass,
+        qualityTier:    e.qualityTier,
+        blockedBy:      e.blockedBy  || null,
+        adverseBy:      e.adverseBy  || null,
+        wickRatio:      rec?.wick?.wickRatio ?? null,
+        // Session v17 structural scoring
+        sessionGrade:   e.sessionGrade || rec?.session?.grade || null,
+        sessionScore:   rec?.session?.sessionScore ?? null,
+        sessionChecks:  rec?.session?.checks       || null,
+        scoreAvailable: rec?.session?.scoreAvailable ?? null,
+        // Legacy field — kept so sparklines work for signals recorded before v17
         withPriorSession: rec?.session?.withPriorSession ?? null,
-        cvdLowTrust: rec?.cvd?.cvdLowTrust ?? null,
-        cvdDivergence: rec?.cvd?.cvdDivergence ?? null,
+        cvdLowTrust:    rec?.cvd?.cvdLowTrust  ?? null,
+        cvdDivergence:  rec?.cvd?.cvdDivergence ?? null,
       };
     });
 
