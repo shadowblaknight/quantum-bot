@@ -193,6 +193,73 @@ _bearishDiv = _divReady and not na(_divCvdHiN) and high >= _divPrHiN and _cvdRun
 _bullishDiv = _divReady and not na(_divCvdLoN) and low  <= _divPrLoN and _cvdRunning > _divCvdLoN
 cvdDivergence = _bearishDiv ? "bearish" : _bullishDiv ? "bullish" : "none"
 
+// ── SESSION CONTEXT v17 — structural scoring fields ───────────────────
+_scTicker   = str.upper(syminfo.ticker)
+_isGold     = str.contains(_scTicker, "XAU")
+_isNas      = str.contains(_scTicker, "NAS") or str.contains(_scTicker, "NDX") or str.contains(_scTicker, "NQ")
+_isUs500    = str.contains(_scTicker, "SPX") or str.contains(_scTicker, "ES1") or str.contains(_scTicker, "US500") or str.contains(_scTicker, "SP500") or str.contains(_scTicker, "SPY")
+_isIndex    = _isNas or _isUs500
+
+_hourUtc    = hour(time, "UTC")
+_minOfDay   = _hourUtc * 60 + minute(time, "UTC")
+_dayOfWeek  = dayofweek(time, "UTC") - 1
+
+_atr14d     = request.security(syminfo.tickerid, "D", ta.atr(14))
+_todayOpen  = request.security(syminfo.tickerid, "D", open)
+_todayHigh  = request.security(syminfo.tickerid, "D", high)
+_todayLow   = request.security(syminfo.tickerid, "D", low)
+_priorClose = request.security(syminfo.tickerid, "D", close[1])
+_priorDayHi = request.security(syminfo.tickerid, "D", high[1])
+_priorDayLo = request.security(syminfo.tickerid, "D", low[1])
+
+_adrConsumed = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
+_gapRaw      = _todayOpen - _priorClose
+_gapAtr      = _atr14d > 0 ? math.abs(_gapRaw) / _atr14d : 0.0
+_gapSign     = _gapRaw > 0 ? 1 : _gapRaw < 0 ? -1 : 0
+_gapDirLong  = _gapSign
+_gapDirShort = _gapSign * -1
+_priorDayPos = _todayOpen > _priorDayHi ? 1 : _todayOpen < _priorDayLo ? -1 : 0
+_nearKeyTime = _isGold and ((_minOfDay >= 585 and _minOfDay <= 675) or (_minOfDay >= 765 and _minOfDay <= 855)) ? 1 : 0
+
+_ibStart    = 13 * 60 + 30
+_ibEnd      = 14 * 60 + 30
+_inIBWindow = _minOfDay >= _ibStart and _minOfDay < _ibEnd
+_postIB     = _minOfDay >= _ibEnd
+
+var float _ibHigh    = na
+var float _ibLow     = na
+var int   _ibHighBar = na
+var int   _ibLowBar  = na
+var bool  _ibDone    = false
+
+if _newDay
+    _ibHigh    := na
+    _ibLow     := na
+    _ibHighBar := na
+    _ibLowBar  := na
+    _ibDone    := false
+
+if _isIndex and (_inIBWindow or (_postIB and not _ibDone))
+    if na(_ibHigh) or high > _ibHigh
+        _ibHigh    := high
+        _ibHighBar := bar_index
+    if na(_ibLow) or low < _ibLow
+        _ibLow    := low
+        _ibLowBar := bar_index
+
+if _isIndex and _postIB and not na(_ibHigh) and not na(_ibLow)
+    _ibDone := true
+
+_ibSideStr   = _isIndex and _ibDone ? (_ibLowBar < _ibHighBar ? "low_first" : "high_first") : "null"
+_ibPositionV = _isIndex and _ibDone and (_ibHigh - _ibLow) > 0 ? math.round((close - _ibLow) / (_ibHigh - _ibLow) * 100) / 100 : -1.0
+
+var float _rthOpenPrice = na
+if _newDay
+    _rthOpenPrice := na
+if _isIndex and _minOfDay == _ibStart and na(_rthOpenPrice)
+    _rthOpenPrice := open
+_first15mDir = _isIndex and not na(_rthOpenPrice) and _minOfDay >= (_ibStart + 15) ? (close > _rthOpenPrice ? 1 : close < _rthOpenPrice ? -1 : 0) : 0
+
 // ─── ALERT BUILDER ────────────────────────────────────────────────────
 f_buildAlertPro(string dir, float entry, float sl,
                 float tp1, float tp2, float tp3,
@@ -215,7 +282,8 @@ f_buildAlertPro(string dir, float entry, float sl,
     zone   = ",\"zoneUpper\":\"" + str.tostring(zU, format.mintick) + "\",\"zoneLower\":\"" + str.tostring(zL, format.mintick) + "\",\"zoneType\":\"ORB\""
     htf    = ",\"activeSession\":\"" + sess + "\",\"htfTier\":\"" + tier + "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "\",\"htfBiasAlign\":" + str.tostring(biasAlign) + ",\"htfConfluence\":\"" + conf + "\""
     _cvdConf = dir == "LONG" ? cvdSlope == "rising" : cvdSlope == "falling"
-    ctx    = ",\"window\":\"" + sess + "\",\"swept\":\"\",\"impulseATR\":" + str.tostring(wATR, "0.00") + ",\"filters\":\"" + filters + "\",\"immediateEntry\":\"" + str.tostring(immediateEntry, format.mintick) + "\",\"retestEntry\":\"" + str.tostring(retestEntry, format.mintick) + "\",\"actualStyle\":\"" + actualStyle + "\",\"cvdSlope\":\"" + cvdSlope + "\",\"cvdConfirms\":" + str.tostring(_cvdConf) + ",\"cvdDivergence\":\"" + cvdDivergence + "\",\"cvdLowTrust\":" + str.tostring(cvdLowTrust) + ",\"barOpen\":\"" + str.tostring(open, format.mintick) + "\",\"barHigh\":\"" + str.tostring(high, format.mintick) + "\",\"barLow\":\"" + str.tostring(low, format.mintick) + "\",\"barClose\":\"" + str.tostring(close, format.mintick) + "\",\"apiKey\":\"" + alertApiKey + "\"}"
+    _scGapDir = dir == "LONG" ? _gapDirLong : _gapDirShort
+    ctx    = ",\"window\":\"" + sess + "\",\"swept\":\"\",\"impulseATR\":" + str.tostring(wATR, "0.00") + ",\"filters\":\"" + filters + "\",\"immediateEntry\":\"" + str.tostring(immediateEntry, format.mintick) + "\",\"retestEntry\":\"" + str.tostring(retestEntry, format.mintick) + "\",\"actualStyle\":\"" + actualStyle + "\",\"cvdSlope\":\"" + cvdSlope + "\",\"cvdConfirms\":" + str.tostring(_cvdConf) + ",\"cvdDivergence\":\"" + cvdDivergence + "\",\"cvdLowTrust\":" + str.tostring(cvdLowTrust) + ",\"barOpen\":\"" + str.tostring(open, format.mintick) + "\",\"barHigh\":\"" + str.tostring(high, format.mintick) + "\",\"barLow\":\"" + str.tostring(low, format.mintick) + "\",\"barClose\":\"" + str.tostring(close, format.mintick) + "\",\"adrConsumed\":\"" + str.tostring(_adrConsumed, "#.####") + "\",\"gapAtr\":\"" + str.tostring(_gapAtr, "#.####") + "\",\"gapDir\":\"" + str.tostring(_scGapDir) + "\",\"priorDayPos\":\"" + str.tostring(_priorDayPos) + "\",\"hourUtc\":\"" + str.tostring(_hourUtc) + "\",\"dayOfWeek\":\"" + str.tostring(_dayOfWeek) + "\",\"nearKeyTime\":\"" + str.tostring(_nearKeyTime) + "\",\"ibSide\":\"" + _ibSideStr + "\",\"ibPosition\":\"" + str.tostring(_ibPositionV, "#.##") + "\",\"first15mDir\":\"" + str.tostring(_first15mDir) + "\",\"apiKey\":\"" + alertApiKey + "\"}"
     readable + head + prices + zone + htf + ctx
 
 // ─── POSITION BOX ─────────────────────────────────────────────────────
