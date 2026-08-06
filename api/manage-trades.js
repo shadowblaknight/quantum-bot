@@ -527,7 +527,16 @@ async function managePosition(position) {
     }
 
     if (!skipRatchet) {
-      const modifyResult = await modifyPosition(position.id, slCandidate, finalTPPrice, asset);
+      // Retry-with-backoff: transient MetaAPI errors (429, network hiccup) cause a
+      // single-attempt modify to fail silently and leave the position unprotected
+      // until the next tick. Three attempts with 1.5 s / 3 s delays cost at most
+      // ~4.5 s total — well inside manage-trades' 30 s Vercel budget.
+      let modifyResult = { ok: false, error: 'not-attempted' };
+      for (let _mAttempt = 1; _mAttempt <= 3; _mAttempt++) {
+        modifyResult = await modifyPosition(position.id, slCandidate, finalTPPrice, asset);
+        if (modifyResult.ok) break;
+        if (_mAttempt < 3) await new Promise(r => setTimeout(r, 1500 * _mAttempt));
+      }
       if (modifyResult.ok) {
         // Post-submit verification.
         // MetaAPI HTTP 200 = order QUEUED, not broker-confirmed. MT5 can still
@@ -592,6 +601,16 @@ async function managePosition(position) {
         actions.push({ action: 'sl-move', error: modifyResult.error, attemptedSL: slCandidate });
         await pushCommentary(asset, 'sl-move-rejected',
           `SL lock to ${chosen.name} rejected (retries next tick): ${modifyResult.error.slice(0, 70)}`);
+        await logMTError({ type: 'sl-lock-failed', asset, positionId: position.id, tpName: chosen.name, attemptedSL: slCandidate, error: modifyResult.error });
+        // Alert the user: the lock failed so the position is currently unprotected.
+        // The SL modify will be retried on the next manage-trades tick.
+        try {
+          await sendOnce(`sllock-fail:${position.id}:${chosen.name}`,
+            `⚠️ <b>${chosen.name} SL-lock FAILED — ${asset.toUpperCase()}</b>\n\n` +
+            `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · attempted SL: <code>${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}</code>\n` +
+            `Error: <code>${(modifyResult.error || '').slice(0, 150)}</code>\n\n` +
+            `<b>Position is UNPROTECTED at this TP level. Will retry next tick. Consider intervening manually.</b>`);
+        } catch (_) {}
       }
     }
   }

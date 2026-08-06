@@ -40,6 +40,14 @@ const { resolveSymbol: resolveAssetToBroker, resolveAsset } = require('./symbol-
 
 const ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mn'];
 
+// Short-lived positions cache: multiple Lambda functions (manage-trades every 1min,
+// alexg-run every 15min, alexg-watchdog every 5min, dashboard polls) independently
+// call fetchPositions(). When they overlap they burst MetaAPI with concurrent
+// identical requests. A 30s cache ensures only ONE call reaches MetaAPI per window.
+// manage-trades fires every 60s so the cache always expires before the next tick.
+const POSITIONS_CACHE_KEY = 'v14:broker:positions:cache';
+const POSITIONS_CACHE_TTL = 30; // seconds
+
 // Per-TF Redis cache TTLs (seconds). Same as V11.
 const TF_CACHE_TTL = {
   '1m':   30,        // 30 seconds
@@ -186,6 +194,20 @@ async function fetchAccount() {
 // =================================================================
 
 async function fetchPositions() {
+  // Serve from cache if a recent fetch already ran (prevents burst when multiple
+  // Lambda invocations overlap). manage-trades' 60s interval always outlasts the
+  // 30s TTL, so each cron tick still gets a fresh read.
+  const r = getRedis();
+  if (r) {
+    try {
+      const cached = await r.get(POSITIONS_CACHE_KEY).catch(() => null);
+      if (cached) {
+        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (_) { /* cache miss — fall through to live fetch */ }
+  }
+
   const url = `${metaapiBase()}/users/current/accounts/${accountId()}/positions`;
   const { resp, error } = await metaapiFetch(url, 'fetchPositions');
   if (error) {
@@ -209,6 +231,7 @@ async function fetchPositions() {
   // Annotate each with assetId if we can resolve it — but time-bound it so a
   // slow symbol-resolver can never hang the whole request. Fall back to the
   // un-annotated positions (correct, just missing the convenience field).
+  let result = positions;
   try {
     const annotate = Promise.all((positions || []).map(async (p) => {
       const assetId = await resolveAsset(p.symbol).catch(() => null);
@@ -216,10 +239,17 @@ async function fetchPositions() {
     }));
     const cap = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
     const annotated = await Promise.race([annotate, cap]);
-    return annotated || positions;
+    result = annotated || positions;
   } catch (_) {
-    return positions;
+    result = positions;
   }
+
+  // Write to cache after a successful live fetch
+  if (r && Array.isArray(result)) {
+    try { await r.set(POSITIONS_CACHE_KEY, JSON.stringify(result), { ex: POSITIONS_CACHE_TTL }); } catch (_) {}
+  }
+
+  return result;
 }
 
 // =================================================================

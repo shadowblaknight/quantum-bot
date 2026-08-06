@@ -16,9 +16,9 @@
 //   It NEVER touches trade records, ledger, order prices, or positions.
 //   G6 is enforced at the HTTP layer (gating-rules.js) which rejects non-POST.
 //
-// Seeding: on first isGated() call, if the store is empty, seeds from
-//   HARDCODED_BLOCKS so the existing ORB×BTC and ORB×NAS100 blocks are
-//   represented in the store from day one.
+// Seeding: every loadRules() call runs seedMissingBlocks(), which adds any
+//   HARDCODED_BLOCKS entry not yet present in the store. This seeds new blocks
+//   on existing installations without disturbing user-configured rules.
 
 const { getRedis, safeParse } = require('./_lib');
 
@@ -26,26 +26,46 @@ const RULES_KEY = 'v14:gating:rules';
 const AUDIT_KEY = 'v14:gating:audit';
 const AUDIT_CAP = 200;
 
-// Mirrors the hardcoded TEMPLATE_INSTRUMENT_BLOCKS in webhook.js.
-// Used only for initial seeding if the store is empty.
+// Canonical list of known-bad template×instrument pairs.
+// seedMissingBlocks() adds any of these that aren't already in the store, so:
+//   – New installations get all blocks from day one.
+//   – Existing stores only get blocks for keys that have never been set.
+//   – Explicit panel overrides (on: true) are preserved — they already exist
+//     in the store, so seedMissingBlocks skips them.
 const HARDCODED_BLOCKS = [
-  { template: 'orb', session: '*', instrument: 'btc',    on: false, reason: 'hardcoded-migration' },
-  { template: 'orb', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-migration' },
+  { template: 'orb',          session: '*', instrument: 'btc',    on: false, reason: 'hardcoded-migration' },
+  { template: 'orb',          session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-migration' },
+  // Reaction family: historically negative expectancy on XAU + indices.
+  // Signal quality gates (wick/session/CVD) do not compensate for bad template-instrument fit.
+  { template: 'reaction',     session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction',     session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction',     session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction-fvg', session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction-fvg', session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction-fvg', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction-ifvg', session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction-ifvg', session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
+  { template: 'reaction-ifvg', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
 ];
 
 function ruleKey(template, session, instrument) {
   return `${template}|${session}|${instrument}`;
 }
 
-async function seedIfEmpty(r, rules) {
-  if (Object.keys(rules).length > 0) return rules;
-  const seeded = {};
-  for (const b of HARDCODED_BLOCKS) {
+// Seeds HARDCODED_BLOCKS entries that don't yet have any rule in the store.
+// Unlike the old seedIfEmpty (which only ran when the store was completely empty),
+// this runs every loadRules() call and picks up new blocks added to the list
+// without disturbing any rule the user has explicitly set via the panel.
+async function seedMissingBlocks(r, rules) {
+  const missing = HARDCODED_BLOCKS.filter(b => !(ruleKey(b.template, b.session, b.instrument) in rules));
+  if (missing.length === 0) return rules;
+  const now = Date.now();
+  for (const b of missing) {
     const k = ruleKey(b.template, b.session, b.instrument);
-    seeded[k] = { on: b.on, updatedAt: Date.now(), updatedBy: 'seed', reason: b.reason };
+    rules[k] = { on: b.on, updatedAt: now, updatedBy: 'seed', reason: b.reason };
   }
-  try { await r.set(RULES_KEY, JSON.stringify(seeded)); } catch (_) {}
-  return seeded;
+  try { await r.set(RULES_KEY, JSON.stringify(rules)); } catch (_) {}
+  return rules;
 }
 
 async function loadRules(r) {
@@ -65,7 +85,7 @@ async function loadRules(r) {
     }
   }
   if (migrated) { await r.set(RULES_KEY, JSON.stringify(rules)).catch(() => {}); }
-  return seedIfEmpty(r, rules);
+  return seedMissingBlocks(r, rules);
 }
 
 // Returns null (allowed) or { blocked:true, ruleKey, updatedBy } (blocked).
