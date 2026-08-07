@@ -25,6 +25,7 @@ const TEMPLATE_META = {
   'reaction':         { glyph: '🎯', label: 'Reaction (coil break)' },
   'reaction-fvg':     { glyph: '🌀', label: 'Reaction (FVG)' },
   'reaction-ifvg':    { glyph: '🔄', label: 'Reaction (IFVG)' },
+  'reaction-impulse': { glyph: '⚡', label: 'Reaction (impulse tap)' },
   'alexg':            { glyph: '📐', label: 'Alex G Set&Forget' },
 };
 
@@ -45,22 +46,22 @@ function templateLabelMap() {
 // Display order (heatmaps, cards).
 const TEMPLATE_ORDER = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'alexg',
 ];
 
 // UI groupings — separately MEASURED, grouped only for a tidy screen.
 const ICT_TEMPLATES      = ['silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg'];
-const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg'];
+const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse'];
 
 // Accepted templates by active mode. Active = everything; defensive = the
 // higher-conviction subset (drops the two most aggressive ICT setups).
 const ACCEPTED_ACTIVE = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'alexg',
 ];
 const ACCEPTED_DEFENSIVE = [
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
-  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'alexg',
 ];
 
 module.exports = {

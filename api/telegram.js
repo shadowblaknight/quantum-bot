@@ -381,6 +381,22 @@ async function notifyTradeClosed({ asset, direction, totalPnL, tpsHit, positionI
   return sendOnce(dedupeKey, text);
 }
 
+// ─── Session-expiry alert ─────────────────────────────────────────────────────
+// Fires once when a managed position is still open after its session kill zone
+// has closed. Telegram only — no broker action. Redis flag prevents duplicates.
+async function notifySessionExpired({ asset, template, direction, positionId, entry, minsExpired, sessionName }) {
+  const dedupeKey = `v17:session-expired-notified:${positionId}`;
+  const dir       = direction === 'LONG' ? 'LONG 🟢' : 'SHORT 🔴';
+  const label     = TEMPLATE_LABELS[template] || template || 'trade';
+  const text = [
+    `⏰ <b>SESSION EXPIRED — trade still open</b>`,
+    `${assetLabel(asset)} · ${label} · ${dir}`,
+    `Entry: ${formatPrice(entry, asset)} · ${minsExpired}m past ${sessionName || 'session'} close`,
+    `Position still open — your call.`,
+  ].join('\n');
+  return sendOnce(dedupeKey, text);
+}
+
 // =================================================================
 // EXPORTS
 // =================================================================
@@ -400,4 +416,5 @@ module.exports = {
   notifyTPHit,
   notifySLHit,
   notifyTradeClosed,
+  notifySessionExpired,
 };

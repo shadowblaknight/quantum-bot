@@ -63,8 +63,9 @@ slMaxH1ATR  = input.float(3.00, "SL max (× accum-TF ATR)", step=0.10, group=G_E
 requireHTFalign = input.bool(false, "Only trade WITH H1/H4 bias", group=G_ENTRY, tooltip="If on, only fire when the break direction agrees with the higher-timeframe bias (tier A only).")
 
 G_CONF = "FVG / IFVG confirmation — parallel paths that fire on HTF displacement (no coil needed)"
-useFvgConfirm  = input.bool(true,  "FVG confirm (reaction-fvg)",     group=G_CONF, tooltip="Fire when a FRESH accum-TF FVG forms while price is at the zone. The displacement gap replaces the coil as the 'they're committed' proof. Direction = the FVG's direction.")
-useIfvgConfirm = input.bool(true,  "IFVG inversion (reaction-ifvg)", group=G_CONF, tooltip="Fire when price CLOSES THROUGH the opposing accum-TF FVG frozen at the tap, inverting it.")
+useFvgConfirm     = input.bool(true,  "FVG confirm (reaction-fvg)",       group=G_CONF, tooltip="Fire when a FRESH accum-TF FVG forms while price is at the zone. The displacement gap replaces the coil as the 'they're committed' proof. Direction = the FVG's direction.")
+useIfvgConfirm    = input.bool(true,  "IFVG inversion (reaction-ifvg)",   group=G_CONF, tooltip="Fire when price CLOSES THROUGH the opposing accum-TF FVG frozen at the tap, inverting it.")
+useImpulseConfirm = input.bool(true,  "Impulse tap (reaction-impulse)",   group=G_CONF, tooltip="Fire when price wicks into a zone and immediately displaces away with a strong body — no coil required. Captures instant-rejection and next-bar impulse moves. Entry is always immediate (at close). SL sits just beyond the tapped zone edge.")
 
 G_ALR = "Alerts"
 alertApiKey = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API key", group=G_ALR)
@@ -317,12 +318,17 @@ var bool sigFvgL  = false
 var bool sigFvgS  = false
 var bool sigIfvgL = false
 var bool sigIfvgS = false
+// v17 — impulse tap markers
+var bool sigImpL  = false
+var bool sigImpS  = false
 
 if barstate.isconfirmed
     sigFvgL  := false
     sigFvgS  := false
     sigIfvgL := false
     sigIfvgS := false
+    sigImpL  := false
+    sigImpS  := false
     if rCool > 0
         rCool := rCool - 1
 
@@ -339,6 +345,38 @@ if barstate.isconfirmed
             // baseline so only FVGs forming AFTER the tap read as 'fresh'
             rPrevFvgU := accFvgU
             rPrevFvgL := accFvgL
+        // ── PATH C-0 — Instant impulse: wick into zone, body displaces OUT same bar ──
+        // Captured when close is NOT inside the zone (inZone=false) but the bar
+        // wicked into it and closed away with a strong body. The state machine never
+        // enters STATE 1 for these moves — they're over before accumulation can form.
+        else if rCool == 0 and useImpulseConfirm and not na(zU) and not na(zL)
+            _dispRefI0 = math.max(nz(accumATR, 0.0), nz(h1ATR, 0.0))
+            _posBodyI0 = math.abs(close - open)
+            _tapLo0    = low  <= zL + atrVal * 0.15
+            _tapHi0    = high >= zU - atrVal * 0.15
+            _impU0 = _tapLo0 and close > open and close > zU and _dispRefI0 > 0 and _posBodyI0 >= _dispRefI0 * immediateBodyATR and _posBodyI0 <= _dispRefI0 * immediateMaxBodyATR
+            _impD0 = _tapHi0 and close < open and close < zL and _dispRefI0 > 0 and _posBodyI0 >= _dispRefI0 * immediateBodyATR and _posBodyI0 <= _dispRefI0 * immediateMaxBodyATR
+            if _impU0 or _impD0
+                _sDirI0 = _impU0 ? 1 : -1
+                _dirI0  = _impU0 ? "LONG" : "SHORT"
+                _biasI0 = (h1B == _sDirI0 or h4B == _sDirI0) ? 1 : 0
+                _htfI0  = not requireHTFalign or _biasI0 == 1
+                _bufI0  = math.max(0.3 * atrVal, 0.05 * nz(accumATR, atrVal))
+                _slI0   = _impU0 ? zL - _bufI0 : zU + _bufI0
+                _sdI0   = math.abs(close - _slI0)
+                _saI0   = accumATR > 0 ? _sdI0 / accumATR : 0.0
+                if _htfI0 and _sdI0 > 0 and _saI0 >= slMinH1ATR and _saI0 <= slMaxH1ATR
+                    _tp1I0 = _impU0 ? close + _sdI0 : close - _sdI0
+                    _tp2I0 = _impU0 ? close + _sdI0 * 2.0 : close - _sdI0 * 2.0
+                    _tp3I0 = _impU0 ? close + _sdI0 * 3.0 : close - _sdI0 * 3.0
+                    _tierI0 = _biasI0 == 1 ? "A" : "B"
+                    _confI0 = "reaction-impulse" + (_biasI0 == 1 ? "-withbias" : "-counter")
+                    alert(f_buildAlertR("reaction-impulse", _dirI0, close, _slI0, _tp1I0, _tp2I0, _tp3I0, math.max(zU, zL), math.min(zU, zL), _tierI0, _biasI0, _confI0, close, close, "immediate"), alert.freq_once_per_bar)
+                    if showPosBox
+                        f_drawPosBox(close, _slI0, _tp3I0)
+                    sigImpL := _impU0
+                    sigImpS := _impD0
+                    rCool := cooldownBars
 
     else if rState == 1
         rWatch := rWatch + 1
@@ -414,6 +452,41 @@ if barstate.isconfirmed
         rPrevFvgU := accFvgU
         rPrevFvgL := accFvgL
 
+        // ── PATH C-1 — Next-bar impulse (strong displacement after zone tap, no coil) ──
+        // Fires when the first candle(s) after entering the zone close outside it
+        // with a body large enough to confirm institutional commitment. The coil
+        // and FVG/IFVG paths require market structure to form; this catches the moves
+        // that start before that structure exists.
+        if useImpulseConfirm and nearZone and guardOK and not fired
+            _dispRefC = math.max(nz(accumATR, 0.0), nz(h1ATR, 0.0))
+            _posBodyC = math.abs(close - open)
+            _impU1 = close > rZU and close > open and _dispRefC > 0 and _posBodyC >= _dispRefC * immediateBodyATR and _posBodyC <= _dispRefC * immediateMaxBodyATR
+            _impD1 = close < rZL and close < open and _dispRefC > 0 and _posBodyC >= _dispRefC * immediateBodyATR and _posBodyC <= _dispRefC * immediateMaxBodyATR
+            if _impU1 or _impD1
+                _sDirC = _impU1 ? 1 : -1
+                _dirC  = _impU1 ? "LONG" : "SHORT"
+                _biasC = (h1B == _sDirC or h4B == _sDirC) ? 1 : 0
+                _htfC  = not requireHTFalign or _biasC == 1
+                _bufC  = math.max(0.3 * atrVal, 0.05 * accumATR)
+                _slC   = _impU1 ? rZL - _bufC : rZU + _bufC
+                _sdC   = math.abs(close - _slC)
+                _saC   = _sdC / accumATR
+                _slOkC = _impU1 ? _slC < close : _slC > close
+                if _htfC and _sdC > 0 and _saC >= slMinH1ATR and _saC <= slMaxH1ATR and _slOkC
+                    _tp1C = _impU1 ? close + _sdC : close - _sdC
+                    _tp2C = _impU1 ? close + _sdC * 2.0 : close - _sdC * 2.0
+                    _tp3C = _impU1 ? close + _sdC * 3.0 : close - _sdC * 3.0
+                    _tierC = _biasC == 1 ? "A" : "B"
+                    _confC = "reaction-impulse" + (_biasC == 1 ? "-withbias" : "-counter")
+                    alert(f_buildAlertR("reaction-impulse", _dirC, close, _slC, _tp1C, _tp2C, _tp3C, rZU, rZL, _tierC, _biasC, _confC, close, close, "immediate"), alert.freq_once_per_bar)
+                    if showPosBox
+                        f_drawPosBox(close, _slC, _tp3C)
+                    sigImpL := _impU1
+                    sigImpS := _impD1
+                    fired   := true
+                    rState  := 0
+                    rCool   := cooldownBars
+
         // ── existing COIL path (only if neither confirmation fired) ──
         if not fired
             if not nearZone or rWatch > maxWatchBars
@@ -472,8 +545,10 @@ if showZones and barstate.islast
         coilBox := box.new(bar_index - 5, rCoilHi, bar_index, rCoilLo, border_color=color.new(color.orange, 0), bgcolor=color.new(color.orange, 80))
 
 plotshape(rState == 2 and rState[1] == 1, "Armed", shape.triangleup, location.belowbar, color.orange, size=size.tiny)
-plotshape(sigFvgL,  "FVG↑",  shape.diamond, location.belowbar, color.new(color.aqua, 0),    size=size.tiny)
-plotshape(sigFvgS,  "FVG↓",  shape.diamond, location.abovebar, color.new(color.aqua, 0),    size=size.tiny)
-plotshape(sigIfvgL, "IFVG↑", shape.xcross,  location.belowbar, color.new(color.fuchsia, 0), size=size.tiny)
-plotshape(sigIfvgS, "IFVG↓", shape.xcross,  location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
+plotshape(sigFvgL,  "FVG↑",  shape.diamond,   location.belowbar, color.new(color.aqua, 0),    size=size.tiny)
+plotshape(sigFvgS,  "FVG↓",  shape.diamond,   location.abovebar, color.new(color.aqua, 0),    size=size.tiny)
+plotshape(sigIfvgL, "IFVG↑", shape.xcross,    location.belowbar, color.new(color.fuchsia, 0), size=size.tiny)
+plotshape(sigIfvgS, "IFVG↓", shape.xcross,    location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
+plotshape(sigImpL,  "IMP↑",  shape.arrowup,   location.belowbar, color.new(color.yellow, 0),  size=size.small)
+plotshape(sigImpS,  "IMP↓",  shape.arrowdown, location.abovebar, color.new(color.yellow, 0),  size=size.small)
 bgcolor(rState == 1 ? color.new(color.teal, 92) : rState == 2 ? color.new(color.orange, 90) : na)

@@ -29,7 +29,7 @@ const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watc
 const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
-const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce } = require('./telegram');
+const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
 const { runEntryStyleEvaluator } = require('./entrystyle-evaluator');
 
@@ -314,6 +314,29 @@ async function managePosition(position) {
 
   if (!matchedPending) {
     return { id: position.id, error: 'no matching pending setup found', positionId: position.id };
+  }
+
+  // Session-expiry notification — Telegram only, never a broker action.
+  // Fires once per trade when the trade is still open past its session close time.
+  if (matchedPending.sessionClosesAt && Date.now() > matchedPending.sessionClosesAt) {
+    try {
+      const r2 = getRedis();
+      const expiredFlag = `v17:session-expired-notified:${position.id}`;
+      const alreadySent = r2 ? await r2.get(expiredFlag).catch(() => null) : '1';
+      if (!alreadySent) {
+        const minsExpired = Math.round((Date.now() - matchedPending.sessionClosesAt) / 60000);
+        await notifySessionExpired({
+          asset:       asset,
+          template:    matchedPending.setup?.template,
+          direction:   direction,
+          positionId:  position.id,
+          entry:       position.openPrice,
+          minsExpired,
+          sessionName: matchedPending.killZoneName || matchedPending.setup?.session || 'session',
+        });
+        if (r2) await r2.set(expiredFlag, '1', { ex: 7 * 24 * 3600 }).catch(() => {});
+      }
+    } catch (_) {}
   }
 
   let state = await getPositionState(position.id);
@@ -806,6 +829,8 @@ async function detectAndProcessClosed(currentOpenIds) {
       openedAt: state.createdAt,
       closedAt: Date.now(),
       dedupeKey: state.dedupeKey || null,
+      minsIntoWindow: matchedPending.minsIntoWindow || null,
+      adrConsumed: matchedPending.adrConsumed || null,
       synthetic: false,
     };
 

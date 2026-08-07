@@ -17,6 +17,7 @@ const { addWatchedSetup } = require('./watched-setups');
 const { templateLabelMap, REACTION_TEMPLATES } = require('./_templates');
 const { evaluateReactionMTF, tfSetForMode } = require('./reaction-filter');
 const { evaluateSignalQuality }             = require('./signal-quality');
+const { checkKillZone }                     = require('./kill-zones');
 const TEMPLATE_LABELS = templateLabelMap();
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -680,6 +681,10 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     const finalTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
     const finalTP3 = decision.finalTP3 != null ? decision.finalTP3 : tp3;
     const slDistance = Math.abs(entry - finalSL);
+    const _kzAtSignal  = checkKillZone(new Date(p.timestamp || Date.now()));
+    const _sigUtcMin   = (() => { const d = new Date(p.timestamp || Date.now()); return d.getUTCHours() * 60 + d.getUTCMinutes(); })();
+    const _minsIntoWindow  = _kzAtSignal.inKillZone ? _sigUtcMin - _kzAtSignal.startUtcMin : null;
+    const _sessionClosesAt = _kzAtSignal.inKillZone ? Date.now() + (_kzAtSignal.minutesUntilClose * 60 * 1000) : null;
     const pendingRecord = {
       id: `setup_${assetId}_v13_${p.timestamp}_${Date.now()}`,
       asset: assetId,
@@ -714,6 +719,10 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       entryType, execKind: useMarket ? 'market' : 'limit',
       htfTier: p.htfTier || null,
       dedupeKey,
+      minsIntoWindow: _minsIntoWindow,
+      sessionClosesAt: _sessionClosesAt,
+      killZoneName: _kzAtSignal.inKillZone ? _kzAtSignal.name : null,
+      adrConsumed: parseFloat(p.adrConsumed) || null,
       v13: true, pilotRulesApplied: decision.rulesApplied,
     };
     await addPendingSetup(assetId, pendingRecord);

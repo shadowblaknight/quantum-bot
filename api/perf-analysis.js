@@ -49,7 +49,9 @@ function classifySession(openedAt) {
   if (day === 0 || day === 6) return 'WEEKEND';
   if (h >= 23 || h < 8)      return 'ASIAN';
   if (h >= 8  && h < 13)     return 'LONDON';
-  if (h >= 13 && h < 16)     return 'NY_AM';
+  if (h >= 13 && h < 13.5)   return 'NY_AM_EARLY';  // 13:00–13:30 — true NY open
+  if (h >= 13.5 && h < 14.5) return 'NY_AM_MID';    // 13:30–14:30 — established trend
+  if (h >= 14.5 && h < 16)   return 'NY_AM_LATE';   // 14:30–16:00 — session decay
   if (h >= 16 && h < 21)     return 'NY_PM';
   return 'OFF';
 }

@@ -59,7 +59,17 @@ async function storeClosedTrade(trade) {
     );
   } catch (_) {}
 
-  const fv = buildFeatureVector(trade, quality);
+  // Join regime category from shadow log (written by assessRegime at signal time)
+  let regimeCategory = null;
+  try {
+    if (trade.dedupeKey) {
+      const regRaw = await r.get(`v14:regime:shadow:${trade.dedupeKey}`).catch(() => null);
+      const regShadow = regRaw ? (typeof regRaw === 'string' ? safeParse(regRaw) : regRaw) : null;
+      regimeCategory = regShadow?.regime ?? null;
+    }
+  } catch (_) {}
+
+  const fv = buildFeatureVector({ ...trade, regimeCategory }, quality);
 
   try {
     await r.set(TRADE_KEY(trade.id), JSON.stringify(fv));
@@ -175,6 +185,12 @@ function buildFeatureVector(trade, quality) {
     cvdDivergence:    quality?.cvd?.cvdDivergence     ?? null,
     cvdSlope:         quality?.cvd?.cvdSlope          ?? null,
     qualityTier:      quality?.qualityTier            ?? null,
+    // v17: timing + market-structure enrichment
+    minsIntoWindow:   trade.minsIntoWindow  ?? null,
+    adrConsumed:      trade.adrConsumed     ?? null,
+    sessionScore:     quality?.session?.sessionScore ?? null,
+    sessionGrade:     quality?.session?.grade        ?? null,
+    regimeCategory:   trade.regimeCategory  ?? null,
   };
 }
 
