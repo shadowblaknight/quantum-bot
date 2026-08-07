@@ -228,18 +228,44 @@ async function getAllTrades(limit = 1000) {
 // Given a current setup (built by coherence-checker), find the K nearest past
 // closed trades by similarity.
 //
-// SIMILARITY DEFINITION:
-//   - Same asset:           required (different markets behave differently)
-//   - Same direction:       required (LONG vs SHORT are different setups)
-//   - Same mode:            +0.3 if match (SCALP vs DAY vs SWING)
-//   - Tactic overlap:       Jaccard similarity of contributing tactics
-//   - Timeframe overlap:    Jaccard similarity of timeframes
-//   - Same session:         +0.15 if match
-//   - News state match:     +0.10 if both have/don't-have news
+// SIMILARITY DEFINITION (all weights normalized by total applicable weight):
+//   HARD GATES (required):
+//   - Same asset:           required
+//   - Same direction:       required
+//
+//   STRUCTURAL (always scored):
+//   - Tactic overlap:       Jaccard ×0.35
+//   - Timeframe overlap:    Jaccard ×0.15
+//   - Mode match:           ×0.12
+//   - Session bucket match: ×0.10
+//   - News match:           ×0.08
+//
+//   CONTEXTUAL (conditional — only scored when BOTH sides have the field):
+//   - minsIntoWindow bucket: ×0.12  (early <20m / mid 20-60m / late 60m+)
+//   - adrConsumed bucket:    ×0.12  (fresh <35% / mid / high / exhausted >90%)
+//   - regimeCategory match:  ×0.10  (trending / ranging / choppy)
+//
+// Contextual dimensions are skipped when either side has null — backward-compatible
+// with v13-v16 trades that predate these fields.
 //
 // Returns: { matches: [{trade, similarity}], summary: {wins, losses, ...} }
 
-async function findSimilarTrades({ asset, direction, mode, session, contributingTactics, timeframesInPlay, newsFeature }, k = 20) {
+function _minsIntoBucket(mins) {
+  if (mins == null || mins < 0) return null;
+  if (mins < 20)  return 'early';   // first 20 min: opening momentum window
+  if (mins < 60)  return 'mid';     // 20-60 min: established session move
+  return 'late';                     // 60m+: session decay, range compression
+}
+
+function _adrBucket(adr) {
+  if (adr == null || adr < 0) return null;
+  if (adr < 0.35) return 'fresh';     // day barely started — full range potential
+  if (adr < 0.65) return 'mid';       // normal: move has room
+  if (adr < 0.90) return 'high';      // most of day's range consumed
+  return 'exhausted';                  // >90%: near daily limit, mean-revert risk
+}
+
+async function findSimilarTrades({ asset, direction, mode, session, contributingTactics, timeframesInPlay, newsFeature, minsIntoWindow, adrConsumed, dedupeKey }, k = 20) {
   const all = await getAllTrades(500);
 
   // Pre-filter: same asset + same direction (hard constraints)
@@ -279,6 +305,19 @@ async function findSimilarTrades({ asset, direction, mode, session, contributing
     return { matches: [], summary: emptySummary(), totalConsidered: candidates.length, preFixExcluded };
   }
 
+  // Read current signal's regime from shadow log (written by assessRegime earlier in the pipeline)
+  let currentRegime = null;
+  if (dedupeKey && r) {
+    try {
+      const regRaw = await r.get(`v14:regime:shadow:${dedupeKey}`).catch(() => null);
+      const regObj = regRaw ? (typeof regRaw === 'string' ? safeParse(regRaw) : regRaw) : null;
+      currentRegime = regObj?.regime ?? null;
+    } catch (_) {}
+  }
+
+  const curMinsBucket = _minsIntoBucket(minsIntoWindow);
+  const curAdrBucket  = _adrBucket(adrConsumed);
+
   const currentTactics = new Set(contributingTactics || []);
   const currentTFs = new Set(timeframesInPlay || []);
 
@@ -290,33 +329,58 @@ async function findSimilarTrades({ asset, direction, mode, session, contributing
     let sim = 0;
     let weight = 0;
 
+    // ── Structural dimensions (always scored) ─────────────────────────
+
     // Tactic overlap (Jaccard)
     const tacticInter = [...currentTactics].filter((x) => candidateTactics.has(x)).length;
     const tacticUnion = new Set([...currentTactics, ...candidateTactics]).size;
     const tacticJaccard = tacticUnion > 0 ? tacticInter / tacticUnion : 0;
-    sim += tacticJaccard * 0.4;
-    weight += 0.4;
+    sim += tacticJaccard * 0.35;
+    weight += 0.35;
 
     // Timeframe overlap
     const tfInter = [...currentTFs].filter((x) => candidateTFs.has(x)).length;
     const tfUnion = new Set([...currentTFs, ...candidateTFs]).size;
     const tfJaccard = tfUnion > 0 ? tfInter / tfUnion : 0;
-    sim += tfJaccard * 0.2;
-    weight += 0.2;
-
-    // Mode
-    if (t.mode === mode) sim += 0.15;
+    sim += tfJaccard * 0.15;
     weight += 0.15;
 
-    // Session
+    // Mode
+    if (t.mode === mode) sim += 0.12;
+    weight += 0.12;
+
+    // Session bucket
     if (t.session === session) sim += 0.10;
     weight += 0.10;
 
     // News
     const currentNews = newsFeature?.highImpactWithin60min || false;
     const tradeNews = t.highImpactWithin60min || false;
-    if (currentNews === tradeNews) sim += 0.10;
-    weight += 0.10;
+    if (currentNews === tradeNews) sim += 0.08;
+    weight += 0.08;
+
+    // ── Contextual dimensions (conditional — skipped when either side is null) ─
+
+    // minsIntoWindow bucket: early / mid / late within session
+    const tradeMinsBucket = _minsIntoBucket(t.minsIntoWindow);
+    if (curMinsBucket !== null && tradeMinsBucket !== null) {
+      if (curMinsBucket === tradeMinsBucket) sim += 0.12;
+      weight += 0.12;
+    }
+
+    // adrConsumed bucket: how much of the day's range was already used
+    const tradeAdrBucket = _adrBucket(t.adrConsumed);
+    if (curAdrBucket !== null && tradeAdrBucket !== null) {
+      if (curAdrBucket === tradeAdrBucket) sim += 0.12;
+      weight += 0.12;
+    }
+
+    // regimeCategory: trending / ranging / choppy at signal time
+    const tradeRegime = t.regimeCategory ?? null;
+    if (currentRegime !== null && tradeRegime !== null) {
+      if (currentRegime === tradeRegime) sim += 0.10;
+      weight += 0.10;
+    }
 
     // Synthetic trades count for less (decay over real-trade accumulation)
     const realPenalty = t.synthetic ? 0.5 : 1.0;

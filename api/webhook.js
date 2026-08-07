@@ -733,13 +733,16 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     try {
       const { findSimilarTrades, getSizeMultiplier } = require('./recognition-memory');
       const _recog = await findSimilarTrades({
-        assetId,
+        asset:               assetId,
         direction:           p.direction,
         template:            p.template,
         session:             p.window || (p.swept ? `swept ${p.swept}` : 'unknown'),
         contributingTactics: [p.template],
         timeframesInPlay:    [p.timeframe],
         newsFeature:         null,
+        minsIntoWindow:      _minsIntoWindow,
+        adrConsumed:         parseFloat(p.adrConsumed) || null,
+        dedupeKey,
       });
       const _adv = _recog && _recog.summary;
       if (_adv) {
