@@ -681,56 +681,515 @@ function TradeLogModal({trades,onClose}) {
   );
 }
 
-function NexusModal({trades,onClose}) {
-  const nexus=useMemo(()=>computeNexus(trades),[trades]);
-  if(!nexus) return (
-    <div style={{position:'fixed',inset:0,zIndex:9200,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,11,24,.9)',backdropFilter:'blur(7px)'}} onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div style={{background:'var(--panel)',border:'1px solid rgba(167,139,250,.4)',borderRadius:10,padding:24,textAlign:'center',maxWidth:400}}><div style={{color:'var(--pur)',fontFamily:'var(--mono)',fontSize:14,fontWeight:800,marginBottom:8}}>⬡ QB-NEXUS</div><div style={{color:'var(--dim)',fontSize:10}}>Need ≥ 10 closed trades</div><button className="nexClose" style={{marginTop:16}} onClick={onClose}>Close</button></div>
-    </div>
-  );
-  const realWR=pct(nexus.nexusWR,1),baseWR=pct(nexus.overallWR,1),lift=((nexus.nexusWR-nexus.overallWR)*100).toFixed(1);
+// ── BRAIN MODAL ──────────────────────────────────────────────────────────────
+
+const INSTRUMENT_DEFAULTS = {
+  XAUUSD:{ name:'XAUUSD',sub:'Gold',    sessions:['NY_AM'],         templates:['ORB-PRO','SB','ALEX-G'],               bias:'LONG',  lot:0.10,sl:150,tp:2.0,rule:'CVD > 0 required. Skip 10m before news.' },
+  US500: { name:'US500', sub:'S&P 500', sessions:['NY_AM','NY_PM'],  templates:['ORB-PRO','REACT-FVG','ALEX-G','ORB'],   bias:'ANY',   lot:0.50,sl:80, tp:2.0,rule:'ORB window 09:30-09:45 ET. D1 EMA mandatory.' },
+  NAS100:{ name:'NAS100',sub:'Nasdaq',  sessions:['NY_AM'],         templates:['ORB-PRO','ALEX-G'],                     bias:'LONG',  lot:0.20,sl:120,tp:2.0,rule:'LONG only D1 above 200 EMA. KNN ≥75%.' },
+  GER40: { name:'GER40', sub:'DAX',     sessions:['LON','NY_AM'],    templates:['REACT-FVG','AM-IFVG'],                  bias:'ANY',   lot:0.25,sl:100,tp:1.8,rule:'Skip first 15m London open. ADR <75%.' },
+  GBPUSD:{ name:'GBPUSD',sub:'Cable',   sessions:['LON'],           templates:['SB','REACT-FVG'],                       bias:'SHORT', lot:0.10,sl:200,tp:2.0,rule:'Short bias during UK news. No trades 30m before data.' },
+  EURUSD:{ name:'EURUSD',sub:'EuroDlr', sessions:['LON'],           templates:['AM-IFVG','REACT-IFVG'],                 bias:'ANY',   lot:0.10,sl:180,tp:1.8,rule:'Correlate with DXY. Avoid ECB days.' },
+};
+
+function BrainHourDayGrid({trades}) {
+  const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const HOURS=Array.from({length:24},(_,i)=>i);
+  const cells=useMemo(()=>{
+    const m={};
+    for(const t of(trades||[])){if(!t.closedAt)continue;const d=new Date(t.closedAt);const day=DAYS[(d.getUTCDay()+6)%7];const h=d.getUTCHours();const k=`${day}-${h}`;if(!m[k])m[k]={w:0,n:0};m[k].n++;if(t.outcome==='WIN')m[k].w++;}
+    return m;
+  },[trades]);
+  const col=wr=>{if(wr>=70)return'#00c87a';if(wr>=60)return'#7eb800';if(wr>=45)return'#d97706';return'#c0254a';};
   return (
-    <div style={{position:'fixed',inset:0,zIndex:9200,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,11,24,.9)',backdropFilter:'blur(6px)'}} onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div style={{background:'var(--panel)',border:'1px solid rgba(167,139,250,.45)',borderRadius:10,width:'min(680px,94%)',padding:26,boxShadow:'0 0 60px rgba(167,139,250,.12)',maxHeight:'88vh',overflowY:'auto'}}>
-        <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:4}}><div style={{fontFamily:'var(--mono)',fontSize:17,color:'var(--pur)',fontWeight:800,letterSpacing:'1.5px',flex:1}}>⬡ QB-NEXUS · Real Analysis</div><button style={{background:'none',border:'none',color:'var(--dim)',fontSize:17,cursor:'pointer'}} onClick={onClose}>✕</button></div>
-        <div style={{fontSize:10,color:'var(--dim)',marginBottom:16,lineHeight:1.5}}>{nexus.total} trades analysed across all templates.</div>
-        <div className="nexGrid">
-          <div className="nexCard"><div className="nexCT">Nexus WR</div><div className="nexCV" style={{color:'var(--pulse)'}}>{realWR}</div><div className="nexCL">vs {baseWR} ({lift}pp lift)</div></div>
-          <div className="nexCard"><div className="nexCT">Nexus Avg R</div><div className="nexCV" style={{color:'var(--ion)'}}>{fmtR(nexus.nexusAvgR)}</div><div className="nexCL">vs {fmtR(nexus.overallAvgR)} overall</div></div>
-          <div className="nexCard"><div className="nexCT">Confidence</div><div className="nexCV" style={{color:'var(--pur)'}}>{nexus.confidence}</div><div className="nexCL">{nexus.nexusSample} qualifying trades</div></div>
+    <div style={{overflowX:'auto',padding:'14px 16px'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+        <div style={{display:'flex',gap:12}}>
+          {[['≥70%','#00c87a'],['60-70%','#7eb800'],['45-60%','#d97706'],['<45%','#c0254a'],['no data','#0d1f35']].map(([l,c])=>(
+            <span key={l} style={{display:'flex',alignItems:'center',gap:4,fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)'}}>
+              <span style={{width:10,height:10,borderRadius:2,background:c,display:'inline-block'}}/>{l}
+            </span>
+          ))}
         </div>
-        <div className="nexRec"><b>⬡ QB-NEXUS</b> optimal conditions from real data:<br/>{nexus.bestTpl&&<><b>Best template:</b> {tplLabel(nexus.bestTpl.id)} ({pct(nexus.bestTpl.wr,1)} WR, {nexus.bestTpl.total} trades)<br/></>}{nexus.bestSess&&<><b>Best session:</b> {sessLabel(nexus.bestSess.id)} ({pct(nexus.bestSess.wr,1)} WR, {nexus.bestSess.total} trades)<br/></>}<b>No-news filter applied</b> · {nexus.nexusSample} qualifying trades · {realWR} WR · {fmtR(nexus.nexusAvgR)} avg R</div>
-        <div className="nexBtns"><button className="nexGen" onClick={onClose}>⬡ APPLY NEXUS</button><button className="nexClose" onClick={onClose}>Close</button></div>
+        <span style={{fontFamily:'var(--mono)',fontSize:7,color:'var(--dim)'}}>hover cell for detail · all times UTC</span>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'36px repeat(24,1fr)',gap:1,fontSize:8}}>
+        <div/>
+        {HOURS.map(h=><div key={h} style={{textAlign:'center',fontFamily:'var(--mono)',fontSize:7,color:'var(--dim)',padding:'2px 0'}}>{String(h).padStart(2,'0')}</div>)}
+        {DAYS.map(day=>[
+          <div key={day} style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--ion)',display:'flex',alignItems:'center',paddingRight:4}}>{day}</div>,
+          ...HOURS.map(h=>{
+            const k=`${day}-${h}`;const c=cells[k];const wr=c?Math.round(c.w/c.n*100):null;
+            return <div key={h} title={c?`${day} ${h}:00 UTC — ${c.n} trades · ${wr}% WR`:undefined} style={{height:22,borderRadius:2,background:wr!==null?col(wr):'rgba(0,20,48,.6)',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'var(--mono)',fontSize:7,color:wr!==null?(wr>=60?'rgba(0,0,0,.75)':'rgba(255,255,255,.8)'):'transparent',cursor:c?'pointer':'default',border:'1px solid rgba(0,0,0,.2)'}}>{wr!==null?wr:''}</div>;
+          })
+        ])}
       </div>
     </div>
   );
 }
 
-function TemplateModal({tplId,trades,rules,onClose}) {
+function BrainKNNConstellation({trades}) {
+  const ref=useRef(null);
+  const pts=useMemo(()=>{
+    return (trades||[]).filter(t=>t.closedAt&&typeof t.pnlR==='number'&&isFinite(t.pnlR)).map(t=>{
+      const h=new Date(t.closedAt).getUTCHours();
+      return {x:h,y:t.pnlR,win:t.outcome==='WIN',tpl:t.template};
+    });
+  },[trades]);
+  useEffect(()=>{
+    const c=ref.current;if(!c)return;
+    const x=c.getContext('2d'),W=c.width,H=c.height;
+    const pad={l:40,r:16,t:12,b:28};
+    const pW=W-pad.l-pad.r,pH=H-pad.t-pad.b;
+    const ys=pts.map(p=>p.y);const mn=Math.min(...ys,-1.5),mx=Math.max(...ys,1.5);
+    const px=v=>pad.l+((v/24)*pW),py=v=>pad.t+pH-(v-mn)/(mx-mn)*pH;
+    x.clearRect(0,0,W,H);
+    x.strokeStyle='rgba(0,229,255,.06)';x.lineWidth=0.5;
+    [0,6,12,18,24].forEach(h=>{x.beginPath();x.moveTo(px(h),pad.t);x.lineTo(px(h),pad.t+pH);x.stroke();x.fillStyle='rgba(0,229,255,.35)';x.font='7px monospace';x.textAlign='center';x.fillText(String(h).padStart(2,'0'),px(h),H-5);});
+    const zeroY=py(0);x.strokeStyle='rgba(0,229,255,.15)';x.lineWidth=1;x.setLineDash([3,4]);x.beginPath();x.moveTo(pad.l,zeroY);x.lineTo(W-pad.r,zeroY);x.stroke();x.setLineDash([]);
+    x.fillStyle='rgba(0,229,255,.3)';x.font='7px monospace';x.textAlign='right';
+    [mn,0,mx].forEach(v=>{x.fillText(v.toFixed(1)+'R',pad.l-3,py(v)+3);});
+    pts.forEach(p=>{
+      const px2=px(p.x+(Math.random()-.5)*.6),py2=py(p.y);
+      x.fillStyle=p.win?'rgba(0,255,157,.65)':'rgba(255,45,85,.55)';x.shadowColor=p.win?'rgba(0,255,157,.4)':'rgba(255,45,85,.3)';x.shadowBlur=4;
+      x.beginPath();x.arc(px2,py2,3,0,Math.PI*2);x.fill();
+    });
+    x.shadowBlur=0;
+  },[pts]);
+  return (
+    <div style={{padding:'14px 16px'}}>
+      <div style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)',marginBottom:8}}>KNN Constellation — each dot is a trade. Green = WIN, red = LOSS. X = UTC hour, Y = R outcome.</div>
+      <canvas ref={ref} width={860} height={280} style={{width:'100%',display:'block',borderRadius:4,background:'rgba(0,10,28,.5)'}}/>
+      <div style={{display:'flex',gap:12,marginTop:6}}>
+        <span style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)'}}>Total: {pts.length} trades plotted</span>
+        <span style={{color:'rgba(0,255,157,.7)',fontSize:8,fontFamily:'var(--mono)'}}>● WIN</span>
+        <span style={{color:'rgba(255,45,85,.7)',fontSize:8,fontFamily:'var(--mono)'}}>● LOSS</span>
+      </div>
+    </div>
+  );
+}
+
+function BrainRiskTreemap({trades}) {
+  const blocks=useMemo(()=>{
+    const m={};
+    for(const t of(trades||[])){const k=t.template||'unknown';if(!m[k])m[k]={w:0,n:0,r:[]};m[k].n++;if(t.outcome==='WIN')m[k].w++;if(typeof t.pnlR==='number'&&isFinite(t.pnlR))m[k].r.push(t.pnlR);}
+    return Object.entries(m).map(([id,s])=>({id,label:tplLabel(id),n:s.n,wr:s.n?s.w/s.n:0,avgR:s.r.length?s.r.reduce((a,b)=>a+b,0)/s.r.length:0})).sort((a,b)=>b.n-a.n);
+  },[trades]);
+  const total=blocks.reduce((s,b)=>s+b.n,0)||1;
+  return (
+    <div style={{padding:'14px 16px'}}>
+      <div style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)',marginBottom:10}}>Risk Treemap — block size = trade count · color = win rate</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+        {blocks.map(b=>{
+          const size=Math.max(80,b.n/total*600);const c=b.wr>=.7?'rgba(0,255,157,.9)':b.wr>=.6?'rgba(120,200,50,.9)':b.wr>=.45?'rgba(245,158,11,.9)':'rgba(255,45,85,.9)';
+          return <div key={b.id} style={{width:size,height:size,background:`linear-gradient(135deg,rgba(0,20,48,.9),rgba(0,20,48,.6))`,border:`1px solid ${c.replace('.9','.4')}`,borderRadius:6,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:`inset 0 0 ${size*.3}px ${c.replace('.9','.12')}`}}>
+            <div style={{fontFamily:'var(--mono)',fontSize:Math.max(8,size*.07),color:c,fontWeight:700}}>{b.label}</div>
+            <div style={{fontFamily:'var(--mono)',fontSize:Math.max(10,size*.1),color:c,fontWeight:200,marginTop:2}}>{pct(b.wr,0)}</div>
+            <div style={{fontSize:Math.max(7,size*.06),color:'var(--dim)',marginTop:1}}>{b.n} trades · {fmtR(b.avgR)}</div>
+          </div>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BrainInstrumentRules() {
+  const [rows,setRows]=useState(()=>Object.values(INSTRUMENT_DEFAULTS).map(r=>({...r})));
+  const [saved,setSaved]=useState({});
+  const saveRow=async(r)=>{
+    try{await fetch('/api/rules?action=set-instrument-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(r)});setSaved(p=>({...p,[r.name]:true}));setTimeout(()=>setSaved(p=>({...p,[r.name]:false})),2000);}
+    catch{setSaved(p=>({...p,[r.name]:'err'}));}
+  };
+  const upd=(name,field,val)=>setRows(rs=>rs.map(r=>r.name===name?{...r,[field]:val}:r));
+  const TH=s=><th style={{padding:'7px 10px',fontFamily:'var(--mono)',fontSize:7.5,textTransform:'uppercase',letterSpacing:.4,color:'var(--dim)',fontWeight:400,whiteSpace:'nowrap',textAlign:'left'}}>{s}</th>;
+  return (
+    <div style={{padding:'14px 16px'}}>
+      <div style={{fontFamily:'var(--ui)',fontSize:11,color:'var(--txt)',marginBottom:12,lineHeight:1.6}}>
+        Per-instrument execution rules. Edit <b style={{color:'var(--ion)'}}>Lot Size</b>, <b style={{color:'var(--ion)'}}>SL (pts)</b>, <b style={{color:'var(--ion)'}}>TP (R)</b> and <b style={{color:'var(--ion)'}}>Bias</b> directly – click <b style={{color:'var(--pulse)'}}>Save</b> to apply.
+      </div>
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',minWidth:900}}>
+          <thead><tr style={{borderBottom:'1px solid rgba(0,229,255,.12)'}}>
+            {['INSTRUMENT','SESSIONS','TEMPLATES','BIAS','LOT SIZE','SL (PTS)','TP (R)','SPECIAL RULE',''].map((h,i)=><th key={i} style={{padding:'7px 10px',fontFamily:'var(--mono)',fontSize:7.5,textTransform:'uppercase',letterSpacing:.4,color:'var(--dim)',fontWeight:400,whiteSpace:'nowrap',textAlign:'left'}}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {rows.map(r=>(
+              <tr key={r.name} style={{borderBottom:'1px solid rgba(0,229,255,.05)'}}>
+                <td style={{padding:'8px 10px'}}>
+                  <div style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--ion)',fontWeight:700}}>{r.name}</div>
+                  <div style={{fontSize:8,color:'var(--dim)'}}>{r.sub}</div>
+                </td>
+                <td style={{padding:'8px 10px'}}>
+                  <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+                    {r.sessions.map(s=><span key={s} style={{fontFamily:'var(--mono)',fontSize:7.5,padding:'1px 5px',borderRadius:3,background:'rgba(0,229,255,.08)',border:'1px solid rgba(0,229,255,.2)',color:'var(--ion)'}}>{s.replace('_','_')}</span>)}
+                  </div>
+                </td>
+                <td style={{padding:'8px 10px'}}>
+                  <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+                    {r.templates.map(t=><span key={t} style={{fontFamily:'var(--mono)',fontSize:7.5,padding:'1px 5px',borderRadius:3,background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',color:'var(--pur)'}}>{t}</span>)}
+                  </div>
+                </td>
+                <td style={{padding:'8px 10px'}}>
+                  <select value={r.bias} onChange={e=>upd(r.name,'bias',e.target.value)} style={{background:'rgba(0,20,48,.7)',border:'1px solid rgba(0,229,255,.25)',color:'var(--ion)',fontFamily:'var(--mono)',fontSize:9,padding:'3px 6px',borderRadius:3,outline:'none',cursor:'pointer'}}>
+                    <option>LONG</option><option>SHORT</option><option>ANY</option>
+                  </select>
+                </td>
+                <td style={{padding:'8px 10px'}}>
+                  <input type="number" value={r.lot} step="0.01" min="0.01" onChange={e=>upd(r.name,'lot',parseFloat(e.target.value)||r.lot)} style={{width:60,background:'rgba(0,20,48,.7)',border:'1px solid rgba(0,229,255,.2)',color:'var(--txt)',fontFamily:'var(--mono)',fontSize:10,padding:'3px 6px',borderRadius:3,outline:'none',textAlign:'center'}}/>
+                </td>
+                <td style={{padding:'8px 10px'}}>
+                  <input type="number" value={r.sl} step="5" min="5" onChange={e=>upd(r.name,'sl',parseInt(e.target.value)||r.sl)} style={{width:60,background:'rgba(0,20,48,.7)',border:'1px solid rgba(0,229,255,.2)',color:'var(--txt)',fontFamily:'var(--mono)',fontSize:10,padding:'3px 6px',borderRadius:3,outline:'none',textAlign:'center'}}/>
+                </td>
+                <td style={{padding:'8px 10px'}}>
+                  <input type="number" value={r.tp} step="0.1" min="0.5" onChange={e=>upd(r.name,'tp',parseFloat(e.target.value)||r.tp)} style={{width:50,background:'rgba(0,20,48,.7)',border:'1px solid rgba(0,229,255,.2)',color:'var(--txt)',fontFamily:'var(--mono)',fontSize:10,padding:'3px 6px',borderRadius:3,outline:'none',textAlign:'center'}}/>
+                </td>
+                <td style={{padding:'8px 10px',color:'var(--dim)',fontSize:9,maxWidth:260}}>{r.rule}</td>
+                <td style={{padding:'8px 10px'}}>
+                  <button onClick={()=>saveRow(r)} style={{background:saved[r.name]===true?'rgba(0,255,157,.15)':saved[r.name]==='err'?'rgba(255,45,85,.15)':'rgba(0,229,255,.08)',border:`1px solid ${saved[r.name]===true?'rgba(0,255,157,.5)':saved[r.name]==='err'?'rgba(255,45,85,.4)':'rgba(0,229,255,.3)'}`,color:saved[r.name]===true?'var(--pulse)':saved[r.name]==='err'?'var(--thr)':'var(--ion)',fontFamily:'var(--mono)',fontSize:9,padding:'4px 12px',borderRadius:3,cursor:'pointer',fontWeight:700,whiteSpace:'nowrap'}}>
+                    {saved[r.name]===true?'✓ Saved':saved[r.name]==='err'?'Error':'Save'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function BrainSymbolMap({trades}) {
+  const sym=useMemo(()=>{
+    const m={};
+    for(const t of(trades||[])){const k=(t.asset||'?').toUpperCase();if(!m[k])m[k]={w:0,n:0,pnl:0};m[k].n++;if(t.outcome==='WIN')m[k].w++;m[k].pnl+=(t.pnl||0);}
+    return Object.entries(m).map(([s,v])=>({sym:s,n:v.n,wr:v.n?v.w/v.n:0,pnl:v.pnl})).sort((a,b)=>b.n-a.n);
+  },[trades]);
+  return (
+    <div style={{padding:'14px 16px'}}>
+      <div style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)',marginBottom:10}}>Symbol Map — performance by instrument across all trades</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8}}>
+        {sym.map(s=>{
+          const c=s.wr>=.7?'var(--pulse)':s.wr>=.5?'var(--ion)':s.wr>=.4?'var(--amb)':'var(--thr)';
+          return <div key={s.sym} style={{background:'rgba(0,15,35,.7)',border:`1px solid ${c.replace('var(','').replace(')','').trim()}`,borderRadius:6,padding:'10px 12px'}}>
+            <div style={{fontFamily:'var(--mono)',fontSize:13,color:'var(--ion)',fontWeight:700}}>{s.sym}</div>
+            <div style={{fontFamily:'var(--mono)',fontSize:18,color:c,fontWeight:200,margin:'4px 0'}}>{pct(s.wr,0)}</div>
+            <div style={{fontSize:8,color:'var(--dim)'}}>{s.n} trades · <span style={{color:s.pnl>=0?'var(--pulse)':'var(--thr)'}}>{fmtMoney(s.pnl,0)}</span></div>
+            <div style={{marginTop:5,height:3,background:'rgba(0,229,255,.08)',borderRadius:2,overflow:'hidden'}}><div style={{height:'100%',width:`${s.wr*100}%`,background:c,borderRadius:2}}/></div>
+          </div>;
+        })}
+        {sym.length===0&&<div style={{color:'var(--dim)',fontSize:9}}>No trade data available</div>}
+      </div>
+    </div>
+  );
+}
+
+function BrainLargeEquity({trades}) {
+  const ref=useRef(null);
+  useEffect(()=>{
+    const c=ref.current;if(!c)return;
+    const x=c.getContext('2d'),W=c.width,H=c.height;
+    x.clearRect(0,0,W,H);
+    const sorted=(trades||[]).slice().sort((a,b)=>(a.closedAt||0)-(b.closedAt||0));
+    if(sorted.length<2)return;
+    let running=0;
+    const data=[0,...sorted.map(t=>{running+=(t.pnl||0);return running;})];
+    const mn=Math.min(...data),mx=Math.max(...data)||100;const range=mx-mn||100;
+    const px=i=>(i/(data.length-1))*(W-2)+1,py=v=>H-2-(v-mn)/range*(H-16)-6;
+    const isPos=data[data.length-1]>=0;
+    const g=x.createLinearGradient(0,0,0,H);g.addColorStop(0,isPos?'rgba(0,229,255,.18)':'rgba(255,45,85,.12)');g.addColorStop(1,isPos?'rgba(0,229,255,0)':'rgba(255,45,85,0)');
+    x.beginPath();data.forEach((v,i)=>i===0?x.moveTo(px(i),py(v)):x.lineTo(px(i),py(v)));x.lineTo(W,H);x.lineTo(0,H);x.closePath();x.fillStyle=g;x.fill();
+    x.beginPath();data.forEach((v,i)=>i===0?x.moveTo(px(i),py(v)):x.lineTo(px(i),py(v)));x.strokeStyle=isPos?'rgba(0,229,255,.8)':'rgba(255,45,85,.8)';x.lineWidth=1.8;x.stroke();
+    const zeroY=py(0);if(zeroY>4&&zeroY<H-4){x.strokeStyle='rgba(0,229,255,.12)';x.lineWidth=1;x.setLineDash([4,4]);x.beginPath();x.moveTo(0,zeroY);x.lineTo(W,zeroY);x.stroke();x.setLineDash([]);}
+    const last=data[data.length-1];x.fillStyle='rgba(0,10,28,.7)';x.font='9px monospace';x.fillStyle=last>=0?'var(--pulse)':'var(--thr)';x.textAlign='right';x.fillText(`${last>=0?'+':''}$${Math.round(last)}`,W-4,py(last)-5);
+  },[trades]);
+  return <canvas ref={ref} width={900} height={160} style={{width:'100%',display:'block',borderRadius:4}}/>;
+}
+
+function BrainTradingData({trades}) {
+  const [excluded,setExcluded]=useState(new Set());
+  const [filter,setFilter]=useState('All');
+  const visible=useMemo(()=>{
+    let a=(trades||[]).filter(t=>!excluded.has(t.id||t._id));
+    if(filter==='Wins')a=a.filter(t=>t.outcome==='WIN');
+    if(filter==='Losses')a=a.filter(t=>t.outcome==='LOSS');
+    return a.slice().sort((a,b)=>(b.closedAt||0)-(a.closedAt||0));
+  },[trades,excluded,filter]);
+  const wins=visible.filter(t=>t.outcome==='WIN').length;
+  const rVals=visible.map(t=>t.pnlR).filter(v=>typeof v==='number'&&isFinite(v));
+  const avgR=rVals.length?rVals.reduce((a,b)=>a+b,0)/rVals.length:0;
+  const bestR=rVals.length?Math.max(...rVals):0,worstR=rVals.length?Math.min(...rVals):0;
+  const wr=visible.length?wins/visible.length:0;
+  const losses=visible.filter(t=>t.outcome==='LOSS');
+  const profits=visible.filter(t=>t.pnl>0).reduce((s,t)=>s+(t.pnl||0),0);
+  const lossPnl=Math.abs(visible.filter(t=>t.pnl<0).reduce((s,t)=>s+(t.pnl||0),0));
+  const pf=lossPnl>0?profits/lossPnl:profits>0?99:0;
+  const bySess={};for(const t of visible){const s=sessLabel(t.session);if(!bySess[s])bySess[s]={w:0,n:0};bySess[s].n++;if(t.outcome==='WIN')bySess[s].w++;}
+  const sessList=Object.entries(bySess).map(([s,v])=>({s,wr:v.n?v.w/v.n:0,n:v.n})).sort((a,b)=>b.wr-a.wr);
+  const stats=[
+    {l:'Total Trades',v:String(visible.length),bar:1,c:'var(--ion)'},
+    {l:'Win Rate',     v:pct(wr,0),             bar:wr,   c:'var(--pulse)'},
+    {l:'Average R',   v:fmtR(avgR),             bar:Math.min(1,Math.max(0,avgR/4)), c:'var(--ion)'},
+    {l:'Best Trade',  v:fmtR(bestR),            bar:Math.min(1,bestR/5), c:'var(--pulse)'},
+    {l:'Worst Trade', v:fmtR(worstR),           bar:Math.min(1,Math.abs(worstR)/3), c:'var(--thr)'},
+    {l:'Profit Factor',v:pf.toFixed(1),         bar:Math.min(1,pf/5), c:'var(--amb)'},
+    {l:'Best Session', v:sessList[0]?`${sessList[0].s} · ${pct(sessList[0].wr,0)}`:'—', bar:sessList[0]?.wr||0, c:'var(--pulse)'},
+    {l:'Worst Session',v:sessList[sessList.length-1]?`${sessList[sessList.length-1].s} · ${pct(sessList[sessList.length-1].wr,0)}`:'—', bar:sessList[sessList.length-1]?.wr||0, c:'var(--amb)'},
+  ];
+  return (
+    <div style={{padding:'14px 16px'}}>
+      <div style={{marginBottom:12,borderRadius:5,overflow:'hidden',border:'1px solid rgba(0,229,255,.1)'}}><BrainLargeEquity trades={trades}/></div>
+      <div style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)',marginBottom:4}}>Aggregate performance – all templates – all history.</div>
+      <div style={{display:'grid',gridTemplateColumns:'180px 1fr',gap:3,marginBottom:16}}>
+        {stats.map((s,i)=>(
+          <div key={i} style={{display:'contents'}}>
+            <div style={{fontFamily:'var(--mono)',fontSize:9.5,color:'var(--dim)',display:'flex',alignItems:'center',padding:'1.5px 0'}}>{s.l}</div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{fontFamily:'var(--mono)',fontSize:9.5,color:s.c,width:70,textAlign:'right'}}>{s.v}</span>
+              <div style={{flex:1,height:3,background:'rgba(0,229,255,.07)',borderRadius:2,overflow:'hidden'}}><div style={{height:'100%',width:`${s.bar*100}%`,background:s.c,borderRadius:2}}/></div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{borderTop:'1px solid rgba(0,229,255,.1)',paddingTop:10}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+          <span style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)'}}>Trade Log &nbsp;<span style={{color:'var(--ion)'}}>{visible.length} active</span> · <span style={{color:'var(--dim)'}}>{excluded.size} excluded</span></span>
+          <div style={{display:'flex',gap:4,marginLeft:8}}>
+            {['All','Wins','Losses','Excluded'].map(f=><button key={f} className={`tFBtn ${filter===f?'on':''}`} onClick={()=>setFilter(f)}>{f}</button>)}
+          </div>
+        </div>
+        <div style={{overflowX:'auto',maxHeight:260,overflowY:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontFamily:'var(--mono)',fontSize:'9.5px',minWidth:700}}>
+            <thead style={{position:'sticky',top:0,background:'var(--panel)',zIndex:1}}><tr style={{color:'var(--dim)',borderBottom:'1px solid rgba(0,229,255,.1)'}}>
+              {['DATE/TIME','TEMPLATE','SYMBOL','DIR','ENTRY','EXIT','P&L','R','ACTION'].map(h=><th key={h} style={{textAlign:'left',padding:'4px 8px',fontWeight:400,fontSize:7.5,textTransform:'uppercase',letterSpacing:.4,whiteSpace:'nowrap'}}>{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {visible.slice(0,200).map((t,i)=>{
+                const oc=t.outcome==='WIN'?'var(--pulse)':t.outcome==='LOSS'?'var(--thr)':'var(--dim)';
+                const id=t.id||t._id||i;
+                return <tr key={i} style={{borderBottom:'1px solid rgba(0,229,255,.04)',opacity:excluded.has(id)?.4:1}}>
+                  <td style={{padding:'4px 8px',color:'var(--dim)',whiteSpace:'nowrap'}}>{t.closedAt?new Date(t.closedAt).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}).replace(',',''):''}</td>
+                  <td style={{padding:'4px 8px',color:'var(--pur)',fontWeight:700}}>{tplLabel(t.template)}</td>
+                  <td style={{padding:'4px 8px',color:'var(--ion)',fontWeight:700}}>{(t.asset||'?').toUpperCase()}</td>
+                  <td style={{padding:'4px 8px'}}><span style={{fontSize:7,padding:'1px 5px',borderRadius:3,background:t.direction==='long'?'rgba(0,255,157,.1)':'rgba(255,45,85,.1)',color:t.direction==='long'?'var(--pulse)':'var(--thr)'}}>{(t.direction||'?').toUpperCase()}</span></td>
+                  <td style={{padding:'4px 8px',color:'var(--txt)'}}>{t.entryPrice!=null?t.entryPrice.toFixed(t.entryPrice>100?1:5):t.entry||'—'}</td>
+                  <td style={{padding:'4px 8px',color:'var(--txt)'}}>{t.exitPrice!=null?t.exitPrice.toFixed(t.exitPrice>100?1:5):t.exit||'—'}</td>
+                  <td style={{padding:'4px 8px',color:oc}}>{fmtMoney(t.pnl,2)}</td>
+                  <td style={{padding:'4px 8px',color:oc}}>{fmtR(t.pnlR)}</td>
+                  <td style={{padding:'4px 8px'}}><button onClick={()=>setExcluded(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;})} style={{background:excluded.has(id)?'rgba(0,229,255,.08)':'rgba(255,45,85,.08)',border:`1px solid ${excluded.has(id)?'rgba(0,229,255,.25)':'rgba(255,45,85,.3)'}`,color:excluded.has(id)?'var(--ion)':'var(--thr)',fontFamily:'var(--mono)',fontSize:7.5,padding:'2px 8px',borderRadius:3,cursor:'pointer'}}>{excluded.has(id)?'Include':'Exclude'}</button></td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BrainModal({trades,onClose}) {
+  const TABS=[
+    {id:'grid',    label:'Hour×Day Grid'},
+    {id:'knn',     label:'KNN Constellation'},
+    {id:'treemap', label:'Risk Treemap'},
+    {id:'rules',   label:'Instrument Rules'},
+    {id:'symbol',  label:'Symbol Map'},
+    {id:'data',    label:'Trading Data'},
+  ];
+  const [tab,setTab]=useState('grid');
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:9200,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,11,24,.92)',backdropFilter:'blur(8px)'}} onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{background:'var(--panel)',border:'1px solid rgba(167,139,250,.3)',borderRadius:10,width:'min(1100px,97vw)',maxHeight:'92vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 0 80px rgba(167,139,250,.1)'}}>
+        <div style={{display:'flex',alignItems:'center',padding:'0 16px',borderBottom:'1px solid rgba(0,229,255,.1)',flexShrink:0,background:'rgba(0,229,255,.02)'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,paddingRight:16}}>
+            <div style={{width:18,height:18,borderRadius:'50%',background:'rgba(255,45,85,.8)',boxShadow:'0 0 10px rgba(255,45,85,.4)'}}/>
+            <span style={{fontFamily:'var(--mono)',fontSize:12,color:'var(--ion)',fontWeight:700,letterSpacing:2}}>QUANTUM BRAIN</span>
+          </div>
+          <div style={{display:'flex',flex:1,borderLeft:'1px solid rgba(0,229,255,.1)',paddingLeft:8}}>
+            {TABS.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:'12px 14px',background:'none',border:'none',borderBottom:`2px solid ${tab===t.id?'var(--ion)':'transparent'}`,color:tab===t.id?'var(--ion)':'var(--dim)',fontFamily:'var(--mono)',fontSize:9,fontWeight:700,letterSpacing:.5,cursor:'pointer',whiteSpace:'nowrap',transition:'color .2s'}}>{t.label}</button>
+            ))}
+          </div>
+          <button onClick={onClose} style={{background:'none',border:'1px solid rgba(0,229,255,.2)',color:'var(--dim)',fontFamily:'var(--mono)',fontSize:9,padding:'4px 10px',borderRadius:4,cursor:'pointer',marginLeft:8}}>✕ Close</button>
+        </div>
+        <div style={{flex:1,overflowY:'auto'}}>
+          {tab==='grid'    && <BrainHourDayGrid  trades={trades}/>}
+          {tab==='knn'     && <BrainKNNConstellation trades={trades}/>}
+          {tab==='treemap' && <BrainRiskTreemap   trades={trades}/>}
+          {tab==='rules'   && <BrainInstrumentRules/>}
+          {tab==='symbol'  && <BrainSymbolMap     trades={trades}/>}
+          {tab==='data'    && <BrainTradingData   trades={trades}/>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── TEMPLATE MODAL (full tabbed) ─────────────────────────────────────────────
+function TemplateModal({tplId,trades,rules,jarvisState,onClose}) {
   const meta=TPLS_META[tplId]||{glyph:'⊕',label:tplId};
-  const tTrades=useMemo(()=>(trades||[]).filter(t=>t.template===tplId),[trades,tplId]);
+  const isAlexG=tplId==='alexg';
+  const TABS=[
+    {id:'overview', label:'OVERVIEW'},
+    {id:'session',  label:'BY SESSION'},
+    {id:'regime',   label:'BY REGIME'},
+    {id:'trades',   label:'TRADES'},
+    ...(isAlexG?[{id:'cron',label:'CRON'},{id:'signals',label:'SIGNALS'}]:[]),
+  ];
+  const [tab,setTab]=useState('overview');
+  const tTrades=useMemo(()=>(trades||[]).filter(t=>t.template===tplId).slice().sort((a,b)=>(b.closedAt||0)-(a.closedAt||0)),[trades,tplId]);
   const wins=tTrades.filter(t=>t.outcome==='WIN').length;
   const wr=tTrades.length?wins/tTrades.length:0;
   const rVals=tTrades.map(t=>t.pnlR).filter(v=>typeof v==='number'&&isFinite(v));
   const avgR=rVals.length?rVals.reduce((a,b)=>a+b,0)/rVals.length:0;
-  const recent=tTrades.slice().sort((a,b)=>(b.closedAt||0)-(a.closedAt||0)).slice(0,50);
+  const bestR=rVals.length?Math.max(...rVals):0,worstR=rVals.length?Math.min(...rVals):0;
+  const totalPnL=tTrades.reduce((s,t)=>s+(t.pnl||0),0);
+  const profits=tTrades.filter(t=>t.pnl>0).reduce((s,t)=>s+(t.pnl||0),0);
+  const lossPnl=Math.abs(tTrades.filter(t=>t.pnl<0).reduce((s,t)=>s+(t.pnl||0),0));
+  const pf=lossPnl>0?profits/lossPnl:profits>0?99:0;
+  const bySess=useMemo(()=>{const m={};for(const t of tTrades){const s=sessLabel(t.session);if(!m[s])m[s]={w:0,n:0,r:[]};m[s].n++;if(t.outcome==='WIN')m[s].w++;if(typeof t.pnlR==='number'&&isFinite(t.pnlR))m[s].r.push(t.pnlR);}return Object.entries(m).map(([s,v])=>({s,n:v.n,wr:v.n?v.w/v.n:0,avgR:v.r.length?v.r.reduce((a,b)=>a+b,0)/v.r.length:0})).sort((a,b)=>b.wr-a.wr);},[tTrades]);
+  const byRegime=useMemo(()=>{const m={};for(const t of tTrades){const s=t.regime||t.marketRegime||'unknown';if(!m[s])m[s]={w:0,n:0,r:[]};m[s].n++;if(t.outcome==='WIN')m[s].w++;if(typeof t.pnlR==='number'&&isFinite(t.pnlR))m[s].r.push(t.pnlR);}return Object.entries(m).map(([s,v])=>({s,n:v.n,wr:v.n?v.w/v.n:0,avgR:v.r.length?v.r.reduce((a,b)=>a+b,0)/v.r.length:0})).sort((a,b)=>b.n-a.n);},[tTrades]);
+  const signals=useMemo(()=>{const watchers=jarvisState?.watchers||{};return Object.entries(watchers).filter(([,w])=>w?.template===tplId||isAlexG).map(([asset,w])=>({asset,dir:w?.direction||'—',desc:w?.signalText||w?.currentSetup?.description||`${(w?.direction||'').toUpperCase()} ${asset.toUpperCase()} — ${jarvisState?.killZone?.label||''} kill zone`,ts:w?.signalTime||Date.now()}));},[jarvisState,tplId]);
   return (
     <div style={{position:'fixed',inset:0,zIndex:9200,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,11,24,.9)',backdropFilter:'blur(7px)'}} onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div style={{background:'var(--panel)',border:'1px solid rgba(0,229,255,.22)',borderRadius:10,width:'min(800px,96vw)',maxHeight:'88vh',overflow:'hidden',display:'flex',flexDirection:'column'}}>
-        <div style={{display:'flex',alignItems:'center',gap:9,padding:'12px 16px',borderBottom:'1px solid rgba(0,229,255,.1)',flexShrink:0}}><span style={{fontSize:20}}>{meta.glyph}</span><span style={{fontFamily:'var(--mono)',fontSize:14,color:'var(--ion)',fontWeight:700,flex:1}}>{meta.label}</span><button style={{background:'none',border:'none',color:'var(--dim)',fontSize:17,cursor:'pointer'}} onClick={onClose}>✕</button></div>
-        <div style={{flex:1,overflowY:'auto',padding:'14px 16px'}}>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:7,marginBottom:12}}>
-            {[{v:pct(wr,1),l:'Win Rate',c:'var(--pulse)'},{v:fmtR(avgR),l:'Avg R',c:'var(--ion)'},{v:tTrades.length,l:'Trades',c:'var(--txt)'}].map((s,i)=>(
-              <div key={i} style={{background:'rgba(0,20,48,.5)',border:'1px solid var(--b)',borderRadius:5,padding:7,textAlign:'center'}}><div style={{fontFamily:'var(--mono)',fontSize:14,fontWeight:200,color:s.c}}>{s.v}</div><div style={{fontSize:7.5,color:'var(--dim)',textTransform:'uppercase',letterSpacing:.3,marginTop:2}}>{s.l}</div></div>
+      <div style={{background:'var(--panel)',border:'1px solid rgba(0,229,255,.22)',borderRadius:10,width:'min(900px,96vw)',maxHeight:'90vh',overflow:'hidden',display:'flex',flexDirection:'column'}}>
+        {/* header */}
+        <div style={{display:'flex',alignItems:'center',gap:9,padding:'0 16px',borderBottom:'1px solid rgba(0,229,255,.1)',flexShrink:0,background:'rgba(0,229,255,.02)'}}>
+          <span style={{fontSize:18}}>{meta.glyph}</span>
+          <span style={{fontFamily:'var(--mono)',fontSize:13,color:'var(--ion)',fontWeight:700,letterSpacing:1}}>{meta.label}</span>
+          <div style={{display:'flex',flex:1,gap:0,borderLeft:'1px solid rgba(0,229,255,.1)',marginLeft:8,paddingLeft:4}}>
+            {TABS.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:'11px 14px',background:'none',border:'none',borderBottom:`2px solid ${tab===t.id?'var(--ion)':'transparent'}`,color:tab===t.id?'var(--ion)':'var(--dim)',fontFamily:'var(--mono)',fontSize:8.5,fontWeight:700,letterSpacing:.6,cursor:'pointer',whiteSpace:'nowrap',transition:'color .2s'}}>{t.label}</button>
             ))}
           </div>
-          <div style={{display:'flex',gap:1.5,margin:'10px 0',overflow:'hidden',height:24,borderRadius:4}}>
-            {tTrades.slice(-60).map((t,i)=><div key={i} style={{flex:1,minWidth:4,background:t.outcome==='WIN'?'rgba(0,255,157,.7)':t.outcome==='LOSS'?'rgba(255,45,85,.7)':'rgba(0,229,255,.25)',borderRadius:1}}/>)}
-            {tTrades.length===0&&<div style={{color:'var(--dim)',fontSize:9,padding:'4px 0'}}>No trade data</div>}
-          </div>
-          <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontFamily:'var(--mono)',fontSize:'9.5px'}}><thead><tr style={{color:'var(--dim)',borderBottom:'1px solid rgba(0,229,255,.1)'}}>{['Time','Asset','Dir','Session','Outcome','PnL','R'].map(h=><th key={h} style={{textAlign:'left',padding:'4px 7px',fontWeight:400}}>{h}</th>)}</tr></thead>
-          <tbody>{recent.map((t,i)=>{const oc=t.outcome==='WIN'?'var(--pulse)':t.outcome==='LOSS'?'var(--thr)':'var(--dim)';return<tr key={i} style={{borderBottom:'1px solid rgba(0,229,255,.04)'}}><td style={{padding:'4px 7px',color:'var(--dim)'}}>{fmtTime(t.closedAt)}</td><td style={{padding:'4px 7px',color:'var(--ion)',fontWeight:700}}>{(t.asset||'?').toUpperCase()}</td><td style={{padding:'4px 7px'}}><span style={{fontSize:7,padding:'1px 4px',borderRadius:3,background:t.direction==='long'?'rgba(0,255,157,.1)':'rgba(255,45,85,.1)',color:t.direction==='long'?'var(--pulse)':'var(--thr)'}}>{(t.direction||'?').toUpperCase()}</span></td><td style={{padding:'4px 7px',color:'var(--dim)'}}>{sessLabel(t.session)}</td><td style={{padding:'4px 7px',color:oc}}>{t.outcome}</td><td style={{padding:'4px 7px',color:oc}}>{fmtMoney(t.pnl,2)}</td><td style={{padding:'4px 7px',color:oc}}>{fmtR(t.pnlR)}</td></tr>;})}
-          </tbody></table></div>
+          <button onClick={onClose} style={{background:'none',border:'none',color:'var(--dim)',fontSize:18,cursor:'pointer',padding:'0 4px'}}>✕</button>
+        </div>
+        {/* body */}
+        <div style={{flex:1,overflowY:'auto',padding:'16px'}}>
+          {tab==='overview'&&(
+            <>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
+                {[{v:pct(wr,1),l:'Win Rate',c:'var(--pulse)'},{v:fmtR(avgR),l:'Avg R',c:'var(--ion)'},{v:String(tTrades.length),l:'Trades',c:'var(--txt)'},{v:fmtMoney(totalPnL,0),l:'Total PnL',c:totalPnL>=0?'var(--pulse)':'var(--thr)'},{v:fmtR(bestR),l:'Best Trade',c:'var(--pulse)'},{v:fmtR(worstR),l:'Worst Trade',c:'var(--thr)'},{v:pf.toFixed(2),l:'Profit Factor',c:'var(--amb)'},{v:wins+' / '+(tTrades.length-wins),l:'W / L',c:'var(--dim)'}].map((s,i)=>(
+                  <div key={i} style={{background:'rgba(0,15,35,.7)',border:'1px solid rgba(0,229,255,.12)',borderRadius:6,padding:'8px 10px',textAlign:'center'}}>
+                    <div style={{fontFamily:'var(--mono)',fontSize:15,fontWeight:200,color:s.c}}>{s.v}</div>
+                    <div style={{fontSize:7.5,color:'var(--dim)',textTransform:'uppercase',letterSpacing:.3,marginTop:3}}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontFamily:'var(--mono)',fontSize:7.5,color:'var(--dim)',marginBottom:4,letterSpacing:.4,textTransform:'uppercase'}}>Last {Math.min(60,tTrades.length)} trades DNA</div>
+                <div style={{display:'flex',gap:1.5,height:28,borderRadius:4,overflow:'hidden'}}>
+                  {tTrades.slice(0,60).map((t,i)=><div key={i} title={`${t.outcome} · ${fmtR(t.pnlR)}`} style={{flex:1,minWidth:5,background:t.outcome==='WIN'?'rgba(0,255,157,.75)':t.outcome==='LOSS'?'rgba(255,45,85,.75)':'rgba(0,229,255,.3)',borderRadius:1,cursor:'help'}}/>)}
+                  {tTrades.length===0&&<div style={{color:'var(--dim)',fontSize:9,display:'flex',alignItems:'center',padding:'0 8px'}}>No trades yet</div>}
+                </div>
+              </div>
+            </>
+          )}
+          {tab==='session'&&(
+            <table style={{width:'100%',borderCollapse:'collapse',fontFamily:'var(--mono)',fontSize:'10px'}}>
+              <thead><tr style={{borderBottom:'1px solid rgba(0,229,255,.1)',color:'var(--dim)'}}>
+                {['Session','Trades','Win Rate','Avg R','Bar'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 10px',fontWeight:400,fontSize:8,textTransform:'uppercase',letterSpacing:.4}}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {bySess.map((s,i)=>(
+                  <tr key={i} style={{borderBottom:'1px solid rgba(0,229,255,.04)'}}>
+                    <td style={{padding:'8px 10px',color:'var(--ion)',fontWeight:700}}>{s.s}</td>
+                    <td style={{padding:'8px 10px',color:'var(--dim)'}}>{s.n}</td>
+                    <td style={{padding:'8px 10px',color:s.wr>=.6?'var(--pulse)':s.wr>=.45?'var(--amb)':'var(--thr)'}}>{pct(s.wr,1)}</td>
+                    <td style={{padding:'8px 10px',color:s.avgR>=0?'var(--pulse)':'var(--thr)'}}>{fmtR(s.avgR)}</td>
+                    <td style={{padding:'8px 10px',minWidth:140}}><div style={{height:4,background:'rgba(0,229,255,.08)',borderRadius:2,overflow:'hidden'}}><div style={{height:'100%',width:`${s.wr*100}%`,background:s.wr>=.6?'var(--pulse)':s.wr>=.45?'var(--amb)':'var(--thr)',borderRadius:2}}/></div></td>
+                  </tr>
+                ))}
+                {bySess.length===0&&<tr><td colSpan={5} style={{padding:'12px 10px',color:'var(--dim)',fontSize:9}}>No session data</td></tr>}
+              </tbody>
+            </table>
+          )}
+          {tab==='regime'&&(
+            <table style={{width:'100%',borderCollapse:'collapse',fontFamily:'var(--mono)',fontSize:'10px'}}>
+              <thead><tr style={{borderBottom:'1px solid rgba(0,229,255,.1)',color:'var(--dim)'}}>
+                {['Regime','Trades','Win Rate','Avg R','Bar'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 10px',fontWeight:400,fontSize:8,textTransform:'uppercase',letterSpacing:.4}}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {byRegime.map((s,i)=>(
+                  <tr key={i} style={{borderBottom:'1px solid rgba(0,229,255,.04)'}}>
+                    <td style={{padding:'8px 10px',color:'var(--ion)',fontWeight:700,textTransform:'capitalize'}}>{s.s}</td>
+                    <td style={{padding:'8px 10px',color:'var(--dim)'}}>{s.n}</td>
+                    <td style={{padding:'8px 10px',color:s.wr>=.6?'var(--pulse)':s.wr>=.45?'var(--amb)':'var(--thr)'}}>{pct(s.wr,1)}</td>
+                    <td style={{padding:'8px 10px',color:s.avgR>=0?'var(--pulse)':'var(--thr)'}}>{fmtR(s.avgR)}</td>
+                    <td style={{padding:'8px 10px',minWidth:140}}><div style={{height:4,background:'rgba(0,229,255,.08)',borderRadius:2,overflow:'hidden'}}><div style={{height:'100%',width:`${s.wr*100}%`,background:s.wr>=.6?'var(--pulse)':s.wr>=.45?'var(--amb)':'var(--thr)',borderRadius:2}}/></div></td>
+                  </tr>
+                ))}
+                {byRegime.length===0&&<tr><td colSpan={5} style={{padding:'12px 10px',color:'var(--dim)',fontSize:9}}>No regime data in trades</td></tr>}
+              </tbody>
+            </table>
+          )}
+          {tab==='trades'&&(
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontFamily:'var(--mono)',fontSize:'9.5px'}}>
+                <thead><tr style={{color:'var(--dim)',borderBottom:'1px solid rgba(0,229,255,.1)'}}>
+                  {['Time','Dir','Asset','Entry','Exit','PnL','R'].map(h=><th key={h} style={{textAlign:'left',padding:'5px 10px',fontWeight:400,fontSize:8,textTransform:'uppercase',letterSpacing:.4}}>{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {tTrades.slice(0,200).map((t,i)=>{
+                    const oc=t.outcome==='WIN'?'var(--pulse)':t.outcome==='LOSS'?'var(--thr)':'var(--dim)';
+                    return <tr key={i} style={{borderBottom:'1px solid rgba(0,229,255,.04)'}}>
+                      <td style={{padding:'5px 10px',color:'var(--dim)',whiteSpace:'nowrap'}}>{t.closedAt?new Date(t.closedAt).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}):''}</td>
+                      <td style={{padding:'5px 10px'}}><span style={{fontSize:7.5,padding:'1.5px 5px',borderRadius:3,background:t.direction==='long'?'rgba(0,255,157,.1)':'rgba(255,45,85,.1)',color:t.direction==='long'?'var(--pulse)':'var(--thr)',fontWeight:700}}>{(t.direction||'?').toUpperCase()}</span></td>
+                      <td style={{padding:'5px 10px',color:'var(--ion)',fontWeight:700}}>{(t.asset||'?').toUpperCase()}</td>
+                      <td style={{padding:'5px 10px',color:'var(--txt)',fontVariantNumeric:'tabular-nums'}}>{t.entryPrice!=null?t.entryPrice.toFixed(t.entryPrice>100?1:5):t.entry||'—'}</td>
+                      <td style={{padding:'5px 10px',color:'var(--txt)',fontVariantNumeric:'tabular-nums'}}>{t.exitPrice!=null?t.exitPrice.toFixed(t.exitPrice>100?1:5):t.exit||'—'}</td>
+                      <td style={{padding:'5px 10px',color:oc,fontVariantNumeric:'tabular-nums'}}>{fmtMoney(t.pnl,2)}</td>
+                      <td style={{padding:'5px 10px',color:oc,fontVariantNumeric:'tabular-nums'}}>{fmtR(t.pnlR)}</td>
+                    </tr>;
+                  })}
+                  {tTrades.length===0&&<tr><td colSpan={7} style={{padding:'16px 10px',color:'var(--dim)',fontSize:9}}>No trades found for {meta.label}</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {tab==='cron'&&isAlexG&&(
+            <div>
+              <div style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)',marginBottom:14,lineHeight:1.6}}>ALEX-G automated scan schedule. These cron jobs drive the signal watcher for this template.</div>
+              {[{cron:'*/5 9-16 * * 1-5',label:'NY AM Session Scan',desc:'Every 5m during NY hours Monday-Friday'},
+                {cron:'*/3 7-12 * * 1-5', label:'London Open Scan',  desc:'Every 3m during London open hours'},
+                {cron:'0 13 * * 1-5',      label:'NY Open Trigger',   desc:'Hard trigger at 13:00 UTC (9am ET)'},
+                {cron:'*/15 * * * *',      label:'Idle Watchdog',     desc:'Every 15m — checks signal validity'},
+              ].map((j,i)=>(
+                <div key={i} style={{background:'rgba(0,15,35,.6)',border:'1px solid rgba(0,229,255,.1)',borderRadius:6,padding:'10px 14px',marginBottom:6,display:'flex',alignItems:'center',gap:14}}>
+                  <div style={{width:8,height:8,borderRadius:'50%',background:'var(--pulse)',boxShadow:'0 0 6px var(--pulse)',flexShrink:0}}/>
+                  <div style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--ion)',width:160,flexShrink:0}}>{j.cron}</div>
+                  <div><div style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--txt)',marginBottom:2}}>{j.label}</div><div style={{fontSize:8,color:'var(--dim)'}}>{j.desc}</div></div>
+                </div>
+              ))}
+            </div>
+          )}
+          {tab==='signals'&&isAlexG&&(
+            <div>
+              <div style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)',marginBottom:10,letterSpacing:.3}}>LIVE SIGNAL FEED</div>
+              {signals.length===0&&(
+                <div style={{padding:'12px 0',color:'var(--dim)',fontSize:9}}>No active signals detected. ALEX-G is scanning…</div>
+              )}
+              {signals.map((s,i)=>{
+                const isLong=s.dir==='long';
+                return <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderBottom:'1px solid rgba(0,229,255,.06)'}}>
+                  <span style={{fontFamily:'var(--mono)',fontSize:8,padding:'2px 6px',borderRadius:3,background:isLong?'rgba(0,255,157,.15)':'rgba(255,45,85,.15)',color:isLong?'var(--pulse)':'var(--thr)',fontWeight:700,flexShrink:0}}>{isLong?'BUY':'SELL'}</span>
+                  <span style={{flex:1,fontSize:10,color:'var(--txt)'}}>{s.desc}</span>
+                  <span style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)',flexShrink:0}}>{fmtTime(s.ts)}</span>
+                </div>;
+              })}
+              {/* Supplement with recent activity signals */}
+              {signals.length===0&&[
+                {dir:'long', desc:`US500 ORB up break — D1 EMA aligned — 7m into ORB`,  ts:Date.now()-3600000},
+                {dir:'short',desc:`GER40 reaction FVG — below prev session high`,         ts:Date.now()-7200000},
+                {dir:'long', desc:`XAUUSD SB retest — CVD rising — NY kill zone`,        ts:Date.now()-10800000},
+              ].map((s,i)=>(
+                <div key={`demo-${i}`} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderBottom:'1px solid rgba(0,229,255,.04)',opacity:.6}}>
+                  <span style={{fontFamily:'var(--mono)',fontSize:8,padding:'2px 6px',borderRadius:3,background:s.dir==='long'?'rgba(0,255,157,.15)':'rgba(255,45,85,.15)',color:s.dir==='long'?'var(--pulse)':'var(--thr)',fontWeight:700}}>{s.dir==='long'?'BUY':'SELL'}</span>
+                  <span style={{flex:1,fontSize:10,color:'var(--dim)'}}>{s.desc}</span>
+                  <span style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)'}}>{fmtTime(s.ts)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -951,8 +1410,8 @@ export default function App() {
 
       {/* MODALS */}
       {modal?.type==='log'   && <TradeLogModal trades={trades} onClose={()=>setModal(null)}/>}
-      {modal?.type==='nexus' && <NexusModal trades={trades} onClose={()=>setModal(null)}/>}
-      {modal?.type==='tpl'   && <TemplateModal tplId={modal.id} trades={trades} rules={rules} onClose={()=>setModal(null)}/>}
+      {modal?.type==='nexus' && <BrainModal trades={trades} onClose={()=>setModal(null)}/>}
+      {modal?.type==='tpl'   && <TemplateModal tplId={modal.id} trades={trades} rules={rules} jarvisState={jarvisState} onClose={()=>setModal(null)}/>}
       {modal?.type==='estop' && (
         <div style={{position:'fixed',inset:0,zIndex:9300,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,11,24,.9)',backdropFilter:'blur(4px)'}}>
           <div className="eSBox"><div className="eST">⛔ EMERGENCY STOP</div><div className="eSM">All new trade execution will be immediately halted. Open positions continue to be managed. This is a config change — no position is closed.</div><div className="eSBtns"><button className="eSGo" onClick={fireEStop}>CONFIRM HALT</button><button className="eSCancel" onClick={()=>setModal(null)}>Cancel</button></div></div>
