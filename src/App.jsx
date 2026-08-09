@@ -1130,7 +1130,26 @@ export default function App() {
           fetch(API('manage-trades?action=today-pnl')).then(r=>r.json()).catch(()=>null),
           fetch(API('jarvis-state')).then(r=>r.json()).catch(()=>null),
           fetch(API('jarvis-goal')).then(r=>r.json()).catch(()=>null),
-          fetch(API('news-context')).then(r=>r.json()).catch(()=>null),
+          Promise.all([
+            fetch(API('news-context?asset=gold')).then(r=>r.json()).catch(()=>null),
+            fetch(API('news-context?asset=eurusd')).then(r=>r.json()).catch(()=>null),
+          ]).then(([a, b]) => {
+            // merge live+imminent+today from both assets, dedupe by title+ts
+            const merge = (x) => [
+              ...(x?.events?.live    || []),
+              ...(x?.events?.imminent|| []),
+              ...(x?.events?.today   || []),
+            ];
+            const all = [...merge(a), ...merge(b)];
+            const seen = new Set();
+            const deduped = all.filter(e => {
+              const k = `${e.title}|${e.ts}`;
+              if (seen.has(k)) return false;
+              seen.add(k); return true;
+            });
+            deduped.sort((x,y) => x.ts - y.ts);
+            return { upcoming: deduped, state: a?.state || b?.state || 'none' };
+          }),
         ]);
         if (!alive) return;
         if (r && !r.error)            setRules(r);
