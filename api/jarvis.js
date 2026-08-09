@@ -550,40 +550,48 @@ async function reasonGoal(goals, ctx, message, r, base) {
   // ── Try to set a new goal from the message ─────────────────────────────
   const newGoal = message ? parseNewGoal(message) : null;
 
-  if (newGoal) {
+  if (newGoal && r) {
     try {
-      const body = newGoal.isMonthly
-        ? { monthlyTarget: newGoal.amount }
-        : { dailyTarget:   newGoal.amount };
+      const DAILY_KEY   = 'v1:jarvis:goal:daily';
+      const MONTHLY_KEY = 'v1:jarvis:goal:monthly';
 
-      const resp = await fetch(`${base}/api/jarvis-goal`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body),
-      });
-      const data = await resp.json().catch(() => ({}));
+      // Read current stored values so we preserve the achieved counter
+      const [rawD, rawM] = await Promise.all([
+        r.get(DAILY_KEY).catch(() => null),
+        r.get(MONTHLY_KEY).catch(() => null),
+      ]);
+      const daily   = safeParse(rawD)   || { target: 0, achieved: 0, currency: 'USD' };
+      const monthly = safeParse(rawM) || { target: 0, achieved: 0, currency: 'USD' };
 
-      if (data.ok) {
-        // Use the freshly written values for calibration
-        const updatedGoals = {
-          daily:   data.daily   || goals?.daily   || { target: 0, achieved: 0 },
-          monthly: data.monthly || goals?.monthly || { target: 0, achieved: 0 },
-        };
-
-        // Auto-chain into sizing calibration with the new target
-        const sizing = await reasonCalibrate(ctx, updatedGoals, r);
-        const typeStr = newGoal.isMonthly ? 'Monthly' : 'Daily';
-        const amtStr  = fmt$(newGoal.amount);
-
-        return {
-          speech:     `${typeStr} target set at ${amtStr}, Sir. ${sizing.speech}`,
-          focusPanel: 'goal',
-          urgency:    sizing.urgency || 'normal',
-          action:     sizing.action,
-        };
+      if (newGoal.isMonthly) {
+        monthly.target = newGoal.amount;
+      } else {
+        daily.target = newGoal.amount;
       }
+
+      // TTLs: daily key resets at UTC midnight, monthly at 35 days
+      const now = new Date();
+      const secondsUntilMidnight = Math.floor(
+        (new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)) - now) / 1000
+      );
+      await Promise.all([
+        r.set(DAILY_KEY,   JSON.stringify(daily),   { ex: Math.max(3600, secondsUntilMidnight) }),
+        r.set(MONTHLY_KEY, JSON.stringify(monthly), { ex: 35 * 24 * 3600 }),
+      ]);
+
+      const updatedGoals = { daily, monthly };
+      const sizing  = await reasonCalibrate(ctx, updatedGoals, r);
+      const typeStr = newGoal.isMonthly ? 'Monthly' : 'Daily';
+      const amtStr  = fmt$(newGoal.amount);
+
+      return {
+        speech:     `${typeStr} target set at ${amtStr}, Sir. ${sizing.speech}`,
+        focusPanel: 'goal',
+        urgency:    sizing.urgency || 'normal',
+        action:     sizing.action,
+      };
     } catch (_) {
-      // Fall through to reporting if the write fails
+      // Fall through to reporting on Redis error
     }
   }
 
