@@ -24,29 +24,61 @@ const NOTIF_DEDUPE_TTL    = 7 * 24 * 60 * 60; // 7 days
 
 async function sendTelegram(text, opts = {}) {
   const token  = process.env[TG_BOT_TOKEN_ENV];
-  const chatId = process.env[TG_CHAT_ID_ENV];
+  const chatId = opts.chatId || process.env[TG_CHAT_ID_ENV];
   if (!token || !chatId) return { ok: false, error: 'telegram-credentials-missing' };
 
   try {
+    const body = {
+      chat_id:                  chatId,
+      text:                     String(text).slice(0, 4096),
+      parse_mode:               'HTML',
+      disable_web_page_preview: true,
+      disable_notification:     opts.silent === true,
+    };
+    if (opts.reply_markup) body.reply_markup = opts.reply_markup;
+
     const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        chat_id:                 chatId,
-        text,
-        parse_mode:              'HTML',
-        disable_web_page_preview: true,
-        disable_notification:    opts.silent === true,
-      }),
+      body:    JSON.stringify(body),
     });
     if (!resp.ok) {
       const txt = await resp.text().catch(() => '');
       return { ok: false, error: `tg-${resp.status}: ${txt.slice(0, 200)}` };
     }
-    return { ok: true };
+    const data = await resp.json().catch(() => ({}));
+    return { ok: true, messageId: data.result?.message_id };
   } catch (e) {
     return { ok: false, error: `tg-fetch: ${e.message}` };
   }
+}
+
+// Low-level API call for non-sendMessage methods (editMessageText, answerCallbackQuery)
+async function tgCall(method, body) {
+  const token = process.env[TG_BOT_TOKEN_ENV];
+  if (!token) return { ok: false };
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    return resp.json().catch(() => ({ ok: false }));
+  } catch (_) { return { ok: false }; }
+}
+
+// Confirm/cancel inline keyboard for staged JARVIS actions
+function confirmKeyboard() {
+  return { inline_keyboard: [[
+    { text: '✅ Confirm', callback_data: 'confirm' },
+    { text: '❌ Cancel',  callback_data: 'cancel'  },
+  ]]};
+}
+
+// Push a proactive JARVIS alert to Telegram (used by jarvis.js for critical urgency)
+async function telegramPush(text, withConfirmKeyboard = false) {
+  const opts = withConfirmKeyboard ? { reply_markup: confirmKeyboard() } : {};
+  return sendTelegram(`🤖 <b>JARVIS</b>\n\n${text}`, opts);
 }
 
 // ─── Dedupe ───────────────────────────────────────────────────────────────────
@@ -404,6 +436,9 @@ async function notifySessionExpired({ asset, template, direction, positionId, en
 module.exports = {
   sendTelegram,
   sendOnce,
+  tgCall,
+  confirmKeyboard,
+  telegramPush,
   // Formatting helpers (exposed for testing and inline use in manage-trades)
   formatPrice,
   formatMoney,

@@ -68,6 +68,30 @@
     "api/analyst.js": {
       "memory": 512,
       "maxDuration": 60
+    },
+    "api/jarvis.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/jarvis-state.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/jarvis-goal.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/jarvis-action.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/jarvis-sizing.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/telegram-webhook.js": {
+      "memory": 256,
+      "maxDuration": 15
     }
   },
   "crons": [

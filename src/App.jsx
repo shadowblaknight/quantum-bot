@@ -1,7713 +1,1414 @@
 /* eslint-disable */
-// =====================================================================
-// QUANTUM BOT V13 — PILOT DASHBOARD (v13.1)
-// =====================================================================
-// Aligned to rules-store.js v1.2 shape. Backend endpoints used:
-//   /api/broker               — account, positions
-//   /api/rules                — read/write all dashboard rules
-//   /api/rules?action=activity — server-side activity log
-//   /api/rules?action=daily-pnl — today's realized P&L
-//   /api/template-performance — closed-trade stats
-//   /api/recognition-memory?action=stats — KNN memory stats   [v13.1]
-//   /api/watched-setups       — manual-mode active watches
-//   /api/symbol-resolver      — broker symbol mapping
-//
-// TWO-AXIS MODE MODEL:
-//   activeMode:   sleep | active | defensive | vacation  (what setups are allowed)
-//   tradingMode:  auto | manual                          (does bot execute, or alert only?)
-//
-// v13.1 ADDITIVE FEATURES (no existing logic touched):
-//   1. Collapsible activity feed (▼/▲ toggle)
-//   2. UTC time + session + date in header (TimeDisplay)
-//   3. Recognition memory statistics panel (RecognitionPanel)
-//   4. Template × Instrument performance heatmap, WR/PF toggle (PerfHeatmapPanel)
-// =====================================================================
+// JARVIS · Quantum Bot v17 — Live Dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+// All panels pull from real API endpoints.
+// JARVIS chat is live via POST /api/jarvis.
+// Trade DNA computed from recognition-memory (all closed trades).
+// QB Nexus analysis is real — computed client-side from trade intersections.
+// ─────────────────────────────────────────────────────────────────────────────
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 
-import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
-
-// =====================================================================
-// 1 · CONSTANTS
-// =====================================================================
-
-const API = (p) => `/api/${p}`;
-const PREFS_KEY = "qb_v13_prefs";
-const THEME_KEY = "qb_v13_theme";
-
-const ACTIVE_MODES = [
-  { id: "sleep",     label: "Sleep",     glyph: "🌙", hint: "Only swing setups · half lot · max 1 position" },
-  { id: "active",    label: "Active",    glyph: "☕", hint: "All templates · full lot · full management" },
-  { id: "defensive", label: "Defensive", glyph: "🛡️", hint: "High-confidence templates · half lot · min 2R" },
-  { id: "vacation",  label: "Vacation",  glyph: "🏖️", hint: "Block all new trades · existing positions managed" },
-];
-
-const TRADING_MODES = [
-  { id: "auto",   label: "Auto",   glyph: "◆", hint: "Bot places orders automatically" },
-  { id: "manual", label: "Manual", glyph: "✋", hint: "Bot watches & alerts · you place trades in MT5" },
-];
-
-const TEMPLATE_DISPLAY = {
-  "silver-bullet":    { glyph: "🥈", label: "Silver Bullet" },
-  "unicorn":          { glyph: "🦄", label: "Unicorn" },
-  "turtle-soup":      { glyph: "🐢", label: "Turtle Soup" },
-  "judas-swing":      { glyph: "🎭", label: "Judas Swing" },
-  "ote-continuation": { glyph: "🎯", label: "OTE Continuation" },
-  "am-ifvg":          { glyph: "🌅", label: "AM IFVG Reversal" },
-  "orb":              { glyph: "🚀", label: "ORB Breakout" },
-  "orb-pro":          { glyph: "⚡", label: "PRO ORB" },
-  "reaction":         { glyph: "🎯", label: "Reaction (coil break)" },
-  "reaction-fvg":     { glyph: "🌀", label: "Reaction (FVG)" },
-  "reaction-ifvg":    { glyph: "🔄", label: "Reaction (IFVG)" },
-  "alexg":            { glyph: "📐", label: "Alex G Set&Forget" },
-};
-
-const TEMPLATE_ORDER = [
-  "silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg",
-  "orb", "orb-pro", "reaction", "reaction-fvg", "reaction-ifvg", "alexg",
-];
-
-// v14: the five ICT templates are grouped under one collapsible "ICT" header in
-// the UI, but stay separately measured so you can see which sub-setup actually
-// works and prune the losers.
-const ICT_TEMPLATES = ["silver-bullet", "unicorn", "turtle-soup", "judas-swing", "ote-continuation", "am-ifvg"];
-// The three reaction confirmation paths — separately measured, grouped in the UI.
-const REACTION_TEMPLATES = ["reaction", "reaction-fvg", "reaction-ifvg"];
-
-const ASSET_CATALOG = [
-  { id: "eurusd",   name: "EUR/USD",     category: "forex"     },
-  { id: "gbpusd",   name: "GBP/USD",     category: "forex"     },
-  { id: "usdjpy",   name: "USD/JPY",     category: "forex"     },
-  { id: "usdchf",   name: "USD/CHF",     category: "forex"     },
-  { id: "audusd",   name: "AUD/USD",     category: "forex"     },
-  { id: "eurjpy",   name: "EUR/JPY",     category: "forex"     },
-  { id: "gbpjpy",   name: "GBP/JPY",     category: "forex"     },
-  { id: "gold",     name: "Gold",        category: "metal"     },
-  { id: "silver",   name: "Silver",      category: "metal"     },
-  { id: "btc",      name: "Bitcoin",     category: "crypto"    },
-  { id: "eth",      name: "Ethereum",    category: "crypto"    },
-  { id: "nas100",   name: "Nasdaq 100",  category: "index"     },
-  { id: "us30",     name: "Dow Jones",   category: "index"     },
-  { id: "us500",    name: "S&P 500",     category: "index"     },
-  { id: "ger40",    name: "DAX 40",      category: "index"     },
-  { id: "jp225",    name: "Nikkei 225",  category: "index"     },
-  { id: "oil_wti",  name: "WTI Crude",   category: "commodity" },
-];
-
-const PIP_SIZE = {
-  eurusd: 0.0001, gbpusd: 0.0001, audusd: 0.0001, nzdusd: 0.0001, usdjpy: 0.01,
-  usdchf: 0.0001, usdcad: 0.0001, eurjpy: 0.01, gbpjpy: 0.01, eurgbp: 0.0001,
-  gold: 0.1, silver: 0.01, btc: 1, eth: 0.01,
-  nas100: 1, us30: 1, us500: 0.1, ger40: 0.1, jp225: 1,
-  oil_wti: 0.01,
-};
-
-// =====================================================================
-// 2 · THEME
-// =====================================================================
-
-const DEFAULT_THEME = {
-  bgVoid:       "#06070a",
-  bgPanel:      "#0c0e14",
-  bgPanelHi:    "#11141c",
-  border:       "rgba(255,255,255,0.06)",
-  borderHi:     "rgba(255,255,255,0.12)",
-  borderAccent: "rgba(0,217,255,0.35)",
-  textHi:       "#e6e8ec",
-  textMid:      "#9098a3",
-  textLo:       "#5a606b",
-  textFaint:    "#3a3e47",
-  accent:       "#00d9ff",
-  accentSoft:   "rgba(0,217,255,0.10)",
-  warn:         "#ffb84d",
-  warnSoft:     "rgba(255,184,77,0.12)",
-  ok:           "#4ade80",
-  okSoft:       "rgba(74,222,128,0.10)",
-  bad:          "#f87171",
-  badSoft:      "rgba(248,113,113,0.10)",
-  fontSans:     "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-  fontMono:     "'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace",
-  fontSerif:    "'Instrument Serif', Georgia, serif",
-};
-
-const loadTheme = () => {
-  try { const s = localStorage.getItem(THEME_KEY); return s ? { ...DEFAULT_THEME, ...JSON.parse(s) } : DEFAULT_THEME; }
-  catch (_) { return DEFAULT_THEME; }
-};
-const saveTheme = (t) => { try { localStorage.setItem(THEME_KEY, JSON.stringify(t)); } catch (_) {} };
-const camelToKebab = (s) => s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
-const applyThemeVars = (t) => {
-  const root = document.documentElement;
-  for (const [k, v] of Object.entries(t)) {
-    if (typeof v === "string" || typeof v === "number") {
-      root.style.setProperty("--qb-" + camelToKebab(k), String(v));
-    }
-  }
-};
-
-// =====================================================================
-// 3 · PREFS
-// =====================================================================
-
-const DEFAULT_PREFS = {
-  watchlist: ["gold", "eurusd", "gbpusd", "usdjpy", "nas100", "us500", "btc"],
-};
-
-const loadPrefs = () => {
-  try { const s = localStorage.getItem(PREFS_KEY); return s ? { ...DEFAULT_PREFS, ...JSON.parse(s) } : DEFAULT_PREFS; }
-  catch (_) { return DEFAULT_PREFS; }
-};
-const savePrefs = (p) => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch (_) {} };
-
-// =====================================================================
-// 4 · FORMATTERS
-// =====================================================================
-
-const fmtUSD = (v, signed = false) => {
-  if (v == null || !isFinite(v)) return "—";
-  const sign = signed && v >= 0 ? "+" : v < 0 ? "−" : "";
-  return `${sign}$${Math.abs(v).toFixed(2)}`;
-};
-const fmtPct = (v, digits = 2, signed = true) => {
-  if (v == null || !isFinite(v)) return "—";
-  const sign = signed && v >= 0 ? "+" : v < 0 ? "−" : "";
-  return `${sign}${Math.abs(v).toFixed(digits)}%`;
-};
-const fmtPrice = (p, assetId) => {
-  if (p == null || !isFinite(p)) return "—";
-  const pip = PIP_SIZE[assetId] || 0.0001;
-  const dec = pip >= 1 ? 2 : pip >= 0.1 ? 2 : pip >= 0.01 ? 3 : pip >= 0.001 ? 4 : 5;
-  return p.toFixed(dec);
-};
-const fmtTime = (ts) => {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-};
-const fmtAge = (ts) => {
-  if (!ts) return "—";
-  const s = Math.round((Date.now() - ts) / 1000);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) return `${Math.round(s / 3600)}h`;
-  return `${Math.round(s / 86400)}d`;
-};
-
-const getAssetById = (id) => ASSET_CATALOG.find((a) => a.id === id) || null;
-
-// =====================================================================
-// 5 · GLOBAL STYLES
-// =====================================================================
-
-const GLOBAL_STYLES = `
-  * { box-sizing: border-box; }
-  html, body, #root { margin:0; padding:0; min-height:100%; background: var(--qb-bg-void); color: var(--qb-text-hi); font-family: var(--qb-font-sans); -webkit-font-smoothing: antialiased; }
-  
-  .qb-mono { font-family: var(--qb-font-mono); font-variant-numeric: tabular-nums; }
-  .qb-serif { font-family: var(--qb-font-serif); }
-  .qb-panel { background: var(--qb-bg-panel); border: 1px solid var(--qb-border); border-radius: 6px; }
-  .qb-cell { background: var(--qb-bg-panel-hi); border: 1px solid var(--qb-border); border-radius: 4px; }
-  @keyframes qbPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-  .qb-pulse { animation: qbPulse 2s ease-in-out infinite; }
-  .qb-clickable { cursor: pointer; transition: background 120ms, border-color 120ms; }
-  .qb-clickable:hover { border-color: var(--qb-border-hi); }
-  *::-webkit-scrollbar { width:5px; height:5px; }
-  *::-webkit-scrollbar-track { background: transparent; }
-  *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius:3px; }
-  *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
-  input, button, select, textarea { font-family: inherit; color: inherit; }
-  input:focus, button:focus, select:focus { outline: none; }
-  .qb-divider { height:1px; background: var(--qb-border); margin: 8px 0; }
+// ─── CSS ─────────────────────────────────────────────────────────────────────
+const CSS = `
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#020b18;--panel:#040e1e;--card:rgba(0,20,48,.82);
+  --b:rgba(0,229,255,.18);--b2:rgba(0,229,255,.07);
+  --ion:#00e5ff;--pulse:#00ff9d;--thr:#ff2d55;
+  --amb:#f59e0b;--pur:#a78bfa;--txt:#b8d4f0;
+  --dim:rgba(120,170,210,.42);
+  --mono:"SF Mono","Fira Code","Consolas",monospace;
+  --ui:-apple-system,"Segoe UI",sans-serif
+}
+html,body,#root{height:100%;overflow:hidden;background:var(--bg);color:var(--txt);font-family:var(--ui);font-size:12px}
+.hud{display:flex;flex-direction:column;height:100%;overflow:hidden;position:relative}
+/* scan-line overlay */
+.hud::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;
+  background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.022) 3px,rgba(0,0,0,.022) 4px)}
+/* grid overlay */
+.hud::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9996;
+  background-image:linear-gradient(rgba(0,229,255,.015) 1px,transparent 1px),linear-gradient(90deg,rgba(0,229,255,.015) 1px,transparent 1px);
+  background-size:64px 64px}
+/* ambient glow */
+#amb{position:fixed;inset:0;pointer-events:none;z-index:9999;transition:box-shadow .8s}
+#amb.monitor{box-shadow:inset 0 0 0 1px rgba(0,229,255,.22),inset 0 0 80px rgba(0,229,255,.04);animation:aP 3s ease-in-out infinite}
+#amb.signal{box-shadow:inset 0 0 0 2px rgba(0,255,157,.5),inset 0 0 100px rgba(0,255,157,.06);animation:aP 1.8s ease-in-out infinite}
+#amb.warn{box-shadow:inset 0 0 0 2px rgba(245,158,11,.5),inset 0 0 80px rgba(245,158,11,.06);animation:aP 2.2s ease-in-out infinite}
+#amb.critical{box-shadow:inset 0 0 0 3px rgba(255,45,85,.7),inset 0 0 120px rgba(255,45,85,.1);animation:aF .9s ease-in-out infinite}
+@keyframes aP{0%,100%{opacity:.7}50%{opacity:1}}
+@keyframes aF{0%,100%{opacity:.5}50%{opacity:1}}
+@keyframes dp{0%,100%{opacity:.4}50%{opacity:1}}
+@keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+/* panel base */
+.pnl{background:var(--card);border:1px solid var(--b);border-radius:6px;position:relative;overflow:hidden}
+.pnl::before,.pnl::after{content:'';position:absolute;width:9px;height:9px;z-index:2;pointer-events:none}
+.pnl::before{top:-1px;left:-1px;border-top:2px solid var(--ion);border-left:2px solid var(--ion)}
+.pnl::after{bottom:-1px;right:-1px;border-bottom:2px solid var(--ion);border-right:2px solid var(--ion)}
+.pH{padding:5px 9px;border-bottom:1px solid var(--b2);display:flex;align-items:center;gap:5px;background:rgba(0,229,255,.02)}
+.pHL{font-family:var(--mono);font-size:7.5px;text-transform:uppercase;letter-spacing:1.2px;color:var(--ion);font-weight:700;flex:1}
+.tag{display:inline-flex;align-items:center;font-size:6.5px;padding:1px 5px;border-radius:6px;font-family:var(--mono);font-weight:700;text-transform:uppercase;letter-spacing:.2px}
+.tag.live{background:rgba(0,255,157,.1);color:var(--pulse);animation:dp 1.8s ease-in-out infinite}
+.tag.ai{background:rgba(0,229,255,.1);color:var(--ion)}
+.tag.warn{background:rgba(245,158,11,.1);color:var(--amb)}
+/* top bar */
+#top{height:46px;border-bottom:1px solid rgba(0,229,255,.18);background:rgba(2,11,24,.97);backdrop-filter:blur(12px);
+  display:flex;align-items:center;padding:0 12px;gap:10px;z-index:100;flex-shrink:0}
+.tLogo{font-family:var(--mono);font-size:12px;color:var(--ion);font-weight:700;letter-spacing:2.5px;display:flex;align-items:center;gap:6px}
+.tDot{width:8px;height:8px;border-radius:50%;background:var(--ion);box-shadow:0 0 10px var(--ion);animation:dp 1.5s ease-in-out infinite}
+.tSep{width:1px;height:22px;background:rgba(0,229,255,.15)}
+.tSt{display:flex;flex-direction:column;align-items:center;min-width:48px}
+.tV{font-family:var(--mono);font-size:11px;font-weight:200}
+.tL{font-size:6.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:1px}
+.tV.g{color:var(--pulse)}.tV.r{color:var(--thr)}.tV.a{color:var(--amb)}
+.tR{margin-left:auto;display:flex;align-items:center;gap:8px}
+.mBadge{font-family:var(--mono);font-size:8px;padding:3px 8px;border-radius:4px;font-weight:700;letter-spacing:.5px;cursor:pointer;transition:all .2s}
+.mBadge.active{background:rgba(0,255,157,.1);border:1px solid rgba(0,255,157,.3);color:var(--pulse)}
+.mBadge.defensive{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:var(--amb)}
+.mBadge.sleep{background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.2);color:var(--ion)}
+.mBadge.vacation{background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.25);color:var(--pur)}
+.tbBtn{font-size:8px;font-family:var(--mono);padding:4px 9px;border-radius:4px;cursor:pointer;font-weight:700;letter-spacing:.5px;transition:all .2s;border:none}
+.tbBtnR{background:rgba(255,45,85,.08);border:1px solid rgba(255,45,85,.28)!important;color:var(--thr)}
+.tbBtnR:hover{background:rgba(255,45,85,.2)}
+.tbBtnP{background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.28)!important;color:var(--pur)}
+.tbBtnP:hover{background:rgba(167,139,250,.2)}
+.tbBtnB{background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.22)!important;color:var(--ion)}
+.tbBtnB:hover{background:rgba(0,229,255,.15)}
+/* workspace */
+#ws{display:grid;grid-template-columns:245px 1fr 245px;gap:8px;padding:8px 8px 0;flex:1;min-height:0;overflow:hidden}
+#lCol,#rCol{display:flex;flex-direction:column;gap:6px;overflow-y:auto;overflow-x:hidden;min-height:0;padding-bottom:6px}
+#lCol::-webkit-scrollbar,#rCol::-webkit-scrollbar{width:2px}
+#lCol::-webkit-scrollbar-thumb,#rCol::-webkit-scrollbar-thumb{background:rgba(0,229,255,.18);border-radius:2px}
+#cCol{display:flex;flex-direction:column;gap:6px;overflow:hidden;min-height:0}
+/* gates */
+.gRow{display:flex;align-items:center;gap:5px;padding:3px 9px;border-bottom:1px solid rgba(0,229,255,.03);position:relative}
+.gRow::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:0 2px 2px 0}
+.gRow.pass::before{background:var(--pulse);box-shadow:0 0 4px var(--pulse)}
+.gRow.off::before{background:var(--thr)}
+.gRow.warn::before{background:var(--amb)}
+.gIco{font-size:10px;width:13px;text-align:center;flex-shrink:0}
+.gName{font-family:var(--mono);font-size:8.5px;flex:1;color:var(--txt)}
+.gDesc{font-size:6.5px;color:var(--dim)}
+.gVal{font-family:var(--mono);font-size:8px;white-space:nowrap}
+.gVal.pass{color:var(--pulse)}.gVal.off{color:var(--thr)}.gVal.warn{color:var(--amb)}
+/* news */
+.nItem{padding:4px 9px;border-bottom:1px solid rgba(0,229,255,.04)}
+.nHead{display:flex;align-items:center;gap:4px;margin-bottom:1px}
+.nTag{font-size:6.5px;padding:1px 4px;border-radius:4px;font-family:var(--mono);font-weight:700;text-transform:uppercase}
+.nHigh{background:rgba(255,45,85,.1);color:var(--thr)}
+.nMed{background:rgba(245,158,11,.1);color:var(--amb)}
+.nLow{background:rgba(0,229,255,.07);color:var(--ion)}
+.nTitle{font-size:9.5px;color:var(--txt);line-height:1.35}
+.nCurr{font-size:7px;color:var(--ion);font-family:var(--mono)}
+.nTime{font-size:7px;color:var(--dim);font-family:var(--mono);margin-left:auto}
+/* signal panel */
+.sigBig{padding:7px 9px 4px}
+.sigDir{font-family:var(--mono);font-size:18px;font-weight:200;line-height:1;display:flex;align-items:baseline;gap:6px}
+.sigDir.long{color:var(--pulse)}.sigDir.short{color:var(--thr)}.sigDir.none{color:var(--dim)}
+.sigSym{font-size:11px;color:var(--ion)}
+.sigSub{font-size:7px;color:var(--dim);margin-top:2px;font-family:var(--mono)}
+.sigGrid{display:grid;grid-template-columns:1fr 1fr;gap:3px;padding:4px 9px}
+.sMeta{background:rgba(0,229,255,.04);border-radius:4px;padding:3px 6px}
+.sMetaV{font-family:var(--mono);font-size:10px;color:var(--txt)}
+.sMetaL{font-size:6.5px;color:var(--dim);margin-top:1px}
+/* positions */
+.posRow{display:flex;align-items:center;gap:4px;padding:3.5px 9px;border-bottom:1px solid rgba(0,229,255,.04)}
+.pSym{font-family:var(--mono);font-size:10px;color:var(--ion);font-weight:700;width:48px}
+.pDir{font-family:var(--mono);font-size:7px;padding:1px 4px;border-radius:3px}
+.pDir.long{background:rgba(0,255,157,.1);color:var(--pulse)}.pDir.short{background:rgba(255,45,85,.1);color:var(--thr)}
+.pInfo{flex:1}.pEntry{font-family:var(--mono);font-size:7.5px;color:var(--dim)}
+.pPnl{font-family:var(--mono);font-size:10px}.pPnl.pos{color:var(--pulse)}.pPnl.neg{color:var(--thr)}
+/* activity */
+.aRow{display:flex;gap:5px;padding:2.5px 9px;align-items:flex-start}
+.aDot{width:5px;height:5px;border-radius:50%;margin-top:3px;flex-shrink:0}
+.aDot.g{background:var(--pulse)}.aDot.r{background:var(--thr)}.aDot.b{background:var(--ion)}.aDot.a{background:var(--amb)}
+.aT{font-size:9.5px;line-height:1.3}.aT b{color:var(--ion)}
+.aTm{font-family:var(--mono);font-size:6.5px;color:var(--dim)}
+/* orb area */
+#orbWrap{flex-shrink:0;background:var(--card);border:1px solid var(--b);border-radius:8px;position:relative;overflow:hidden;
+  display:flex;flex-direction:column;align-items:center}
+#orbWrap::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(0,229,255,.05) 0%,transparent 65%);pointer-events:none;z-index:0}
+.orbStatus{font-family:var(--mono);font-size:7.5px;text-transform:uppercase;letter-spacing:2px;color:var(--ion);padding:0 0 7px;z-index:1;display:flex;align-items:center;gap:6px}
+.orbDot{width:5px;height:5px;border-radius:50%;background:var(--pulse);animation:dp 1.5s ease-in-out infinite}
+/* template strip */
+#tplStrip{flex-shrink:0;background:var(--card);border:1px solid var(--b);border-radius:6px;overflow:hidden}
+#tplRow{display:flex;gap:4px;padding:6px;overflow-x:auto}
+#tplRow::-webkit-scrollbar{height:2px}
+#tplRow::-webkit-scrollbar-thumb{background:rgba(0,229,255,.18)}
+.tChip{flex-shrink:0;background:rgba(0,229,255,.04);border:1px solid rgba(0,229,255,.15);border-radius:5px;
+  padding:4px 7px;cursor:pointer;transition:all .2s;min-width:80px;text-align:center}
+.tChip:hover{background:rgba(0,229,255,.1);border-color:var(--ion)}
+.tChip.dis{opacity:.35}
+.tCG{font-size:12px;margin-bottom:2px}
+.tCN{font-family:var(--mono);font-size:7.5px;color:var(--ion);font-weight:700;letter-spacing:.3px}
+.tCS{font-family:var(--mono);font-size:9.5px;margin-top:1px}
+.tCS.g{color:var(--pulse)}.tCS.a{color:var(--amb)}
+.tcDNA{display:flex;gap:1px;justify-content:center;margin-top:2px}
+.dNb{width:3.5px;height:5px;border-radius:1px}
+.dNb.w{background:rgba(0,255,157,.65)}.dNb.l{background:rgba(255,45,85,.65)}.dNb.b{background:rgba(0,229,255,.35)}
+/* jarvis chat */
+#jConv{flex:1;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--b);border-radius:6px;overflow:hidden;min-height:0}
+#jConvH{padding:5px 9px;border-bottom:1px solid var(--b2);display:flex;align-items:center;gap:5px;flex-shrink:0;background:rgba(0,229,255,.02)}
+#jMsgs{flex:1;overflow-y:auto;padding:7px;display:flex;flex-direction:column;gap:4px;scroll-behavior:smooth}
+#jMsgs::-webkit-scrollbar{width:2px}
+#jMsgs::-webkit-scrollbar-thumb{background:rgba(0,229,255,.18)}
+.jM{max-width:92%;animation:slideUp .25s ease}
+.jM.j{align-self:flex-start}.jM.u{align-self:flex-end}
+.jMB{padding:6px 9px;border-radius:7px;font-size:11px;line-height:1.5}
+.jM.j .jMB{background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.13);border-radius:2px 7px 7px 7px;color:var(--txt)}
+.jM.j .jMB .px{font-family:var(--mono);font-size:7px;color:var(--ion);margin-bottom:2px;letter-spacing:.4px}
+.jM.u .jMB{background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.22);border-radius:7px 2px 7px 7px;color:var(--txt)}
+.jThink{display:inline-flex;gap:3px;align-items:center;padding:2px 0}
+.jThink span{width:5px;height:5px;border-radius:50%;background:var(--pur);animation:jT 1.2s ease-in-out infinite}
+.jThink span:nth-child(2){animation-delay:.2s}.jThink span:nth-child(3){animation-delay:.4s}
+@keyframes jT{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}}
+.jUrgent{color:var(--thr)!important;font-weight:600}
+.jElevated{color:var(--amb)!important}
+/* command bar */
+#cmd{height:70px;border-top:1px solid rgba(0,229,255,.14);background:rgba(2,11,24,.97);padding:8px 12px;
+  display:flex;flex-direction:column;gap:5px;flex-shrink:0}
+.cmdR1{display:flex;align-items:center;gap:6px}
+#cmdIn{flex:1;background:rgba(0,20,48,.55);border:1px solid rgba(0,229,255,.22);border-radius:5px;
+  color:var(--txt);font-family:var(--mono);font-size:11px;padding:5px 10px;outline:none;transition:border-color .2s}
+#cmdIn:focus{border-color:var(--ion);box-shadow:0 0 8px rgba(0,229,255,.1)}
+#cmdIn::placeholder{color:var(--dim)}
+.vBtn{width:30px;height:30px;border-radius:50%;background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.28);
+  color:var(--ion);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s}
+.vBtn:hover{background:rgba(0,229,255,.15)}
+.qBtns{display:flex;gap:3px;flex-wrap:nowrap;overflow-x:auto}
+.qBtns::-webkit-scrollbar{display:none}
+.qB{background:rgba(0,229,255,.04);border:1px solid rgba(0,229,255,.16);color:var(--ion);font-family:var(--mono);
+  font-size:8px;padding:2px 7px;border-radius:4px;cursor:pointer;white-space:nowrap;transition:all .2s}
+.qB:hover{background:rgba(0,229,255,.12)}
+.qB.r{border-color:rgba(255,45,85,.28);color:var(--thr);background:rgba(255,45,85,.04)}.qB.r:hover{background:rgba(255,45,85,.14)}
+.qB.p{border-color:rgba(167,139,250,.26);color:var(--pur);background:rgba(167,139,250,.04)}.qB.p:hover{background:rgba(167,139,250,.12)}
+.qB.g{border-color:rgba(0,255,157,.26);color:var(--pulse);background:rgba(0,255,157,.04)}.qB.g:hover{background:rgba(0,255,157,.12)}
+/* equity panel */
+.eqBig{font-family:var(--mono);font-size:20px;font-weight:200;color:var(--ion);padding:6px 9px 1px}
+.eqSub{font-size:7.5px;font-family:var(--mono);padding:0 9px 5px}
+.goalBar{background:var(--b2);border-radius:3px;height:3px;margin:0 9px 5px;overflow:hidden}
+.goalFill{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--ion),var(--pulse));transition:width .5s}
+/* modals */
+.overlay{position:fixed;inset:0;z-index:9200;display:flex;align-items:center;justify-content:center;
+  background:rgba(2,11,24,.9);backdrop-filter:blur(7px)}
+.modCard{background:var(--panel);border-radius:10px;width:min(900px,96vw);max-height:88vh;overflow:hidden;display:flex;flex-direction:column}
+.modCard.nexCard{border:1px solid rgba(167,139,250,.4);box-shadow:0 0 60px rgba(167,139,250,.1)}
+.modCard.logCard{border:1px solid rgba(0,229,255,.22)}
+.modH{display:flex;align-items:center;gap:9px;padding:11px 15px;border-bottom:1px solid rgba(0,229,255,.1);background:rgba(0,229,255,.02);flex-shrink:0}
+.modHN{font-family:var(--mono);font-size:13px;color:var(--ion);font-weight:700;flex:1}
+.modHN.pur{color:var(--pur)}
+.modClose{background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer}
+.modBody{flex:1;overflow-y:auto;padding:14px 15px}
+.modBody::-webkit-scrollbar{width:3px}
+.modBody::-webkit-scrollbar-thumb{background:rgba(0,229,255,.18)}
+/* trade log */
+.tblWrap{overflow-x:auto}
+.tbl{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:9px}
+.tbl th{color:var(--dim);text-align:left;padding:4px 7px;border-bottom:1px solid rgba(0,229,255,.1);font-size:7px;
+  text-transform:uppercase;letter-spacing:.4px;font-weight:400;white-space:nowrap}
+.tbl td{padding:4px 7px;border-bottom:1px solid rgba(0,229,255,.04);vertical-align:middle}
+.tbl tr:hover td{background:rgba(0,229,255,.025)}
+.tblWin{color:var(--pulse)}.tblLoss{color:var(--thr)}.tblBE{color:var(--dim)}
+.tblFilter{display:flex;gap:4px;margin-bottom:9px;flex-wrap:wrap}
+.fBtn{background:rgba(0,229,255,.05);border:1px solid rgba(0,229,255,.16);color:var(--dim);font-family:var(--mono);
+  font-size:7.5px;padding:2px 7px;border-radius:3px;cursor:pointer;transition:all .2s}
+.fBtn.on{background:rgba(0,229,255,.12);border-color:var(--ion);color:var(--ion)}
+/* nexus */
+.nexGrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:14px}
+.nexCard{background:rgba(167,139,250,.05);border:1px solid rgba(167,139,250,.16);border-radius:6px;padding:9px;text-align:center}
+.nexCT{font-family:var(--mono);font-size:7px;color:var(--pur);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.nexCV{font-family:var(--mono);font-size:18px;font-weight:200}
+.nexCL{font-size:7px;color:var(--dim);margin-top:2px}
+.nexRec{background:rgba(0,229,255,.04);border:1px solid rgba(0,229,255,.1);border-radius:5px;padding:9px;
+  margin-bottom:13px;font-size:10px;color:var(--txt);line-height:1.6}
+.nexRec b{color:var(--ion)}
+.nexBtns{display:flex;gap:7px}
+.nexGen{background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.36);color:var(--pur);font-family:var(--mono);
+  font-size:9.5px;padding:7px 16px;border-radius:5px;cursor:pointer;font-weight:700}
+.nexClose{background:none;border:1px solid var(--dim);color:var(--dim);font-family:var(--mono);font-size:9.5px;padding:7px 12px;border-radius:5px;cursor:pointer}
+.nexClose:hover{border-color:var(--ion);color:var(--ion)}
+.tplStatGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px;margin:10px 0}
+.tplStat{background:rgba(0,20,48,.5);border:1px solid var(--b);border-radius:5px;padding:7px;text-align:center}
+.tplStatV{font-family:var(--mono);font-size:13px;font-weight:200;margin-bottom:2px}
+.tplStatL{font-size:7px;color:var(--dim);text-transform:uppercase;letter-spacing:.3px}
+/* e-stop */
+.eSBox{background:var(--panel);border:2px solid var(--thr);border-radius:10px;padding:26px;max-width:330px;
+  width:90%;text-align:center;box-shadow:0 0 80px rgba(255,45,85,.2)}
+.eST{font-family:var(--mono);font-size:17px;color:var(--thr);font-weight:900;margin-bottom:8px;letter-spacing:2px}
+.eSM{font-size:10px;color:var(--dim);margin-bottom:18px;line-height:1.6}
+.eSBtns{display:flex;gap:8px;justify-content:center}
+.eSGo{background:var(--thr);color:#fff;border:none;padding:7px 20px;border-radius:5px;font-size:11px;font-family:var(--mono);font-weight:700;cursor:pointer}
+.eSCancel{background:none;border:1px solid var(--dim);color:var(--dim);padding:7px 14px;border-radius:5px;font-size:11px;font-family:var(--mono);cursor:pointer}
+.eSCancel:hover{border-color:var(--ion);color:var(--ion)}
+/* focus dock */
+#jFocus{flex-shrink:0;display:none;padding:0 4px 4px}
+#jFocus.show{display:block;animation:slideUp .3s ease}
+.fdCard{background:var(--card);border:1px solid var(--b);border-radius:6px;padding:7px 9px}
+.fdTitle{font-size:7.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-bottom:5px;
+  display:flex;justify-content:space-between;align-items:center}
+.fdRow{display:flex;justify-content:space-between;align-items:center;padding:2px 0;border-bottom:1px solid rgba(0,229,255,.05)}
+.fdRow:last-child{border-bottom:none}
+.fdK{font-size:7.5px;color:var(--dim)}.fdV{font-family:var(--mono);font-size:8px;font-weight:600;text-align:right}
+.dismissBtn{background:none;border:1px solid rgba(0,229,255,.18);color:var(--dim);font-family:var(--mono);
+  font-size:6.5px;padding:1px 6px;border-radius:3px;cursor:pointer}
+.dismissBtn:hover{border-color:var(--ion);color:var(--ion)}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-thumb{background:rgba(0,229,255,.16);border-radius:2px}
 `;
 
-// =====================================================================
-// 6 · ROOT
-// =====================================================================
+// ─── Constants ────────────────────────────────────────────────────────────────
+const API = p => `/api/${p}`;
 
-// v13.2 — viewport width detection for desktop/mobile layout switch
-function useIsMobile(breakpoint = 768) {
-  const [isMobile, setIsMobile] = useState(
-    () => (typeof window !== "undefined" ? window.innerWidth < breakpoint : false)
-  );
-  useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
-    window.addEventListener("resize", onResize);
-    onResize();
-    return () => window.removeEventListener("resize", onResize);
-  }, [breakpoint]);
-  return isMobile;
+const TPLS = {
+  'orb-pro':       { glyph: '⚡', label: 'ORB-PRO' },
+  'silver-bullet': { glyph: '🥈', label: 'SILVER-BLT' },
+  'alexg':         { glyph: '📐', label: 'ALEX-G' },
+  'reaction-fvg':  { glyph: '🌀', label: 'REACT-FVG' },
+  'reaction':      { glyph: '🎯', label: 'REACT-IMP' },
+  'reaction-ifvg': { glyph: '🔄', label: 'REACT-IFVG' },
+  'am-ifvg':       { glyph: '🌅', label: 'AM-IFVG' },
+  'unicorn':       { glyph: '🦄', label: 'UNICORN' },
+  'turtle-soup':   { glyph: '🐢', label: 'TURTLE-SOP' },
+  'judas-swing':   { glyph: '🎭', label: 'JUDAS' },
+  'orb':           { glyph: '🚀', label: 'ORB' },
+  'ote-continuation': { glyph: '🎯', label: 'OTE-CONT' },
+};
+
+const SESSION_LABELS = {
+  london: 'LONDON', london_open: 'LONDON', new_york: 'NEW YORK', ny_am: 'NY AM',
+  ny_pm: 'NY PM', asian: 'ASIAN', sydney: 'SYDNEY', unknown: '—',
+};
+
+const MODE_LABELS = { active: '🟢 ACTIVE', defensive: '🛡 DEFENSIVE', sleep: '🌙 SLEEP', vacation: '🏖 VACATION' };
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const fmtMoney = (n, decimals = 0) =>
+  typeof n === 'number' && isFinite(n)
+    ? (n >= 0 ? '+' : '') + n.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    : '—';
+
+const fmtMoneyAbs = (n, decimals = 0) =>
+  typeof n === 'number' && isFinite(n)
+    ? '$' + Math.abs(n).toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    : '—';
+
+const fmtR = n => typeof n === 'number' && isFinite(n) ? (n >= 0 ? '+' : '') + n.toFixed(1) + 'R' : '—';
+const pct  = (n, d=0) => typeof n === 'number' && isFinite(n) ? (n*100).toFixed(d) + '%' : '—';
+
+const fmtTime = ts => {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+};
+
+const fmtRelTime = ts => {
+  if (!ts) return '';
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60)  return `${Math.round(diff)}s ago`;
+  if (diff < 3600) return `${Math.round(diff/60)}m ago`;
+  return `${Math.round(diff/3600)}h ago`;
+};
+
+function tplLabel(id) {
+  return TPLS[id]?.label || id?.toUpperCase() || '?';
+}
+function tplGlyph(id) {
+  return TPLS[id]?.glyph || '⊕';
+}
+function sessLabel(s) {
+  return SESSION_LABELS[s?.toLowerCase()] || s?.toUpperCase() || '—';
 }
 
-export default function App() {
-  const [theme, setTheme] = useState(loadTheme);
-  useEffect(() => { applyThemeVars(theme); saveTheme(theme); }, [theme]);
-
-  useEffect(() => {
-    const id = "qb-styles-v13";
-    if (document.getElementById(id)) return;
-    const s = document.createElement("style");
-    s.id = id; s.textContent = GLOBAL_STYLES;
-    document.head.appendChild(s);
-  }, []);
-
-  // v13.2 — ensure a mobile viewport meta exists (won't clobber an existing one)
-  useEffect(() => {
-    let m = document.querySelector('meta[name="viewport"]');
-    if (!m) { m = document.createElement("meta"); m.name = "viewport"; document.head.appendChild(m); }
-    if (!m.content || !/width=device-width/.test(m.content)) {
-      m.content = "width=device-width, initial-scale=1, viewport-fit=cover";
-    }
-  }, []);
-
-  const [prefs, setPrefs] = useState(loadPrefs);
-  useEffect(() => { savePrefs(prefs); }, [prefs]);
-
-  return <PilotDashboard prefs={prefs} setPrefs={setPrefs} theme={theme} setTheme={setTheme} />;
-}
-
-// =====================================================================
-// 7 · PILOT DASHBOARD
-// =====================================================================
-
-function PilotDashboard({ prefs, setPrefs, theme, setTheme }) {
-
-  const isMobile = useIsMobile();
-
-  // ── Broker state (existing endpoint) ───────────────────────────────
-  const [account, setAccount]     = useState(null);
-  const [positions, setPositions] = useState([]);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const a = await fetch(API("broker?action=account")).then((r) => r.json()).catch(() => null);
-        if (alive && a && !a.error) setAccount(a);
-        const p = await fetch(API("broker?action=positions")).then((r) => r.json()).catch(() => []);
-        if (alive) setPositions(Array.isArray(p) ? p : []);
-      } catch (_) {}
-    };
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  // ── Rules state (NEW: /api/rules) ──────────────────────────────────
-  const [rules, setRules]           = useState(null);
-  const [rulesError, setRulesError] = useState(null);
-
-  const loadRules = useCallback(async () => {
-    try {
-      const r = await fetch(API("rules")).then((res) => res.json());
-      if (r && !r.error) { setRules(r); setRulesError(null); }
-      else setRulesError(r?.error || "endpoint not deployed");
-    } catch (e) { setRulesError(e.message || "fetch failed"); }
-  }, []);
-
-  useEffect(() => {
-    loadRules();
-    const id = setInterval(loadRules, 15000);
-    return () => clearInterval(id);
-  }, [loadRules]);
-
-  // ── Generic rules action caller ────────────────────────────────────
-  const callRulesAction = useCallback(async (action, body = {}) => {
-    try {
-      const r = await fetch(API(`rules?action=${action}`), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(body),
-      }).then((res) => res.json());
-      if (r?.ok && r?.rules) setRules(r.rules);
-      else if (r?.error) console.warn(`[rules] ${action} failed:`, r.error);
-      loadRules();
-      return r;
-    } catch (e) {
-      console.error(`[rules] ${action} error:`, e);
-      return { ok: false, error: e.message };
-    }
-  }, [loadRules]);
-
-  // ── Activity log (NEW: server-side) ────────────────────────────────
-  const [activity, setActivity] = useState([]);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("rules?action=activity&limit=50")).then((res) => res.json());
-        if (alive && r?.activity) setActivity(r.activity);
-      } catch (_) {}
-    };
-    tick();
-    const id = setInterval(tick, 10000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  // ── Daily P&L (NEW) ────────────────────────────────────────────────
-  const [dailyPnL, setDailyPnL] = useState(0);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        // v14.1: source "Today" from the broker's actual closed deals (matches MT5).
-        const r = await fetch(API("manage-trades?action=today-pnl")).then((res) => res.json());
-        if (alive && r?.ok && typeof r.pnl === "number") { setDailyPnL(r.pnl); return; }
-        // fallback to the internal counter only if the broker fetch fails
-        const r2 = await fetch(API("rules?action=daily-pnl")).then((res) => res.json());
-        if (alive && r2?.pnl != null) setDailyPnL(r2.pnl);
-      } catch (_) {}
-    };
-    tick();
-    const id = setInterval(tick, 30000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  // ── Template performance ───────────────────────────────────────────
-  const [perf, setPerf]           = useState(null);
-  const [perfError, setPerfError] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("template-performance")).then((res) => res.json());
-        if (alive) {
-          if (r && !r.error) { setPerf(r); setPerfError(null); }
-          else setPerfError(r?.error || "endpoint not deployed");
-        }
-      } catch (e) { if (alive) setPerfError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 60000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  // ── v14 · Macro regime (news + volatility + manual override) ────────
-  const [regime, setRegime] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("market-regime")).then((res) => res.json());
-        if (alive && r && r.regime) setRegime(r.regime);
-      } catch (_) {}
-    };
-    tick();
-    const id = setInterval(tick, 30000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-  const setRegimeOverride = useCallback(async (mode) => {
-    try {
-      const r = await fetch(API("market-regime?action=set-override"), {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
-      }).then((res) => res.json());
-      if (r && r.regime) setRegime(r.regime);
-    } catch (e) { console.error("[regime] override error:", e); }
-  }, []);
-
-  // ── Symbol resolver ────────────────────────────────────────────────
-  const [resolver, setResolver] = useState(null);
-  useEffect(() => {
-    fetch(API("symbol-resolver?action=status"))
-      .then((r) => r.json()).then(setResolver).catch(() => setResolver({ error: "unavailable" }));
-  }, []);
-
-  // ── Modal state ────────────────────────────────────────────────────
-  const [assetModalOpen, setAssetModalOpen] = useState(false);
-  const [estopOpen, setEstopOpen]           = useState(false);
-  const [settingsOpen, setSettingsOpen]     = useState(false);
-
-  // ── Derived values ─────────────────────────────────────────────────
-  const activeMode  = rules?.activeMode || "active";
-  const tradingMode = rules?.tradingMode || "auto";
-  const estopActive = rules?.account?.emergencyStop === true;
-  const balance     = account?.balance;
-  const equity      = account?.equity ?? balance;
-  const floatingPnL = account?.profit ?? 0;
-
-  // ── Action handlers ────────────────────────────────────────────────
-  const setActiveModeAction  = (mode) => callRulesAction("set-active-mode",  { mode });
-  const setTradingModeAction = (mode) => callRulesAction("set-trading-mode", { mode });
-  const triggerEStop  = () => { callRulesAction("emergency-stop", { enable: true  }); setEstopOpen(false); };
-  const clearEStop    = () => callRulesAction("emergency-stop", { enable: false });
-
-  // ── v13.2 · MOBILE LAYOUT (desktop layout below is untouched) ───────
-  if (isMobile) {
-    return (
-      <MobileLayout
-        equity={equity} balance={balance}
-        floatingPnL={floatingPnL} dailyPnL={dailyPnL}
-        positions={positions}
-        rules={rules} rulesError={rulesError}
-        perf={perf} perfError={perfError}
-        activity={activity}
-        resolver={resolver}
-        prefs={prefs} setPrefs={setPrefs}
-        theme={theme} setTheme={setTheme}
-        activeMode={activeMode} tradingMode={tradingMode}
-        estopActive={estopActive}
-        regime={regime} setRegimeOverride={setRegimeOverride}
-        callRulesAction={callRulesAction}
-      />
-    );
-  }
-
-  return (
-    <div style={{
-      width: "100vw", minHeight: "100vh",
-      background: "var(--qb-bg-void)",
-      display: "grid",
-      gridTemplateRows: "auto auto auto auto",
-      overflow: "visible",
-    }}>
-
-      <DashboardHeader
-        equity={equity} balance={balance}
-        floatingPnL={floatingPnL} dailyPnL={dailyPnL}
-        positions={positions}
-        rulesError={rulesError}
-        regime={regime}
-        estopActive={estopActive}
-        onOpenEstop={() => setEstopOpen(true)}
-        onClearEstop={clearEStop}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-
-      <ModeBar
-        activeMode={activeMode}
-        tradingMode={tradingMode}
-        onSetActiveMode={setActiveModeAction}
-        onSetTradingMode={setTradingModeAction}
-        disabled={!rules || estopActive}
-      />
-
-      <div style={{
-        padding: 14,
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr 1fr",
-        gridTemplateRows: "minmax(240px, auto) minmax(240px, auto) minmax(240px, auto)",
-        // v14: full-width panels (Day-vs-Swing, Immediate-vs-Retest) flow into
-        // implicit rows 4+. Without an auto-row size they collapse to zero height
-        // (their inner content is height:100% of an undefined row). Give every
-        // implicit row a real minimum so added panels actually render.
-        gridAutoRows: "minmax(40px, auto)",
-        gap: 10, overflow: "auto",
-      }}>
-        <AccountSafetyPanel
-          balance={balance} equity={equity}
-          floatingPnL={floatingPnL} dailyPnL={dailyPnL}
-          rules={rules}
-          callRulesAction={callRulesAction}
-        />
-
-        <TemplatesPanel
-          rules={rules}
-          perf={perf} perfError={perfError}
-          callRulesAction={callRulesAction}
-        />
-
-        <OpenPositionsPanel positions={positions} />
-
-        <RulesPanel
-          rules={rules}
-          rulesError={rulesError}
-          callRulesAction={callRulesAction}
-          watchlist={prefs.watchlist}
-          onAddInstrument={() => setAssetModalOpen(true)}
-          onRemoveInstrument={(id) => setPrefs((p) => ({ ...p, watchlist: p.watchlist.filter((a) => a !== id) }))}
-        />
-
-        <PivotsPanel watchlist={prefs.watchlist} />
-
-        <WatchesPanel
-          tradingMode={tradingMode}
-          callRulesAction={callRulesAction}
-        />
-
-        {/* ─── v13.1 · 3rd ROW: Recognition (cols 1-2) + Heatmap (col 3) ─── */}
-        <RecognitionPanel perf={perf} />
-
-        <PerfHeatmapPanel perf={perf} watchlist={prefs.watchlist} />
-
-        {/* ─── v14 · Macro regime risk dial (full width) ─── */}
-        <RegimePanel regime={regime} onSetOverride={setRegimeOverride} />
-
-        {/* ─── v15.3 · Regime Detector shadow validation (full width) ─── */}
-        <RegimeDetectorShadowPanel />
-
-        {/* ─── v14 · Day-vs-Swing comparison (full width) ─── */}
-        <StyleComparisonPanel />
-
-        {/* ─── v14 · Immediate-vs-Retest entry-style comparison (full width) ─── */}
-        <EntryStyleComparisonPanel />
-
-        {/* ─── v15.6 · Template × session × instrument performance ranking (full width) ─── */}
-        <PerfRankingPanel />
-
-        {/* ─── v14.1 · TP reach by template (full width) ─── */}
-        <TpHitPanel />
-        <ORBComparePanel />
-        <TradeDataPanel />
-
-        {/* ─── v14.4 · Alex G live-signal scanner (full width) ─── */}
-        <AlexgHeartbeatPanel />
-        <AlexgSignalsPanel />
-
-        {/* ─── v15.3 · Session performance heatmap (full width) ─── */}
-        <SessionHeatmapPanel />
-
-        {/* ─── v16.0 · Signal Quality Panel — live gates (CVD + session + wick) ─── */}
-        <SignalQualityPanel />
-
-        {/* ─── v16.1 · NY Open Specialist — daily journal + context matcher ─── */}
-        <NYOpenPanel />
-
-        {/* ─── v15.8 · Signal Gating Control Panel (full width) ─── */}
-        <GatingPanel />
-
-        {/* ─── v15.8 · Instrument Heatmap (full width) ─── */}
-        <InstrumentHeatmapPanel />
-
-        {/* ─── v15.8 · Trend vs Counter-Trend Heatmap (full width) ─── */}
-        <TrendHeatmapPanel />
-
-        {/* ─── v15.9 · Recognition Advisor shadow log (full width) ─── */}
-        <ShadowAdvicePanel />
-      </div>
-
-      <ActivityFeed activity={activity} />
-
-      {assetModalOpen && (
-        <AssetPicker
-          watchlist={prefs.watchlist}
-          resolver={resolver}
-          onAdd={(id) => {
-            setPrefs((p) => ({ ...p, watchlist: p.watchlist.includes(id) ? p.watchlist : [...p.watchlist, id] }));
-            setAssetModalOpen(false);
-          }}
-          onClose={() => setAssetModalOpen(false)}
-        />
-      )}
-      {estopOpen && (
-        <EstopModal onConfirm={triggerEStop} onCancel={() => setEstopOpen(false)} />
-      )}
-      {settingsOpen && (
-        <SettingsModal
-          theme={theme} setTheme={setTheme}
-          resolver={resolver}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
-
-      {/* ─── v15.7 · Analyst Sidebar ─── */}
-      <AnalystSidebar />
-    </div>
-  );
-}
-
-// =====================================================================
-// 8 · HEADER
-// =====================================================================
-
-function DashboardHeader({
-  equity, balance, floatingPnL, dailyPnL, positions,
-  rulesError, regime, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
-}) {
-  const openCount = positions?.length || 0;
-  const floatColor = floatingPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-  const dailyColor = dailyPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-
-  return (
-    <div style={{
-      borderBottom: "1px solid var(--qb-border)",
-      padding: "12px 18px",
-      display: "flex",
-      alignItems: "center",
-      gap: 20,
-      background: "var(--qb-bg-void)",
-    }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-        <span className="qb-serif" style={{ fontSize: 22, color: "var(--qb-text-hi)", letterSpacing: -0.5 }}>
-          Quantum<span style={{ color: "var(--qb-accent)" }}>·</span>Bot
-        </span>
-        <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-faint)", letterSpacing: 1 }}>
-          v13 PILOT
-        </span>
-      </div>
-
-      {/* v14 — blinking news / regime warning dot */}
-      {regime && (regime.newsActive || regime.eventImminent || regime.level === "elevated" || regime.level === "crisis") && (() => {
-        const hot = regime.level === "crisis" || regime.newsActive || regime.eventImminent;
-        const c = hot ? "var(--qb-bad)" : "var(--qb-warn)";
-        let label;
-        if (regime.eventImminent && regime.nextEvent) {
-          const m = regime.nextEvent.minutesUntil;
-          const tag = m > 0 ? ` ${m}m` : m === 0 ? " NOW" : ` ${-m}m`;
-          label = `${regime.nextEvent.country} ${regime.nextEvent.title}`.slice(0, 22) + tag;
-        } else if (regime.newsActive) {
-          label = regime.level === "crisis" ? "NEWS · CRISIS" : regime.level === "elevated" ? "NEWS · ELEVATED" : "NEWS";
-        } else {
-          label = regime.level.toUpperCase();
-        }
-        const tip = (regime.reasons || []).join("  •  ")
-          || (regime.headlines || []).map((h) => h.title).slice(0, 3).join("  |  ")
-          || "Elevated market risk";
-        return (
-          <div title={tip} style={{
-            display: "flex", alignItems: "center", gap: 7,
-            padding: "3px 11px", borderRadius: 3,
-            background: "var(--qb-bg-panel-hi)", border: `1px solid ${c}`,
-          }}>
-            <span className="qb-pulse" style={{
-              width: 9, height: 9, borderRadius: "50%", background: c, boxShadow: `0 0 8px ${c}`,
-            }} />
-            <span className="qb-mono" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.8, color: c, textTransform: "uppercase" }}>
-              {label}
-            </span>
-          </div>
-        );
-      })()}
-
-      <div style={{ width: 1, height: 22, background: "var(--qb-border)" }} />
-
-      <div style={{ display: "flex", gap: 22, alignItems: "center" }}>
-        <HeaderStat label="Equity"   value={fmtUSD(equity)} mono />
-        <HeaderStat label="Balance"  value={fmtUSD(balance)} mono />
-        <HeaderStat label="Float"    value={fmtUSD(floatingPnL, true)} mono accent={floatColor} />
-        <HeaderStat label="Today"    value={fmtUSD(dailyPnL, true)} mono accent={dailyColor} />
-        <HeaderStat label="Open"     value={openCount} mono />
-      </div>
-
-      <div style={{ flex: 1 }} />
-
-      {/* v13.1 — UTC clock + session + date */}
-      <TimeDisplay />
-
-      {rulesError ? (
-        <span className="qb-mono" title={rulesError} style={{
-          fontSize: 10, padding: "3px 10px",
-          background: "var(--qb-warn-soft)", color: "var(--qb-warn)",
-          border: "1px solid var(--qb-warn)", borderRadius: 3,
-          letterSpacing: 0.5, textTransform: "uppercase",
-        }}>▲ rules offline</span>
-      ) : (
-        <span className="qb-mono" style={{
-          fontSize: 10, padding: "3px 10px",
-          background: "var(--qb-ok-soft)", color: "var(--qb-ok)",
-          border: "1px solid var(--qb-ok)", borderRadius: 3,
-          letterSpacing: 0.5, textTransform: "uppercase",
-        }}>● online</span>
-      )}
-
-      {estopActive ? (
-        <button onClick={onClearEstop} className="qb-mono qb-pulse" style={{
-          background: "var(--qb-bad)", color: "white",
-          border: "1px solid var(--qb-bad)", borderRadius: 4,
-          padding: "6px 16px", fontSize: 11, fontWeight: 700,
-          letterSpacing: 1.2, cursor: "pointer", textTransform: "uppercase",
-        }}>⛔ E-STOP ACTIVE — clear?</button>
-      ) : (
-        <button onClick={onOpenEstop} className="qb-mono" style={{
-          background: "transparent", color: "var(--qb-bad)",
-          border: "1px solid var(--qb-bad)", borderRadius: 4,
-          padding: "6px 12px", fontSize: 11, fontWeight: 600,
-          letterSpacing: 1.2, cursor: "pointer", textTransform: "uppercase",
-        }} title="Emergency stop">⛔ E-STOP</button>
-      )}
-
-      <button onClick={onOpenSettings} style={{
-        background: "transparent", color: "var(--qb-text-mid)",
-        border: "1px solid var(--qb-border)", borderRadius: 4,
-        padding: "5px 10px", fontSize: 14, cursor: "pointer",
-      }} title="Settings">⚙</button>
-    </div>
-  );
-}
-
-function HeaderStat({ label, value, mono, accent }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
-      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>{label}</span>
-      <span className={mono ? "qb-mono" : ""} style={{ fontSize: 14, color: accent || "var(--qb-text-hi)", fontWeight: 500 }}>{value}</span>
-    </div>
-  );
-}
-
-// ── v13.1 · UTC TIME + SESSION + DATE ──────────────────────────────────
-// Sessions (UTC), aligned to qb-v2.2.pine windows:
-//   Asian   20:00–05:00   ·   London 07:00–10:00   ·   New York 12:00–17:00
-function activeSessionUTC(d) {
-  const t = d.getUTCHours() * 60 + d.getUTCMinutes();
-  if (t >= 20 * 60 || t < 5 * 60)  return { label: "ASIA",     color: "var(--qb-warn)" };
-  if (t >= 7 * 60  && t < 10 * 60) return { label: "LONDON",   color: "var(--qb-accent)" };
-  if (t >= 12 * 60 && t < 17 * 60) return { label: "NEW YORK", color: "#ec4899" };
-  return { label: "OFF", color: "var(--qb-text-lo)" };
-}
-
-function TimeDisplay() {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-  const mons = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-  const dow = days[now.getUTCDay()];
-  const dd  = String(now.getUTCDate()).padStart(2, "0");
-  const mon = mons[now.getUTCMonth()];
-  const hh  = String(now.getUTCHours()).padStart(2, "0");
-  const mm  = String(now.getUTCMinutes()).padStart(2, "0");
-  const ss  = String(now.getUTCSeconds()).padStart(2, "0");
-  const ses = activeSessionUTC(now);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", lineHeight: 1.25 }}>
-      <span className="qb-mono" style={{ fontSize: 13, color: "var(--qb-text-hi)", letterSpacing: 0.5 }}>
-        {hh}:{mm}<span style={{ color: "var(--qb-text-lo)" }}>:{ss}</span>
-        <span style={{ color: "var(--qb-text-faint)", fontSize: 9, marginLeft: 4 }}>UTC</span>
-      </span>
-      <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-mid)", letterSpacing: 0.5, display: "flex", gap: 6, alignItems: "center" }}>
-        <span>{dow} {dd} {mon}</span>
-        <span style={{ color: "var(--qb-text-faint)" }}>·</span>
-        <span style={{ color: ses.color, display: "flex", alignItems: "center", gap: 3 }}>
-          <span style={{ width: 5, height: 5, borderRadius: "50%", background: ses.color, display: "inline-block" }} />
-          {ses.label}
-        </span>
-      </span>
-    </div>
-  );
-}
-
-// =====================================================================
-// 9 · MODE BAR (two axes)
-// =====================================================================
-
-function ModeBar({ activeMode, tradingMode, onSetActiveMode, onSetTradingMode, disabled }) {
-  const currentActive  = ACTIVE_MODES.find((m) => m.id === activeMode);
-  const currentTrading = TRADING_MODES.find((m) => m.id === tradingMode);
-
-  return (
-    <div style={{
-      padding: "10px 18px",
-      borderBottom: "1px solid var(--qb-border)",
-      background: "var(--qb-bg-panel)",
-      display: "flex",
-      alignItems: "center",
-      gap: 16,
-    }}>
-      {/* ACTIVE MODE */}
-      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
-        Mode
-      </span>
-      {ACTIVE_MODES.map((m) => {
-        const isActive = m.id === activeMode;
-        return (
-          <button
-            key={m.id}
-            onClick={() => !disabled && onSetActiveMode(m.id)}
-            disabled={disabled}
-            title={m.hint}
-            className="qb-mono"
-            style={{
-              background: isActive ? "var(--qb-accent-soft)" : "transparent",
-              color: isActive ? "var(--qb-accent)" : "var(--qb-text-mid)",
-              border: `1px solid ${isActive ? "var(--qb-accent)" : "var(--qb-border)"}`,
-              borderRadius: 4,
-              padding: "6px 12px",
-              fontSize: 11, fontWeight: 600,
-              letterSpacing: 0.5,
-              cursor: disabled ? "not-allowed" : "pointer",
-              opacity: disabled ? 0.4 : 1,
-              display: "flex", alignItems: "center", gap: 6,
-              textTransform: "uppercase",
-            }}
-          >
-            <span style={{ fontSize: 13 }}>{m.glyph}</span>
-            {m.label}
-          </button>
-        );
-      })}
-
-      <div style={{ width: 1, height: 22, background: "var(--qb-border)", marginLeft: 6 }} />
-
-      {/* TRADING MODE */}
-      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
-        Execution
-      </span>
-      {TRADING_MODES.map((m) => {
-        const isActive = m.id === tradingMode;
-        return (
-          <button
-            key={m.id}
-            onClick={() => !disabled && onSetTradingMode(m.id)}
-            disabled={disabled}
-            title={m.hint}
-            className="qb-mono"
-            style={{
-              background: isActive ? (m.id === "auto" ? "var(--qb-ok-soft)" : "var(--qb-warn-soft)") : "transparent",
-              color: isActive ? (m.id === "auto" ? "var(--qb-ok)" : "var(--qb-warn)") : "var(--qb-text-mid)",
-              border: `1px solid ${isActive ? (m.id === "auto" ? "var(--qb-ok)" : "var(--qb-warn)") : "var(--qb-border)"}`,
-              borderRadius: 4,
-              padding: "6px 12px",
-              fontSize: 11, fontWeight: 600,
-              letterSpacing: 0.5,
-              cursor: disabled ? "not-allowed" : "pointer",
-              opacity: disabled ? 0.4 : 1,
-              display: "flex", alignItems: "center", gap: 6,
-              textTransform: "uppercase",
-            }}
-          >
-            <span style={{ fontSize: 13 }}>{m.glyph}</span>
-            {m.label}
-          </button>
-        );
-      })}
-
-      <div style={{ flex: 1 }} />
-
-      <span style={{ fontSize: 10, color: "var(--qb-text-lo)", fontStyle: "italic" }}>
-        {currentActive?.hint} · {currentTrading?.hint}
-      </span>
-    </div>
-  );
-}
-
-// =====================================================================
-// 10 · ACCOUNT SAFETY PANEL
-// =====================================================================
-
-function AccountSafetyPanel({ balance, equity, floatingPnL, dailyPnL, rules, callRulesAction }) {
-  const safety = rules?.account || {};
-  const maxDailyLossPct  = safety.maxDailyLossPct  ?? 5.0;
-  const maxRiskPerTradePct = safety.maxRiskPerTradePct ?? 2.0;
-  const maxConcurrent    = safety.maxConcurrentPositions ?? 5;
-
-  // Daily loss percent (negative dailyPnL / balance × 100)
-  const currentLossPct = balance > 0 ? Math.max(0, -dailyPnL / balance * 100) : 0;
-  const lossMeterPct = Math.min(1, currentLossPct / maxDailyLossPct);
-
-  const updateSafety = (patch) => callRulesAction("update-account-safety", { patch });
-
-  return (
-    <Panel title="Account Safety" subtitle="limits · drawdown">
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 12, height: "100%" }}>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
-            Today (realized)
-          </span>
-          <span className="qb-mono" style={{
-            fontSize: 22, fontWeight: 300,
-            color: dailyPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)",
-          }}>
-            {fmtUSD(dailyPnL, true)}
-            <span style={{ fontSize: 11, marginLeft: 8, color: "var(--qb-text-lo)" }}>
-              ({balance > 0 ? fmtPct(dailyPnL / balance * 100, 2) : "—"})
-            </span>
-          </span>
-        </div>
-
-        <div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--qb-text-lo)", marginBottom: 4 }}>
-            <span>Daily loss limit</span>
-            <span className="qb-mono">{currentLossPct.toFixed(2)}% / {maxDailyLossPct.toFixed(1)}%</span>
-          </div>
-          <Meter value={lossMeterPct} color="var(--qb-bad)" />
-        </div>
-
-        <div className="qb-divider" />
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <ThresholdRow
-            label="Max daily loss"
-            value={maxDailyLossPct}
-            suffix="%"
-            step="0.5"
-            onChange={(v) => updateSafety({ maxDailyLossPct: v })}
-          />
-          <ThresholdRow
-            label="Max risk per trade"
-            value={maxRiskPerTradePct}
-            suffix="%"
-            step="0.1"
-            onChange={(v) => updateSafety({ maxRiskPerTradePct: v })}
-          />
-          <ThresholdRow
-            label="Max concurrent positions"
-            value={maxConcurrent}
-            suffix=""
-            step="1"
-            onChange={(v) => updateSafety({ maxConcurrentPositions: Math.round(v) })}
-          />
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function Meter({ value, color }) {
-  return (
-    <div style={{
-      height: 6, background: "var(--qb-bg-panel-hi)",
-      border: "1px solid var(--qb-border)", borderRadius: 3, overflow: "hidden",
-    }}>
-      <div style={{
-        height: "100%",
-        width: `${Math.min(100, Math.max(0, value * 100))}%`,
-        background: color,
-        transition: "width 400ms ease-out",
-      }} />
-    </div>
-  );
-}
-
-function ThresholdRow({ label, value, prefix, suffix, step = "1", onChange }) {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => { setDraft(String(value)); }, [value]);
-  const commit = () => {
-    const n = parseFloat(draft);
-    if (isFinite(n) && n >= 0) onChange(n);
-  };
-  return (
-    <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11 }}>
-      <span style={{ color: "var(--qb-text-mid)" }}>{label}</span>
-      <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-        {prefix && <span style={{ color: "var(--qb-text-lo)", fontFamily: "var(--qb-font-mono)" }}>{prefix}</span>}
-        <input
-          type="number"
-          step={step}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => { if (e.key === "Enter") { commit(); e.target.blur(); }}}
-          style={{
-            width: 70, textAlign: "right",
-            background: "var(--qb-bg-panel-hi)",
-            border: "1px solid var(--qb-border)",
-            borderRadius: 3, padding: "3px 6px",
-            color: "var(--qb-text-hi)",
-            fontFamily: "var(--qb-font-mono)",
-            fontSize: 11,
-          }}
-        />
-        {suffix && <span style={{ color: "var(--qb-text-lo)", fontSize: 10 }}>{suffix}</span>}
-      </span>
-    </label>
-  );
-}
-
-// =====================================================================
-// 11 · TEMPLATES PANEL
-// =====================================================================
-
-function TemplatesPanel({ rules, perf, perfError, callRulesAction }) {
-  const overrides = rules?.templateOverrides || {};
-  const byTemplate = perf?.byTemplate || {};
-
-  const toggleTemplate = (tplId, enabled) => {
-    callRulesAction("update-template", { template: tplId, patch: { enabled } });
-  };
-
-  return (
-    <Panel title="Templates & Performance" subtitle={perf?.totalTrades != null ? `${perf.totalTrades} closed trades` : "live"}>
-      <div style={{ padding: 10, height: "100%", overflow: "auto" }}>
-        {perfError && <PlaceholderError msg={`Performance: ${perfError}`} />}
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {TEMPLATE_ORDER.map((t) => (
-            <TemplateRow
-              key={t}
-              templateId={t}
-              meta={TEMPLATE_DISPLAY[t]}
-              override={overrides[t]}
-              stats={byTemplate[t]}
-              onToggle={(enabled) => toggleTemplate(t, enabled)}
-            />
-          ))}
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function TemplateRow({ templateId, meta, override, stats, onToggle }) {
-  const enabled = override?.enabled !== false;
-  const hasData = stats && stats.sample > 0;
-
-  let verdict = "no-data";
-  let verdictColor = "var(--qb-text-lo)";
-  let verdictGlyph = "·";
-  let verdictLabel = "NEW";
-
-  if (hasData) {
-    if (stats.sample < 5) {
-      verdict = "too-few"; verdictLabel = "n=" + stats.sample; verdictColor = "var(--qb-text-lo)";
-    } else if (stats.profitFactor >= 1.5) {
-      verdict = "profitable"; verdictGlyph = "●"; verdictLabel = "PROFIT"; verdictColor = "var(--qb-ok)";
-    } else if (stats.profitFactor >= 1.0) {
-      verdict = "marginal"; verdictGlyph = "◐"; verdictLabel = "MARGINAL"; verdictColor = "var(--qb-warn)";
-    } else {
-      verdict = "under"; verdictGlyph = "○"; verdictLabel = "UNDERPERF"; verdictColor = "var(--qb-bad)";
-    }
-  }
-
-  return (
-    <div className="qb-cell" style={{
-      padding: "8px 10px",
-      display: "grid",
-      gridTemplateColumns: "20px 1fr 50px 50px 70px 36px",
-      gap: 6, alignItems: "center",
-      opacity: enabled ? 1 : 0.5,
-    }}>
-      <span style={{ fontSize: 13 }}>{meta?.glyph || "·"}</span>
-      <span style={{ fontSize: 11, color: "var(--qb-text-hi)" }}>{meta?.label || templateId}</span>
-      <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", textAlign: "right" }}>
-        {hasData ? `${Math.round(stats.winRate * 100)}%` : "—"}
-      </span>
-      <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", textAlign: "right" }}>
-        {hasData ? stats.profitFactor.toFixed(2) : "—"}
-      </span>
-      <span className="qb-mono" style={{ fontSize: 9, color: verdictColor, textAlign: "right", letterSpacing: 0.6 }}>
-        {verdictGlyph} {verdictLabel}
-      </span>
-      <ToggleSwitch checked={enabled} onChange={onToggle} small />
-    </div>
-  );
-}
-
-function ToggleSwitch({ checked, onChange, small }) {
-  const w = small ? 28 : 36;
-  const h = small ? 14 : 18;
-  return (
-    <button
-      onClick={() => onChange(!checked)}
-      style={{
-        width: w, height: h,
-        background: checked ? "var(--qb-accent)" : "var(--qb-bg-panel-hi)",
-        border: `1px solid ${checked ? "var(--qb-accent)" : "var(--qb-border)"}`,
-        borderRadius: h / 2,
-        position: "relative",
-        cursor: "pointer",
-        padding: 0,
-        transition: "background 200ms",
-      }}
-    >
-      <span style={{
-        position: "absolute",
-        top: 1, left: checked ? (w - h + 1) : 1,
-        width: h - 4, height: h - 4,
-        background: "white",
-        borderRadius: "50%",
-        transition: "left 200ms",
-      }} />
-    </button>
-  );
-}
-
-// =====================================================================
-// 12 · OPEN POSITIONS
-// =====================================================================
-
-function OpenPositionsPanel({ positions }) {
-  return (
-    <Panel title="Open Positions" subtitle={`${positions.length} active`}>
-      <div style={{ padding: 10, overflow: "auto", height: "100%" }}>
-        {positions.length === 0 ? (
-          <Placeholder msg="No open positions." />
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {positions.map((p) => (
-              <PositionRow key={p.id || p.ticket || `${p.assetId}-${p.openTime}`} pos={p} />
-            ))}
-          </div>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-function PositionRow({ pos }) {
-  const profit = pos.profit ?? 0;
-  const color = profit >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-  return (
-    <div className="qb-cell" style={{
-      padding: "8px 10px",
-      display: "grid",
-      gridTemplateColumns: "1fr 60px 80px 80px",
-      gap: 8, alignItems: "center",
-      fontFamily: "var(--qb-font-mono)",
-      fontSize: 11,
-    }}>
-      <div>
-        <span style={{ color: "var(--qb-text-hi)", fontWeight: 600 }}>{(pos.assetId || pos.symbol || "?").toUpperCase()}</span>
-        {(() => {
-          // MetaAPI sends type as the string 'POSITION_TYPE_BUY' / '..._SELL'
-          // (not the number 0/1). Handle both forms + a direction fallback.
-          const isBuy = pos.type === 0 || pos.type === "POSITION_TYPE_BUY" ||
-                        String(pos.type).toUpperCase().includes("BUY") || pos.direction === "LONG";
-          return (
-            <span style={{ color: isBuy ? "var(--qb-ok)" : "var(--qb-bad)", marginLeft: 6, fontSize: 10 }}>
-              {isBuy ? "BUY" : "SELL"}
-            </span>
-          );
-        })()}
-      </div>
-      <span style={{ color: "var(--qb-text-mid)", textAlign: "right" }}>{(pos.volume || 0).toFixed(2)}</span>
-      <span style={{ color: "var(--qb-text-mid)", textAlign: "right" }}>@ {fmtPrice(pos.openPrice, pos.assetId)}</span>
-      <span style={{ color, textAlign: "right", fontWeight: 600 }}>{fmtUSD(profit, true)}</span>
-    </div>
-  );
-}
-
-// =====================================================================
-// 13 · PER-INSTRUMENT RULES
-// =====================================================================
-
-function RulesPanel({ rules, rulesError, callRulesAction, watchlist, onAddInstrument, onRemoveInstrument }) {
-  const instruments = rules?.instruments || {};
-
-  const updateInst = (assetId, patch) => callRulesAction("update-instrument", { assetId, patch });
-
-  return (
-    <Panel title="Per-Instrument Rules" subtitle={`${watchlist.length} watched`}>
-      <div style={{ padding: 10, overflow: "auto", height: "100%" }}>
-        {rulesError && <PlaceholderError msg={`Rules: ${rulesError}`} />}
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {watchlist.map((id) => (
-            <InstrumentRuleRow
-              key={id}
-              assetId={id}
-              rule={instruments[id]}
-              onChange={(patch) => updateInst(id, patch)}
-              onRemove={() => onRemoveInstrument(id)}
-              canRemove={watchlist.length > 1}
-            />
-          ))}
-        </div>
-
-        <button
-          onClick={onAddInstrument}
-          style={{
-            marginTop: 10, width: "100%",
-            background: "transparent",
-            border: "1px dashed var(--qb-border-hi)",
-            borderRadius: 4,
-            padding: "8px 10px",
-            color: "var(--qb-text-mid)",
-            fontSize: 11, cursor: "pointer",
-            fontFamily: "var(--qb-font-mono)",
-            letterSpacing: 0.5, textTransform: "uppercase",
-          }}
-        >
-          + add instrument
-        </button>
-      </div>
-    </Panel>
-  );
-}
-
-function InstrumentRuleRow({ assetId, rule, onChange, onRemove, canRemove }) {
-  const [expanded, setExpanded] = useState(false);
-  // Hooks must run unconditionally on every render — keep this ABOVE the
-  // `!rule` early return below. rule?.style is null-safe for the stub case.
-  const liveStyle  = rule?.style === "swing" ? "swing" : "day";
-  const [editStyle, setEditStyle] = useState(liveStyle);
-
-  if (!rule) {
-    // Asset in watchlist but no rules record yet — show a "needs configuration" stub
-    return (
-      <div className="qb-cell" style={{
-        padding: "8px 10px",
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-      }}>
-        <span style={{ fontFamily: "var(--qb-font-mono)", fontSize: 12, fontWeight: 600 }}>{assetId.toUpperCase()}</span>
-        <span style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>not configured in rules-store</span>
-        {canRemove && (
-          <button onClick={onRemove} style={{
-            background: "transparent", border: "none", color: "var(--qb-text-faint)",
-            fontSize: 14, cursor: "pointer", padding: "0 4px",
-          }}>×</button>
-        )}
-      </div>
-    );
-  }
-
-  const enabled    = rule.enabled !== false;
-
-  // Read a field from a style's profile, falling back to the legacy flat field
-  // (migration-safe), then a default.
-  const readField = (style, field, dflt) => {
-    const prof = rule[style + "Profile"];
-    if (prof && prof[field] != null) return prof[field];
-    if (rule[field] != null) return rule[field];
-    return dflt;
-  };
-  // Patch a field inside the profile currently being EDITED. Deep-merged server-side.
-  const setField = (field, v) => onChange({ [editStyle + "Profile"]: { [field]: v } });
-
-  // Collapsed-row summary reflects the LIVE profile (what actually trades).
-  const lvLotMode = readField(liveStyle, "lotMode", "risk-based");
-  const lvSlMode  = readField(liveStyle, "slMode", "pine");
-  const lvTpMode  = readField(liveStyle, "tpMode", "pine-three");
-  const slLabel  = lvSlMode === "pine" ? "Pine SL" : lvSlMode === "fixed-pips" ? `${readField(liveStyle,"fixedSLPips","?")}p` : `$${readField(liveStyle,"fixedSLDollars","?")}`;
-  const lotLabel = lvLotMode === "fixed" ? `${Number(readField(liveStyle,"fixedLot",0)).toFixed(2)} fixed` : `risk ≤${Number(readField(liveStyle,"maxLot",0)).toFixed(2)}`;
-
-  // Fields for the profile being EDITED.
-  const lotMode = readField(editStyle, "lotMode", "risk-based");
-  const slMode  = readField(editStyle, "slMode", "pine");
-  const tpMode  = readField(editStyle, "tpMode", "pine-three");
-
-  return (
-    <div className="qb-cell" style={{ opacity: enabled ? 1 : 0.5 }}>
-      <div
-        onClick={() => setExpanded((v) => !v)}
-        style={{
-          padding: "8px 10px",
-          display: "grid",
-          gridTemplateColumns: "20px 60px 1fr 62px 44px 30px 16px",
-          gap: 6, alignItems: "center",
-          cursor: "pointer",
-        }}
-      >
-        <ToggleSwitch checked={enabled} onChange={(v) => onChange({ enabled: v })} small />
-        <span style={{ fontFamily: "var(--qb-font-mono)", fontSize: 12, color: "var(--qb-text-hi)", fontWeight: 600 }}>
-          {assetId.toUpperCase()}
-        </span>
-        <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)" }}>{lotLabel}</span>
-        <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", textAlign: "right" }}>SL: {slLabel}</span>
-        <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", textAlign: "right" }}>{lvTpMode === "rr" ? `RR ${readField(liveStyle, "numTPs", 3)}×` : lvTpMode === "pine-three" ? "pine" : lvTpMode}</span>
-        <span className="qb-mono" style={{
-          fontSize: 8, fontWeight: 700, textAlign: "center", padding: "1px 0", borderRadius: 3,
-          color: liveStyle === "swing" ? "#08080a" : "var(--qb-accent)",
-          background: liveStyle === "swing" ? "var(--qb-accent)" : "transparent",
-          border: "1px solid var(--qb-accent)",
-        }}>{liveStyle === "swing" ? "SW" : "DAY"}</span>
-        <span style={{ fontSize: 10, color: "var(--qb-text-faint)", textAlign: "right" }}>
-          {expanded ? "▾" : "▸"}
-        </span>
-      </div>
-
-      {expanded && (
-        <div style={{
-          padding: "10px 12px",
-          borderTop: "1px solid var(--qb-border)",
-          display: "flex", flexDirection: "column", gap: 10,
-        }}>
-          {/* LIVE PROFILE — which profile actually trades this instrument */}
-          <ConfigGroup label="Live profile (what trades)">
-            <SegmentControl
-              options={[{id: "day", label: "Day"}, {id: "swing", label: "Swing"}]}
-              value={liveStyle}
-              onChange={(v) => { onChange({ style: v }); setEditStyle(v); }}
-            />
-          </ConfigGroup>
-
-          {/* EDIT TABS — configure either profile without changing the live one */}
-          <div style={{ display: "flex", borderBottom: "1px solid var(--qb-border)" }}>
-            {["day", "swing"].map((s) => (
-              <button key={s} onClick={() => setEditStyle(s)} style={{
-                flex: 1, background: "transparent", border: "none", cursor: "pointer",
-                padding: "6px 4px", fontFamily: "var(--qb-font-mono)", fontSize: 10,
-                letterSpacing: 0.5, textTransform: "uppercase",
-                color: editStyle === s ? "var(--qb-accent)" : "var(--qb-text-faint)",
-                borderBottom: editStyle === s ? "2px solid var(--qb-accent)" : "2px solid transparent",
-                fontWeight: editStyle === s ? 700 : 400,
-              }}>
-                {s === "day" ? "Day" : "Swing"} profile{s === liveStyle ? " ●" : ""}
-              </button>
-            ))}
-          </div>
-
-          {/* LOT MODE */}
-          <ConfigGroup label="Lot mode">
-            <SegmentControl
-              options={[{id: "risk-based", label: "Risk-based"}, {id: "fixed", label: "Fixed lot"}]}
-              value={lotMode}
-              onChange={(v) => setField("lotMode", v)}
-            />
-          </ConfigGroup>
-
-          {lotMode === "fixed" && (
-            <SmallNumberField
-              label="Fixed lot"
-              value={readField(editStyle, "fixedLot", 0.01)}
-              step="0.01"
-              onChange={(v) => setField("fixedLot", v)}
-            />
-          )}
-          <SmallNumberField
-            label="Max lot"
-            value={readField(editStyle, "maxLot", 1)}
-            step="0.01"
-            onChange={(v) => setField("maxLot", v)}
-          />
-
-          {/* SL MODE */}
-          <ConfigGroup label="SL mode">
-            <SegmentControl
-              options={[
-                {id: "pine", label: "Pine"},
-                {id: "fixed-pips", label: "Pips"},
-                {id: "fixed-dollars", label: "Dollars"},
-              ]}
-              value={slMode}
-              onChange={(v) => setField("slMode", v)}
-            />
-          </ConfigGroup>
-          {slMode === "fixed-pips" && (
-            <SmallNumberField
-              label="SL (pips)"
-              value={readField(editStyle, "fixedSLPips", 15)}
-              step="1"
-              onChange={(v) => setField("fixedSLPips", v)}
-            />
-          )}
-          {slMode === "fixed-dollars" && (
-            <SmallNumberField
-              label="SL ($/lot)"
-              value={readField(editStyle, "fixedSLDollars", 25)}
-              step="1"
-              onChange={(v) => setField("fixedSLDollars", v)}
-            />
-          )}
-
-          {/* TP MODE */}
-          <ConfigGroup label="TP mode">
-            <SegmentControl
-              options={[
-                {id: "rr", label: "By RR"},
-                {id: "pine-three", label: "Pine TPs"},
-                {id: "trail-only", label: "Trail only"},
-              ]}
-              value={tpMode}
-              onChange={(v) => setField("tpMode", v)}
-            />
-          </ConfigGroup>
-
-          {tpMode === "rr" && (
-            <>
-              <ConfigGroup label="Number of TPs">
-                <SegmentControl
-                  options={[{id: "1", label: "1"}, {id: "2", label: "2"}, {id: "3", label: "3"}]}
-                  value={String(readField(editStyle, "numTPs", 3))}
-                  onChange={(v) => setField("numTPs", Number(v))}
-                />
-              </ConfigGroup>
-              <SmallNumberField
-                label="TP1 (×R)"
-                value={readField(editStyle, "tp1RR", 1.5)}
-                step="0.1"
-                onChange={(v) => setField("tp1RR", v)}
-              />
-              {Number(readField(editStyle, "numTPs", 3)) >= 2 && (
-                <SmallNumberField
-                  label="TP2 (×R)"
-                  value={readField(editStyle, "tp2RR", 3)}
-                  step="0.1"
-                  onChange={(v) => setField("tp2RR", v)}
-                />
-              )}
-              {Number(readField(editStyle, "numTPs", 3)) >= 3 && (
-                <SmallNumberField
-                  label="TP3 (×R)"
-                  value={readField(editStyle, "tp3RR", 5)}
-                  step="0.1"
-                  onChange={(v) => setField("tp3RR", v)}
-                />
-              )}
-              <div style={{
-                fontSize: 11,
-                color: "var(--qb-text-faint)",
-                lineHeight: 1.5,
-                marginTop: 2,
-                padding: "6px 8px",
-                background: "rgba(255,255,255,0.03)",
-                borderRadius: 6,
-                border: "1px solid rgba(255,255,255,0.07)",
-              }}>
-                Full position rides to the last TP. SL ratchets up to each TP as price touches it — no partial closes.
-              </div>
-            </>
-          )}
-
-          {/* MIN RR */}
-          <SmallNumberField
-            label="Min RR"
-            value={readField(editStyle, "minRR", 1.0)}
-            step="0.1"
-            onChange={(v) => setField("minRR", v)}
-          />
-
-          {canRemove && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onRemove(); }}
-              style={{
-                marginTop: 4,
-                background: "transparent",
-                color: "var(--qb-bad)",
-                border: "1px solid var(--qb-bad)",
-                borderRadius: 3,
-                padding: "5px 8px",
-                fontSize: 10, cursor: "pointer",
-                letterSpacing: 0.5, textTransform: "uppercase",
-                fontFamily: "var(--qb-font-mono)",
-              }}
-            >
-              Remove from watchlist
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ConfigGroup({ label, children }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 9, color: "var(--qb-text-lo)", textTransform: "uppercase", letterSpacing: 1 }}>
-        {label}
-      </span>
-      {children}
-    </div>
-  );
-}
-
-function SegmentControl({ options, value, onChange }) {
-  return (
-    <div style={{ display: "flex", gap: 4 }}>
-      {options.map((opt) => (
-        <button
-          key={opt.id}
-          onClick={() => onChange(opt.id)}
-          className="qb-mono"
-          style={{
-            flex: 1,
-            background: value === opt.id ? "var(--qb-accent-soft)" : "transparent",
-            color: value === opt.id ? "var(--qb-accent)" : "var(--qb-text-mid)",
-            border: `1px solid ${value === opt.id ? "var(--qb-accent)" : "var(--qb-border)"}`,
-            borderRadius: 3,
-            padding: "4px 6px",
-            fontSize: 9, cursor: "pointer",
-            letterSpacing: 0.5, textTransform: "uppercase",
-          }}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function SmallNumberField({ label, value, step = "1", onChange }) {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => setDraft(String(value)), [value]);
-  const commit = () => {
-    const n = parseFloat(draft);
-    if (isFinite(n) && n >= 0) onChange(n);
-  };
-  return (
-    <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11 }}>
-      <span style={{ color: "var(--qb-text-mid)" }}>{label}</span>
-      <input
-        type="number"
-        step={step}
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => { if (e.key === "Enter") { commit(); e.target.blur(); }}}
-        style={{
-          width: 80, textAlign: "right",
-          background: "var(--qb-bg-panel-hi)",
-          border: "1px solid var(--qb-border)",
-          borderRadius: 3, padding: "3px 6px",
-          color: "var(--qb-text-hi)",
-          fontFamily: "var(--qb-font-mono)",
-          fontSize: 11,
-        }}
-      />
-    </label>
-  );
-}
-
-// =====================================================================
-// 14 · PIVOTS PANEL
-// =====================================================================
-
-function PivotsPanel({ watchlist }) {
-  const [pivots, setPivots] = useState(null);
-  const [error, setError]   = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("pivots")).then((res) => res.json());
-        if (alive) {
-          if (r && !r.error) { setPivots(r); setError(null); }
-          else setError(r?.error || "endpoint not deployed");
-        }
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 60000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  return (
-    <Panel title="Pivots" subtitle="H1 ATR levels">
-      <div style={{ padding: 10, overflow: "auto", height: "100%" }}>
-        {error && <PlaceholderError msg={`Pivots: ${error}`} />}
-        {!error && !pivots && <Placeholder msg="Loading..." />}
-        {pivots?.byAsset && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {watchlist.map((id) => {
-              const p = pivots.byAsset[id];
-              if (!p) return null;
-              return (
-                <div key={id} className="qb-cell" style={{
-                  padding: "6px 10px",
-                  display: "grid",
-                  gridTemplateColumns: "60px 1fr 1fr 1fr",
-                  gap: 6, alignItems: "center",
-                  fontSize: 10, fontFamily: "var(--qb-font-mono)",
-                }}>
-                  <span style={{ color: "var(--qb-text-hi)" }}>{id.toUpperCase()}</span>
-                  <span style={{ color: "var(--qb-ok)" }}>R: {fmtPrice(p.r1, id)}</span>
-                  <span style={{ color: "var(--qb-text-mid)" }}>P: {fmtPrice(p.pivot, id)}</span>
-                  <span style={{ color: "var(--qb-bad)" }}>S: {fmtPrice(p.s1, id)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15 · ACTIVE WATCHES (manual mode)
-// =====================================================================
-
-function WatchesPanel({ tradingMode, callRulesAction }) {
-  const [data, setData]   = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("watched-setups")).then((res) => res.json());
-        if (alive) {
-          if (r && !r.error) { setData(r); setError(null); }
-          else setError(r?.error || "endpoint not deployed");
-        }
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 15000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const cancelWatch = async (id) => {
-    try {
-      await fetch(API(`watched-setups?action=cancel&id=${encodeURIComponent(id)}`));
-    } catch (_) {}
-  };
-
-  const isManual = tradingMode === "manual";
-
-  return (
-    <Panel
-      title="Active Watches"
-      subtitle={isManual ? `${data?.watching || 0} watching · ${data?.alerted || 0} alerted` : "manual mode only"}
-    >
-      <div style={{ padding: 10, overflow: "auto", height: "100%" }}>
-        {!isManual && <Placeholder msg="Switch execution to MANUAL to receive zone-approach alerts." />}
-        {isManual && error && <PlaceholderError msg={`Watches: ${error}`} />}
-        {isManual && !error && (!data?.list || data.list.length === 0) && (
-          <Placeholder msg="No active watches. Waiting for setups." />
-        )}
-        {isManual && data?.list?.map((w) => (
-          <WatchRow key={w.id} watch={w} onCancel={() => cancelWatch(w.id)} />
-        ))}
-      </div>
-    </Panel>
-  );
-}
-
-function WatchRow({ watch, onCancel }) {
-  const meta = TEMPLATE_DISPLAY[watch.template] || { glyph: "·", label: watch.template };
-  const isAlerted = watch.status === "alerted";
-
-  return (
-    <div className="qb-cell" style={{
-      padding: "8px 10px", marginBottom: 4,
-      display: "flex", flexDirection: "column", gap: 4,
-      borderColor: isAlerted ? "var(--qb-accent)" : "var(--qb-border)",
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 13 }}>{meta.glyph}</span>
-        <span style={{ fontSize: 11, color: "var(--qb-text-hi)", flex: 1 }}>{meta.label}</span>
-        <span className="qb-mono" style={{ fontSize: 10, color: watch.direction === "LONG" ? "var(--qb-ok)" : "var(--qb-bad)" }}>
-          {watch.direction}
-        </span>
-        <span style={{ fontSize: 10, color: "var(--qb-text-lo)" }}>{(watch.asset || "").toUpperCase()}</span>
-        {isAlerted && (
-          <span className="qb-mono qb-pulse" style={{
-            fontSize: 9, color: "var(--qb-accent)",
-            background: "var(--qb-accent-soft)",
-            padding: "1px 6px", borderRadius: 2,
-            letterSpacing: 0.5,
-          }}>⚡ ALERTED</span>
-        )}
-      </div>
-      <div className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", display: "flex", gap: 10 }}>
-        <span>Zone: {fmtPrice(watch.zoneLower, watch.asset)}–{fmtPrice(watch.zoneUpper, watch.asset)}</span>
-        <span>SL: {fmtPrice(watch.sl, watch.asset)}</span>
-        <span>Lot: {(watch.finalLot || 0).toFixed(2)}</span>
-        <span style={{ color: "var(--qb-text-lo)" }}>{fmtAge(watch.createdAt)} ago</span>
-      </div>
-      <button
-        onClick={onCancel}
-        style={{
-          background: "transparent", color: "var(--qb-text-lo)",
-          border: "1px solid var(--qb-border)", borderRadius: 3,
-          padding: "2px 6px", fontSize: 9, cursor: "pointer",
-          alignSelf: "flex-start", letterSpacing: 0.5,
-          fontFamily: "var(--qb-font-mono)", textTransform: "uppercase",
-        }}
-      >
-        Cancel watch
-      </button>
-    </div>
-  );
-}
-
-// =====================================================================
-// 15a · DAY vs SWING COMPARISON PANEL  [v14]
-// =====================================================================
-// Reads /api/recognition-memory?action=recent — each closed trade now carries
-// `style` (day|swing) and `template`. Groups them so you can see which risk
-// profile is actually working. Two views: Overall (Day vs Swing) and a
-// per-template breakdown. This is the measurement tool behind the dual-profile
-// config — and the reason the ICT templates stay separately tracked.
-
-function aggTrades(trades) {
-  let wins = 0, losses = 0, be = 0, net = 0, grossWin = 0, grossLoss = 0, rSum = 0, rN = 0;
+// ─── QB Nexus Real Analysis ───────────────────────────────────────────────────
+function computeNexus(trades) {
+  if (!trades || trades.length < 10) return null;
+
+  const isWin  = t => t.outcome === 'WIN';
+  const isLoss = t => t.outcome === 'LOSS';
+  const rOf    = t => (typeof t.pnlR === 'number' && isFinite(t.pnlR)) ? t.pnlR : null;
+  const avgArr = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
+
+  const total = trades.length;
+  const overallWR  = trades.filter(isWin).length / total;
+  const overallAvgR = avgArr(trades.map(rOf).filter(v => v !== null));
+
+  // Per-template breakdown
+  const byTpl = {};
   for (const t of trades) {
-    const pnl = Number(t.pnl) || 0;
-    net += pnl;
-    if (t.outcome === "WIN" || pnl > 0.5) { wins++; grossWin += pnl; }
-    else if (t.outcome === "LOSS" || pnl < -0.5) { losses++; grossLoss += Math.abs(pnl); }
-    else be++;
-    if (t.pnlR != null && isFinite(t.pnlR)) { rSum += t.pnlR; rN++; }
+    const k = t.template || 'unknown';
+    if (!byTpl[k]) byTpl[k] = { w:0, l:0, r:[] };
+    if (isWin(t)) byTpl[k].w++;
+    else if (isLoss(t)) byTpl[k].l++;
+    const r = rOf(t); if (r !== null) byTpl[k].r.push(r);
   }
-  const decided = wins + losses;
+  const tplStats = Object.entries(byTpl)
+    .map(([id, s]) => ({ id, total: s.w+s.l, wins: s.w, wr: s.w+s.l ? s.w/(s.w+s.l) : 0, avgR: avgArr(s.r) }))
+    .filter(s => s.total >= 4)
+    .sort((a,b) => b.wr - a.wr);
+
+  // Per-session breakdown
+  const bySess = {};
+  for (const t of trades) {
+    const k = t.session || 'unknown';
+    if (!bySess[k]) bySess[k] = { w:0, total:0, r:[] };
+    bySess[k].total++;
+    if (isWin(t)) bySess[k].w++;
+    const r = rOf(t); if (r !== null) bySess[k].r.push(r);
+  }
+  const sessStats = Object.entries(bySess)
+    .map(([id, s]) => ({ id, total: s.total, wins: s.w, wr: s.total ? s.w/s.total : 0, avgR: avgArr(s.r) }))
+    .filter(s => s.total >= 4)
+    .sort((a,b) => b.wr - a.wr);
+
+  const bestTpl  = tplStats[0] || null;
+  const bestSess = sessStats[0] || null;
+
+  // Nexus intersection: best template + best session + no high-impact news
+  const nexus = trades.filter(t =>
+    (!bestTpl  || t.template === bestTpl.id) &&
+    (!bestSess || t.session  === bestSess.id) &&
+    !t.highImpactWithin60min
+  );
+
+  const nWins  = nexus.filter(isWin).length;
+  const nexusWR  = nexus.length ? nWins / nexus.length : 0;
+  const nexusAvgR = avgArr(nexus.map(rOf).filter(v => v !== null));
+
   return {
-    count: trades.length, wins, losses, be,
-    winRate: decided > 0 ? wins / decided : null,
-    net,
-    profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
-    avgR: rN > 0 ? rSum / rN : null,
+    total, overallWR, overallAvgR, tplStats, sessStats,
+    bestTpl, bestSess,
+    nexusSample: nexus.length,
+    nexusWR, nexusAvgR,
+    confidence: nexus.length >= 25 ? 'HIGH' : nexus.length >= 12 ? 'MEDIUM' : 'LOW',
+    nexusTrades: nexus,
   };
 }
 
-function wrColorOf(wr) {
-  if (wr == null) return "var(--qb-text-lo)";
-  return wr >= 0.55 ? "var(--qb-ok)" : wr >= 0.45 ? "var(--qb-warn)" : "var(--qb-bad)";
-}
-function netColorOf(net) {
-  if (!net) return "var(--qb-text-lo)";
-  return net > 0 ? "var(--qb-ok)" : net < 0 ? "var(--qb-bad)" : "var(--qb-text-lo)";
-}
-function fmtWR(wr) { return wr == null ? "·" : `${Math.round(wr * 100)}%`; }
-function fmtNet(net, count) { return count ? `${net >= 0 ? "+" : ""}${net.toFixed(0)}` : "·"; }
+// ─── Orb Canvas ───────────────────────────────────────────────────────────────
+function OrbCanvas({ state }) {
+  const canvasRef = useRef(null);
+  const animRef   = useRef(null);
+  const t0        = useRef(Date.now());
 
-function Stat({ label, value, color, big }) {
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const cx = W/2, cy = H/2;
+
+    const color = state === 'signal' ? '#00ff9d' : state === 'warn' ? '#f59e0b' : state === 'critical' ? '#ff2d55' : '#00e5ff';
+    const rgb   = state === 'signal' ? '0,255,157' : state === 'warn' ? '245,158,11' : state === 'critical' ? '255,45,85' : '0,229,255';
+
+    const draw = () => {
+      const now = (Date.now() - t0.current) / 1000;
+      ctx.clearRect(0, 0, W, H);
+
+      // outer glow
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 80);
+      g.addColorStop(0, `rgba(${rgb},.1)`);
+      g.addColorStop(1, 'transparent');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+
+      // rings
+      [70, 54, 38].forEach((r, i) => {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + Math.sin(now * (0.5 + i * 0.2)) * 2, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${rgb},${0.15 + i * 0.05})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+
+      // rotating particles
+      for (let i = 0; i < 8; i++) {
+        const angle = (now * 0.6 + (i / 8) * Math.PI * 2);
+        const rx = cx + Math.cos(angle) * 54;
+        const ry = cy + Math.sin(angle) * 54;
+        ctx.beginPath();
+        ctx.arc(rx, ry, 2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rgb},${0.3 + 0.3 * Math.sin(now * 2 + i)})`;
+        ctx.fill();
+      }
+
+      // inner pulse
+      const pulse = 0.7 + 0.3 * Math.sin(now * 2);
+      const gi = ctx.createRadialGradient(cx, cy, 0, cx, cy, 24 * pulse);
+      gi.addColorStop(0, `rgba(${rgb},.7)`);
+      gi.addColorStop(0.5, `rgba(${rgb},.25)`);
+      gi.addColorStop(1, 'transparent');
+      ctx.fillStyle = gi;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 24 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+
+      // core dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+
+      animRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animRef.current);
+  }, [state]);
+
+  return <canvas ref={canvasRef} width={160} height={160} style={{ display:'block', position:'relative', zIndex:1 }} />;
+}
+
+// ─── Gate Row ─────────────────────────────────────────────────────────────────
+function GateRow({ icon, name, desc, value, status }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
-      <span style={{ fontSize: 8, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
-      <span className="qb-mono" style={{ fontSize: big ? 24 : 13, fontWeight: big ? 300 : 500, color, lineHeight: 1.2 }}>{value}</span>
+    <div className={`gRow ${status}`}>
+      <span className="gIco">{icon}</span>
+      <div style={{flex:1}}>
+        <div className="gName">{name}</div>
+        {desc && <div className="gDesc">{desc}</div>}
+      </div>
+      <span className={`gVal ${status}`}>{value}</span>
     </div>
   );
 }
 
-function StyleStatCard({ title, agg }) {
+// ─── Gates Panel ─────────────────────────────────────────────────────────────
+function GatesPanel({ jarvisState, rules }) {
+  const kz   = jarvisState?.killZone;
+  const cb   = jarvisState?.circuitBreakers || {};
+  const mode = rules?.activeMode || 'active';
+
+  const gatingRules = jarvisState?.gatingRules || {};
+  const blockedTpls = Object.entries(gatingRules)
+    .filter(([k, v]) => v === false || v?.enabled === false)
+    .map(([k]) => k);
+
+  const gates = [
+    {
+      icon: '⏱', name: 'Kill Zone', desc: kz?.label || '—',
+      value: kz?.inKillZone ? kz.label : (kz?.minutesUntilNext ? `in ${kz.minutesUntilNext}m` : 'INACTIVE'),
+      status: kz?.inKillZone ? 'pass' : 'warn',
+    },
+    {
+      icon: '🎯', name: 'Active Mode', desc: 'Bot behavioral posture',
+      value: mode.toUpperCase(),
+      status: mode === 'active' ? 'pass' : mode === 'defensive' ? 'warn' : 'off',
+    },
+    {
+      icon: '🔄', name: 'Trading Mode', desc: rules?.tradingMode === 'auto' ? 'Auto-execute signals' : 'Alert only',
+      value: (rules?.tradingMode || 'auto').toUpperCase(),
+      status: rules?.tradingMode === 'auto' ? 'pass' : 'warn',
+    },
+    {
+      icon: '📏', name: 'Lot Multiplier', desc: `Tier A × ${rules?.tierALotMultiplier?.toFixed(2) || '1.00'} · Tier B × ${rules?.tierBLotMultiplier?.toFixed(2) || '1.00'}`,
+      value: `×${(rules?.tierBLotMultiplier || 1).toFixed(2)}`,
+      status: (rules?.tierBLotMultiplier || 1) >= 1 ? 'pass' : 'warn',
+    },
+    {
+      icon: '🚫', name: 'OTE-Continuation', desc: 'Permanently disabled',
+      value: 'BLOCKED', status: 'off',
+    },
+    {
+      icon: '⚡', name: 'SB Immediate', desc: 'Silver Bullet immediate-only',
+      value: 'ENFORCED', status: 'pass',
+    },
+    {
+      icon: '📋', name: 'Blocked Templates', desc: blockedTpls.length ? blockedTpls.join(', ') : 'none',
+      value: blockedTpls.length ? `${blockedTpls.length} blocked` : 'ALL CLEAR',
+      status: blockedTpls.length ? 'warn' : 'pass',
+    },
+  ];
+
+  const passCount = gates.filter(g => g.status === 'pass').length;
+
   return (
-    <div className="qb-cell" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontFamily: "var(--qb-font-mono)", fontSize: 12, fontWeight: 700, letterSpacing: 1, color: "var(--qb-accent)" }}>{title}</span>
-        <span style={{ fontSize: 10, color: "var(--qb-text-faint)" }}>{agg.count} trade{agg.count === 1 ? "" : "s"}</span>
+    <div className="pnl" style={{flexShrink:0}}>
+      <div className="pH">
+        <span className="pHL">Signal Gates</span>
+        <span className="tag ai">{passCount}/{gates.length}</span>
       </div>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Stat label="Win rate" value={fmtWR(agg.winRate)} color={wrColorOf(agg.winRate)} big />
-        <Stat label="Net $" value={agg.count ? `${agg.net >= 0 ? "+" : ""}${agg.net.toFixed(0)}` : "·"} color={netColorOf(agg.net)} big />
-      </div>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Stat label="Profit factor" value={agg.profitFactor == null ? "·" : agg.profitFactor === Infinity ? "∞" : agg.profitFactor.toFixed(2)} color="var(--qb-text-mid)" />
-        <Stat label="Avg R" value={agg.avgR == null ? "·" : `${agg.avgR >= 0 ? "+" : ""}${agg.avgR.toFixed(2)}R`} color={netColorOf(agg.avgR)} />
-        <Stat label="W / L" value={`${agg.wins} / ${agg.losses}`} color="var(--qb-text-mid)" />
+      <div style={{padding:'4px 0'}}>
+        {gates.map((g,i) => <GateRow key={i} {...g} />)}
       </div>
     </div>
   );
 }
 
-// ─── v14 · Macro Regime panel (status + manual override) ────────────────
-function RegimePanel({ regime, onSetOverride, gridColumn = "1 / 4", compact = false }) {
-  const r = regime || { level: "normal", sizeMult: 1, slWiden: 1, reasons: [], headlines: [], manualOverride: "auto", newsActive: false, volRatio: null, upcomingEvents: [], nextEvent: null, eventImminent: false };
-  const level = r.level || "normal";
-  const COLORS = { normal: "var(--qb-ok)", elevated: "var(--qb-warn)", crisis: "var(--qb-bad)" };
-  const col = COLORS[level] || "var(--qb-text-mid)";
-  const pct = (m) => `${Math.round((m != null ? m : 1) * 100)}%`;
-  const modes = ["auto", "normal", "elevated", "crisis"];
-  const cur = r.manualOverride || "auto";
-  const evWhen = (m) => (m > 0 ? `in ${m}m` : m === 0 ? "now" : `${-m}m ago`);
+// ─── News Panel ───────────────────────────────────────────────────────────────
+function NewsPanel({ news }) {
+  const events = useMemo(() => {
+    const list = news?.upcoming || news?.events || [];
+    return list.filter(e => e.ts > Date.now()).slice(0, 6);
+  }, [news]);
 
   return (
-    <Panel title="Macro Regime" subtitle="risk dial — news + volatility + calendar" style={{ gridColumn }}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto", display: "grid", gridTemplateColumns: compact ? "1fr" : "1fr 1fr", gap: 16 }}>
-        {/* left — current state */}
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-            <span className={level !== "normal" ? "qb-pulse" : ""} style={{ width: 13, height: 13, borderRadius: "50%", background: col, boxShadow: `0 0 8px ${col}` }} />
-            <span className="qb-serif" style={{ fontSize: 22, color: col, letterSpacing: 0.5 }}>{level.toUpperCase()}</span>
-            {cur !== "auto" && (
-              <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", border: "1px solid var(--qb-border)", borderRadius: 3, padding: "1px 6px", letterSpacing: 0.5 }}>MANUAL</span>
-            )}
-          </div>
-          <div className="qb-mono" style={{ fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 2 }}>
-            <div>Position size&nbsp;→&nbsp;<span style={{ color: r.sizeMult < 1 ? "var(--qb-warn)" : "var(--qb-text-hi)" }}>{pct(r.sizeMult)}</span> <span style={{ color: "var(--qb-text-faint)" }}>of your input</span></div>
-            <div>Stop width&nbsp;→&nbsp;<span style={{ color: r.slWiden > 1 ? "var(--qb-warn)" : "var(--qb-text-hi)" }}>{pct(r.slWiden)}</span> <span style={{ color: "var(--qb-text-faint)" }}>of your input</span></div>
-            {r.volRatio != null && <div>Volatility&nbsp;→&nbsp;<span style={{ color: "var(--qb-text-hi)" }}>{r.volRatio}×</span> <span style={{ color: "var(--qb-text-faint)" }}>baseline</span></div>}
-          </div>
-          {(r.reasons || []).length > 0 && (
-            <div style={{ marginTop: 10, fontSize: 10, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
-              {r.reasons.map((x, i) => <div key={i}>• {x}</div>)}
+    <div className="pnl" style={{flexShrink:0}}>
+      <div className="pH">
+        <span className="pHL">News Feed</span>
+        <span className="tag ai">LIVE</span>
+      </div>
+      {events.length === 0 && (
+        <div style={{padding:'8px 9px',color:'var(--dim)',fontSize:9}}>No high-impact events in next 12h</div>
+      )}
+      {events.map((e,i) => {
+        const impClass = e.impact === 'high' ? 'nHigh' : e.impact === 'medium' ? 'nMed' : 'nLow';
+        const minsAway = Math.round((e.ts - Date.now()) / 60000);
+        return (
+          <div className="nItem" key={i}>
+            <div className="nHead">
+              <span className={`nTag ${impClass}`}>{e.impact}</span>
+              <span className="nCurr">{e.currency}</span>
+              <span className="nTime">{minsAway < 60 ? `${minsAway}m` : `${Math.round(minsAway/60)}h`}</span>
             </div>
-          )}
-        </div>
-
-        {/* right — manual override + live news + scheduled events */}
-        <div>
-          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 7 }}>Manual override</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
-            {modes.map((m) => (
-              <button key={m} onClick={() => onSetOverride && onSetOverride(m)} className="qb-mono" style={{
-                fontSize: 10, padding: "5px 11px", borderRadius: 3, cursor: "pointer",
-                textTransform: "uppercase", letterSpacing: 0.5,
-                background: cur === m ? (COLORS[m] || "var(--qb-accent)") : "transparent",
-                color: cur === m ? "var(--qb-bg-void)" : "var(--qb-text-mid)",
-                border: `1px solid ${cur === m ? (COLORS[m] || "var(--qb-accent)") : "var(--qb-border)"}`,
-                fontWeight: cur === m ? 700 : 400,
-              }}>{m}</button>
-            ))}
+            <div className="nTitle">{e.title}</div>
           </div>
+        );
+      })}
+    </div>
+  );
+}
 
-          {r.newsActive && (r.headlines || []).length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div className="qb-mono qb-pulse" style={{ fontSize: 9, color: "var(--qb-bad)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>● Live high-impact news</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                {r.headlines.slice(0, 3).map((h, i) => (
-                  <div key={i} style={{ fontSize: 10, color: "var(--qb-text-mid)", lineHeight: 1.35 }}>
-                    <span style={{ color: "var(--qb-text-faint)" }}>{h.source ? h.source + " — " : ""}</span>{h.title}
-                  </div>
+// ─── Signal Panel ─────────────────────────────────────────────────────────────
+function SignalPanel({ jarvisState }) {
+  const watchers = jarvisState?.watchers || {};
+  const activeAssets = Object.entries(watchers).filter(([,w]) => w?.currentSetup || w?.direction);
+  const best = activeAssets[0];
+  const w    = best?.[1];
+  const asset = best?.[0];
+
+  if (!w) {
+    return (
+      <div className="pnl" style={{flexShrink:0}}>
+        <div className="pH"><span className="pHL">Live Signal</span></div>
+        <div className="sigBig">
+          <div className="sigDir none">SCANNING<span className="sigSym">—</span></div>
+          <div className="sigSub">No active setups across all instruments</div>
+        </div>
+      </div>
+    );
+  }
+
+  const dir = (w.direction || 'long').toLowerCase();
+  const template = w.currentSetup?.template || w.template || '—';
+  const knnWR = w.knnWR || jarvisState?.sigQual?.knnWinRate;
+
+  return (
+    <div className="pnl" style={{flexShrink:0}}>
+      <div className="pH">
+        <span className="pHL">Live Signal</span>
+        <span className="tag live">ACTIVE</span>
+      </div>
+      <div className="sigBig">
+        <div className={`sigDir ${dir}`}>
+          {dir === 'long' ? 'LONG' : 'SHORT'}
+          <span className="sigSym">{asset?.toUpperCase()}</span>
+        </div>
+        <div className="sigSub">{tplLabel(template)} · {sessLabel(jarvisState?.killZone?.label)}</div>
+      </div>
+      <div className="sigGrid">
+        <div className="sMeta"><div className="sMetaV">{tplLabel(template)}</div><div className="sMetaL">Template</div></div>
+        <div className="sMeta"><div className="sMetaV">{knnWR ? pct(knnWR,0) : '—'}</div><div className="sMetaL">KNN Match</div></div>
+        <div className="sMeta"><div className="sMetaV">{w.pendingCount || '—'}</div><div className="sMetaL">Pending</div></div>
+        <div className="sMeta"><div className="sMetaV">{jarvisState?.sigQual?.knnAvgR ? fmtR(jarvisState.sigQual.knnAvgR) : '—'}</div><div className="sMetaL">Avg R</div></div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Template Strip ───────────────────────────────────────────────────────────
+function TemplateStrip({ rules, trades, onSelectTpl }) {
+  const tplIds = Object.keys(rules?.templateOverrides || TPLS);
+
+  const dnaMap = useMemo(() => {
+    const m = {};
+    for (const t of (trades || [])) {
+      const id = t.template || 'unknown';
+      if (!m[id]) m[id] = [];
+      m[id].push(t.outcome);
+    }
+    return m;
+  }, [trades]);
+
+  const wrMap = useMemo(() => {
+    const m = {};
+    for (const id of tplIds) {
+      const arr = dnaMap[id] || [];
+      if (!arr.length) { m[id] = null; continue; }
+      const wins = arr.filter(o => o === 'WIN').length;
+      m[id] = wins / arr.length;
+    }
+    return m;
+  }, [dnaMap, tplIds]);
+
+  return (
+    <div id="tplStrip">
+      <div className="pH">
+        <span className="pHL">Templates · {trades?.length || 0} trades</span>
+        <button onClick={() => onSelectTpl('log')} className="tbBtnB tbBtn" style={{fontSize:7.5}}>Trade Log</button>
+      </div>
+      <div id="tplRow">
+        {tplIds.map(id => {
+          const meta   = TPLS[id] || { glyph:'⊕', label: id.toUpperCase() };
+          const ov     = rules?.templateOverrides?.[id] || {};
+          const enabled = ov.enabled !== false;
+          const wr     = wrMap[id];
+          const dna    = (dnaMap[id] || []).slice(-12);
+
+          return (
+            <div key={id} className={`tChip ${!enabled ? 'dis' : ''}`} onClick={() => onSelectTpl(id)}>
+              <div className="tCG">{meta.glyph}</div>
+              <div className="tCN">{meta.label}</div>
+              <div className={`tCS ${wr !== null ? (wr >= 0.5 ? 'g' : 'a') : ''}`}>
+                {wr !== null ? pct(wr,0) : (dnaMap[id]?.length ? pct(0,0) : '—')}
+              </div>
+              <div className="tcDNA">
+                {dna.map((o,i) => (
+                  <div key={i} className={`dNb ${o === 'WIN' ? 'w' : o === 'LOSS' ? 'l' : 'b'}`} />
                 ))}
               </div>
             </div>
-          )}
-
-          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>Scheduled events · Forex Factory</div>
-          {(r.upcomingEvents || []).length > 0 ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {r.upcomingEvents.slice(0, 5).map((e, i) => {
-                const imm = e.minutesUntil <= 30 && e.minutesUntil >= -15;
-                return (
-                  <div key={i} style={{ fontSize: 10, color: imm ? "var(--qb-bad)" : "var(--qb-text-mid)", lineHeight: 1.35, display: "flex", justifyContent: "space-between", gap: 8 }}>
-                    <span><span style={{ color: "var(--qb-text-faint)" }}>{e.country} </span>{e.title}</span>
-                    <span className="qb-mono" style={{ color: imm ? "var(--qb-bad)" : "var(--qb-text-faint)", whiteSpace: "nowrap" }}>{evWhen(e.minutesUntil)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>No high-impact events queued this week (or calendar still loading).</div>
-          )}
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-// ─── v14 · Immediate vs Retest entry-style comparison (full width) ──────
-// Mirrors the Day-vs-Swing panel. Aggregates closed trades tagged with an
-// entryType: "immediate" (market fill) vs "retest" (resting limit). Only
-// trades placed after the v14 entry-routing update carry the label, so the
-// table fills with fresh, clean data going forward. Each cell shows win-rate,
-// trade count, and net P&L via the shared aggTrades() helper.
-// ─── v14.1 · Per-template TP reach (how deep each template runs) ─────────
-function tpAgg(trades) {
-  const n = trades.length;
-  if (!n) return { n: 0, tp1: 0, tp2: 0, tp3: 0, avg: 0 };
-  let tp1 = 0, tp2 = 0, tp3 = 0, sum = 0;
-  for (const t of trades) {
-    const m = t.maxTP || 0;
-    if (m >= 1) tp1++;
-    if (m >= 2) tp2++;
-    if (m >= 3) tp3++;
-    sum += m;
-  }
-  return { n, tp1, tp2, tp3, avg: sum / n };
-}
-function pctOf(c, n) { return n ? Math.round((c / n) * 100) : 0; }
-
-function TpHitPanel({ gridColumn = "1 / 4" }) {
-  const [trades, setTrades] = useState(null);
-  const [error, setError]   = useState(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
-        if (alive) {
-          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
-          else setError(r?.error || "no trade data");
-        }
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 60000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const labeled  = (trades || []).filter((t) => t.maxTP != null);
-  const overall  = tpAgg(labeled);
-  const untagged = (trades || []).length - labeled.length;
-
-  const byTemplate = {};
-  for (const t of labeled) {
-    const tmpl = t.template || (t.contributingTactics || [])[0] || "—";
-    (byTemplate[tmpl] = byTemplate[tmpl] || []).push(t);
-  }
-  const rows = Object.keys(byTemplate)
-    .map((tmpl) => ({ tmpl, agg: tpAgg(byTemplate[tmpl]) }))
-    .sort((a, b) => b.agg.avg - a.agg.avg);
-
-  const cell    = (c, n) => (n ? `${c} (${pctOf(c, n)}%)` : "·");
-  const tpColor = (pct) => (pct >= 50 ? "var(--qb-ok)" : pct >= 25 ? "var(--qb-warn)" : "var(--qb-text-mid)");
-
-  return (
-    <Panel title="TP Reach by Template" subtitle="how deep each template runs" style={{ gridColumn }}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
-        {error && <PlaceholderError msg={`TP reach: ${error}`} />}
-        {!error && labeled.length === 0 && (
-          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No TP-reach data yet. Each trade's reached rungs are recorded as it closes — stats appear here for trades closing after the v14.1 ratchet update.
-          </div>
-        )}
-        {labeled.length > 0 && (
-          <>
-            <div style={{ display: "flex", gap: 18, marginBottom: 12, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
-              <span style={{ color: "var(--qb-text-faint)" }}>{overall.n} trades</span>
-              <span>TP1 <b style={{ color: tpColor(pctOf(overall.tp1, overall.n)) }}>{pctOf(overall.tp1, overall.n)}%</b></span>
-              <span>TP2 <b style={{ color: tpColor(pctOf(overall.tp2, overall.n)) }}>{pctOf(overall.tp2, overall.n)}%</b></span>
-              <span>TP3 <b style={{ color: tpColor(pctOf(overall.tp3, overall.n)) }}>{pctOf(overall.tp3, overall.n)}%</b></span>
-              <span style={{ color: "var(--qb-text-faint)" }}>avg {overall.avg.toFixed(2)} rungs/trade</span>
-            </div>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
-              <thead>
-                <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
-                  <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
-                  <th style={{ padding: "4px 6px" }}>n</th>
-                  <th style={{ padding: "4px 6px" }}>TP1</th>
-                  <th style={{ padding: "4px 6px" }}>TP2</th>
-                  <th style={{ padding: "4px 6px" }}>TP3</th>
-                  <th style={{ padding: "4px 6px" }}>avg</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(({ tmpl, agg }) => {
-                  const meta = TEMPLATE_DISPLAY[tmpl];
-                  return (
-                    <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
-                      <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>{meta ? `${meta.glyph} ${meta.label}` : tmpl}</td>
-                      <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{agg.n}</td>
-                      <td style={{ padding: "4px 6px", color: tpColor(pctOf(agg.tp1, agg.n)) }}>{cell(agg.tp1, agg.n)}</td>
-                      <td style={{ padding: "4px 6px", color: tpColor(pctOf(agg.tp2, agg.n)) }}>{cell(agg.tp2, agg.n)}</td>
-                      <td style={{ padding: "4px 6px", color: tpColor(pctOf(agg.tp3, agg.n)) }}>{cell(agg.tp3, agg.n)}</td>
-                      <td style={{ padding: "4px 6px", color: "var(--qb-text-hi)" }}>{agg.avg.toFixed(2)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {untagged > 0 && (
-              <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-                {untagged} older trade{untagged === 1 ? "" : "s"} predate TP-reach tracking and aren't counted here.
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// ─── v14.4 · Alex G live-signal scanner ─────────────────────────────────
-// Read-only funnel across all instruments straight from /api/alexg-trade
-// (no key — the endpoint only analyses, never places). Lets you eyeball the
-// bot's top-down reads against Alex's chart reads during validation: which
-// pair is filtered as chop, which is at an AOI awaiting a shift, which has a
-// gradeable setup, and which is actually tradeable. Refreshes gently (the
-// scan does a full multi-TF analysis per instrument).
-const ALEXG_ORDER = ["eurusd", "gbpusd", "usdjpy", "usdchf", "audusd", "nzdusd", "usdcad", "eurjpy", "gbpjpy", "gold", "nas100", "us500", "btc"];
-// Funnel stage metadata — rank drives "focus" ordering (deepest first).
-const ALEXG_STAGE_META = {
-  ready: { rank: 6, label: "● READY", color: "var(--qb-ok)" },
-  gates: { rank: 5, label: "◕ entry · gating", color: "var(--qb-warn)" },
-  entry: { rank: 4, label: "◑ at AOI · confirming", color: "var(--qb-accent)" },
-  aoi:   { rank: 3, label: "◔ bias · seeking AOI", color: "var(--qb-text-mid)" },
-  bias:  { rank: 2, label: "○ forming bias", color: "var(--qb-text-faint)" },
-  error: { rank: 1, label: "⚠ error", color: "var(--qb-bad)" },
-  data:  { rank: 0, label: "· no data", color: "var(--qb-text-faint)" },
-};
-function alexgStage(p) {
-  if (!p) return { label: "—", color: "var(--qb-text-faint)", rank: -1 };
-  if (p.tradeable) return ALEXG_STAGE_META.ready;
-  const st = p.funnel && p.funnel.stage;
-  if (st && ALEXG_STAGE_META[st]) return ALEXG_STAGE_META[st];
-  // fallback when funnel is absent (older cached response)
-  const r = (p.reason || "").toLowerCase();
-  if (p.entry != null) return { label: `setup · graded ${p.grade ? p.grade.letter : "?"}`, color: "var(--qb-warn)", rank: 5 };
-  if (p.zone) return { label: "at AOI · awaiting shift", color: "var(--qb-accent)", rank: 4 };
-  if (p.direction) return { label: `bias ${p.direction === "long" ? "↑" : "↓"} · no AOI`, color: "var(--qb-text-mid)", rank: 3 };
-  if (r.includes("ineligib") || r.includes("consolidat") || r.includes("chop")) return { label: "filtered · chop", color: "var(--qb-text-faint)", rank: 1 };
-  return { label: "no setup", color: "var(--qb-text-faint)", rank: 0 };
-}
-const alexgTrend = (t) => (t === "up" ? "↑" : t === "down" ? "↓" : "·");
-const alexgTrendColor = (t) => (t === "up" ? "var(--qb-ok)" : t === "down" ? "var(--qb-bad)" : "var(--qb-text-faint)");
-// ─── v14.5 · Alex G cron heartbeat — makes a silent cron failure visible ──
-// Reads /api/alexg-heartbeat (the alexg-run cron stamps every execution). Green
-// = ran recently; amber = overdue (possible silent death); red = last run threw.
-function AlexgHeartbeatPanel({ gridColumn = "1 / 4" }) {
-  const [h, setH]       = useState(null);
-  const [error, setErr] = useState(null);
-  useEffect(() => {
-    const alive = { v: true };
-    const tick = async () => {
-      try {
-        const r = await fetch(API("alexg-heartbeat")).then((res) => res.json());
-        if (!alive.v) return;
-        if (r && r.health) { setH(r.health); setErr(null); } else setErr(r?.error || "no heartbeat");
-      } catch (e) { if (alive.v) setErr(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 60000);
-    return () => { alive.v = false; clearInterval(id); };
-  }, []);
-
-  const status = error ? "error" : (h ? h.status : "loading");
-  const MAP = {
-    ok:      { dot: "var(--qb-ok)",         label: "running" },
-    stale:   { dot: "var(--qb-warn)",       label: "stale · no recent run" },
-    failed:  { dot: "var(--qb-bad)",        label: "last run failed" },
-    unknown: { dot: "var(--qb-text-faint)", label: "no runs recorded yet" },
-    error:   { dot: "var(--qb-bad)",        label: "heartbeat unreachable" },
-    loading: { dot: "var(--qb-text-faint)", label: "checking…" },
-  };
-  const m = MAP[status] || MAP.unknown;
-  const l = h && h.latest;
-  const ageMin = h && h.ageMs != null ? Math.round(h.ageMs / 60000) : null;
-  const staleMin = h && h.staleMs ? Math.round(h.staleMs / 60000) : 35;
-
-  return (
-    <Panel title="📐 Alex G · Cron Health" subtitle="alexg-run heartbeat" style={{ gridColumn }}>
-      <div style={{ padding: 12, fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <span style={{ width: 9, height: 9, borderRadius: "50%", background: m.dot, display: "inline-block", flexShrink: 0 }} />
-          <span style={{ color: "var(--qb-text-hi)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>{m.label}</span>
-          {ageMin != null && (
-            <span style={{ color: "var(--qb-text-faint)", marginLeft: "auto" }}>
-              {ageMin <= 0 ? "just now" : `${ageMin} min ago`}
-            </span>
-          )}
-        </div>
-        {error && <PlaceholderError msg={`Cron health: ${error}`} />}
-        {l && (
-          <div style={{ color: "var(--qb-text-mid)", lineHeight: 1.7 }}>
-            <div>last run {new Date(l.ts).toUTCString().slice(5, 25)} UTC{l.dryRun ? " · dry-run" : ""}</div>
-            <div>
-              evaluated <b style={{ color: "var(--qb-text-hi)" }}>{l.evaluated}</b>
-              {" · "}placed <b style={{ color: l.placed > 0 ? "var(--qb-ok)" : "var(--qb-text-hi)" }}>{l.placed}</b>
-              {" · "}skipped {l.skipped}
-              {l.durationMs != null ? ` · ${(l.durationMs / 1000).toFixed(1)}s` : ""}
-            </div>
-            {l.error   && <div style={{ color: "var(--qb-bad)" }}>error: {l.error}</div>}
-            {l.blocked && <div style={{ color: "var(--qb-warn)" }}>blocked: {l.blocked}</div>}
-          </div>
-        )}
-        {!l && !error && (
-          <div style={{ color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No alexg-run executions recorded yet — the heartbeat appears after the cron's first run.
-          </div>
-        )}
-        <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-          Green = ran within {staleMin} min. Amber = overdue (possible silent cron failure). Red = last run threw.
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function AlexgSignalsPanel({ gridColumn = "1 / 4" }) {
-  const [results, setResults] = useState({});
-  const [error, setError]     = useState(null);
-  const [busy, setBusy]       = useState(false);
-  const [progress, setProgress] = useState(null);
-  const [scannedAt, setScannedAt] = useState(null);
-  // Fetch one instrument at a time (?asset=X is light) instead of one big
-  // all-7 scan that can exceed the function timeout. Renders progressively.
-  const scan = async (alive = { v: true }) => {
-    setBusy(true); setError(null);
-    const acc = {};
-    try {
-      for (let i = 0; i < ALEXG_ORDER.length; i++) {
-        if (!alive.v) return;
-        const a = ALEXG_ORDER[i];
-        setProgress(`${i + 1}/${ALEXG_ORDER.length} · ${a.toUpperCase()}`);
-        try {
-          const r = await fetch(API("alexg-trade?asset=" + a)).then((res) => res.json());
-          if (!alive.v) return;
-          if (r && r.trade) acc[a] = r.trade;
-          else acc[a] = { asset: a, tradeable: false, reason: (r && r.error) || "no data" };
-        } catch (e) {
-          if (!alive.v) return;
-          acc[a] = { asset: a, tradeable: false, reason: "fetch failed" };
-        }
-        setResults({ ...acc }); // progressive — row appears as each returns
-      }
-      if (alive.v) setScannedAt(Date.now());
-    } finally {
-      if (alive.v) { setBusy(false); setProgress(null); }
-    }
-  };
-  useEffect(() => {
-    const alive = { v: true };
-    scan(alive);
-    const id = setInterval(() => scan(alive), 180000); // 180s; per-instrument calls are light
-    return () => { alive.v = false; clearInterval(id); };
-  }, []);
-
-  const rows = ALEXG_ORDER
-    .filter((a) => results && results[a])
-    .map((a) => ({ a, p: results[a], st: alexgStage(results[a]) }))
-    .sort((x, y) => (y.st.rank - x.st.rank) || x.a.localeCompare(y.a));
-  const fireN  = rows.filter((r) => r.p.tradeable).length;
-  const entryN = rows.filter((r) => !r.p.tradeable && r.st.rank === 4).length;
-  const aoiN   = rows.filter((r) => r.st.rank === 3).length;
-  const biasN  = rows.filter((r) => r.st.rank === 2).length;
-  const gradeColor = (pct) => (pct >= 70 ? "var(--qb-ok)" : pct >= 50 ? "var(--qb-warn)" : "var(--qb-text-faint)");
-  const fmt = (x) => (x == null ? "·" : String(x));
-
-  return (
-    <Panel title="📐 Alex G · Live Signals" subtitle="read-only funnel · ranked by how close each pair is to firing" style={{ gridColumn }}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
-          <span style={{ color: "var(--qb-ok)" }}>{fireN} ready</span>
-          <span style={{ color: "var(--qb-accent)" }}>{entryN} confirming</span>
-          <span style={{ color: "var(--qb-text-mid)" }}>{aoiN} seeking AOI</span>
-          <span style={{ color: "var(--qb-text-faint)" }}>{biasN} bias</span>
-          <span style={{ color: "var(--qb-text-faint)" }}>
-            {busy ? `scanning ${progress || ""}` : scannedAt ? `scanned ${new Date(scannedAt).toUTCString().slice(17, 25)} UTC` : "—"}
-          </span>
-          <button
-            onClick={() => scan()}
-            disabled={busy}
-            style={{ marginLeft: "auto", fontFamily: "var(--qb-font-mono)", fontSize: 10, padding: "3px 10px", color: "var(--qb-text-hi)", background: "var(--qb-bg-panel-hi)", border: "1px solid var(--qb-border)", borderRadius: 4, cursor: busy ? "default" : "pointer", opacity: busy ? 0.5 : 1 }}
-          >
-            {busy ? "scanning…" : "↻ rescan"}
-          </button>
-        </div>
-        {error && <PlaceholderError msg={`Alex G scan: ${error}`} />}
-        {!error && rows.length === 0 && (
-          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            {busy ? `Analysing instruments… ${progress || ""}` : "No scan data yet."}
-          </div>
-        )}
-        {rows.map(({ a, p, st }) => {
-          const f = p.funnel || {};
-          const tr = f.bias && f.bias.trends;
-          const dirColor = p.direction === "long" ? "var(--qb-ok)" : p.direction === "short" ? "var(--qb-bad)" : "var(--qb-text-faint)";
-          const graded = p.entry != null;
-          return (
-            <div key={a} style={{ borderTop: "1px solid var(--qb-border)", padding: "7px 2px", fontFamily: "var(--qb-font-mono)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, flexWrap: "wrap" }}>
-                <span style={{ color: "var(--qb-text-hi)", fontWeight: 600, minWidth: 60 }}>{a.toUpperCase()}</span>
-                <span style={{ color: st.color }}>{st.label}</span>
-                {p.direction && <span style={{ color: dirColor }}>{p.direction === "long" ? "↑ long" : "↓ short"}</span>}
-                {tr && (
-                  <span style={{ marginLeft: "auto", fontSize: 10, letterSpacing: 0.5 }}>
-                    <span style={{ color: "var(--qb-text-faint)" }}>W</span><span style={{ color: alexgTrendColor(tr.w) }}>{alexgTrend(tr.w)}</span>{" "}
-                    <span style={{ color: "var(--qb-text-faint)" }}>D</span><span style={{ color: alexgTrendColor(tr.d) }}>{alexgTrend(tr.d)}</span>{" "}
-                    <span style={{ color: "var(--qb-text-faint)" }}>4h</span><span style={{ color: alexgTrendColor(tr.h4) }}>{alexgTrend(tr.h4)}</span>
-                  </span>
-                )}
-              </div>
-              <div style={{ fontSize: 10, color: "var(--qb-text-mid)", marginTop: 3, lineHeight: 1.4 }}>
-                {f.waitingFor || p.reason || "—"}
-              </div>
-              {graded && (
-                <div style={{ fontSize: 10, color: "var(--qb-text-faint)", marginTop: 3, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <span>entry <span style={{ color: "var(--qb-text-mid)" }}>{fmt(p.entry)}</span></span>
-                  <span>SL <span style={{ color: "var(--qb-text-mid)" }}>{fmt(p.sl)}</span></span>
-                  <span>TP <span style={{ color: "var(--qb-text-mid)" }}>{fmt(p.tp)}</span></span>
-                  <span style={{ color: p.rr != null && p.rr >= 2 ? "var(--qb-ok)" : "var(--qb-text-mid)" }}>{p.rr != null ? p.rr + "R" : "·"}</span>
-                  {p.grade && <span style={{ color: gradeColor(p.grade.pct) }}>{p.grade.letter} {p.grade.pct}%</span>}
-                  {p.triggerTF && <span>TF {p.triggerTF}</span>}
-                </div>
-              )}
-            </div>
           );
         })}
-        <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-          Read-only — analyses but never places. Rows are ranked by how far each pair has advanced through the funnel (bias → AOI → shift → engulfing → gates). The order only fires from the alexg-run cron when a setup reaches grade ≥ 70% inside session hours.
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-// ─── ORB vs PRO ORB comparison panel ─────────────────────────────────────
-// Side-by-side performance cards for 'orb' and 'orb-pro', pulled live from
-// /api/ledger?action=list. Includes per-instrument breakdown and per-metric
-// winner indicators. When orb-pro has < MIN_TRADES trades it shows a
-// "collecting data" notice so thin samples don't look bad.
-
-const MIN_ORB_PRO_TRADES = 10;
-
-function _aggLedger(trades) {
-  if (!trades || !trades.length) return { count: 0, wins: 0, losses: 0, winRate: null, netPnl: 0, avgR: null, profitFactor: null, avgSlippage: null };
-  const wins   = trades.filter((t) => t.outcome === "WIN");
-  const losses = trades.filter((t) => t.outcome === "LOSS");
-  const winPnl  = wins.reduce((s, t) => s + (t.netPnl || 0), 0);
-  const lossPnl = losses.reduce((s, t) => s + Math.abs(t.netPnl || 0), 0);
-  const rs    = trades.filter((t) => t.pnlR != null).map((t) => t.pnlR);
-  const slips = trades.filter((t) => t.slippagePips != null).map((t) => t.slippagePips);
-  return {
-    count:        trades.length,
-    wins:         wins.length,
-    losses:       losses.length,
-    winRate:      trades.length ? wins.length / trades.length : null,
-    netPnl:       trades.reduce((s, t) => s + (t.netPnl || 0), 0),
-    avgR:         rs.length ? rs.reduce((s, v) => s + v, 0) / rs.length : null,
-    profitFactor: lossPnl > 0 ? winPnl / lossPnl : (winPnl > 0 ? null : null),
-    avgSlippage:  slips.length ? slips.reduce((s, v) => s + v, 0) / slips.length : null,
-  };
-}
-
-function _winnerOf(a, b, higherIsBetter = true) {
-  if (a == null || b == null || !isFinite(a) || !isFinite(b)) return null;
-  if (a === b) return null;
-  return higherIsBetter ? (a > b ? "orb" : "orb-pro") : (a < b ? "orb" : "orb-pro");
-}
-
-function ORBStatCard({ title, agg, winners, isChallenger, thin }) {
-  const s = { padding: "10px 12px", borderRadius: 6, border: "1px solid var(--qb-border)", background: "var(--qb-surface2)", minWidth: 180, flex: "1 1 180px" };
-  const header = { fontFamily: "var(--qb-font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: isChallenger ? "var(--qb-accent)" : "var(--qb-text-hi)", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 };
-  const row = { display: "flex", justifyContent: "space-between", padding: "3px 0", fontFamily: "var(--qb-font-mono)", fontSize: 10, borderBottom: "1px solid var(--qb-border)" };
-  const badge = (metric) => {
-    const w = winners[metric];
-    if (!w) return null;
-    const isWin = (w === "orb" && !isChallenger) || (w === "orb-pro" && isChallenger);
-    return <span style={{ marginLeft: 4, fontSize: 9, color: isWin ? "var(--qb-ok)" : "var(--qb-text-faint)" }}>{isWin ? "▲" : "▼"}</span>;
-  };
-  const fmtWR  = (v) => v != null ? `${(v * 100).toFixed(0)}%` : "—";
-  const fmtPnl = (v) => v != null ? `${v >= 0 ? "+" : ""}$${v.toFixed(2)}` : "—";
-  const fmtR   = (v) => v != null ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}R` : "—";
-  const fmtPF  = (v) => v != null ? v.toFixed(2) : "—";
-  const fmtSlip= (v) => v != null ? `${v.toFixed(1)} pip` : "—";
-  const wrCol  = agg.winRate != null ? (agg.winRate >= 0.5 ? "var(--qb-ok)" : agg.winRate >= 0.35 ? "var(--qb-warn)" : "var(--qb-bad)") : "var(--qb-text-mid)";
-  const pnlCol = agg.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-
-  return (
-    <div style={s}>
-      <div style={header}>
-        {isChallenger ? "⚡" : "🚀"} {title}
-        {thin && <span style={{ fontSize: 9, color: "var(--qb-warn)", fontWeight: 400, marginLeft: 4 }}>collecting data</span>}
-      </div>
-      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Trades</span><span>{agg.count}{badge("count")}</span></div>
-      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Win rate</span><span style={{ color: wrCol }}>{fmtWR(agg.winRate)}{badge("winRate")}</span></div>
-      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Net P&L</span><span style={{ color: pnlCol }}>{fmtPnl(agg.netPnl)}{badge("netPnl")}</span></div>
-      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Avg R</span><span>{fmtR(agg.avgR)}{badge("avgR")}</span></div>
-      <div style={row}><span style={{ color: "var(--qb-text-faint)" }}>Prof. factor</span><span>{fmtPF(agg.profitFactor)}{badge("profitFactor")}</span></div>
-      <div style={{ ...row, border: "none" }}><span style={{ color: "var(--qb-text-faint)" }}>Avg slip</span><span>{fmtSlip(agg.avgSlippage)}{badge("avgSlippage")}</span></div>
-    </div>
-  );
-}
-
-function ORBComparePanel({ gridColumn = "1 / 4" }) {
-  const [trades, setTrades] = useState(null);
-  const [error, setError]   = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("ledger?action=list&limit=500")).then((res) => res.json());
-        if (alive) {
-          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
-          else setError(r?.error || "ledger unavailable");
-        }
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 90000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const all    = trades || [];
-  const orbT   = all.filter((t) => t.template === "orb");
-  const proT   = all.filter((t) => t.template === "orb-pro");
-  const orbAgg = _aggLedger(orbT);
-  const proAgg = _aggLedger(proT);
-  const thin   = proT.length < MIN_ORB_PRO_TRADES;
-
-  // Per-metric winner map
-  const winners = {
-    winRate:      _winnerOf(orbAgg.winRate,      proAgg.winRate,      true),
-    netPnl:       _winnerOf(orbAgg.netPnl,       proAgg.netPnl,       true),
-    avgR:         _winnerOf(orbAgg.avgR,          proAgg.avgR,         true),
-    profitFactor: _winnerOf(orbAgg.profitFactor,  proAgg.profitFactor, true),
-    avgSlippage:  _winnerOf(orbAgg.avgSlippage,   proAgg.avgSlippage,  false),
-  };
-
-  // Per-instrument breakdown (both templates)
-  const assets = Array.from(new Set([...orbT, ...proT].map((t) => t.asset).filter(Boolean))).sort();
-  const instrRows = assets.map((asset) => ({
-    asset,
-    orb:    _aggLedger(orbT.filter((t) => t.asset === asset)),
-    orbPro: _aggLedger(proT.filter((t) => t.asset === asset)),
-  }));
-
-  const fmtWR  = (v) => v != null ? `${(v * 100).toFixed(0)}%` : "—";
-  const fmtPnl = (v, n) => n === 0 ? "—" : `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`;
-  const wrCol  = (v) => v != null ? (v >= 0.5 ? "var(--qb-ok)" : v >= 0.35 ? "var(--qb-warn)" : "var(--qb-bad)") : "var(--qb-text-faint)";
-
-  return (
-    <Panel title="ORB vs PRO ORB" subtitle="live challenger comparison — same account" style={{ gridColumn }}>
-      <div style={{ padding: 12, overflow: "auto" }}>
-        {error && <PlaceholderError msg={`ORB compare: ${error}`} />}
-        {!error && orbT.length === 0 && proT.length === 0 && (
-          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No ledger trades for orb or orb-pro yet. Stats appear here as trades close.
-          </div>
-        )}
-
-        {(orbT.length > 0 || proT.length > 0) && (
-          <>
-            {/* ── side-by-side summary cards ── */}
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-              <ORBStatCard title="ORB (live)"  agg={orbAgg} winners={winners} isChallenger={false} thin={false} />
-              <ORBStatCard title="PRO ORB"     agg={proAgg} winners={winners} isChallenger={true}  thin={thin}  />
-            </div>
-
-            {thin && proT.length > 0 && (
-              <div style={{ marginBottom: 12, fontSize: 10, color: "var(--qb-warn)", fontFamily: "var(--qb-font-mono)" }}>
-                ⚠ PRO ORB has {proT.length} trade{proT.length === 1 ? "" : "s"} — need {MIN_ORB_PRO_TRADES}+ for reliable stats. ▲/▼ indicators hidden until then.
-              </div>
-            )}
-
-            {/* ── per-instrument table ── */}
-            {instrRows.length > 0 && (
-              <div style={{ overflow: "auto" }}>
-                <div style={{ fontSize: 10, color: "var(--qb-text-faint)", marginBottom: 6, fontFamily: "var(--qb-font-mono)", letterSpacing: 0.4 }}>
-                  PER-INSTRUMENT BREAKDOWN
-                </div>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
-                  <thead>
-                    <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
-                      <th style={{ textAlign: "left",  padding: "3px 6px" }}>Instrument</th>
-                      <th style={{ padding: "3px 6px" }}>ORB n</th>
-                      <th style={{ padding: "3px 6px" }}>ORB WR</th>
-                      <th style={{ padding: "3px 6px" }}>ORB net</th>
-                      <th style={{ padding: "3px 4px", color: "var(--qb-accent)" }}>PRO n</th>
-                      <th style={{ padding: "3px 4px", color: "var(--qb-accent)" }}>PRO WR</th>
-                      <th style={{ padding: "3px 4px", color: "var(--qb-accent)" }}>PRO net</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {instrRows.map(({ asset, orb, orbPro }) => {
-                      const assetMeta = ASSET_CATALOG.find((a) => a.id === asset);
-                      const label = assetMeta ? assetMeta.name : asset;
-                      const orbWRc = wrCol(orb.winRate);
-                      const proWRc = wrCol(orbPro.winRate);
-                      const pnlWin = orb.count && orbPro.count ? (orbPro.netPnl > orb.netPnl ? "pro" : orbPro.netPnl < orb.netPnl ? "orb" : null) : null;
-                      return (
-                        <tr key={asset} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
-                          <td style={{ textAlign: "left", padding: "3px 6px", color: "var(--qb-text-hi)" }}>{label}</td>
-                          <td style={{ padding: "3px 6px", color: "var(--qb-text-mid)" }}>{orb.count || "·"}</td>
-                          <td style={{ padding: "3px 6px", color: orbWRc }}>{fmtWR(orb.winRate)}</td>
-                          <td style={{ padding: "3px 6px", color: orb.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)" }}>{fmtPnl(orb.netPnl, orb.count)}</td>
-                          <td style={{ padding: "3px 4px", color: "var(--qb-text-mid)" }}>{orbPro.count || "·"}</td>
-                          <td style={{ padding: "3px 4px", color: proWRc }}>{fmtWR(orbPro.winRate)}</td>
-                          <td style={{ padding: "3px 4px", color: orbPro.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)" }}>
-                            {fmtPnl(orbPro.netPnl, orbPro.count)}
-                            {pnlWin === "pro" && <span style={{ marginLeft: 3, color: "var(--qb-accent)", fontSize: 9 }}>▲</span>}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// ─── v14.3 · Trade Data manager — view & purge recognition records ──────
-// Remove software-artifact trades (e.g. a position force-closed by a bug) so
-// they don't poison recognition memory / template stats. Delete is key-guarded
-// server-side; the admin key is entered once and kept on this device only.
-function TradeDataPanel({ gridColumn = "1 / 4" }) {
-  const [trades, setTrades] = useState(null);
-  const [error, setError]   = useState(null);
-  const [assetFilter, setAssetFilter] = useState("all");
-  const [busyId, setBusyId] = useState(null);
-  const [notice, setNotice] = useState(null);
-  const [suspectsOnly, setSuspectsOnly] = useState(false);
-  const [suspectCount, setSuspectCount] = useState(0);
-
-  const load = async () => {
-    try {
-      const r = await fetch(API("recognition-memory?action=find&limit=500")).then((res) => res.json());
-      if (r && Array.isArray(r.trades)) { setTrades(r.trades); setSuspectCount(r.suspectCount || 0); setError(null); }
-      else setError(r?.error || "no trade data");
-    } catch (e) { setError(e.message); }
-  };
-  useEffect(() => { load(); }, []);
-
-  const getKey = () => {
-    let k = "";
-    try { k = window.localStorage.getItem("qb_admin_key") || ""; } catch (_) {}
-    if (!k) {
-      k = window.prompt("Enter admin key (WEBHOOK_API_KEY) to enable delete:") || "";
-      if (k) { try { window.localStorage.setItem("qb_admin_key", k); } catch (_) {} }
-    }
-    return k;
-  };
-
-  const del = async (t) => {
-    const money = t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}$${Number(t.pnl).toFixed(2)}` : "";
-    const label = `${t.asset} \u00b7 ${t.template || "\u2014"} \u00b7 ${t.direction || ""} \u00b7 ${money}`;
-    if (!window.confirm(`Delete this trade from recognition memory?\n\n${label}\n\nRemoves it from the KNN advisor and all template stats. Your broker balance/P&L is unaffected. Cannot be undone.`)) return;
-    const key = getKey();
-    if (!key) return;
-    setBusyId(t.id); setNotice(null);
-    try {
-      const r = await fetch(API(`recognition-memory?action=delete&id=${encodeURIComponent(t.id)}&key=${encodeURIComponent(key)}`)).then((res) => res.json());
-      if (r && r.ok) {
-        setTrades((prev) => (prev || []).filter((x) => x.id !== t.id));
-        setNotice({ kind: "ok", msg: `Removed ${t.asset} ${t.template || ""}` });
-      } else if (r && r.error === "unauthorized") {
-        try { window.localStorage.removeItem("qb_admin_key"); } catch (_) {}
-        setNotice({ kind: "err", msg: "Wrong admin key \u2014 cleared. Try the delete again." });
-      } else {
-        setNotice({ kind: "err", msg: r?.error || "delete failed" });
-      }
-    } catch (e) { setNotice({ kind: "err", msg: e.message }); }
-    finally { setBusyId(null); }
-  };
-
-  const all = trades || [];
-  const assets = Array.from(new Set(all.map((t) => t.asset).filter(Boolean))).sort();
-  const rows = all
-    .filter((t) => (assetFilter === "all" || t.asset === assetFilter) && (!suspectsOnly || t.suspect))
-    .sort((a, b) => (b.closedAt || 0) - (a.closedAt || 0));
-
-  const oc = (o) => (o === "WIN" ? "var(--qb-ok)" : o === "LOSS" ? "var(--qb-bad)" : "var(--qb-warn)");
-  const fmtDate = (iso) => {
-    if (!iso) return "\u2014";
-    const d = new Date(iso);
-    return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  };
-  const ctrlStyle = { background: "var(--qb-bg-panel-hi)", color: "var(--qb-text-hi)", border: "1px solid var(--qb-border)", borderRadius: 4, padding: "3px 6px", fontFamily: "var(--qb-font-mono)", fontSize: 11 };
-
-  return (
-    <Panel title="Trade Data" subtitle="view & purge recognition records" style={{ gridColumn }} collapsible panelId="trade-data" defaultCollapsed={true}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
-        {error && <PlaceholderError msg={`trade data: ${error}`} />}
-        {!error && (
-          <>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap", fontFamily: "var(--qb-font-mono)", fontSize: 11 }}>
-              <span style={{ color: "var(--qb-text-faint)" }}>{rows.length} of {all.length}</span>
-              <select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)} style={ctrlStyle}>
-                <option value="all">all instruments</option>
-                {assets.map((a) => <option key={a} value={a}>{a}</option>)}
-              </select>
-              <button onClick={load} style={{ ...ctrlStyle, cursor: "pointer", color: "var(--qb-text-mid)", background: "transparent" }}>{"\u21bb refresh"}</button>
-              <button onClick={() => setSuspectsOnly((v) => !v)} title="Show only force-close artifacts (TP2+ reached in <=3 min)"
-                style={{ ...ctrlStyle, cursor: "pointer", color: suspectsOnly ? "var(--qb-bad)" : "var(--qb-text-mid)", background: suspectsOnly ? "var(--qb-bad-soft)" : "transparent", borderColor: suspectsOnly ? "var(--qb-bad)" : "var(--qb-border)" }}>
-                {`\u26a0 suspects${suspectCount ? ` (${suspectCount})` : ""}`}
-              </button>
-              {notice && <span style={{ color: notice.kind === "ok" ? "var(--qb-ok)" : "var(--qb-bad)" }}>{notice.msg}</span>}
-            </div>
-            {!trades && <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>loading\u2026</div>}
-            {trades && rows.length === 0 && <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>No trades.</div>}
-            {rows.length > 0 && (
-              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
-                <thead>
-                  <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
-                    <th style={{ textAlign: "left", padding: "4px 6px" }}>When</th>
-                    <th style={{ textAlign: "left", padding: "4px 6px" }}>Asset</th>
-                    <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
-                    <th style={{ padding: "4px 6px" }}>Dir</th>
-                    <th style={{ padding: "4px 6px" }}>Out</th>
-                    <th style={{ padding: "4px 6px" }}>P&amp;L</th>
-                    <th style={{ padding: "4px 6px" }}>TPs</th>
-                    <th style={{ padding: "4px 6px" }}>min</th>
-                    <th style={{ padding: "4px 6px" }} />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((t) => {
-                    const meta = TEMPLATE_DISPLAY[t.template];
-                    return (
-                      <tr key={t.id} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right", background: t.suspect ? "var(--qb-bad-soft)" : "transparent" }}>
-                        <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-mid)" }}>{t.suspect ? "\u26a0 " : ""}{fmtDate(t.closedAtISO)}</td>
-                        <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>{t.asset}</td>
-                        <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-mid)" }}>{meta ? `${meta.glyph} ${meta.label}` : (t.template || "\u2014")}</td>
-                        <td style={{ padding: "4px 6px", color: t.direction === "LONG" ? "var(--qb-ok)" : "var(--qb-bad)" }}>{t.direction === "LONG" ? "L" : "S"}</td>
-                        <td style={{ padding: "4px 6px", color: oc(t.outcome) }}>{t.outcome ? t.outcome[0] : "\u00b7"}</td>
-                        <td style={{ padding: "4px 6px", color: (t.pnl || 0) >= 0 ? "var(--qb-ok)" : "var(--qb-bad)" }}>{t.pnl != null ? `${t.pnl >= 0 ? "+" : ""}${Number(t.pnl).toFixed(2)}` : "\u00b7"}</td>
-                        <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{Array.isArray(t.tpsHit) && t.tpsHit.length ? t.tpsHit.length : "\u00b7"}</td>
-                        <td style={{ padding: "4px 6px", color: "var(--qb-text-faint)" }}>{t.durationMin != null ? t.durationMin : "\u00b7"}</td>
-                        <td style={{ padding: "4px 6px" }}>
-                          <button onClick={() => del(t)} disabled={busyId === t.id} title="Delete from recognition memory"
-                            style={{ background: "transparent", color: busyId === t.id ? "var(--qb-text-faint)" : "var(--qb-bad)", border: "1px solid var(--qb-border)", borderRadius: 4, padding: "2px 7px", cursor: busyId === t.id ? "default" : "pointer", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
-                            {busyId === t.id ? "\u2026" : "\u2715"}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-            <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-              Deleting removes a trade from the KNN advisor and template stats only \u2014 broker balance and realized P&amp;L are unaffected. Use it to purge software-artifact trades (e.g. a bug-forced close). Admin key required, stored on this device.
-            </div>
-          </>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// ─── v15.6 · Immediate vs Retest shadow EV comparison (full width) ─────────
-// Reads /api/entrystyle-summary. Shadow records log what WOULD have happened
-// under both entry styles for reaction/orb/ICT templates that branch.
-// Winner = higher EV-per-signal; no-fills count as 0R in denominator.
-
-const ES_MIN_N  = 8;     // min nResolved before showing a decisive winner badge
-const ES_EV_GAP = 0.05;  // min |immEV − retestEV| in R for a decisive call
-
-const ES_SESS_SHORT = {
-  ASIAN: "Asia", LONDON: "London", NY_AM: "NY AM", NY_PM: "NY PM",
-  WEEKEND: "Wknd", OFF: "Off-hrs",
-};
-
-function EntryStyleComparisonPanel({ gridColumn = "1 / 4" }) {
-  const [data, setData]           = useState(null);
-  const [fetchError, setFetchError] = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [ready, setReady]         = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API("entrystyle-summary")).then((res) => res.json());
-        if (!alive) return;
-        // Only set data when ok:true — never expose the not-ready shape downstream
-        if (r?.ok === true) { setData(r); setFetchError(null); }
-        else { setData(null); setFetchError(r?.error || "not ready"); }
-      } catch (e) {
-        if (alive) { setData(null); setFetchError(e.message); }
-      }
-      if (alive) { setLastFetch(new Date()); setReady(true); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  // ── GUARD: never access data.templates / .sessions / .byTemplateSession
-  //           before confirming data.ok. Only reach the grid render when ok===true.
-  const dataOk = data?.ok === true;
-
-  const panelProps = {
-    title: "Immediate vs Retest",
-    subtitle: "shadow EV · reaction + orb + ICT templates · not live gating",
-    style: { gridColumn },
-    collapsible: true, panelId: 'entry-style', defaultCollapsed: false,
-  };
-
-  // ── NOT READY state — renders a clearly visible collecting badge ──────────
-  if (!ready || !dataOk) {
-    const isNetworkError = ready && fetchError && fetchError !== "not ready";
-    return (
-      <Panel {...panelProps}>
-        <div style={{ padding: "14px 16px", minHeight: 120 }}>
-          {!ready && <Placeholder msg="Loading entry-style shadow data…" />}
-          {ready && !isNetworkError && (
-            <div style={{
-              padding: "10px 14px",
-              background: "var(--qb-bg-void)",
-              border: "1px solid var(--qb-border)",
-              borderRadius: 4,
-              fontSize: 10,
-              color: "var(--qb-text-mid)",
-              lineHeight: 1.7,
-            }}>
-              <div style={{ fontWeight: 600, color: "var(--qb-text-hi)", marginBottom: 4 }}>
-                Collecting entry-style data
-              </div>
-              Needs resolved reaction / orb trades to populate. Shadow records write on every
-              signal and evaluate after 4 h. No data yet (0 resolved).
-              {lastFetch && (
-                <div style={{ marginTop: 6, fontSize: 8, color: "var(--qb-text-faint)" }}>
-                  Last checked: {lastFetch.toLocaleTimeString()}
-                </div>
-              )}
-            </div>
-          )}
-          {isNetworkError && (
-            <PlaceholderError msg={`Cannot reach /api/entrystyle-summary: ${fetchError}`} />
-          )}
-        </div>
-      </Panel>
-    );
-  }
-
-  // ── DATA READY — data.ok === true; safe to access all fields ─────────────
-  // data.templates, data.sessions, data.byTemplateSession are all present.
-  const templates = data.templates;
-  const sessions  = data.sessions;
-  const getCell   = (tmpl, sess) => data.byTemplateSession[`${tmpl}|${sess}`] ?? null;
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: "auto" }}>
-        <EntryStyleSummaryBar totals={data.totals} />
-
-        {templates.length > 0 && sessions.length > 0 ? (
-          <div style={{ overflowX: "auto", marginTop: 10 }}>
-            <table style={{
-              borderCollapse: "collapse",
-              fontFamily: "var(--qb-font-mono)",
-              fontSize: 9,
-              tableLayout: "auto",
-              whiteSpace: "nowrap",
-            }}>
-              <thead>
-                <tr>
-                  <th style={{
-                    textAlign: "left", padding: "3px 10px 6px 2px",
-                    color: "var(--qb-text-faint)", fontWeight: 400, minWidth: 138,
-                  }}>
-                    Template
-                  </th>
-                  {sessions.map((s) => (
-                    <th key={s} style={{
-                      textAlign: "center", padding: "3px 4px 6px",
-                      color: "var(--qb-text-faint)", fontWeight: 400, minWidth: 112,
-                    }}>
-                      {ES_SESS_SHORT[s] || s}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {templates.map((tmpl) => {
-                  const meta = TEMPLATE_DISPLAY[tmpl];
-                  return (
-                    <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)" }}>
-                      <td style={{
-                        padding: "6px 10px 6px 2px", verticalAlign: "top",
-                        color: "var(--qb-text-hi)", fontSize: 10, lineHeight: 1.4,
-                      }}>
-                        {meta ? `${meta.glyph} ${meta.label}` : tmpl}
-                      </td>
-                      {sessions.map((sess) => (
-                        <td key={sess} style={{ padding: "3px", verticalAlign: "top" }}>
-                          <EntryStyleCell c={getCell(tmpl, sess)} />
-                        </td>
-                      ))}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic", padding: "6px 4px" }}>
-            No resolved signals yet — accumulates after reaction/orb trades close out.
-          </div>
-        )}
-
-        <div style={{ marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
-          EV = avg R-per-signal · RET EV discounts no-fills (no-fill → 0R in denominator) ·
-          badge requires n≥{ES_MIN_N} resolved and gap&gt;{ES_EV_GAP}R
-          {lastFetch && ` · refreshed ${lastFetch.toLocaleTimeString()}`}
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function EntryStyleCell({ c }) {
-  if (!c || (c.nResolved ?? 0) === 0) {
-    return (
-      <div style={{
-        padding: "5px 7px", textAlign: "center",
-        color: "var(--qb-text-faint)", fontSize: 9, minWidth: 108,
-      }}>·</div>
-    );
-  }
-
-  const { nResolved, immediate: imm, retest: ret, immEV, retestEV, winner } = c;
-
-  // Client-side gate: badge only when nResolved≥8 and |EV gap|≥0.05R
-  const hasEnough  = (nResolved || 0) >= ES_MIN_N;
-  const gap        = Math.abs((immEV ?? 0) - (retestEV ?? 0));
-  const decisive   = hasEnough && gap >= ES_EV_GAP && winner !== "tie";
-
-  let badgeText, badgeColor;
-  if (!hasEnough) {
-    badgeText = `collecting (${nResolved}/${ES_MIN_N})`;
-    badgeColor = "var(--qb-text-faint)";
-  } else if (!decisive) {
-    badgeText = "≈ tied";
-    badgeColor = "var(--qb-text-faint)";
-  } else if (winner === "immediate") {
-    badgeText = `▶ IMMEDIATE  +${gap.toFixed(2)}R`;
-    badgeColor = "var(--qb-ok)";
-  } else {
-    badgeText = `▶ RETEST  +${gap.toFixed(2)}R`;
-    badgeColor = "#4a9eff";
-  }
-
-  const borderColor = decisive ? badgeColor : "var(--qb-border)";
-
-  const fmtR      = (v) => v == null ? "·" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`;
-  const noFillPct = ret?.fillRate != null ? Math.round((1 - ret.fillRate) * 100) : null;
-
-  return (
-    <div style={{
-      background: "var(--qb-bg-panel-hi)", borderRadius: 3,
-      padding: "5px 7px", minWidth: 108,
-      border: `1px solid ${borderColor}`,
-    }}>
-      {/* IMM: WR%  avgR  n=X  EV */}
-      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}>
-        <span style={{ color: "var(--qb-text-faint)", minWidth: 24 }}>IMM</span>
-        <span style={{ color: wrColorOf(imm?.winRate) }}>{fmtWR(imm?.winRate)}</span>
-        <span style={{ color: netColorOf(imm?.avgR) }}>{fmtR(imm?.avgR)}</span>
-        <span style={{ color: "var(--qb-text-lo)", marginLeft: "auto" }}>n={imm?.n ?? "·"}</span>
-      </div>
-      {/* RET: WR%  avgRPerSignal  (fills)  EV */}
-      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
-        <span style={{ color: "var(--qb-text-faint)", minWidth: 24 }}>RET</span>
-        <span style={{ color: wrColorOf(ret?.winRate) }}>{fmtWR(ret?.winRate)}</span>
-        <span style={{ color: netColorOf(ret?.avgRPerSignal) }}>{fmtR(ret?.avgRPerSignal)}</span>
-        <span style={{ color: "var(--qb-text-lo)", marginLeft: "auto" }}>({ret?.nFilled ?? "·"} fills)</span>
-      </div>
-      {/* EV comparison line */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 2, fontSize: 8 }}>
-        <span style={{ color: "var(--qb-text-faint)" }}>EV</span>
-        <span style={{ color: netColorOf(immEV) }}>{fmtR(immEV)}</span>
-        <span style={{ color: "var(--qb-text-faint)" }}>vs</span>
-        <span style={{ color: netColorOf(retestEV) }}>{fmtR(retestEV)}</span>
-        {noFillPct != null && (
-          <span style={{
-            marginLeft: "auto",
-            color: noFillPct > 40 ? "var(--qb-bad)" : "var(--qb-text-faint)",
-          }}>
-            {noFillPct}% no-fill
-          </span>
-        )}
-      </div>
-      {/* Winner badge */}
-      <div style={{
-        fontSize: 8, fontWeight: decisive ? 700 : 400,
-        color: badgeColor, letterSpacing: 0.3, lineHeight: 1.4,
-      }}>
-        {badgeText}
       </div>
     </div>
   );
 }
 
-function EntryStyleSummaryBar({ totals }) {
-  if (!totals || !(totals.n || totals.nResolved)) return null;
-  const { n, nResolved, retest: ret, immEV, retestEV } = totals;
-  const hasEnough = (nResolved || 0) >= ES_MIN_N;
-  const gap       = Math.abs((immEV ?? 0) - (retestEV ?? 0));
-  const decisive  = hasEnough && gap >= ES_EV_GAP;
-  const winner    = decisive ? (immEV > retestEV ? "immediate" : "retest") : null;
-  const col       = winner === "immediate" ? "var(--qb-ok)" : winner === "retest" ? "#4a9eff" : "var(--qb-text-faint)";
-  const fmtR      = (v) => v == null ? "·" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`;
+// ─── Positions Panel ──────────────────────────────────────────────────────────
+function PositionsPanel({ positions }) {
+  if (!positions?.length) return (
+    <div className="pnl">
+      <div className="pH"><span className="pHL">Open Positions</span></div>
+      <div style={{padding:'8px 9px',color:'var(--dim)',fontSize:9}}>No open positions</div>
+    </div>
+  );
 
   return (
-    <div style={{
-      display: "flex", alignItems: "center", flexWrap: "wrap", gap: 16,
-      padding: "7px 4px", borderBottom: "1px solid var(--qb-border)", marginBottom: 10,
-      fontFamily: "var(--qb-font-mono)", fontSize: 9,
-    }}>
-      <span style={{ color: "var(--qb-text-faint)" }}>
-        {nResolved ?? 0}/{n ?? 0} resolved
-      </span>
-      <span style={{ color: "var(--qb-text-mid)" }}>
-        IMM EV <span style={{ color: netColorOf(immEV) }}>{fmtR(immEV)}</span>
-      </span>
-      <span style={{ color: "var(--qb-text-mid)" }}>
-        RET EV <span style={{ color: netColorOf(retestEV) }}>{fmtR(retestEV)}</span>
-        {ret?.fillRate != null && (
-          <span style={{ color: "var(--qb-text-faint)", marginLeft: 4 }}>
-            ({Math.round(ret.fillRate * 100)}% fill)
-          </span>
-        )}
-      </span>
-      <span style={{ fontSize: 10, fontWeight: 700, color: col, marginLeft: "auto" }}>
-        {!hasEnough
-          ? `collecting (${nResolved ?? 0}/${ES_MIN_N})`
-          : !decisive
-          ? "≈ tied overall"
-          : winner === "immediate"
-          ? "▲ IMMEDIATE leads overall"
-          : "▲ RETEST leads overall"}
-      </span>
+    <div className="pnl">
+      <div className="pH">
+        <span className="pHL">Open Positions</span>
+        <span className="tag live">{positions.length}</span>
+      </div>
+      {positions.map((p,i) => {
+        const isLong = (p.type === 'POSITION_TYPE_BUY' || p.type === 'BUY' || p.type === 0);
+        const pnl = p.profit ?? p.unrealizedProfit ?? 0;
+        const sym = (p.symbol || p.id || '').replace(/^.*\//, '').toUpperCase();
+        return (
+          <div className="posRow" key={i}>
+            <span className="pSym">{sym.slice(0, 8)}</span>
+            <span className={`pDir ${isLong ? 'long' : 'short'}`}>{isLong ? 'BUY' : 'SELL'}</span>
+            <div className="pInfo">
+              <div className="pEntry">{p.volume ? `${p.volume} lot` : ''} · {p.openPrice?.toFixed(p.openPrice > 100 ? 2 : 5) || ''}</div>
+            </div>
+            <span className={`pPnl ${pnl >= 0 ? 'pos' : 'neg'}`}>{fmtMoney(pnl,2)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// PERFORMANCE RANKING — deduped recognition-memory ∪ ledger
-// Join key: trade.id = "trade_{asset}_{positionId}" (deterministic).
-// RANKED = n≥8 buckets, sorted by chosen metric.
-// COLLECTING = n<8, greyed, sorted by n, no rank.
-// ═══════════════════════════════════════════════════════════════════════════
-
-const PR_MIN_N   = 8;
-const PR_VIEWS   = [
-  { id: "template", label: "By Template" },
-  { id: "ts",       label: "Template × Session" },
-  { id: "tsi",      label: "Template × Session × Instrument" },
-];
-const PR_SORTS   = [
-  { id: "netPnl",       label: "Net P&L" },
-  { id: "winRate",      label: "Win Rate" },
-  { id: "avgR",         label: "Avg R" },
-  { id: "profitFactor", label: "Profit Factor" },
-];
-const PR_SESSIONS = ["ASIAN", "LONDON", "NY_AM", "NY_PM", "WEEKEND", "OFF"];
-
-function prComputeBucket(trades) {
-  const n      = trades.length;
-  const wins   = trades.filter(t => t.outcome === "WIN");
-  const losses = trades.filter(t => t.outcome === "LOSS");
-  const netPnl = trades.reduce((s, t) => s + (t.netPnl || 0), 0);
-  const winPnl = wins.reduce((s, t) => s + (t.netPnl || 0), 0);
-  const lossPnl = Math.abs(losses.reduce((s, t) => s + (t.netPnl || 0), 0));
-  const rList  = trades.filter(t => t.pnlR != null).map(t => t.pnlR);
-  const slList = trades.filter(t => t.slippagePips != null).map(t => t.slippagePips);
-  const winRate = n > 0 ? wins.length / n : null;
-  const avgR    = rList.length  > 0 ? rList.reduce((s, v) => s + v, 0)  / rList.length  : null;
-  const profitFactor = lossPnl > 0 ? winPnl / lossPnl : (winPnl > 0 ? 99 : null);
-  const avgSlip = slList.length > 0 ? slList.reduce((s, v) => s + v, 0) / slList.length : null;
-  const avgWin  = wins.length   > 0 ? winPnl  / wins.length   : null;
-  const avgLoss = losses.length > 0 ? lossPnl / losses.length : null;
-  const breakEvenWR = avgWin != null && avgLoss != null && avgWin + avgLoss > 0
-    ? avgLoss / (avgWin + avgLoss) : null;
-  return { n, wins: wins.length, losses: losses.length, winRate, netPnl, avgR, profitFactor, avgSlip, breakEvenWR };
-}
-
-function PerfRankingPanel({ gridColumn = "1 / 4" }) {
-  const [data,       setData]       = useState(null);
-  const [fetchError, setFetchError] = useState(null);
-  const [ready,      setReady]      = useState(false);
-  const [view,       setView]       = useState("template");
-  const [sortBy,     setSortBy]     = useState("netPnl");
-  const [filterTemplate, setFilterTemplate] = useState("");
-  const [filterSession,  setFilterSession]  = useState("");
-  const [filterAsset,    setFilterAsset]    = useState("");
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API("perf-ranking")).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok === true) { setData(r); setFetchError(null); }
-        else { setData(null); setFetchError(r?.error || "no data"); }
-      } catch (e) {
-        if (alive) { setData(null); setFetchError(e.message); }
-      }
-      if (alive) setReady(true);
-    };
-    load();
-    const tid = setInterval(load, 10 * 60 * 1000);
-    return () => { alive = false; clearInterval(tid); };
-  }, []);
-
-  const availTemplates = useMemo(() =>
-    [...new Set((data?.trades || []).map(t => t.template).filter(Boolean))].sort(), [data]);
-  const availAssets = useMemo(() =>
-    [...new Set((data?.trades || []).map(t => t.asset).filter(Boolean))].sort(), [data]);
-
-  const buckets = useMemo(() => {
-    if (!data?.trades) return [];
-    let filtered = data.trades;
-    if (filterTemplate) filtered = filtered.filter(t => t.template === filterTemplate);
-    if (filterSession)  filtered = filtered.filter(t => t.session  === filterSession);
-    if (filterAsset)    filtered = filtered.filter(t => t.asset    === filterAsset);
-    const getKey = (t) =>
-      view === "ts"  ? `${t.template || "unknown"}|${t.session}` :
-      view === "tsi" ? `${t.template || "unknown"}|${t.session}|${t.asset || "unknown"}` :
-                       (t.template || "unknown");
-    const groups = {};
-    for (const t of filtered) {
-      const k = getKey(t);
-      (groups[k] = groups[k] || []).push(t);
-    }
-    return Object.entries(groups).map(([key, ts]) => {
-      const parts = key.split("|");
-      return { key, template: parts[0], session: parts[1] || null, asset: parts[2] || null, ...prComputeBucket(ts) };
-    });
-  }, [data, view, filterTemplate, filterSession, filterAsset]);
-
-  const ranked = useMemo(() => {
-    return buckets
-      .filter(b => b.n >= PR_MIN_N)
-      .sort((a, b) =>
-        sortBy === "winRate"      ? (b.winRate       ?? -99) - (a.winRate       ?? -99) :
-        sortBy === "avgR"         ? (b.avgR           ?? -99) - (a.avgR           ?? -99) :
-        sortBy === "profitFactor" ? (b.profitFactor   ??   0) - (a.profitFactor   ??   0) :
-                                    b.netPnl - a.netPnl
-      );
-  }, [buckets, sortBy]);
-
-  const collecting = useMemo(() =>
-    buckets.filter(b => b.n < PR_MIN_N).sort((a, b) => b.n - a.n), [buckets]);
-
-  const panelProps = {
-    title:    "Performance Ranking",
-    subtitle: "deduped · recognition-memory ∪ ledger · real P&L",
-    style: { gridColumn },
-    collapsible: true, panelId: 'perf-ranking', defaultCollapsed: false,
-  };
-
-  if (!ready) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 14 }}><Placeholder msg="Loading performance ranking…" /></div>
-    </Panel>
-  );
-  if (!data) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 14 }}>
-        <PlaceholderError msg={fetchError ? `Cannot reach /api/perf-ranking: ${fetchError}` : "No data"} />
-      </div>
-    </Panel>
-  );
-
-  const rec = data.reconciliation;
-
-  const btnBase = { padding: "2px 7px", fontSize: 9, cursor: "pointer", borderRadius: 3, fontFamily: "inherit" };
-  const showSession  = view === "ts"  || view === "tsi";
-  const showAsset    = view === "tsi";
-
-  const thStyle = (align = "right") => ({
-    padding: "3px 8px 5px", color: "var(--qb-text-faint)", fontWeight: 400,
-    textAlign: align, whiteSpace: "nowrap", fontSize: 9, background: "transparent",
-  });
-  const tdR = (content, color) => (
-    <td style={{ padding: "4px 8px", textAlign: "right", color: color || "var(--qb-text-hi)", fontSize: 10, fontFamily: "var(--qb-font-mono)", whiteSpace: "nowrap" }}>
-      {content}
-    </td>
-  );
-  const tdL = (content, maxW = 130) => (
-    <td style={{ padding: "4px 6px 4px 2px", textAlign: "left", color: "var(--qb-text-hi)", fontSize: 10, whiteSpace: "nowrap", maxWidth: maxW, overflow: "hidden", textOverflow: "ellipsis" }}>
-      {content}
-    </td>
-  );
-
-  const tableHead = (
-    <thead>
-      <tr>
-        <th style={{ ...thStyle("right"), width: 22 }}> </th>
-        <th style={thStyle("left")}>Template</th>
-        {showSession && <th style={thStyle("left")}>Session</th>}
-        {showAsset   && <th style={thStyle("left")}>Instrument</th>}
-        <th style={thStyle()}>n</th>
-        <th style={thStyle()}>WR%</th>
-        <th style={thStyle()}>Net P&L</th>
-        <th style={thStyle()}>Avg R</th>
-        <th style={thStyle()}>PF</th>
-        <th style={thStyle()}>Avg Slip</th>
-      </tr>
-    </thead>
-  );
-
-  const renderRow = (b, rank, greyed) => {
-    const beGap    = b.winRate != null && b.breakEvenWR != null ? b.winRate - b.breakEvenWR : null;
-    const beColor  = beGap == null ? null : beGap >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-    const bePp     = beGap != null ? `${beGap >= 0 ? "▲" : "▼"}${Math.abs(Math.round(beGap * 100))}pp` : "";
-    const tmplMeta = TEMPLATE_DISPLAY[b.template];
-    const tmplLbl  = tmplMeta ? `${tmplMeta.glyph} ${tmplMeta.label}` : (b.template || "unknown");
-    const wrColor  = b.winRate == null ? "var(--qb-text-faint)"
-      : b.winRate >= 0.55 ? "var(--qb-ok)" : b.winRate <= 0.40 ? "var(--qb-bad)" : "var(--qb-text-hi)";
-    return (
-      <tr key={b.key} style={{
-        borderTop: "1px solid var(--qb-border)",
-        opacity: greyed ? 0.5 : 1,
-        background: !greyed && rank % 2 === 0 ? "var(--qb-bg-void)" : "transparent",
-      }}>
-        <td style={{ padding: "4px 6px", textAlign: "right", color: "var(--qb-text-faint)", fontSize: 9, width: 22 }}>
-          {greyed ? "" : rank}
-        </td>
-        {tdL(tmplLbl)}
-        {showSession && tdL(b.session || "—", 80)}
-        {showAsset   && tdL(b.asset   || "—", 80)}
-        {tdR(b.n, "var(--qb-text-mid)")}
-        <td style={{ padding: "4px 8px", textAlign: "right", fontSize: 10, fontFamily: "var(--qb-font-mono)", whiteSpace: "nowrap" }}>
-          <span style={{ color: wrColor }}>
-            {b.winRate != null ? `${Math.round(b.winRate * 100)}%` : "—"}
-          </span>
-          {bePp && <span style={{ marginLeft: 3, fontSize: 8, color: beColor }}>{bePp}</span>}
-        </td>
-        {tdR(
-          b.netPnl != null ? `${b.netPnl >= 0 ? "+" : ""}$${Math.abs(b.netPnl).toFixed(0)}` : "—",
-          b.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"
-        )}
-        {tdR(
-          b.avgR != null ? `${b.avgR >= 0 ? "+" : ""}${b.avgR.toFixed(2)}R` : "—",
-          b.avgR == null ? "var(--qb-text-faint)" : b.avgR >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"
-        )}
-        {tdR(
-          b.profitFactor == null ? "—" : b.profitFactor >= 99 ? "∞" : b.profitFactor.toFixed(2),
-          b.profitFactor == null ? "var(--qb-text-faint)" : b.profitFactor >= 1 ? "var(--qb-ok)" : "var(--qb-bad)"
-        )}
-        {tdR(
-          b.avgSlip != null ? `${b.avgSlip >= 0 ? "+" : ""}${b.avgSlip.toFixed(1)}p` : "—",
-          b.avgSlip != null && b.avgSlip < -0.5 ? "var(--qb-bad)" : "var(--qb-text-faint)"
-        )}
-      </tr>
-    );
-  };
+// ─── Equity Panel ─────────────────────────────────────────────────────────────
+function EquityPanel({ account, dailyPnL, goals }) {
+  const equity = account?.equity ?? account?.balance ?? 0;
+  const balance = account?.balance ?? equity;
+  const float   = account?.profit ?? 0;
+  const dailyGoal = goals?.daily?.target || 0;
+  const dailyAchieved = goals?.daily?.achieved ?? Math.max(0, dailyPnL);
+  const goalPct = dailyGoal > 0 ? Math.min(100, (dailyAchieved / dailyGoal) * 100) : 0;
 
   return (
-    <Panel {...panelProps}>
-      <div style={{ padding: "10px 12px" }}>
-        {/* Reconciliation info bar — total reconciled + rankable subset */}
-        {rec && (
-          <div style={{ fontSize: 8, color: "var(--qb-text-faint)", marginBottom: 10, lineHeight: 1.9 }}>
-            <span style={{ color: "var(--qb-text-hi)", fontWeight: 600 }}>{rec.rankable ?? rec.total}</span>
-            {" ranked trades"}
-            {rec.filteredOut > 0 && (
-              <span style={{ color: "var(--qb-text-faint)" }}>
-                {" · "}{rec.filteredOut} excluded (unknown/legacy template)
-              </span>
-            )}
-            <span style={{ color: "var(--qb-text-faint)" }}>
-              {" · "}{rec.total} total reconciled ({rec.matched} matched · {rec.ledgerOnly} ledger-only · {rec.recogOnly} recog-only)
+    <div className="pnl">
+      <div className="pH">
+        <span className="pHL">Account</span>
+        {dailyGoal > 0 && <span className="tag ai">{goalPct.toFixed(0)}% goal</span>}
+      </div>
+      <div className="eqBig">{equity ? `$${equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}` : '—'}</div>
+      <div className="eqSub" style={{color: dailyPnL >= 0 ? 'var(--pulse)' : 'var(--thr)'}}>
+        Today {fmtMoney(dailyPnL,2)} · Float {fmtMoney(float,2)}
+      </div>
+      {dailyGoal > 0 && (
+        <>
+          <div className="goalBar"><div className="goalFill" style={{width:`${goalPct}%`}} /></div>
+          <div style={{padding:'0 9px 5px',fontSize:7.5,color:'var(--dim)',fontFamily:'var(--mono)'}}>
+            Goal {fmtMoneyAbs(dailyAchieved)} / {fmtMoneyAbs(dailyGoal)} daily
+          </div>
+        </>
+      )}
+      <div style={{display:'flex',gap:7,padding:'3px 9px 6px',flexWrap:'wrap'}}>
+        <span style={{fontSize:8,color:'var(--dim)',fontFamily:'var(--mono)'}}>
+          BAL <span style={{color:'var(--txt)'}}>{balance ? `$${balance.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—'}</span>
+        </span>
+        {goals?.monthly?.target > 0 && (
+          <span style={{fontSize:8,color:'var(--dim)',fontFamily:'var(--mono)'}}>
+            MTH <span style={{color:'var(--pulse)'}}>
+              {pct((goals.monthly.achieved||0)/goals.monthly.target,0)}
             </span>
-          </div>
+          </span>
         )}
+      </div>
+    </div>
+  );
+}
 
-        {/* Controls — view selector + sort toggle */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10, alignItems: "center" }}>
-          <div style={{ display: "flex", gap: 2 }}>
-            {PR_VIEWS.map(v => (
-              <button key={v.id} onClick={() => setView(v.id)} style={{
-                ...btnBase,
-                border: view === v.id ? "1px solid rgba(74,158,255,0.55)" : "1px solid var(--qb-border)",
-                background: view === v.id ? "rgba(74,158,255,0.12)" : "var(--qb-bg-void)",
-                color: view === v.id ? "#4a9eff" : "var(--qb-text-mid)",
-                fontWeight: view === v.id ? 600 : 400,
-              }}>
-                {v.label}
-              </button>
+// ─── Activity Panel ───────────────────────────────────────────────────────────
+function ActivityPanel({ activity }) {
+  const items = useMemo(() => (activity || []).slice(0,20), [activity]);
+
+  const dotColor = type => {
+    if (!type) return 'b';
+    const t = type.toLowerCase();
+    if (t.includes('win') || t.includes('tp') || t.includes('profit')) return 'g';
+    if (t.includes('loss') || t.includes('sl') || t.includes('error')) return 'r';
+    if (t.includes('warn') || t.includes('skip') || t.includes('block')) return 'a';
+    return 'b';
+  };
+
+  return (
+    <div className="pnl" style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
+      <div className="pH"><span className="pHL">Activity Log</span></div>
+      <div style={{flex:1,overflowY:'auto',padding:'3px 0'}}>
+        {items.length === 0 && <div style={{padding:'8px 9px',color:'var(--dim)',fontSize:9}}>No activity yet</div>}
+        {items.map((a,i) => (
+          <div className="aRow" key={i}>
+            <div className={`aDot ${dotColor(a.type)}`} />
+            <div>
+              <div className="aT" dangerouslySetInnerHTML={{__html: (a.message || a.msg || '').replace(/\b(WIN|LOSS|BE|BLOCKED|SKIP)\b/g, '<b>$1</b>')}} />
+              <div className="aTm">{fmtRelTime(a.ts)}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── JARVIS Chat ──────────────────────────────────────────────────────────────
+function JarvisChat({ messages, thinking, focusDock, onDismissFocus }) {
+  const endRef = useRef(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, thinking]);
+
+  return (
+    <div id="jConv">
+      <div id="jConvH">
+        <div style={{width:6,height:6,borderRadius:'50%',background:'var(--pur)',animation:'dp 1.5s ease-in-out infinite'}} />
+        <span style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--pur)',letterSpacing:1.5,fontWeight:700}}>JARVIS · AI CO-PILOT</span>
+        <span className="tag ai" style={{marginLeft:'auto'}}>LIVE</span>
+      </div>
+      {focusDock && (
+        <div id="jFocus" className="show">
+          <div className="fdCard">
+            <div className="fdTitle">
+              <span>{focusDock.title || 'JARVIS FOCUS'}</span>
+              <button className="dismissBtn" onClick={onDismissFocus}>dismiss</button>
+            </div>
+            {(focusDock.rows || []).map((row,i) => (
+              <div className="fdRow" key={i}>
+                <span className="fdK">{row.k}</span>
+                <span className="fdV" style={{color: row.color || 'var(--txt)'}}>{row.v}</span>
+              </div>
             ))}
-          </div>
-          <div style={{ display: "flex", gap: 2, marginLeft: "auto", alignItems: "center" }}>
-            <span style={{ fontSize: 8, color: "var(--qb-text-faint)", marginRight: 2 }}>sort</span>
-            {PR_SORTS.map(s => (
-              <button key={s.id} onClick={() => setSortBy(s.id)} style={{
-                ...btnBase,
-                border: "1px solid var(--qb-border)",
-                background: sortBy === s.id ? "rgba(255,255,255,0.07)" : "transparent",
-                color: sortBy === s.id ? "var(--qb-text-hi)" : "var(--qb-text-faint)",
-                fontWeight: sortBy === s.id ? 600 : 400,
-              }}>
-                {s.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Filters */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ fontSize: 8, color: "var(--qb-text-faint)" }}>filter</span>
-          {[
-            { val: filterTemplate, set: setFilterTemplate, opts: availTemplates, placeholder: "All templates" },
-            { val: filterSession,  set: setFilterSession,  opts: PR_SESSIONS,    placeholder: "All sessions"  },
-            { val: filterAsset,    set: setFilterAsset,    opts: availAssets,    placeholder: "All instruments" },
-          ].map(({ val, set, opts, placeholder }, fi) => (
-            <select key={fi} value={val} onChange={e => set(e.target.value)} style={{
-              fontSize: 9, padding: "2px 4px",
-              background: "var(--qb-bg-void)", color: "var(--qb-text-mid)",
-              border: val ? "1px solid rgba(74,158,255,0.55)" : "1px solid var(--qb-border)",
-              borderRadius: 3, cursor: "pointer",
-            }}>
-              <option value="">{placeholder}</option>
-              {opts.map(o => <option key={o} value={o}>{o}</option>)}
-            </select>
-          ))}
-          {(filterTemplate || filterSession || filterAsset) && (
-            <button onClick={() => { setFilterTemplate(""); setFilterSession(""); setFilterAsset(""); }} style={{
-              ...btnBase, border: "1px solid var(--qb-border)",
-              background: "transparent", color: "var(--qb-amber)",
-            }}>
-              clear
-            </button>
-          )}
-        </div>
-
-        {/* RANKED table */}
-        {ranked.length > 0 ? (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
-              {tableHead}
-              <tbody>{ranked.map((b, i) => renderRow(b, i + 1, false))}</tbody>
-            </table>
-          </div>
-        ) : (
-          <div style={{ padding: "10px 4px", fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No buckets with n≥{PR_MIN_N} yet — keep accumulating trades.
-          </div>
-        )}
-
-        {/* COLLECTING section */}
-        {collecting.length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{
-              fontSize: 8, color: "var(--qb-text-faint)", fontWeight: 600,
-              letterSpacing: 0.4, marginBottom: 4, paddingBottom: 4,
-              borderBottom: "1px dashed var(--qb-border)",
-            }}>
-              COLLECTING (n&lt;{PR_MIN_N}) — not ranked · sorted by trade count
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
-                {tableHead}
-                <tbody>{collecting.map(b => renderRow(b, 0, true))}</tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        <div style={{ marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", lineHeight: 1.6 }}>
-          WR% flag: ▲/▼ pp vs break-even WR · PF = profit factor · Avg Slip in pips · ranked section n≥{PR_MIN_N} only
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function StyleComparisonPanel({ gridColumn = "1 / 4" }) {
-  const [trades, setTrades] = useState(null);
-  const [error, setError]   = useState(null);
-  const [view, setView]     = useState("overall");   // "overall" | "template"
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
-        if (alive) {
-          if (r && Array.isArray(r.trades)) { setTrades(r.trades); setError(null); }
-          else setError(r?.error || "no trade data");
-        }
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 60000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const all      = trades || [];
-  const dayAgg   = aggTrades(all.filter((t) => (t.style || "day") === "day"));
-  const swingAgg = aggTrades(all.filter((t) => t.style === "swing"));
-  const unclassified = all.filter((t) => t.style !== "day" && t.style !== "swing").length;
-
-  const byTemplate = {};
-  for (const t of all) {
-    const tmpl = t.template || (t.contributingTactics || [])[0] || "—";
-    if (!byTemplate[tmpl]) byTemplate[tmpl] = { day: [], swing: [] };
-    byTemplate[tmpl][t.style === "swing" ? "swing" : "day"].push(t);
-  }
-  const templateRows = Object.keys(byTemplate).sort();
-
-  return (
-    <Panel title="Day vs Swing" subtitle="which profile is working" style={{ gridColumn }}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto" }}>
-        {error && <PlaceholderError msg={`Comparison: ${error}`} />}
-        {!error && all.length === 0 && (
-          <div style={{ fontSize: 11, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            No closed trades yet. Day vs Swing stats appear here once trades close and get tagged with their profile.
-          </div>
-        )}
-
-        {all.length > 0 && (
-          <>
-            <div style={{ display: "flex", marginBottom: 12, borderBottom: "1px solid var(--qb-border)" }}>
-              {[["overall", "Overall"], ["template", "By template"]].map(([id, label]) => (
-                <button key={id} onClick={() => setView(id)} style={{
-                  padding: "5px 14px", background: "transparent", border: "none", cursor: "pointer",
-                  fontFamily: "var(--qb-font-mono)", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase",
-                  color: view === id ? "var(--qb-accent)" : "var(--qb-text-faint)",
-                  borderBottom: view === id ? "2px solid var(--qb-accent)" : "2px solid transparent",
-                  fontWeight: view === id ? 700 : 400,
-                }}>{label}</button>
-              ))}
-            </div>
-
-            {view === "overall" && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <StyleStatCard title="DAY" agg={dayAgg} />
-                <StyleStatCard title="SWING" agg={swingAgg} />
+            {focusDock.bar != null && (
+              <div className="goalBar" style={{marginTop:5}}>
+                <div className="goalFill" style={{width:`${Math.min(100,focusDock.bar*100)}%`}} />
               </div>
             )}
-
-            {view === "template" && (
-              <div style={{ overflow: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--qb-font-mono)", fontSize: 10 }}>
-                  <thead>
-                    <tr style={{ color: "var(--qb-text-faint)", textAlign: "right" }}>
-                      <th style={{ textAlign: "left", padding: "4px 6px" }}>Template</th>
-                      <th style={{ padding: "4px 6px" }}>Day n</th>
-                      <th style={{ padding: "4px 6px" }}>Day WR</th>
-                      <th style={{ padding: "4px 6px" }}>Day net</th>
-                      <th style={{ padding: "4px 6px" }}>Sw n</th>
-                      <th style={{ padding: "4px 6px" }}>Sw WR</th>
-                      <th style={{ padding: "4px 6px" }}>Sw net</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {templateRows.map((tmpl) => {
-                      const d = aggTrades(byTemplate[tmpl].day);
-                      const s = aggTrades(byTemplate[tmpl].swing);
-                      const meta = TEMPLATE_DISPLAY[tmpl];
-                      return (
-                        <tr key={tmpl} style={{ borderTop: "1px solid var(--qb-border)", textAlign: "right" }}>
-                          <td style={{ textAlign: "left", padding: "4px 6px", color: "var(--qb-text-hi)" }}>
-                            {meta ? `${meta.glyph} ${meta.label}` : tmpl}
-                          </td>
-                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{d.count || "·"}</td>
-                          <td style={{ padding: "4px 6px", color: wrColorOf(d.winRate) }}>{fmtWR(d.winRate)}</td>
-                          <td style={{ padding: "4px 6px", color: netColorOf(d.net) }}>{fmtNet(d.net, d.count)}</td>
-                          <td style={{ padding: "4px 6px", color: "var(--qb-text-mid)" }}>{s.count || "·"}</td>
-                          <td style={{ padding: "4px 6px", color: wrColorOf(s.winRate) }}>{fmtWR(s.winRate)}</td>
-                          <td style={{ padding: "4px 6px", color: netColorOf(s.net) }}>{fmtNet(s.net, s.count)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {unclassified > 0 && (
-              <div style={{ marginTop: 10, fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-                {unclassified} older trade{unclassified === 1 ? "" : "s"} predate profile tagging and aren't counted by style.
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15b · RECOGNITION MEMORY PANEL  [v13.1]
-// =====================================================================
-// Statistics view only (3A). Reads /api/recognition-memory?action=stats
-// — the confirmed-working endpoint that returns:
-//   { totalTrades, wins, losses, winRate, synthetic, real }
-// This panel is purely informational: it shows what the KNN advisor has
-// learned. Recognition is in OBSERVATION mode — it stores outcomes and can
-// advise, but does not yet auto-size live trades.
-
-function RecognitionPanel({ perf, gridColumn = "1 / 3" }) {
-  const [stats, setStats] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch(API("recognition-memory?action=stats")).then((res) => res.json());
-        if (alive) {
-          if (r && !r.error) { setStats(r); setError(null); }
-          else setError(r?.error || "endpoint not deployed");
-        }
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    tick();
-    const id = setInterval(tick, 60000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const total   = stats?.totalTrades ?? 0;
-  const wins    = stats?.wins ?? 0;
-  const losses  = stats?.losses ?? 0;
-  const real    = stats?.real ?? 0;
-  const synth   = stats?.synthetic ?? 0;
-  const wr      = stats?.winRate != null ? stats.winRate : (total > 0 ? wins / total : null);
-  const wrColor = wr == null ? "var(--qb-text-lo)" : wr >= 0.55 ? "var(--qb-ok)" : wr >= 0.45 ? "var(--qb-warn)" : "var(--qb-bad)";
-
-  // Memory maturity: how close to a statistically meaningful sample.
-  const MATURE_AT = 200;
-  const maturity = Math.min(1, total / MATURE_AT);
-
-  return (
-    <Panel title="Recognition Memory" subtitle="KNN advisor · observation mode" style={{ gridColumn }}>
-      <div style={{ padding: 12, height: "100%", overflow: "auto", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-
-        {/* LEFT — the numbers */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {error && <PlaceholderError msg={`Recognition: ${error}`} />}
-
-          <div style={{ display: "flex", gap: 18, alignItems: "flex-end" }}>
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
-                Memory win rate
-              </span>
-              <span className="qb-mono" style={{ fontSize: 30, fontWeight: 300, color: wrColor, lineHeight: 1.1 }}>
-                {wr == null ? "—" : `${Math.round(wr * 100)}%`}
-              </span>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", paddingBottom: 4 }}>
-              <span className="qb-mono" style={{ fontSize: 12, color: "var(--qb-ok)" }}>{wins} W</span>
-              <span className="qb-mono" style={{ fontSize: 12, color: "var(--qb-bad)" }}>{losses} L</span>
-            </div>
           </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <MiniStat label="Stored trades" value={total} />
-            <MiniStat label="Real / Synthetic" value={`${real} / ${synth}`} />
-          </div>
-
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--qb-text-lo)", marginBottom: 4 }}>
-              <span>Sample maturity</span>
-              <span className="qb-mono">{total} / {MATURE_AT}</span>
-            </div>
-            <Meter value={maturity} color={maturity >= 1 ? "var(--qb-ok)" : "var(--qb-accent)"} />
-            <span style={{ fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic", marginTop: 4, display: "block" }}>
-              {maturity >= 1
-                ? "Sample is statistically meaningful — advisor signals are reliable."
-                : `Need ~${Math.max(0, MATURE_AT - total)} more closed trades before the advisor's edge estimates stabilize.`}
-            </span>
-          </div>
-        </div>
-
-        {/* RIGHT — how it's used */}
-        <div className="qb-cell" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-          <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
-            How the bot uses this
-          </span>
-          <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 1.7 }}>
-            <li>Every closed trade is stored as a <strong style={{ color: "var(--qb-text-hi)" }}>feature vector</strong> (template, session, structure context, outcome).</li>
-            <li>When a new setup forms, the advisor finds the <strong style={{ color: "var(--qb-text-hi)" }}>K nearest</strong> historical situations and reports their win/loss record.</li>
-            <li>Current status: <span style={{ color: "var(--qb-warn)" }}>observation only</span> — it advises but does not yet auto-adjust live lot size.</li>
-            <li>Auto-sizing from recognition unlocks once the sample is mature (≈{MATURE_AT} trades) to avoid amplifying early, biased data.</li>
-          </ul>
-          <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 9, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-            Memory is never deleted on losses — it learns from both wins and losses equally.
-          </span>
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function MiniStat({ label, value }) {
-  return (
-    <div className="qb-cell" style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
-      <span className="qb-mono" style={{ fontSize: 16, color: "var(--qb-text-hi)" }}>{value}</span>
-    </div>
-  );
-}
-
-// =====================================================================
-// 15c · TEMPLATE × INSTRUMENT PERFORMANCE HEATMAP  [v13.1]
-// =====================================================================
-// Full matrix: templates (rows) × watchlist instruments (columns).
-// WR / PF toggle. Data source resolution order (first that yields cells):
-//   1. perf.byTemplate[t].byAsset[asset]  (if template-performance exposes it)
-//   2. perf.matrix / perf.byTemplateAsset (alternate shapes)
-//   3. fetched closed trades from /api/recognition-memory?action=recent
-// Degrades to a clean placeholder if no per-(template,asset) data exists.
-
-function cellFromStats(s) {
-  if (!s) return null;
-  const n  = s.sample ?? s.n ?? s.total ?? s.count ?? 0;
-  let wr   = s.winRate != null ? s.winRate : (s.wins != null && n ? s.wins / n : null);
-  if (wr != null && wr > 1) wr = wr / 100; // tolerate percent-form
-  const pf = s.profitFactor != null ? s.profitFactor : (s.pf != null ? s.pf : null);
-  return { n, wr, pf };
-}
-
-function matrixFromPerf(perf) {
-  const bt = perf?.byTemplate;
-  // Shape 1: nested byAsset under each template
-  if (bt && typeof bt === "object") {
-    const cells = {};
-    let any = false;
-    for (const t of TEMPLATE_ORDER) {
-      const node = bt[t];
-      const byAsset = node?.byAsset || node?.assets;
-      if (byAsset && typeof byAsset === "object") {
-        cells[t] = {};
-        for (const [asset, s] of Object.entries(byAsset)) {
-          const c = cellFromStats(s);
-          if (c) { cells[t][String(asset).toLowerCase()] = c; if (c.n > 0) any = true; }
-        }
-      }
-    }
-    if (any) return cells;
-  }
-  // Shape 2: explicit matrix object  perf.matrix[template][asset]
-  const m = perf?.matrix || perf?.byTemplateAsset;
-  if (m && typeof m === "object") {
-    const cells = {};
-    let any = false;
-    for (const [t, assets] of Object.entries(m)) {
-      if (!assets || typeof assets !== "object") continue;
-      cells[t] = {};
-      for (const [asset, s] of Object.entries(assets)) {
-        const c = cellFromStats(s);
-        if (c) { cells[t][String(asset).toLowerCase()] = c; if (c.n > 0) any = true; }
-      }
-    }
-    if (any) return cells;
-  }
-  return null;
-}
-
-function matrixFromTrades(trades) {
-  if (!Array.isArray(trades) || trades.length === 0) return null;
-  const acc = {};
-  for (const tr of trades) {
-    const template =
-      tr.template || tr.templateName ||
-      (Array.isArray(tr.contributingTactics) ? tr.contributingTactics[0] : null);
-    const assetRaw = tr.assetId || tr.asset || tr.symbol;
-    if (!template || !assetRaw) continue;
-    const asset = String(assetRaw).toLowerCase();
-
-    let pnl = tr.pnl;
-    if (pnl == null) pnl = tr.profit;
-    let r = tr.pnlR;
-    if (r == null) r = tr.rMultiple;
-    if (r == null) r = tr.rr;
-
-    let isWin = tr.win;
-    if (isWin == null && tr.outcome != null) isWin = tr.outcome === "win" || tr.outcome === "tp";
-    if (isWin == null && pnl != null) isWin = pnl > 0;
-    if (isWin == null && r != null) isWin = r > 0;
-
-    const metricVal = pnl != null ? pnl : (r != null ? r : null);
-
-    if (!acc[template]) acc[template] = {};
-    if (!acc[template][asset]) acc[template][asset] = { n: 0, wins: 0, gw: 0, gl: 0 };
-    const c = acc[template][asset];
-    c.n += 1;
-    if (isWin) c.wins += 1;
-    if (metricVal != null) {
-      if (metricVal >= 0) c.gw += metricVal;
-      else c.gl += Math.abs(metricVal);
-    }
-  }
-  const out = {};
-  let any = false;
-  for (const [t, assets] of Object.entries(acc)) {
-    out[t] = {};
-    for (const [a, c] of Object.entries(assets)) {
-      out[t][a] = {
-        n: c.n,
-        wr: c.n ? c.wins / c.n : null,
-        pf: c.gl > 0 ? c.gw / c.gl : (c.gw > 0 ? Infinity : null),
-      };
-      if (c.n > 0) any = true;
-    }
-  }
-  return any ? out : null;
-}
-
-function heatColor(metric, cell) {
-  if (!cell || !cell.n) return "var(--qb-text-faint)";
-  if (metric === "wr") {
-    if (cell.wr == null) return "var(--qb-text-lo)";
-    if (cell.wr >= 0.55) return "var(--qb-ok)";
-    if (cell.wr >= 0.40) return "var(--qb-warn)";
-    return "var(--qb-bad)";
-  }
-  if (cell.pf == null) return "var(--qb-text-lo)";
-  if (cell.pf >= 1.5) return "var(--qb-ok)";
-  if (cell.pf >= 1.0) return "var(--qb-warn)";
-  return "var(--qb-bad)";
-}
-
-function heatText(metric, cell) {
-  if (!cell || !cell.n) return "·";
-  if (metric === "wr") {
-    return cell.wr == null ? "·" : `${Math.round(cell.wr * 100)}`;
-  }
-  if (cell.pf == null) return "·";
-  if (!isFinite(cell.pf)) return "∞";
-  return cell.pf.toFixed(1);
-}
-
-function PerfHeatmapPanel({ perf, watchlist, gridColumn = "3 / 4" }) {
-  const [metric, setMetric] = useState("wr"); // "wr" | "pf"
-  const [trades, setTrades] = useState(null);
-  const [error, setError]   = useState(null);
-
-  const perfMatrix = useMemo(() => matrixFromPerf(perf), [perf]);
-  const needFetch  = !perfMatrix;
-
-  // Fallback fetch (one-shot, quiet) only if template-performance has no matrix
-  useEffect(() => {
-    if (!needFetch) return;
-    let alive = true;
-    (async () => {
-      try {
-        const r = await fetch(API("recognition-memory?action=recent&limit=500")).then((res) => res.json());
-        if (!alive) return;
-        const list = Array.isArray(r) ? r : (r?.trades || r?.recent || r?.list || r?.items || null);
-        if (list) { setTrades(list); setError(null); }
-        else setError(r?.error || "no per-instrument data");
-      } catch (e) { if (alive) setError(e.message); }
-    })();
-    return () => { alive = false; };
-  }, [needFetch]);
-
-  const matrix = perfMatrix || matrixFromTrades(trades);
-  const cols   = watchlist;
-
-  return (
-    <Panel title="Template × Instrument" subtitle={metric === "wr" ? "win rate %" : "profit factor"} style={{ gridColumn }}>
-      <div style={{ padding: 10, height: "100%", overflow: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-
-        {/* WR / PF toggle */}
-        <div style={{ display: "flex", gap: 4 }}>
-          {[{ id: "wr", label: "Win %" }, { id: "pf", label: "Profit factor" }].map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setMetric(opt.id)}
-              className="qb-mono"
-              style={{
-                flex: 1,
-                background: metric === opt.id ? "var(--qb-accent-soft)" : "transparent",
-                color: metric === opt.id ? "var(--qb-accent)" : "var(--qb-text-mid)",
-                border: `1px solid ${metric === opt.id ? "var(--qb-accent)" : "var(--qb-border)"}`,
-                borderRadius: 3, padding: "4px 6px", fontSize: 9, cursor: "pointer",
-                letterSpacing: 0.5, textTransform: "uppercase",
-              }}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
-        {!matrix && error && <PlaceholderError msg={`Heatmap: ${error}`} />}
-        {!matrix && !error && <Placeholder msg="Aggregating closed trades..." />}
-
-        {matrix && (
-          <div style={{ overflow: "auto" }}>
-            <div style={{
-              display: "grid",
-              gridTemplateColumns: `64px repeat(${cols.length}, minmax(30px, 1fr))`,
-              gap: 2, minWidth: 64 + cols.length * 32,
-            }}>
-              {/* header row */}
-              <div />
-              {cols.map((c) => (
-                <div key={`h-${c}`} className="qb-mono" style={{
-                  fontSize: 8, color: "var(--qb-text-faint)", textAlign: "center",
-                  letterSpacing: 0.3, padding: "2px 0", overflow: "hidden", textOverflow: "ellipsis",
-                }} title={c.toUpperCase()}>
-                  {c.toUpperCase()}
-                </div>
-              ))}
-
-              {/* template rows */}
-              {TEMPLATE_ORDER.map((t) => {
-                const meta = TEMPLATE_DISPLAY[t];
-                const row = matrix[t] || {};
-                return (
-                  <Fragment key={t}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, color: "var(--qb-text-mid)" }} title={meta?.label || t}>
-                      <span style={{ fontSize: 11 }}>{meta?.glyph || "·"}</span>
-                    </div>
-                    {cols.map((c) => {
-                      const cell = row[c] || null;
-                      const col = heatColor(metric, cell);
-                      return (
-                        <div
-                          key={`${t}-${c}`}
-                          className="qb-mono"
-                          title={cell && cell.n ? `${meta?.label || t} · ${c.toUpperCase()} · n=${cell.n}` : `${meta?.label || t} · ${c.toUpperCase()} · no trades`}
-                          style={{
-                            background: "var(--qb-bg-panel-hi)",
-                            border: `1px solid ${cell && cell.n ? col : "var(--qb-border)"}`,
-                            borderRadius: 3,
-                            padding: "5px 0",
-                            textAlign: "center",
-                            fontSize: 10,
-                            color: col,
-                            opacity: cell && cell.n && cell.n < 3 ? 0.55 : 1,
-                          }}
-                        >
-                          {heatText(metric, cell)}
-                        </div>
-                      );
-                    })}
-                  </Fragment>
-                );
-              })}
-            </div>
-
-            {/* legend */}
-            <div style={{ display: "flex", gap: 10, marginTop: 8, fontSize: 8, color: "var(--qb-text-faint)", flexWrap: "wrap" }}>
-              {metric === "wr" ? (
-                <>
-                  <LegendDot color="var(--qb-ok)"   label="≥55%" />
-                  <LegendDot color="var(--qb-warn)" label="40–55%" />
-                  <LegendDot color="var(--qb-bad)"  label="<40%" />
-                </>
-              ) : (
-                <>
-                  <LegendDot color="var(--qb-ok)"   label="PF ≥1.5" />
-                  <LegendDot color="var(--qb-warn)" label="1.0–1.5" />
-                  <LegendDot color="var(--qb-bad)"  label="<1.0" />
-                </>
-              )}
-              <span style={{ color: "var(--qb-text-faint)" }}>· faint = n&lt;3 · "·" = no data</span>
-            </div>
-          </div>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15a · REGIME DETECTOR SHADOW PANEL  (v15.3)
-// =====================================================================
-// Shows the shadow-mode regime detector validation data.
-// Always renders — zero shadow records is the expected initial state.
-
-const REGIME_COLORS_MAP = {
-  'NEWS-BLOCKED': 'var(--qb-bad)',
-  'ERRATIC':      'var(--qb-bad)',
-  'CHOPPY':       'var(--qb-warn)',
-  'TRENDING':     'var(--qb-ok)',
-  'NORMAL':       'var(--qb-text-hi)',
-};
-
-function RegimeDetectorShadowPanel({ gridColumn = "1 / 4" }) {
-  const [summary, setSummary]       = useState(null);
-  const [vixData, setVixData]       = useState(null);
-  const [thresholds, setThresholds] = useState(null);
-  const [error, setError]           = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const [sumR, vixR, thrR] = await Promise.all([
-          fetch(API('regime-detector?action=shadow-summary')).then((r) => r.json()),
-          fetch(API('regime-detector?action=vix')).then((r) => r.json()),
-          fetch(API('regime-detector?action=thresholds')).then((r) => r.json()),
-        ]);
-        if (!alive) return;
-        if (sumR && sumR.error && !sumR.ok) setError(sumR.error);
-        else { setSummary(sumR || {}); setError(null); }
-        if (vixR?.ok)  setVixData(vixR.vixData);
-        if (thrR?.ok)  setThresholds(thrR.THRESHOLDS);
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const total     = summary?.totalShadowed ?? 0;
-  const byRegime  = summary?.byRegime || [];
-  const vix       = vixData?.vix;
-  const vixDate   = vixData?.date;
-  const vixCalm   = thresholds?.vix?.calm ?? 15;
-  const vixStress = thresholds?.vix?.stressed ?? 20;
-  const vixColor  = vix == null ? 'var(--qb-text-faint)'
-    : vix > vixStress ? 'var(--qb-bad)'
-    : vix < vixCalm   ? 'var(--qb-ok)'
-    : 'var(--qb-warn)';
-
-  return (
-    <Panel title="Regime Detector" subtitle="shadow mode · validation only · not gating trades yet" style={{ gridColumn }}>
-      <div style={{ padding: 12, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
-
-        {/* Status bar — always visible */}
-        <div style={{ display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap', paddingBottom: 8, borderBottom: '1px solid var(--qb-border)' }}>
-          <div className="qb-mono" style={{ fontSize: 11 }}>
-            VIX&nbsp;
-            {vix != null ? (
-              <>
-                <span style={{ color: vixColor, fontSize: 14, fontWeight: 600 }}>{vix.toFixed(1)}</span>
-                <span style={{ color: 'var(--qb-text-faint)', fontSize: 9 }}> as of {vixDate}</span>
-                <span style={{ color: 'var(--qb-text-faint)', fontSize: 9 }}> · calm &lt;{vixCalm} · stressed &gt;{vixStress}</span>
-              </>
-            ) : (
-              <span style={{ color: 'var(--qb-text-faint)' }}>loading…</span>
-            )}
-          </div>
-          <div className="qb-mono" style={{ fontSize: 10, color: 'var(--qb-text-faint)' }}>
-            Shadow log:&nbsp;
-            <span style={{ color: total > 0 ? 'var(--qb-text-hi)' : 'var(--qb-text-faint)' }}>
-              {total} signal{total !== 1 ? 's' : ''} logged
-            </span>
-            {summary?.matchedToLedger != null && total > 0 && (
-              <span>&nbsp;· {summary.matchedToLedger} matched to ledger</span>
-            )}
-          </div>
-          {error && (
-            <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-bad)' }}>⚠ {error}</span>
-          )}
-        </div>
-
-        {/* Empty state — expected right after deploy */}
-        {byRegime.length === 0 ? (
-          <div style={{ padding: '18px 0', textAlign: 'center', fontSize: 11, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-            {summary == null && !error
-              ? 'Loading…'
-              : `Collecting shadow data — ${total} signal${total !== 1 ? 's' : ''} logged so far. Records accumulate as live signals arrive.`}
-          </div>
-        ) : (
-          /* By-regime breakdown table */
-          <div style={{ overflow: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-              <thead>
-                <tr style={{ color: 'var(--qb-text-faint)' }}>
-                  {['Regime', 'Signals', 'Matched', 'Gated P&L', 'Est. saved', 'Actions'].map((h, i) => (
-                    <th key={h} className="qb-mono" style={{ padding: '4px 8px', borderBottom: '1px solid var(--qb-border)', fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: i === 0 ? 'left' : 'right' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {byRegime.map((g) => {
-                  const col = REGIME_COLORS_MAP[g.regime] || 'var(--qb-text-mid)';
-                  const actions = Object.values(g.byAction || {}).map((a) => `${a.wouldAction}×${a.signals}`).join(' / ');
-                  const saved = g.detectorWouldHaveSaved;
-                  return (
-                    <tr key={g.regime} style={{ borderBottom: '1px solid var(--qb-border)' }}>
-                      <td className="qb-mono" style={{ padding: '6px 8px', color: col, fontWeight: 700 }}>{g.regime}</td>
-                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--qb-text-hi)' }}>{g.signals}</td>
-                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--qb-text-mid)' }}>{g.matchedToLedger}</td>
-                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: g.gatedNetPnl < 0 ? 'var(--qb-bad)' : 'var(--qb-ok)' }}>
-                        {g.gatedNetPnl != null ? `$${g.gatedNetPnl.toFixed(2)}` : '—'}
-                      </td>
-                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: saved > 0 ? 'var(--qb-ok)' : saved < 0 ? 'var(--qb-bad)' : 'var(--qb-text-faint)' }}>
-                        {saved != null ? `${saved >= 0 ? '+' : ''}$${saved.toFixed(2)}` : '—'}
-                      </td>
-                      <td className="qb-mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--qb-text-faint)', fontSize: 9 }}>{actions}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {summary?.unmatchedNote && (
-              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', marginTop: 6, fontStyle: 'italic' }}>ℹ {summary.unmatchedNote}</div>
-            )}
-          </div>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15b · SESSION PERFORMANCE HEATMAP  (v15.3)
-// =====================================================================
-// Template rows × session columns. Color by net P&L or win rate.
-// Data from recognition-memory?action=session-heatmap (server-side).
-
-const SESSION_LABELS = { ASIAN: 'Asia', LONDON: 'London', NY_AM: 'NY AM', NY_PM: 'NY PM', WEEKEND: 'Wknd', OFF: 'Off' };
-const SESSION_ORDER  = ['ASIAN', 'LONDON', 'NY_AM', 'NY_PM', 'WEEKEND', 'OFF'];
-
-function sessHeatColor(metric, cell) {
-  if (!cell || cell.n === 0) return 'var(--qb-border)';
-  if (metric === 'wr') {
-    if (cell.wr >= 0.6) return 'var(--qb-ok)';
-    if (cell.wr >= 0.45) return 'var(--qb-warn)';
-    return 'var(--qb-bad)';
-  }
-  // net P&L
-  if (cell.pnl > 0) return 'var(--qb-ok)';
-  if (cell.pnl < 0) return 'var(--qb-bad)';
-  return 'var(--qb-text-faint)';
-}
-
-function sessHeatText(metric, cell) {
-  if (!cell || cell.n === 0) return '·';
-  if (metric === 'wr') return `${Math.round(cell.wr * 100)}%`;
-  const sign = cell.pnl >= 0 ? '+' : '';
-  return `${sign}$${Math.round(cell.pnl)}`;
-}
-
-function SessionHeatmapPanel({ gridColumn = "1 / 4" }) {
-  const [data, setData]     = useState(null);
-  const [error, setError]   = useState(null);
-  const [metric, setMetric] = useState('pnl'); // 'pnl' | 'wr'
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('recognition-memory?action=session-heatmap')).then((res) => res.json());
-        if (!alive) return;
-        if (r?.ok) { setData(r); setError(null); }
-        else setError(r?.error || 'endpoint error');
-      } catch (e) { if (alive) setError(e.message); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const sessions = data?.sessions?.filter((s) => SESSION_ORDER.includes(s))
-    .sort((a, b) => SESSION_ORDER.indexOf(a) - SESSION_ORDER.indexOf(b)) || SESSION_ORDER;
-
-  const rows = data
-    ? TEMPLATE_ORDER.filter((t) => data.templates.includes(t))
-        .concat(data.templates.filter((t) => !TEMPLATE_ORDER.includes(t)).sort())
-    : TEMPLATE_ORDER;
-
-  return (
-    <Panel title="Template × Session" subtitle={metric === 'pnl' ? 'net P&L · color = direction' : 'win rate · color = strength'} style={{ gridColumn }} collapsible panelId="session-heatmap" defaultCollapsed={false}>
-      <div style={{ padding: 10, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          {[{ id: 'pnl', label: 'Net P&L' }, { id: 'wr', label: 'Win %' }].map((opt) => (
-            <button key={opt.id} onClick={() => setMetric(opt.id)} className="qb-mono" style={{
-              background: metric === opt.id ? 'var(--qb-accent-soft)' : 'transparent',
-              color: metric === opt.id ? 'var(--qb-accent)' : 'var(--qb-text-mid)',
-              border: `1px solid ${metric === opt.id ? 'var(--qb-accent)' : 'var(--qb-border)'}`,
-              borderRadius: 3, padding: '4px 8px', fontSize: 9, cursor: 'pointer',
-              letterSpacing: 0.5, textTransform: 'uppercase',
-            }}>{opt.label}</button>
-          ))}
-          {data && (
-            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 6 }}>
-              {data.total} trades · {data.sessions?.length || 0} sessions
-            </span>
-          )}
-        </div>
-
-        {error && <PlaceholderError msg={`Session heatmap: ${error}`} />}
-        {!error && !data && <Placeholder msg="Loading session data…" />}
-
-        {data && (
-          <div style={{ overflow: 'auto' }}>
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: `80px repeat(${sessions.length}, minmax(56px, 1fr))`,
-              gap: 2,
-            }}>
-              {/* header */}
-              <div />
-              {sessions.map((s) => (
-                <div key={`h-${s}`} className="qb-mono" style={{
-                  fontSize: 8, color: 'var(--qb-text-faint)', textAlign: 'center',
-                  letterSpacing: 0.4, padding: '2px 0',
-                }}>{SESSION_LABELS[s] || s}</div>
-              ))}
-
-              {/* template rows */}
-              {rows.map((t) => {
-                const meta = TEMPLATE_DISPLAY[t];
-                const row  = data.matrix?.[t] || {};
-                return (
-                  <Fragment key={t}>
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: 4,
-                      fontSize: 9, color: 'var(--qb-text-mid)', overflow: 'hidden',
-                    }} title={meta?.label || t}>
-                      <span style={{ fontSize: 11 }}>{meta?.glyph || '·'}</span>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {meta?.label || t}
-                      </span>
-                    </div>
-                    {sessions.map((s) => {
-                      const cell = row[s] || null;
-                      const col  = sessHeatColor(metric, cell);
-                      const dimmed = cell && cell.n > 0 && cell.n < 8;
-                      return (
-                        <div key={`${t}-${s}`} className="qb-mono"
-                          title={cell ? `${meta?.label || t} · ${SESSION_LABELS[s] || s} · n=${cell.n} · WR=${Math.round(cell.wr * 100)}% · net=$${Math.round(cell.pnl)} · avgR=${cell.avgR ?? '—'}` : `${meta?.label || t} · ${SESSION_LABELS[s] || s} · no trades`}
-                          style={{
-                            background: 'var(--qb-bg-panel-hi)',
-                            border: `1px solid ${cell && cell.n ? col : 'var(--qb-border)'}`,
-                            borderRadius: 3, padding: '4px 2px',
-                            textAlign: 'center', fontSize: 9, color: col,
-                            opacity: dimmed ? 0.6 : 1,
-                            lineHeight: 1.3,
-                          }}
-                        >
-                          {cell && cell.n > 0 ? (
-                            <>
-                              <div style={{ fontSize: 7, color: 'var(--qb-text-faint)' }}>n={cell.n}</div>
-                              <div>{sessHeatText(metric, cell)}</div>
-                            </>
-                          ) : '·'}
-                        </div>
-                      );
-                    })}
-                  </Fragment>
-                );
-              })}
-            </div>
-
-            <div style={{ display: 'flex', gap: 10, marginTop: 8, fontSize: 8, color: 'var(--qb-text-faint)', flexWrap: 'wrap' }}>
-              {metric === 'wr' ? (
-                <><LegendDot color="var(--qb-ok)" label="≥60%" /><LegendDot color="var(--qb-warn)" label="45–60%" /><LegendDot color="var(--qb-bad)" label="<45%" /></>
-              ) : (
-                <><LegendDot color="var(--qb-ok)" label="+P&L" /><LegendDot color="var(--qb-bad)" label="-P&L" /></>
-              )}
-              <span>· faint = n&lt;8 (insufficient sample) · hover for details</span>
-            </div>
-          </div>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-function LegendDot({ color, label }) {
-  return (
-    <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-      <span style={{ width: 7, height: 7, borderRadius: 2, background: color, display: "inline-block" }} />
-      {label}
-    </span>
-  );
-}
-// =====================================================================
-// 15c . ORDER FLOW CONFIRMATION PANEL  (v15.7)
-// =====================================================================
-// Reads /api/orderflow-summary -- Phase 3 CVD shadow data.
-// Shows whether CVD-confirmed trades outperform unconfirmed ones.
-// NOT gating execution yet -- shadow measurement only.
-
-const OF_MIN_N = 8; // n<8 cells show "collecting" instead of stats
-
-function ofVerdict(conf, unconf, delta) {
-  if (!conf || !unconf || conf.n < OF_MIN_N || unconf.n < OF_MIN_N) {
-    return { text: 'collecting', color: 'var(--qb-text-faint)' };
-  }
-  const dWR = delta?.winRateDelta ?? 0;
-  const dR  = conf.avgR != null && unconf.avgR != null ? conf.avgR - unconf.avgR : null;
-  if (dWR > 0.05 || (dR != null && dR > 0.1))  return { text: 'CVD adds edge', color: 'var(--qb-ok)' };
-  if (dWR < -0.05 || (dR != null && dR < -0.1)) return { text: 'CVD penalises', color: 'var(--qb-bad)' };
-  return { text: 'no edge yet', color: 'var(--qb-warn)' };
-}
-
-function OFMiniStat({ label, value, color }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-      <span style={{ fontSize: 7, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</span>
-      <span className="qb-mono" style={{ fontSize: 12, color: color || 'var(--qb-text-hi)', fontWeight: 500 }}>{value ?? '--'}</span>
-    </div>
-  );
-}
-
-function OFStatBox({ label, accent, s, minN = OF_MIN_N }) {
-  const collecting = !s || s.n < minN;
-  const wr   = s?.winRate ?? null;
-  const net  = s?.netPnl  ?? null;
-  const avgR = s?.avgR    ?? null;
-  return (
-    <div style={{
-      flex: 1, minWidth: 160, padding: '10px 14px',
-      background: 'var(--qb-bg-panel-hi)',
-      border: `1px solid ${collecting ? 'var(--qb-border)' : accent}`,
-      borderRadius: 4, opacity: collecting ? 0.65 : 1,
-    }}>
-      <div className="qb-mono" style={{ fontSize: 8, color: accent || 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
-        {label}
-      </div>
-      {collecting ? (
-        <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-          {s?.n != null ? `n=${s.n} -- collecting (need ${minN})` : 'collecting'}
-        </div>
-      ) : (
-        <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <OFMiniStat label="n"    value={s.n} />
-          <OFMiniStat label="WR"   value={wr  != null ? `${Math.round(wr * 100)}%` : '--'}
-            color={wr >= 0.55 ? 'var(--qb-ok)' : wr >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
-          <OFMiniStat label="net"  value={net  != null ? fmtUSD(net, true) : '--'}
-            color={net >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-          <OFMiniStat label="avgR" value={avgR != null ? `${avgR >= 0 ? '+' : ''}${avgR.toFixed(2)}R` : '--'}
-            color={avgR != null ? (avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)') : null} />
         </div>
       )}
-    </div>
-  );
-}
-
-function OFTplCell({ s, minN = OF_MIN_N }) {
-  const collecting = !s || s.n < minN;
-  return (
-    <td style={{ padding: '5px 8px', textAlign: 'center', opacity: collecting ? 0.45 : 1 }}>
-      {collecting ? (
-        <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>
-          {s?.n != null ? `n=${s.n}` : '--'}
-        </span>
-      ) : (
-        <span className="qb-mono" style={{ fontSize: 9 }}>
-          <span style={{ color: 'var(--qb-text-mid)' }}>n={s.n} </span>
-          <span style={{ color: s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>
-            {Math.round(s.winRate * 100)}%
-          </span>
-          {' '}
-          <span style={{ color: s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>{fmtUSD(s.netPnl, true)}</span>
-          {s.avgR != null && (
-            <span style={{ color: s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>
-              {' '}{s.avgR >= 0 ? '+' : ''}{s.avgR.toFixed(2)}R
-            </span>
-          )}
-        </span>
-      )}
-    </td>
-  );
-}
-
-function OFSectionLabel({ children }) {
-  return (
-    <div className="qb-mono" style={{
-      fontSize: 8, color: 'var(--qb-text-faint)',
-      textTransform: 'uppercase', letterSpacing: 1.1,
-      padding: '10px 0 5px', marginTop: 4,
-      borderTop: '1px solid var(--qb-border)',
-    }}>{children}</div>
-  );
-}
-
-function OrderFlowPanel({ gridColumn = "1 / 4", style }) {
-  const [data, setData]           = useState(null);
-  const [fetchError, setError]    = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [ready, setReady]         = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('orderflow-summary')).then((res) => res.json());
-        if (!alive) return;
-        if (r?.ok) { setData(r); setError(null); }
-        else { setData(null); setError(r?.error || 'endpoint error'); }
-      } catch (e) {
-        if (alive) { setData(null); setError(e.message); }
-      }
-      if (alive) { setLastFetch(new Date()); setReady(true); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const panelProps = {
-    title: 'Order Flow Confirmation',
-    subtitle: 'cvd shadow -- not gating yet -- measuring',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'order-flow', defaultCollapsed: false,
-  };
-
-  if (!ready) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '18px 14px' }}><Placeholder msg="Loading order-flow data..." /></div>
-    </Panel>
-  );
-
-  if (fetchError && !data) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '14px 16px' }}>
-        <PlaceholderError msg={`/api/orderflow-summary: ${fetchError}`} />
-      </div>
-    </Panel>
-  );
-
-  if (!data) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '14px 16px', minHeight: 100 }}>
-        <div style={{
-          padding: '10px 14px', background: 'var(--qb-bg-void)',
-          border: '1px solid var(--qb-border)', borderRadius: 4,
-          fontSize: 10, color: 'var(--qb-text-mid)', lineHeight: 1.7,
-        }}>
-          <div style={{ fontWeight: 600, color: 'var(--qb-text-hi)', marginBottom: 4 }}>
-            Collecting order-flow confirmation data
+      <div id="jMsgs">
+        {messages.map((m,i) => (
+          <div key={i} className={`jM ${m.role === 'jarvis' ? 'j' : 'u'}`}>
+            <div className={`jMB ${m.urgency === 'critical' ? 'jUrgent' : m.urgency === 'elevated' ? 'jElevated' : ''}`}>
+              {m.role === 'jarvis' && <div className="px">JARVIS · {fmtTime(m.ts)}</div>}
+              {m.text}
+            </div>
           </div>
-          Needs resolved trades with CVD/footprint tags. Shadow records write on every
-          signal and are evaluated after trades close.
-          {lastFetch && (
-            <div style={{ marginTop: 6, fontSize: 8, color: 'var(--qb-text-faint)' }}>
-              Last checked: {lastFetch.toLocaleTimeString()}
+        ))}
+        {thinking && (
+          <div className="jM j">
+            <div className="jMB">
+              <div className="px">JARVIS · processing…</div>
+              <div className="jThink"><span/><span/><span/></div>
             </div>
-          )}
-        </div>
-      </div>
-    </Panel>
-  );
-
-  // -- data is ready ---------------------------------------------------
-  const conf    = data.byConfirms.confirmed;
-  const unconf  = data.byConfirms.unconfirmed;
-  const delta   = data.byConfirms.delta;
-  const divB    = data.byDivergence.bearish;
-  const divBull = data.byDivergence.bullish;
-  const divNone = data.byDivergence.none;
-  const ftrust  = data.fullTrustVsLow.fullTrust;
-  const ltrust  = data.fullTrustVsLow.lowTrust;
-  const cov     = data.coverage;
-
-  // combine bearish + bullish divergence
-  const divN    = (divB?.n ?? 0) + (divBull?.n ?? 0);
-  const divWins = (divB?.wins ?? 0) + (divBull?.wins ?? 0);
-  const divNet  = (divB?.netPnl ?? 0) + (divBull?.netPnl ?? 0);
-  const divWR   = divN > 0 ? divWins / divN : null;
-  const divAvgR = divN > 0
-    ? (((divB?.avgR ?? 0) * (divB?.n ?? 0) + (divBull?.avgR ?? 0) * (divBull?.n ?? 0)) / divN)
-    : null;
-  const divCombined = { n: divN, wins: divWins, netPnl: divNet, winRate: divWR, avgR: divAvgR };
-
-  const verdict  = ofVerdict(conf, unconf, delta);
-  const dAvgR    = conf.avgR != null && unconf.avgR != null ? conf.avgR - unconf.avgR : null;
-  const tplRows  = TEMPLATE_ORDER.filter((t) => data.byTemplate[t]);
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* coverage + freshness */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
-          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
-            {cov.totalClosed} closed trades
-            <span style={{ color: 'var(--qb-text-mid)' }}> ({cov.withCvdShadow} with CVD shadow, {cov.coveragePct}%)</span>
-          </span>
-          {cov.coveragePct < 50 && (
-            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)' }}>low coverage -- data still accumulating</span>
-          )}
-          <span style={{ flex: 1 }} />
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>shadow data -- not gating execution</span>
-          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 8 }}>{lastFetch.toLocaleTimeString()}</span>}
-        </div>
-
-        {/* ---- 1. SUMMARY BAR ------------------------------------------- */}
-        <OFSectionLabel>1 -- CVD Confirmation Overview</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <OFStatBox label="CVD Confirmed (slope = direction)" accent="var(--qb-ok)" s={conf} />
-          <OFStatBox label="CVD Unconfirmed (slope opposes)" accent="var(--qb-bad)" s={unconf} />
-
-          {/* edge verdict card */}
-          <div style={{
-            flex: 1, minWidth: 180, padding: '10px 14px',
-            background: 'var(--qb-bg-panel-hi)',
-            border: `1px solid ${verdict.color}`,
-            borderRadius: 4,
-          }}>
-            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
-              Edge (confirmed - unconfirmed)
-            </div>
-            <div className="qb-mono" style={{ fontSize: 15, fontWeight: 700, color: verdict.color, marginBottom: 6, letterSpacing: 0.4 }}>
-              {verdict.text.toUpperCase()}
-            </div>
-            {delta && conf.n >= OF_MIN_N && unconf.n >= OF_MIN_N ? (
-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                <OFMiniStat label="delta WR"
-                  value={`${delta.winRateDelta >= 0 ? '+' : ''}${(delta.winRateDelta * 100).toFixed(1)}%`}
-                  color={delta.winRateDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-                {dAvgR != null && (
-                  <OFMiniStat label="delta avgR"
-                    value={`${dAvgR >= 0 ? '+' : ''}${dAvgR.toFixed(2)}R`}
-                    color={dAvgR > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-                )}
-                <OFMiniStat label="delta net"
-                  value={fmtUSD(delta.netPnlDelta, true)}
-                  color={delta.netPnlDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-              </div>
-            ) : (
-              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
-                Need n&ge;{OF_MIN_N} per side. Confirmed: {conf.n} | Unconfirmed: {unconf.n}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ---- 2. PER-TEMPLATE TABLE ------------------------------------- */}
-        <OFSectionLabel>2 -- By Template -- which setups benefit from CVD?</OFSectionLabel>
-        {tplRows.length === 0 ? (
-          <Placeholder msg="No per-template data yet." />
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
-              <thead>
-                <tr style={{ color: 'var(--qb-text-faint)' }}>
-                  {['Template', 'Confirmed  n / WR / net / avgR', 'Unconfirmed  n / WR / net / avgR', 'Delta WR'].map((h, i) => (
-                    <th key={h} className="qb-mono" style={{
-                      padding: '3px 8px 6px', borderBottom: '1px solid var(--qb-border)',
-                      fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4,
-                      textAlign: i === 0 ? 'left' : 'center',
-                    }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {tplRows.map((t) => {
-                  const row  = data.byTemplate[t];
-                  const meta = TEMPLATE_DISPLAY[t];
-                  const c    = row.confirmed;
-                  const u    = row.unconfirmed;
-                  const hasC = c.n >= OF_MIN_N;
-                  const hasU = u.n >= OF_MIN_N;
-                  const dWR  = hasC && hasU ? c.winRate - u.winRate : null;
-                  return (
-                    <tr key={t} style={{ borderBottom: '1px solid var(--qb-border)' }}>
-                      <td style={{ padding: '5px 8px', color: 'var(--qb-text-hi)', whiteSpace: 'nowrap' }}>
-                        <span style={{ marginRight: 5, fontSize: 11 }}>{meta?.glyph || '.'}</span>
-                        <span style={{ fontSize: 9 }}>{meta?.label || t}</span>
-                      </td>
-                      <OFTplCell s={c} />
-                      <OFTplCell s={u} />
-                      <td style={{ padding: '5px 8px', textAlign: 'center' }}>
-                        {dWR != null ? (
-                          <span className="qb-mono" style={{
-                            fontSize: 10, fontWeight: 600,
-                            color: dWR > 0.04 ? 'var(--qb-ok)' : dWR < -0.04 ? 'var(--qb-bad)' : 'var(--qb-text-mid)',
-                          }}>
-                            {dWR >= 0 ? '+' : ''}{(dWR * 100).toFixed(1)}%
-                          </span>
-                        ) : <span style={{ color: 'var(--qb-text-faint)' }}>--</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
           </div>
         )}
-
-        {/* ---- 3. CVD DIVERGENCE SECTION --------------------------------- */}
-        <OFSectionLabel>3 -- CVD Divergence -- hollow-move trades vs clean entries</OFSectionLabel>
-        <div style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginBottom: 8, lineHeight: 1.5 }}>
-          Bearish div: price made new high but CVD did not (hollow LONG). Bullish div: price made new low but CVD did not (hollow SHORT).
-          Theory: divergent-tagged entries should underperform clean entries -- negative delta WR confirms the filter is worth using.
-        </div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <OFStatBox label="Any divergence (bearish + bullish combined)" accent="var(--qb-warn)" s={divCombined} />
-          <OFStatBox label="No divergence (clean)" accent="var(--qb-accent)" s={divNone} />
-          {divCombined.n >= OF_MIN_N && (divNone?.n ?? 0) >= OF_MIN_N && (() => {
-            const dWRDiv = divCombined.winRate - divNone.winRate;
-            const dRDiv  = divCombined.avgR != null && divNone.avgR != null ? divCombined.avgR - divNone.avgR : null;
-            return (
-              <div style={{
-                flex: 1, minWidth: 140, padding: '10px 14px',
-                background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4,
-              }}>
-                <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>
-                  Divergent vs clean delta
-                </div>
-                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                  <OFMiniStat label="delta WR"
-                    value={`${(dWRDiv * 100) >= 0 ? '+' : ''}${(dWRDiv * 100).toFixed(1)}%`}
-                    color={dWRDiv < 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-                  {dRDiv != null && (
-                    <OFMiniStat label="delta avgR"
-                      value={`${dRDiv >= 0 ? '+' : ''}${dRDiv.toFixed(2)}R`}
-                      color={dRDiv < 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-                  )}
-                </div>
-                <div style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 5 }}>
-                  negative = divergent trades underperform clean (theory confirmed)
-                </div>
-              </div>
-            );
-          })()}
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-          {[{ label: 'Bearish divergence', s: divB }, { label: 'Bullish divergence', s: divBull }].map(({ label, s }) => {
-            const ok = s && s.n >= 3;
-            return (
-              <div key={label} style={{
-                flex: 1, minWidth: 120, padding: '6px 10px',
-                background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 3,
-                opacity: ok ? 1 : 0.5,
-              }}>
-                <div className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>{label}</div>
-                <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)' }}>
-                  {!ok
-                    ? `n=${s?.n ?? 0}`
-                    : `n=${s.n}  ${Math.round(s.winRate * 100)}% WR  ${fmtUSD(s.netPnl, true)}` +
-                      (s.avgR != null ? `  ${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R` : '')
-                  }
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* ---- 4. FULL-TRUST INSTRUMENTS (footprint-capable) -------------- */}
-        <OFSectionLabel>4 -- Premium instruments (BTC / indices / Gold) -- CVD full-trust only</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <OFStatBox label="Full-trust -- CVD confirmed" accent="var(--qb-ok)" s={ftrust?.confirmed} />
-          <OFStatBox label="Full-trust -- CVD unconfirmed" accent="var(--qb-bad)" s={ftrust?.unconfirmed} />
-          <OFStatBox label="Full-trust -- all trades" accent="var(--qb-text-mid)" s={ftrust?.all} />
-          <OFStatBox label="Low-trust FX -- all combined" accent="var(--qb-text-faint)" s={ltrust} />
-        </div>
-        <div style={{ marginTop: 4, fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-          Footprint absorption / exhaustion data (Path 2) not yet implemented -- showing CVD split by instrument trust level.
-        </div>
-
-        {/* ---- 5. INSTRUMENT TRUST NOTE ----------------------------------- */}
-        <div className="qb-mono" style={{
-          marginTop: 8, padding: '6px 10px',
-          background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 3,
-          fontSize: 8, color: 'var(--qb-text-faint)', lineHeight: 1.7,
-        }}>
-          Order-flow data is{' '}
-          <span style={{ color: 'var(--qb-text-mid)' }}>full-trust</span>{' '}
-          on BTC, ETH, XAUUSD, NAS, US100, US500, SP500 (tick-accurate volume).
-          {' '}FX pairs are{' '}
-          <span style={{ color: 'var(--qb-warn)' }}>low-trust / excluded</span>
-          {' '}-- broker volume is not real tick data and does not reflect bid/ask delta. Do not interpret FX order-flow stats as meaningful.
-        </div>
-
-      </div>
-    </Panel>
-  );
-}
-
-
-// =====================================================================
-// 16 · ACTIVITY FEED  (v13.1 — collapsible)
-// =====================================================================
-
-function ActivityFeed({ activity }) {
-  const [collapsed, setCollapsed] = useState(false);
-
-  return (
-    <div style={{
-      borderTop: "1px solid var(--qb-border)",
-      padding: collapsed ? "6px 18px" : "8px 18px",
-      background: "var(--qb-bg-void)",
-      maxHeight: collapsed ? 30 : 110,
-      overflow: "hidden",
-      display: "flex",
-      flexDirection: "column",
-      transition: "max-height 160ms ease, padding 160ms ease",
-    }}>
-      <div style={{
-        display: "flex", alignItems: "center", gap: 8,
-        marginBottom: collapsed ? 0 : 4,
-      }}>
-        <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>
-          Activity feed · server log
-        </span>
-        {activity.length > 0 && (
-          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)" }}>
-            ({activity.length})
-          </span>
-        )}
-        <div style={{ flex: 1 }} />
-        <button
-          onClick={() => setCollapsed((v) => !v)}
-          title={collapsed ? "Show activity feed" : "Hide activity feed"}
-          className="qb-mono"
-          style={{
-            background: "transparent",
-            border: "1px solid var(--qb-border)",
-            borderRadius: 3,
-            color: "var(--qb-text-mid)",
-            cursor: "pointer",
-            fontSize: 10,
-            lineHeight: 1,
-            padding: "3px 8px",
-          }}
-        >
-          {collapsed ? "▲" : "▼"}
-        </button>
-      </div>
-      {!collapsed && (
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {activity.length === 0 ? (
-            <span style={{ fontSize: 10, color: "var(--qb-text-faint)", fontStyle: "italic" }}>
-              No recent activity. Rule changes and trade events will appear here.
-            </span>
-          ) : (
-            activity.slice(0, 12).map((a, i) => (
-              <ActivityRow key={i} entry={a} />
-            ))
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ActivityRow({ entry }) {
-  // Determine color by type
-  const typeColors = {
-    "trade-placed":     "var(--qb-ok)",
-    "manual-watching":  "var(--qb-accent)",
-    "skip":             "var(--qb-warn)",
-    "placement-failed": "var(--qb-bad)",
-  };
-  const color = typeColors[entry.type] || "var(--qb-text-mid)";
-
-  // Build summary line
-  let detail = "";
-  if (entry.asset) detail += entry.asset.toUpperCase() + " ";
-  if (entry.template) detail += entry.template + " ";
-  if (entry.direction) detail += entry.direction + " ";
-  if (entry.reason) detail += "· " + entry.reason;
-  if (entry.entry) detail += " @ " + entry.entry;
-
-  return (
-    <div className="qb-mono" style={{
-      fontSize: 10, color: "var(--qb-text-mid)",
-      display: "flex", gap: 10, padding: "1px 0",
-    }}>
-      <span style={{ color: "var(--qb-text-lo)", minWidth: 44 }}>{fmtTime(entry.ts)}</span>
-      <span style={{ color, minWidth: 110, textTransform: "uppercase", letterSpacing: 0.5 }}>
-        {entry.type || "event"}
-      </span>
-      <span style={{ color: "var(--qb-text-hi)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {detail.trim()}
-      </span>
-    </div>
-  );
-}
-
-// =====================================================================
-// 17 · PANEL FRAME + PLACEHOLDERS
-// =====================================================================
-
-function Panel({ title, subtitle, children, style, collapsible, panelId, defaultCollapsed }) {
-  const [collapsed, setCollapsed] = useState(() => {
-    if (!collapsible || !panelId) return false;
-    try { const s = localStorage.getItem('qb_panel_' + panelId); if (s !== null) return s === 'true'; } catch (_) {}
-    return defaultCollapsed === true;
-  });
-  const toggle = collapsible ? () => setCollapsed(c => {
-    const next = !c; try { localStorage.setItem('qb_panel_' + panelId, String(next)); } catch (_) {} return next;
-  }) : undefined;
-  return (
-    <div className="qb-panel" style={{ display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0, ...(style || {}) }}>
-      <div
-        style={{
-          padding: "10px 14px",
-          borderBottom: collapsed ? "none" : "1px solid var(--qb-border)",
-          display: "flex", alignItems: "center", gap: 12,
-          cursor: collapsible ? "pointer" : undefined,
-          userSelect: collapsible ? "none" : undefined,
-        }}
-        onClick={toggle}
-      >
-        {collapsible && <span style={{ fontSize: 9, color: "var(--qb-text-faint)", lineHeight: 1, flexShrink: 0, marginRight: 2 }}>{collapsed ? "▸" : "▾"}</span>}
-        <span className="qb-serif" style={{ fontSize: 14, color: "var(--qb-text-hi)", letterSpacing: 0.2 }}>
-          {title}
-        </span>
-        {subtitle && (
-          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>
-            {subtitle}
-          </span>
-        )}
-      </div>
-      {!collapsed && <div style={{ flex: 1, minHeight: 0 }}>{children}</div>}
-    </div>
-  );
-}
-
-function Placeholder({ msg }) {
-  return (
-    <div style={{
-      padding: "16px 8px", textAlign: "center",
-      fontSize: 10, color: "var(--qb-text-lo)",
-      fontStyle: "italic",
-    }}>{msg}</div>
-  );
-}
-
-function PlaceholderError({ msg }) {
-  return (
-    <div style={{
-      padding: "8px 10px", marginBottom: 8,
-      background: "var(--qb-warn-soft)",
-      border: "1px solid var(--qb-warn)",
-      borderRadius: 3,
-      fontSize: 10, color: "var(--qb-warn)",
-      fontFamily: "var(--qb-font-mono)",
-      letterSpacing: 0.3,
-    }}>▲ {msg}</div>
-  );
-}
-
-// =====================================================================
-// 18 · MODALS
-// =====================================================================
-
-function ModalShell({ title, onClose, children, width = 420 }) {
-  return (
-    <div
-      style={{
-        position: "fixed", inset: 0, zIndex: 1000,
-        background: "rgba(0,0,0,0.7)",
-        backdropFilter: "blur(4px)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="qb-panel"
-        style={{
-          width: `min(90vw, ${width}px)`, maxHeight: "85vh",
-          background: "var(--qb-bg-panel)",
-          display: "flex", flexDirection: "column",
-        }}
-      >
-        <div style={{
-          padding: "12px 16px",
-          borderBottom: "1px solid var(--qb-border)",
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-        }}>
-          <span className="qb-serif" style={{ fontSize: 16, color: "var(--qb-text-hi)" }}>{title}</span>
-          <button
-            onClick={onClose}
-            style={{
-              background: "transparent", border: "none", color: "var(--qb-text-mid)",
-              fontSize: 22, cursor: "pointer", lineHeight: 1, padding: 0,
-            }}
-          >×</button>
-        </div>
-        <div style={{ flex: 1, overflow: "auto" }}>{children}</div>
+        <div ref={endRef} />
       </div>
     </div>
   );
 }
 
-function AssetPicker({ watchlist, resolver, onAdd, onClose }) {
-  const [search, setSearch] = useState("");
-  const mapped = resolver?.mapped || [];
+// ─── Trade Log Modal ──────────────────────────────────────────────────────────
+function TradeLogModal({ trades, onClose }) {
+  const [filter, setFilter] = useState('ALL');
+  const [search, setSearch] = useState('');
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase().trim();
-    if (!q) return ASSET_CATALOG;
-    return ASSET_CATALOG.filter((a) =>
-      a.id.toLowerCase().includes(q) || a.name.toLowerCase().includes(q)
-    );
-  }, [search]);
-
-  return (
-    <ModalShell title="Add instrument" onClose={onClose} width={520}>
-      <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-        {resolver && !resolver.error && mapped.length === 0 && (
-          <PlaceholderError msg="No broker symbols detected. Run /api/symbol-resolver?action=sync" />
-        )}
-        <input
-          autoFocus type="text" placeholder="Search..."
-          value={search} onChange={(e) => setSearch(e.target.value)}
-          style={{
-            background: "var(--qb-bg-panel-hi)",
-            border: "1px solid var(--qb-border)",
-            borderRadius: 4, padding: "8px 12px",
-            color: "var(--qb-text-hi)", fontSize: 12,
-          }}
-        />
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 380, overflow: "auto" }}>
-          {filtered.map((a) => {
-            const isInWl = watchlist.includes(a.id);
-            const isMapped = mapped.length === 0 || mapped.includes(a.id);
-            return (
-              <button
-                key={a.id}
-                disabled={isInWl || !isMapped}
-                onClick={() => isMapped && !isInWl && onAdd(a.id)}
-                style={{
-                  background: isInWl ? "var(--qb-accent-soft)" : "var(--qb-bg-panel-hi)",
-                  border: `1px solid ${isInWl ? "var(--qb-accent)" : "var(--qb-border)"}`,
-                  borderRadius: 4, padding: "8px 12px",
-                  color: !isMapped ? "var(--qb-text-faint)" : "var(--qb-text-hi)",
-                  cursor: (isInWl || !isMapped) ? "default" : "pointer",
-                  textAlign: "left", fontFamily: "var(--qb-font-mono)",
-                  fontSize: 11,
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                  opacity: !isMapped ? 0.5 : 1,
-                }}
-              >
-                <span>
-                  <span style={{ fontWeight: 600 }}>{a.id.toUpperCase()}</span>
-                  <span style={{ color: "var(--qb-text-mid)", marginLeft: 8 }}>{a.name}</span>
-                </span>
-                <span style={{ fontSize: 9, color: isInWl ? "var(--qb-accent)" : "var(--qb-text-lo)" }}>
-                  {isInWl ? "✓ added" : !isMapped ? "not mapped" : "+ add"}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </ModalShell>
-  );
-}
-
-function EstopModal({ onConfirm, onCancel }) {
-  return (
-    <ModalShell title="Emergency Stop" onClose={onCancel} width={440}>
-      <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ fontSize: 13, color: "var(--qb-text-hi)", lineHeight: 1.5 }}>
-          E-STOP will <strong style={{ color: "var(--qb-bad)" }}>immediately halt all new trade entries</strong>.
-        </div>
-        <div className="qb-cell" style={{ padding: 10, fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 1.5 }}>
-          • New Pine alerts will be ignored<br/>
-          • Watcher still manages open positions (TP/SL/breakeven)<br/>
-          • You must manually clear E-STOP to resume<br/>
-          • Per-instrument rules are preserved
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={onConfirm} style={{
-            flex: 1, padding: "10px 0",
-            background: "var(--qb-bad)", color: "white",
-            border: "none", borderRadius: 4,
-            fontSize: 12, fontWeight: 700, letterSpacing: 1,
-            cursor: "pointer", textTransform: "uppercase",
-            fontFamily: "var(--qb-font-mono)",
-          }}>⛔ Activate E-STOP</button>
-          <button onClick={onCancel} style={{
-            flex: 1, padding: "10px 0",
-            background: "transparent", color: "var(--qb-text-mid)",
-            border: "1px solid var(--qb-border)", borderRadius: 4,
-            fontSize: 12, cursor: "pointer",
-            fontFamily: "var(--qb-font-mono)",
-            textTransform: "uppercase", letterSpacing: 1,
-          }}>Cancel</button>
-        </div>
-      </div>
-    </ModalShell>
-  );
-}
-
-function SettingsModal({ theme, setTheme, resolver, onClose }) {
-  const [tab, setTab] = useState("symbols");
-  return (
-    <ModalShell title="Settings" onClose={onClose} width={560}>
-      <div style={{ display: "flex", borderBottom: "1px solid var(--qb-border)" }}>
-        {[
-          { id: "symbols", label: "Symbol mapping" },
-          { id: "theme",   label: "Theme" },
-          { id: "about",   label: "About" },
-        ].map((t) => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{
-            flex: 1, padding: "10px 0",
-            background: tab === t.id ? "var(--qb-accent-soft)" : "transparent",
-            color: tab === t.id ? "var(--qb-accent)" : "var(--qb-text-mid)",
-            border: "none",
-            borderBottom: `2px solid ${tab === t.id ? "var(--qb-accent)" : "transparent"}`,
-            fontSize: 11, cursor: "pointer",
-            fontFamily: "var(--qb-font-mono)",
-            letterSpacing: 0.5, textTransform: "uppercase",
-          }}>{t.label}</button>
-        ))}
-      </div>
-      <div style={{ padding: 16, minHeight: 200 }}>
-        {tab === "symbols" && <SymbolMappingTab resolver={resolver} />}
-        {tab === "theme"   && <ThemeTab theme={theme} setTheme={setTheme} />}
-        {tab === "about"   && <AboutTab />}
-      </div>
-    </ModalShell>
-  );
-}
-
-function SymbolMappingTab({ resolver }) {
-  const [syncing, setSyncing] = useState(false);
-  const sync = async () => {
-    setSyncing(true);
-    try {
-      const r = await fetch(API("symbol-resolver?action=sync")).then((res) => res.json());
-      if (!r.ok) alert("Sync failed: " + (r.error || "unknown"));
-      else window.location.reload();
-    } catch (e) { alert("Error: " + e.message); }
-    setSyncing(false);
-  };
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <button onClick={sync} disabled={syncing} style={{
-        background: "var(--qb-accent-soft)", color: "var(--qb-accent)",
-        border: "1px solid var(--qb-accent)", borderRadius: 4,
-        padding: "8px 14px", fontSize: 11,
-        cursor: syncing ? "wait" : "pointer",
-        fontFamily: "var(--qb-font-mono)",
-        textTransform: "uppercase", letterSpacing: 0.5,
-      }}>{syncing ? "Syncing..." : "Sync from broker"}</button>
-      {resolver?.currentMap && (
-        <div className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", maxHeight: 280, overflow: "auto" }}>
-          {Object.entries(resolver.currentMap).map(([a, s]) => (
-            <div key={a} style={{ padding: "2px 0" }}>{a.padEnd(12)} → {s}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ThemeTab({ theme, setTheme }) {
-  const colorKeys = [
-    ["bgVoid",   "Void background"],
-    ["bgPanel",  "Panel background"],
-    ["accent",   "Accent (cyan)"],
-    ["ok",       "OK / profit"],
-    ["bad",      "Bad / loss"],
-    ["warn",     "Warning"],
-    ["textHi",   "Text primary"],
-    ["textMid",  "Text secondary"],
-  ];
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {colorKeys.map(([k, label]) => (
-        <div key={k} className="qb-cell" style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ flex: 1, fontSize: 12 }}>{label}</span>
-          <input
-            type="color"
-            value={theme[k]?.startsWith("#") ? theme[k] : "#000000"}
-            onChange={(e) => setTheme({ ...theme, [k]: e.target.value })}
-            style={{ width: 32, height: 24, border: "none", background: "transparent", cursor: "pointer" }}
-          />
-          <span className="qb-mono" style={{ fontSize: 10, color: "var(--qb-text-mid)", minWidth: 70, textAlign: "right" }}>
-            {theme[k]}
-          </span>
-        </div>
-      ))}
-      <button onClick={() => setTheme(DEFAULT_THEME)} style={{
-        marginTop: 8, background: "transparent", color: "var(--qb-text-mid)",
-        border: "1px solid var(--qb-border)", borderRadius: 3,
-        padding: "6px 12px", fontSize: 11, cursor: "pointer",
-        fontFamily: "var(--qb-font-mono)",
-      }}>Reset to defaults</button>
-    </div>
-  );
-}
-
-function AboutTab() {
-  return (
-    <div className="qb-mono" style={{ fontSize: 11, color: "var(--qb-text-mid)", lineHeight: 1.6 }}>
-      <div>Quantum Bot · v13.1 Pilot Dashboard</div>
-      <div>Algorithmic SMC trading · Pine v2.2 (6 templates incl. AM IFVG)</div>
-      <div style={{ marginTop: 8, color: "var(--qb-text-lo)" }}>
-        Backend endpoints:<br/>
-        · <span style={{ color: "var(--qb-text-mid)" }}>/api/rules</span> — pilot rules R/W<br/>
-        · <span style={{ color: "var(--qb-text-mid)" }}>/api/template-performance</span> — closed-trade stats<br/>
-        · <span style={{ color: "var(--qb-text-mid)" }}>/api/recognition-memory</span> — KNN memory<br/>
-        · <span style={{ color: "var(--qb-text-mid)" }}>/api/watched-setups</span> — manual-mode watches<br/>
-        · <span style={{ color: "var(--qb-text-mid)" }}>/api/broker</span> — account + positions<br/>
-        · <span style={{ color: "var(--qb-text-mid)" }}>/api/pivots</span> — H1 pivots (optional)
-      </div>
-    </div>
-  );
-}
-
-// =====================================================================
-// 19 · MOBILE LAYOUT  [v13.2]
-// =====================================================================
-// A phone-native layout that reuses every existing panel component.
-// Activated by useIsMobile() (<768px). The desktop layout is untouched.
-// Structure: sticky top bar (stats + always-reachable E-STOP) · tab strip
-// · scrollable content with one or two full-width panel cards per tab.
-// Panels are wrapped in single-cell CSS grids so they stretch exactly the
-// way they do inside the desktop grid — no panel internals are modified.
-
-function MobileLayout({
-  equity, balance, floatingPnL, dailyPnL, positions,
-  rules, rulesError, perf, perfError, activity, resolver,
-  prefs, setPrefs, theme, setTheme,
-  activeMode, tradingMode, estopActive, regime, setRegimeOverride, callRulesAction,
-}) {
-  const [tab, setTab]                   = useState("home");
-  const [estopOpen, setEstopOpen]       = useState(false);
-  const [assetModalOpen, setAssetModalOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  const setActiveModeAction  = (mode) => callRulesAction("set-active-mode",  { mode });
-  const setTradingModeAction = (mode) => callRulesAction("set-trading-mode", { mode });
-  const triggerEStop = () => { callRulesAction("emergency-stop", { enable: true }); setEstopOpen(false); };
-  const clearEStop   = () => callRulesAction("emergency-stop", { enable: false });
-
-  const TABS = [
-    { id: "home",   label: "Home",   glyph: "⌂" },
-    { id: "trades", label: "Trades", glyph: "≡" },
-    { id: "stats",  label: "Stats",  glyph: "▦" },
-    { id: "rules",  label: "Rules",  glyph: "⚙" },
-    { id: "feed",   label: "Feed",   glyph: "☰" },
-  ];
-
-  // Wrap a desktop panel so it stretches to a fixed-height card (same
-  // stretch mechanic as a desktop grid cell).
-  const card = (height, node) => (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr", height, flexShrink: 0 }}>{node}</div>
-  );
-
-  return (
-    <div style={{
-      width: "100vw", height: "100vh",
-      display: "flex", flexDirection: "column",
-      background: "var(--qb-bg-void)", overflow: "hidden",
-    }}>
-
-      <MobileTopBar
-        equity={equity} balance={balance}
-        floatingPnL={floatingPnL} dailyPnL={dailyPnL}
-        positions={positions}
-        rulesError={rulesError}
-        regime={regime}
-        estopActive={estopActive}
-        onOpenEstop={() => setEstopOpen(true)}
-        onClearEstop={clearEStop}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-
-      {/* TAB STRIP */}
-      <div style={{ display: "flex", borderBottom: "1px solid var(--qb-border)", background: "var(--qb-bg-panel)", flexShrink: 0 }}>
-        {TABS.map((t) => {
-          const on = tab === t.id;
-          return (
-            <button key={t.id} onClick={() => setTab(t.id)} className="qb-mono" style={{
-              flex: 1,
-              background: on ? "var(--qb-accent-soft)" : "transparent",
-              color: on ? "var(--qb-accent)" : "var(--qb-text-mid)",
-              border: "none",
-              borderBottom: `2px solid ${on ? "var(--qb-accent)" : "transparent"}`,
-              padding: "9px 0", fontSize: 9, cursor: "pointer",
-              letterSpacing: 0.5, textTransform: "uppercase",
-              display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-            }}>
-              <span style={{ fontSize: 15 }}>{t.glyph}</span>
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* CONTENT */}
-      <div style={{
-        flex: 1, minHeight: 0, overflowY: "auto",
-        WebkitOverflowScrolling: "touch",
-        padding: 10, display: "flex", flexDirection: "column", gap: 10,
-      }}>
-
-        {tab === "home" && (
-          <>
-            <MobileModes
-              activeMode={activeMode} tradingMode={tradingMode}
-              onSetActiveMode={setActiveModeAction} onSetTradingMode={setTradingModeAction}
-              disabled={!rules || estopActive}
-            />
-            {card("min(60vh, 420px)",
-              <AccountSafetyPanel
-                balance={balance} equity={equity}
-                floatingPnL={floatingPnL} dailyPnL={dailyPnL}
-                rules={rules} callRulesAction={callRulesAction}
-              />
-            )}
-            {card("min(64vh, 480px)",
-              <RegimePanel regime={regime} onSetOverride={setRegimeOverride} gridColumn="auto" compact />
-            )}
-          </>
-        )}
-
-        {tab === "trades" && (
-          <>
-            {card("min(52vh, 400px)", <OpenPositionsPanel positions={positions} />)}
-            {card("min(48vh, 360px)", <WatchesPanel tradingMode={tradingMode} callRulesAction={callRulesAction} />)}
-          </>
-        )}
-
-        {tab === "stats" && (
-          <>
-            {card("min(50vh, 380px)",
-              <TemplatesPanel rules={rules} perf={perf} perfError={perfError} callRulesAction={callRulesAction} />
-            )}
-            {card("min(54vh, 420px)",
-              <PerfHeatmapPanel perf={perf} watchlist={prefs.watchlist} gridColumn="auto" />
-            )}
-            {card("min(60vh, 480px)",
-              <RecognitionPanel perf={perf} gridColumn="auto" />
-            )}
-            {card("min(56vh, 440px)",
-              <TpHitPanel gridColumn="auto" />
-            )}
-            {card("min(52vh, 400px)",
-              <ORBComparePanel gridColumn="auto" />
-            )}
-            {card("auto",
-              <TradeDataPanel gridColumn="auto" />
-            )}
-            {card("auto",
-              <PerfRankingPanel gridColumn="auto" />
-            )}
-            {card("min(40vh, 300px)",
-              <AlexgHeartbeatPanel gridColumn="auto" />
-            )}
-            {card("min(60vh, 480px)",
-              <AlexgSignalsPanel gridColumn="auto" />
-            )}
-            {card("auto",
-              <EntryStyleComparisonPanel gridColumn="auto" />
-            )}
-            {card("auto",
-              <OrderFlowPanel gridColumn="auto" />
-            )}
-            {card("auto",
-              <ShadowAdvicePanel gridColumn="auto" />
-            )}
-          </>
-        )}
-
-        {tab === "rules" && (
-          <>
-            {card("min(64vh, 540px)",
-              <RulesPanel
-                rules={rules} rulesError={rulesError} callRulesAction={callRulesAction}
-                watchlist={prefs.watchlist}
-                onAddInstrument={() => setAssetModalOpen(true)}
-                onRemoveInstrument={(id) => setPrefs((p) => ({ ...p, watchlist: p.watchlist.filter((a) => a !== id) }))}
-              />
-            )}
-            {card("min(48vh, 360px)", <PivotsPanel watchlist={prefs.watchlist} />)}
-          </>
-        )}
-
-        {tab === "feed" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr", minHeight: "72vh", flexShrink: 0 }}>
-            <MobileActivity activity={activity} />
-          </div>
-        )}
-      </div>
-
-      {/* MODALS (reuse desktop modal components) */}
-      {assetModalOpen && (
-        <AssetPicker
-          watchlist={prefs.watchlist} resolver={resolver}
-          onAdd={(id) => {
-            setPrefs((p) => ({ ...p, watchlist: p.watchlist.includes(id) ? p.watchlist : [...p.watchlist, id] }));
-            setAssetModalOpen(false);
-          }}
-          onClose={() => setAssetModalOpen(false)}
-        />
-      )}
-      {estopOpen && <EstopModal onConfirm={triggerEStop} onCancel={() => setEstopOpen(false)} />}
-      {settingsOpen && (
-        <SettingsModal theme={theme} setTheme={setTheme} resolver={resolver} onClose={() => setSettingsOpen(false)} />
-      )}
-
-      {/* ─── v15.7 · Analyst Sidebar (mobile — full-width drawer) ─── */}
-      <AnalystSidebar mobile />
-    </div>
-  );
-}
-
-function MobileTopBar({
-  equity, balance, floatingPnL, dailyPnL, positions,
-  rulesError, regime, estopActive, onOpenEstop, onClearEstop, onOpenSettings,
-}) {
-  const openCount  = positions?.length || 0;
-  const floatColor = floatingPnL >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-  const dailyColor = dailyPnL   >= 0 ? "var(--qb-ok)" : "var(--qb-bad)";
-
-  return (
-    <div style={{
-      borderBottom: "1px solid var(--qb-border)",
-      background: "var(--qb-bg-void)",
-      padding: "10px 12px",
-      display: "flex", flexDirection: "column", gap: 8, flexShrink: 0,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span className="qb-serif" style={{ fontSize: 17, color: "var(--qb-text-hi)", letterSpacing: -0.5 }}>
-          Quantum<span style={{ color: "var(--qb-accent)" }}>·</span>Bot
-        </span>
-        {rulesError ? (
-          <span className="qb-mono" title={rulesError} style={{
-            fontSize: 8, padding: "2px 6px",
-            background: "var(--qb-warn-soft)", color: "var(--qb-warn)",
-            border: "1px solid var(--qb-warn)", borderRadius: 3, textTransform: "uppercase",
-          }}>▲ off</span>
-        ) : (
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--qb-ok)", display: "inline-block" }} title="online" />
-        )}
-        {regime && (regime.newsActive || regime.eventImminent || regime.level === "elevated" || regime.level === "crisis") && (() => {
-          const hot = regime.level === "crisis" || regime.newsActive || regime.eventImminent;
-          const c = hot ? "var(--qb-bad)" : "var(--qb-warn)";
-          let label;
-          if (regime.eventImminent && regime.nextEvent) {
-            const m = regime.nextEvent.minutesUntil;
-            label = `${regime.nextEvent.country} ${m > 0 ? m + "m" : m === 0 ? "NOW" : -m + "m"}`;
-          } else if (regime.newsActive) { label = "NEWS"; }
-          else { label = regime.level.toUpperCase(); }
-          const tip = (regime.reasons || []).join("  •  ") || "Elevated market risk";
-          return (
-            <span title={tip} className="qb-mono" style={{
-              display: "inline-flex", alignItems: "center", gap: 5,
-              fontSize: 8, fontWeight: 700, letterSpacing: 0.5, color: c,
-              padding: "2px 7px", borderRadius: 3, border: `1px solid ${c}`, textTransform: "uppercase",
-            }}>
-              <span className="qb-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: c, boxShadow: `0 0 6px ${c}` }} />
-              {label}
-            </span>
-          );
-        })()}
-        <div style={{ flex: 1 }} />
-        <TimeDisplay />
-        <button onClick={onOpenSettings} style={{
-          background: "transparent", color: "var(--qb-text-mid)",
-          border: "1px solid var(--qb-border)", borderRadius: 4,
-          padding: "4px 8px", fontSize: 13, cursor: "pointer",
-        }} title="Settings">⚙</button>
-      </div>
-
-      <div style={{ display: "flex", gap: 6 }}>
-        <MobileStat label="Equity" value={fmtUSD(equity)} />
-        <MobileStat label="Float"  value={fmtUSD(floatingPnL, true)} color={floatColor} />
-        <MobileStat label="Today"  value={fmtUSD(dailyPnL, true)} color={dailyColor} />
-        <MobileStat label="Open"   value={openCount} />
-      </div>
-
-      {estopActive ? (
-        <button onClick={onClearEstop} className="qb-mono qb-pulse" style={{
-          width: "100%", background: "var(--qb-bad)", color: "white",
-          border: "1px solid var(--qb-bad)", borderRadius: 6,
-          padding: "12px 0", fontSize: 13, fontWeight: 700, letterSpacing: 1,
-          cursor: "pointer", textTransform: "uppercase",
-        }}>⛔ E-STOP ACTIVE — TAP TO CLEAR</button>
-      ) : (
-        <button onClick={onOpenEstop} className="qb-mono" style={{
-          width: "100%", background: "var(--qb-bad-soft)", color: "var(--qb-bad)",
-          border: "1px solid var(--qb-bad)", borderRadius: 6,
-          padding: "11px 0", fontSize: 13, fontWeight: 700, letterSpacing: 1,
-          cursor: "pointer", textTransform: "uppercase",
-        }}>⛔ EMERGENCY STOP</button>
-      )}
-    </div>
-  );
-}
-
-function MobileStat({ label, value, color }) {
-  return (
-    <div className="qb-cell" style={{ flex: 1, padding: "6px 8px", display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-      <span style={{ fontSize: 8, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
-      <span className="qb-mono" style={{ fontSize: 13, color: color || "var(--qb-text-hi)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{value}</span>
-    </div>
-  );
-}
-
-function MobileModes({ activeMode, tradingMode, onSetActiveMode, onSetTradingMode, disabled }) {
-  const pill = (active, c) => ({
-    flex: "1 1 40%", minWidth: 0,
-    background: active ? c.soft : "transparent",
-    color: active ? c.fg : "var(--qb-text-mid)",
-    border: `1px solid ${active ? c.fg : "var(--qb-border)"}`,
-    borderRadius: 6, padding: "11px 8px",
-    fontSize: 11, fontWeight: 600,
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.4 : 1,
-    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-    textTransform: "uppercase", letterSpacing: 0.4,
-  });
-  const cur = ACTIVE_MODES.find((m) => m.id === activeMode);
-
-  return (
-    <div className="qb-panel" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10, flexShrink: 0 }}>
-      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>Setup mode</span>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {ACTIVE_MODES.map((m) => (
-          <button key={m.id} disabled={disabled} title={m.hint}
-            onClick={() => !disabled && onSetActiveMode(m.id)} className="qb-mono"
-            style={pill(m.id === activeMode, { soft: "var(--qb-accent-soft)", fg: "var(--qb-accent)" })}>
-            <span style={{ fontSize: 14 }}>{m.glyph}</span>{m.label}
-          </button>
-        ))}
-      </div>
-
-      <span style={{ fontSize: 9, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 1.5 }}>Execution</span>
-      <div style={{ display: "flex", gap: 6 }}>
-        {TRADING_MODES.map((m) => {
-          const on = m.id === tradingMode;
-          const c = m.id === "auto"
-            ? { soft: "var(--qb-ok-soft)", fg: "var(--qb-ok)" }
-            : { soft: "var(--qb-warn-soft)", fg: "var(--qb-warn)" };
-          return (
-            <button key={m.id} disabled={disabled} title={m.hint}
-              onClick={() => !disabled && onSetTradingMode(m.id)} className="qb-mono" style={pill(on, c)}>
-              <span style={{ fontSize: 14 }}>{m.glyph}</span>{m.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {cur && (
-        <span style={{ fontSize: 10, color: "var(--qb-text-lo)", fontStyle: "italic" }}>{cur.hint}</span>
-      )}
-    </div>
-  );
-}
-
-function MobileActivity({ activity }) {
-  return (
-    <Panel title="Activity" subtitle="server log">
-      <div style={{ padding: 10, height: "100%", overflowY: "auto" }}>
-        {(!activity || activity.length === 0) ? (
-          <Placeholder msg="No recent activity yet. Rule changes and trade events appear here." />
-        ) : (
-          activity.map((a, i) => <ActivityRow key={i} entry={a} />)
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// ANALYST SIDEBAR  v15.7
-// =====================================================================
-// Fixed right panel — backdrop-filter blur, 380px desktop / full-width mobile.
-// Toggle button always visible bottom-right. Slide transition.
-// GET /api/analyst serves the cached brief. Refresh button forces ?refresh=1.
-// Entirely read-only — no write paths, no rule mutations.
-
-const ANALYST_SECTIONS = ["health", "anomalies", "keepers", "bleeders", "collecting", "recommendations"];
-
-const HEALTH_COLORS = {
-  "healthy":            { fg: "var(--qb-ok)",   bg: "var(--qb-ok-soft)",   label: "HEALTHY" },
-  "broken-write":       { fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "BROKEN" },
-  "broken-join":        { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "JOIN BROKEN" },
-  "no-evaluator":       { fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "NO EVALUATOR" },
-  "stale":              { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "STALE" },
-  "collecting-low-join":{ fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)", label: "LOW JOIN" },
-  "validation-failed":  { fg: "var(--qb-bad)",  bg: "var(--qb-bad-soft)",  label: "FAILED" },
-};
-
-const SEVERITY_COLORS = {
-  warn: { fg: "var(--qb-warn)", bg: "var(--qb-warn-soft)" },
-  info: { fg: "var(--qb-text-mid)", bg: "var(--qb-bg-panel-hi)" },
-};
-
-function AnalystSidebar({ mobile = false }) {
-  const [open, setOpen]     = useState(false);
-  const [brief, setBrief]   = useState(null);
-  const [loading, setLoad]  = useState(false);
-  const [err, setErr]       = useState(null);
-  const [section, setSection] = useState("health");
-
-  const load = useCallback(async (force = false) => {
-    setLoad(true);
-    setErr(null);
-    try {
-      const url = force ? "/api/analyst?refresh=1" : "/api/analyst";
-      const res = await fetch(url).then(r => r.json());
-      if (res.ok) setBrief(res);
-      else setErr(res.error || "endpoint error");
-    } catch (e) {
-      setErr(e.message || "fetch failed");
-    } finally {
-      setLoad(false);
+    let arr = trades || [];
+    if (filter !== 'ALL') arr = arr.filter(t => t.outcome === filter);
+    if (search) {
+      const q = search.toLowerCase();
+      arr = arr.filter(t => (t.asset||'').includes(q) || (t.template||'').includes(q) || (t.session||'').includes(q));
     }
-  }, []);
+    return arr.slice().sort((a,b) => (b.closedAt||0) - (a.closedAt||0));
+  }, [trades, filter, search]);
 
-  // Load on first open; don't auto-refresh on subsequent opens (use cache)
-  const hasLoaded = useRef(false);
-  useEffect(() => {
-    if (open && !hasLoaded.current) {
-      hasLoaded.current = true;
-      load(false);
-    }
-  }, [open, load]);
-
-  const unhealthyCount = brief
-    ? Object.values(brief.shadowHealth || {}).filter(h => h.statusCode !== "healthy").length
-    : 0;
-  const anomalyCount = brief?.anomalies?.length || 0;
+  const wins   = filtered.filter(t => t.outcome === 'WIN').length;
+  const losses = filtered.filter(t => t.outcome === 'LOSS').length;
+  const wrLive = filtered.length ? pct(wins/filtered.length,0) : '—';
+  const rVals  = filtered.map(t => t.pnlR).filter(v => typeof v === 'number' && isFinite(v));
+  const avgR   = rVals.length ? (rVals.reduce((a,b)=>a+b,0)/rVals.length).toFixed(2) : '—';
 
   return (
-    <>
-      {/* Toggle button — always visible */}
-      <button
-        onClick={() => setOpen(v => !v)}
-        title="Analyst Sidebar"
-        style={{
-          position: "fixed", bottom: 22, right: (!mobile && open) ? 396 : 16,
-          zIndex: 1001, width: 42, height: 42,
-          borderRadius: "50%",
-          background: open ? "var(--qb-accent)" : "var(--qb-bg-panel)",
-          border: `1px solid ${open ? "var(--qb-accent)" : "var(--qb-border-hi)"}`,
-          color: open ? "#06070a" : "var(--qb-text-mid)",
-          fontSize: 18, cursor: "pointer",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
-          transition: "right 280ms cubic-bezier(.4,0,.2,1), background 180ms, border-color 180ms",
-        }}
-      >
-        {open ? "×" : "⚡"}
-        {/* Badge for broken health or anomalies */}
-        {!open && (unhealthyCount + anomalyCount) > 0 && (
-          <span style={{
-            position: "absolute", top: -4, right: -4,
-            width: 16, height: 16, borderRadius: "50%",
-            background: "var(--qb-bad)", border: "2px solid var(--qb-bg-void)",
-            fontSize: 9, color: "white", fontWeight: 700,
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}>
-            {Math.min(9, unhealthyCount + anomalyCount)}
-          </span>
-        )}
-      </button>
-
-      {/* Sidebar panel */}
-      <div style={{
-        position: "fixed", top: 0, right: 0, bottom: 0,
-        width: mobile ? "100vw" : 380,
-        zIndex: 1000,
-        transform: open ? "translateX(0)" : "translateX(100%)",
-        transition: "transform 280ms cubic-bezier(.4,0,.2,1)",
-        display: "flex", flexDirection: "column",
-        background: "rgba(6,7,10,0.94)",
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-        borderLeft: "1px solid var(--qb-border-hi)",
-        boxShadow: "-8px 0 32px rgba(0,0,0,0.4)",
-      }}>
-        {/* Header */}
-        <div style={{
-          padding: "14px 16px 10px",
-          borderBottom: "1px solid var(--qb-border)",
-          flexShrink: 0,
-          display: "flex", alignItems: "center", gap: 10,
-        }}>
-          <span className="qb-serif" style={{ fontSize: 15, color: "var(--qb-text-hi)" }}>
-            Analyst
-          </span>
-          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", letterSpacing: 1, textTransform: "uppercase" }}>
-            read-only
-          </span>
-          {brief?._fromCache && (
-            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-lo)", marginLeft: mobile ? undefined : "auto" }}>
-              cached · {brief.generatedAt ? Math.round((Date.now() - brief.generatedAt) / 60000) + "m ago" : ""}
-            </span>
-          )}
-          {mobile && (
-            <button
-              onClick={() => setOpen(false)}
-              style={{
-                marginLeft: "auto", background: "transparent",
-                border: "1px solid var(--qb-border)", borderRadius: 3,
-                color: "var(--qb-text-mid)", fontSize: 12,
-                padding: "3px 10px", cursor: "pointer",
-              }}
-            >✕</button>
-          )}
+    <div className="overlay" onClick={e => e.target.className.includes('overlay') && onClose()}>
+      <div className="modCard logCard">
+        <div className="modH">
+          <span className="modHN">📊 Trade Log · {trades?.length || 0} total</span>
+          <span style={{fontFamily:'var(--mono)',fontSize:9,color:'var(--dim)'}}>WR {wrLive} · Avg R {avgR}R · {wins}W / {losses}L</span>
+          <button className="modClose" onClick={onClose}>✕</button>
         </div>
-
-        {/* Section tabs */}
-        <div style={{
-          display: "flex", gap: 0,
-          borderBottom: "1px solid var(--qb-border)",
-          overflowX: "auto", flexShrink: 0,
-        }}>
-          {ANALYST_SECTIONS.map(s => {
-            const badge =
-              s === "health"          ? (unhealthyCount > 0 ? unhealthyCount : null) :
-              s === "anomalies"       ? (anomalyCount > 0 ? anomalyCount : null) :
-              s === "keepers"         ? (brief?.perf?.keepers?.length || null) :
-              s === "bleeders"        ? (brief?.perf?.bleeders?.length || null) :
-              s === "recommendations" ? (brief?.recommendations?.length || null) :
-              null;
-            return (
-              <button key={s} onClick={() => setSection(s)} className="qb-mono" style={{
-                flex: "1 1 0", minWidth: 50,
-                padding: "7px 6px", fontSize: 9, letterSpacing: 0.5,
-                textTransform: "uppercase",
-                background: "transparent",
-                border: "none",
-                borderBottom: section === s ? "2px solid var(--qb-accent)" : "2px solid transparent",
-                color: section === s ? "var(--qb-accent)" : "var(--qb-text-faint)",
-                cursor: "pointer",
-                position: "relative",
-              }}>
-                {s}
-                {badge != null && (
-                  <span style={{
-                    position: "absolute", top: 3, right: 3,
-                    width: 12, height: 12, borderRadius: "50%",
-                    background: s === "bleeders" || s === "anomalies" ? "var(--qb-bad)" : "var(--qb-accent)",
-                    fontSize: 7, color: "#06070a", fontWeight: 700,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    {badge > 9 ? "9+" : badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
-          {loading && <AnalystLoading />}
-          {!loading && err && <AnalystError msg={err} onRetry={() => load(false)} />}
-          {!loading && !err && !brief && (
-            <div style={{ padding: 20, textAlign: "center", fontSize: 11, color: "var(--qb-text-lo)" }}>
-              No data yet.
-            </div>
-          )}
-          {!loading && !err && brief && (
-            <>
-              {section === "health"          && <AnalystHealthSection  health={brief.shadowHealth} sources={brief.sources} />}
-              {section === "anomalies"       && <AnalystAnomaliesSection anomalies={brief.anomalies} />}
-              {section === "keepers"         && <AnalystKeepersBleeder items={brief.perf?.keepers   || []} kind="keeper"  perf={brief.perf} />}
-              {section === "bleeders"        && <AnalystKeepersBleeder items={brief.perf?.bleeders  || []} kind="bleeder" perf={brief.perf} />}
-              {section === "collecting"      && <AnalystCollecting items={brief.perf?.collecting || []} perf={brief.perf} />}
-              {section === "recommendations" && <AnalystRecommendations recs={brief.recommendations || []} />}
-            </>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div style={{
-          flexShrink: 0,
-          padding: "8px 12px",
-          borderTop: "1px solid var(--qb-border)",
-          display: "flex", alignItems: "center", gap: 10,
-          background: "rgba(6,7,10,0.6)",
-        }}>
-          <span className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", flex: 1 }}>
-            {brief?.generatedAt
-              ? `Generated ${new Date(brief.generatedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} UTC`
-              : "—"}
-          </span>
-          <button
-            onClick={() => load(true)}
-            disabled={loading}
-            className="qb-mono"
-            style={{
-              background: "transparent",
-              border: "1px solid var(--qb-border)",
-              borderRadius: 3,
-              color: loading ? "var(--qb-text-lo)" : "var(--qb-text-mid)",
-              fontSize: 10, padding: "4px 10px",
-              cursor: loading ? "not-allowed" : "pointer",
-              letterSpacing: 0.5, textTransform: "uppercase",
-            }}
-          >
-            {loading ? "loading…" : "↺ refresh"}
-          </button>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ── Analyst sub-sections ──────────────────────────────────────────────────────
-
-function AnalystLoading() {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 0" }}>
-      {[1, 2, 3].map(i => (
-        <div key={i} className="qb-pulse" style={{
-          height: 52, borderRadius: 4,
-          background: "var(--qb-bg-panel-hi)",
-          border: "1px solid var(--qb-border)",
-        }} />
-      ))}
-    </div>
-  );
-}
-
-function AnalystError({ msg, onRetry }) {
-  return (
-    <div style={{
-      padding: "12px 14px", borderRadius: 4,
-      background: "var(--qb-bad-soft)", border: "1px solid var(--qb-bad)",
-      fontSize: 11, color: "var(--qb-bad)",
-      display: "flex", flexDirection: "column", gap: 8,
-    }}>
-      <span className="qb-mono">▲ {msg}</span>
-      <button onClick={onRetry} className="qb-mono" style={{
-        alignSelf: "flex-start", background: "transparent",
-        border: "1px solid var(--qb-bad)", color: "var(--qb-bad)",
-        borderRadius: 3, padding: "4px 10px", fontSize: 10,
-        cursor: "pointer", textTransform: "uppercase", letterSpacing: 0.5,
-      }}>retry</button>
-    </div>
-  );
-}
-
-function AnalystHealthSection({ health, sources }) {
-  const entries = Object.entries(health || {});
-  if (!entries.length) return <Placeholder msg="No health data." />;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <AnalystLabel>SHADOW SYSTEMS</AnalystLabel>
-      {entries.map(([sysName, h]) => {
-        const cfg = HEALTH_COLORS[h.statusCode] || HEALTH_COLORS["healthy"];
-        return (
-          <div key={sysName} className="qb-cell" style={{ padding: "9px 11px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <span style={{
-                fontSize: 8, fontWeight: 700, letterSpacing: 0.8, padding: "1px 5px",
-                borderRadius: 2, background: cfg.bg, color: cfg.fg, fontFamily: "var(--qb-font-mono)",
-                textTransform: "uppercase", flexShrink: 0,
-              }}>{cfg.label}</span>
-              <span style={{ fontSize: 11, color: "var(--qb-text-hi)", fontWeight: 500, flex: 1, minWidth: 0,
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {h.label}
-              </span>
-            </div>
-            <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", lineHeight: 1.6 }}>
-              written {h.written} · joined {h.joined} · resolved {h.resolved}
-              {h.ageHours != null && ` · last signal ${h.ageHours}h ago`}
-            </div>
-            {h.statusCode !== "healthy" && (
-              <div className="qb-mono" style={{ fontSize: 9, color: cfg.fg, marginTop: 3, lineHeight: 1.4 }}>
-                {h.status}
-              </div>
-            )}
-            {h.neededForVerdict != null && h.neededForVerdict > 0 && (
-              <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-faint)", marginTop: 2 }}>
-                {h.neededForVerdict} more resolved records to first n=8 verdict (largest bucket: {h.maxBucketN})
-              </div>
-            )}
-            {h.neededForVerdict === 0 && h.statusCode !== "validation-failed" && (
-              <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-ok)", marginTop: 2 }}>
-                ● n≥8 reached — verdicts available
-              </div>
-            )}
-          </div>
-        );
-      })}
-
-      <AnalystLabel style={{ marginTop: 6 }}>DATA SOURCES</AnalystLabel>
-      {Object.entries(sources || {}).map(([src, s]) => (
-        <div key={src} className="qb-mono" style={{
-          fontSize: 9, display: "flex", justifyContent: "space-between",
-          padding: "3px 0", borderBottom: "1px solid var(--qb-border)",
-          color: s.available ? "var(--qb-text-mid)" : "var(--qb-warn)",
-        }}>
-          <span>{src}</span>
-          <span>{s.available ? "ok" : `unavailable: ${s.error || "?"}`}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AnalystAnomaliesSection({ anomalies }) {
-  if (!anomalies?.length) {
-    return (
-      <div style={{ padding: "18px 0", textAlign: "center" }}>
-        <span style={{ fontSize: 22 }}>✓</span>
-        <div style={{ fontSize: 11, color: "var(--qb-ok)", marginTop: 6 }}>No anomalies detected.</div>
-      </div>
-    );
-  }
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <AnalystLabel>{anomalies.length} ANOMAL{anomalies.length === 1 ? "Y" : "IES"}</AnalystLabel>
-      {anomalies.map((a, i) => {
-        const cfg = SEVERITY_COLORS[a.severity] || SEVERITY_COLORS.info;
-        return (
-          <div key={i} style={{
-            padding: "8px 10px", borderRadius: 4,
-            background: cfg.bg, border: `1px solid ${cfg.fg}22`,
-          }}>
-            <div className="qb-mono" style={{
-              fontSize: 9, fontWeight: 700, color: cfg.fg,
-              textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 3,
-            }}>
-              [{a.severity?.toUpperCase() || "INFO"}] {a.code}
-            </div>
-            <div style={{ fontSize: 10, color: "var(--qb-text-hi)", lineHeight: 1.5 }}>
-              {a.message}
-            </div>
-            {a.tradeIds?.length > 0 && (
-              <div className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-lo)", marginTop: 4 }}>
-                {a.tradeIds.join(", ")}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function AnalystKeepersBleeder({ items, kind, perf }) {
-  if (perf?.available === false) {
-    return (
-      <div style={{
-        padding: "12px 14px", borderRadius: 4,
-        background: "var(--qb-bg-panel-hi)", border: "1px solid var(--qb-border)",
-      }}>
-        <div className="qb-mono" style={{ fontSize: 10, color: "var(--qb-warn)" }}>
-          data source unavailable
-        </div>
-        {perf?.error && (
-          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", marginTop: 4 }}>
-            {perf.error}
-          </div>
-        )}
-      </div>
-    );
-  }
-  if (!items?.length) {
-    return <Placeholder msg={`No ${kind}s above n=8 threshold.`} />;
-  }
-  const isKeeper  = kind === "keeper";
-  const accentFg  = isKeeper ? "var(--qb-ok)"  : "var(--qb-bad)";
-  const accentBg  = isKeeper ? "var(--qb-ok-soft)" : "var(--qb-bad-soft)";
-  const label     = isKeeper ? "KEEPERS" : "BLEEDERS";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <AnalystLabel>{label} (n≥{8})</AnalystLabel>
-      {items.map((item, i) => {
-        const belowBE = item.wrVsBE != null && item.wrVsBE < 0;
-        return (
-          <div key={i} className="qb-cell" style={{ padding: "9px 11px" }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
-              <span style={{ fontSize: 11, color: "var(--qb-text-hi)", fontWeight: 600 }}>
-                {item.template}
-              </span>
-              {item.tier && (
-                <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)" }}>
-                  tier {item.tier}
-                </span>
-              )}
-              {item.session && (
-                <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)" }}>
-                  {item.session}
-                </span>
-              )}
-              <span className="qb-mono" style={{ fontSize: 9, marginLeft: "auto", color: "var(--qb-text-lo)" }}>
-                n={item.n}
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <AnalystStat label="WR" value={fmtPct((item.winRate || 0) * 100, 1, false)} color={accentFg} />
-              {item.breakEvenWR != null && (
-                <AnalystStat label="BE" value={fmtPct(item.breakEvenWR * 100, 1, false)} color="var(--qb-text-lo)" />
-              )}
-              <AnalystStat label="net" value={fmtUSD(item.netPnl, true)} color={item.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"} />
-              {item.avgR != null && (
-                <AnalystStat label="avgR" value={(item.avgR >= 0 ? "+" : "") + item.avgR.toFixed(2)} color={item.avgR >= 0 ? "var(--qb-ok)" : "var(--qb-bad)"} />
-              )}
-            </div>
-            {belowBE && !isKeeper && (
-              <div className="qb-mono" style={{ fontSize: 8, color: "var(--qb-bad)", marginTop: 4 }}>
-                WR below break-even by {fmtPct(Math.abs(item.wrVsBE) * 100, 1, false)}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function AnalystCollecting({ items, perf }) {
-  if (perf?.available === false) {
-    return (
-      <div style={{
-        padding: "12px 14px", borderRadius: 4,
-        background: "var(--qb-bg-panel-hi)", border: "1px solid var(--qb-border)",
-      }}>
-        <div className="qb-mono" style={{ fontSize: 10, color: "var(--qb-warn)" }}>
-          data source unavailable
-        </div>
-        {perf?.error && (
-          <div className="qb-mono" style={{ fontSize: 9, color: "var(--qb-text-lo)", marginTop: 4 }}>
-            {perf.error}
-          </div>
-        )}
-      </div>
-    );
-  }
-  if (!items?.length) return <Placeholder msg="No collecting buckets." />;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <AnalystLabel>COLLECTING (n&lt;8 — not ranked)</AnalystLabel>
-      <div className="qb-mono" style={{
-        fontSize: 9, color: "var(--qb-text-lo)", marginBottom: 4, lineHeight: 1.4,
-      }}>
-        Data accumulating. Figures shown for reference only — not actionable until n≥8.
-      </div>
-      {items.map((item, i) => (
-        <div key={i} className="qb-cell" style={{ padding: "8px 10px", opacity: 0.6 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 3 }}>
-            <span style={{ fontSize: 10, color: "var(--qb-text-mid)" }}>
-              {item.template}
-              {item.tier ? ` ×${item.tier}` : ""}
-              {item.session ? ` ×${item.session}` : ""}
-            </span>
-            <span className="qb-mono" style={{ fontSize: 8, color: "var(--qb-text-faint)", marginLeft: "auto" }}>
-              n={item.n} — need {Math.max(0, 8 - item.n)} more
-            </span>
-          </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            <AnalystStat label="WR" value={fmtPct((item.winRate || 0) * 100, 1, false)} color="var(--qb-text-lo)" />
-            <AnalystStat label="net" value={fmtUSD(item.netPnl, true)} color="var(--qb-text-lo)" />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AnalystRecommendations({ recs }) {
-  const [expanded, setExpanded] = useState({});
-  if (!recs?.length) return <Placeholder msg="No recommendations." />;
-  const typeColor = {
-    bleeder:           "var(--qb-bad)",
-    keeper:            "var(--qb-ok)",
-    "shadow-health":   "var(--qb-warn)",
-    "dead-template":   "var(--qb-warn)",
-    "fires-no-trades": "var(--qb-warn)",
-  };
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <AnalystLabel>{recs.length} RECOMMENDATION{recs.length !== 1 ? "S" : ""}</AnalystLabel>
-      {recs.map((rec, i) => {
-        const c            = typeColor[rec.type] || "var(--qb-text-mid)";
-        const isOpen       = !!expanded[i];
-        const hasBreakdown = Array.isArray(rec.byInstrument) && rec.byInstrument.length > 0;
-        return (
-          <div key={i} style={{
-            padding: "9px 11px", borderRadius: 4,
-            background: "var(--qb-bg-panel-hi)",
-            border: "1px solid var(--qb-border)",
-            borderLeft: `3px solid ${c}`,
-          }}>
-            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 5 }}>
-              <span className="qb-mono" style={{
-                fontSize: 8, fontWeight: 700, letterSpacing: 0.8, padding: "1px 5px",
-                borderRadius: 2, color: "#06070a",
-                background: rec.tag === "CONFIRMED" ? c : "var(--qb-text-lo)",
-                textTransform: "uppercase", flexShrink: 0,
-              }}>{rec.tag}</span>
-              <span className="qb-mono" style={{
-                fontSize: 8, color: c, textTransform: "uppercase", letterSpacing: 0.6,
-              }}>{rec.type}</span>
-            </div>
-            <div style={{ fontSize: 10, color: "var(--qb-text-hi)", lineHeight: 1.55 }}>
-              {rec.message}
-            </div>
-            {hasBreakdown && (
-              <button
-                onClick={() => setExpanded(prev => ({ ...prev, [i]: !isOpen }))}
-                style={{
-                  marginTop: 5, background: "none", border: "none", cursor: "pointer",
-                  padding: 0, fontSize: 9, color: "var(--qb-text-lo)",
-                  fontFamily: "var(--qb-font-mono)", letterSpacing: 0.4,
-                }}
-              >
-                {isOpen ? "▴ hide" : "▾ by instrument"}
-              </button>
-            )}
-            {isOpen && hasBreakdown && (
-              <div style={{ marginTop: 5, display: "flex", flexDirection: "column", gap: 2 }}>
-                {rec.byInstrument.map((inst, j) => (
-                  <div key={j} className="qb-mono" style={{
-                    display: "flex", gap: 8, alignItems: "center", fontSize: 9,
-                    padding: "3px 6px", borderRadius: 2,
-                    background: "var(--qb-bg-panel)",
-                    opacity: inst.insufficient ? 0.65 : 1,
-                  }}>
-                    <span style={{ minWidth: 64, color: "var(--qb-text-mid)", fontWeight: 600 }}>
-                      {inst.asset}
-                    </span>
-                    <span style={{ color: "var(--qb-text-lo)" }}>
-                      n={inst.n}{inst.insufficient ? "★" : ""}
-                    </span>
-                    <span style={{ color: "var(--qb-text-faint)" }}>
-                      {inst.wins}W/{inst.losses}L
-                    </span>
-                    <span style={{
-                      marginLeft: "auto",
-                      color: inst.netPnl >= 0 ? "var(--qb-ok)" : "var(--qb-bad)",
-                    }}>
-                      {inst.netPnl >= 0 ? "+" : ""}{inst.netPnl.toFixed(2)}
-                    </span>
-                    <span style={{ color: "var(--qb-text-lo)" }}>
-                      {(inst.winRate * 100).toFixed(0)}%
-                    </span>
-                  </div>
-                ))}
-                {rec.byInstrument.some(inst => inst.insufficient) && (
-                  <div className="qb-mono" style={{
-                    fontSize: 8, color: "var(--qb-text-faint)", marginTop: 2,
-                  }}>
-                    ★ n&lt;8 — insufficient data, do not restrict on this sample
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Micro helpers ─────────────────────────────────────────────────────────────
-
-function AnalystLabel({ children, style }) {
-  return (
-    <div className="qb-mono" style={{
-      fontSize: 8, letterSpacing: 1.2, textTransform: "uppercase",
-      color: "var(--qb-text-faint)", paddingBottom: 3,
-      borderBottom: "1px solid var(--qb-border)",
-      ...(style || {}),
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function AnalystStat({ label, value, color }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-      <span style={{ fontSize: 7, color: "var(--qb-text-faint)", textTransform: "uppercase", letterSpacing: 0.8, fontFamily: "var(--qb-font-mono)" }}>
-        {label}
-      </span>
-      <span className="qb-mono" style={{ fontSize: 11, color: color || "var(--qb-text-mid)", fontWeight: 500 }}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-// =====================================================================
-// 15d · SESSION-CONTEXT SHADOW PANEL  (v15.8 Part 1)
-// =====================================================================
-// Reads /api/session-context-summary.
-// Shows three splits: liqCoincidence, withPriorSession, asianPosition.
-// n < 8 cells suppressed and shown as "collecting".
-
-const SC_MIN_N = 8;
-
-function ScStatCell({ label, s }) {
-  const thin = !s || s.n < SC_MIN_N;
-  return (
-    <div style={{
-      flex: 1, minWidth: 140, padding: '10px 14px',
-      background: 'var(--qb-bg-panel-hi)',
-      border: `1px solid ${thin ? 'var(--qb-border)' : 'var(--qb-border-hi)'}`,
-      borderRadius: 4, opacity: thin ? 0.65 : 1,
-    }}>
-      <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
-        {label}
-      </div>
-      {thin ? (
-        <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-          {s?.n != null ? `n=${s.n} — collecting (need ${SC_MIN_N})` : 'collecting'}
-        </div>
-      ) : (
-        <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <OFMiniStat label="n"    value={s.n} />
-          <OFMiniStat label="WR"   value={s.winRate != null ? `${Math.round(s.winRate * 100)}%` : '--'}
-            color={s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
-          <OFMiniStat label="net"  value={s.netPnl  != null ? fmtUSD(s.netPnl, true) : '--'}
-            color={s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-          <OFMiniStat label="avgR" value={s.avgR    != null ? `${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R` : '--'}
-            color={s.avgR != null ? (s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)') : null} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ScDeltaBadge({ a, b }) {
-  if (!a || !b || a.n < SC_MIN_N || b.n < SC_MIN_N) return null;
-  const dWR = a.winRate - b.winRate;
-  return (
-    <span className="qb-mono" style={{
-      fontSize: 9, fontWeight: 600, marginLeft: 8,
-      color: Math.abs(dWR) < 0.04 ? 'var(--qb-text-faint)' : dWR > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)',
-    }}>
-      ({dWR >= 0 ? '+' : ''}{(dWR * 100).toFixed(1)}% WR delta)
-    </span>
-  );
-}
-
-function SessionCtxPanel({ gridColumn = '1 / 4', style }) {
-  const [data, setData]           = useState(null);
-  const [fetchError, setError]    = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [ready, setReady]         = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('session-context-summary')).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok) { setData(r); setError(null); }
-        else { setData(null); setError(r?.error || 'endpoint error'); }
-      } catch (e) {
-        if (alive) { setData(null); setError(e.message); }
-      }
-      if (alive) { setLastFetch(new Date()); setReady(true); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const panelProps = {
-    title: 'Session Context',
-    subtitle: 'liq · asian · london — shadow only',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'session-ctx', defaultCollapsed: false,
-  };
-
-  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading session context..." /></div></Panel>;
-  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/session-context-summary: ${fetchError}`} /></div></Panel>;
-
-  if (!data) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '14px 16px' }}>
-        <div style={{ padding: '10px 14px', background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 4, fontSize: 10, color: 'var(--qb-text-mid)' }}>
-          <div style={{ fontWeight: 600, color: 'var(--qb-text-hi)', marginBottom: 4 }}>Collecting session context data</div>
-          Shadow records write on every signal. n≥8 required per bucket before stats are shown.
-        </div>
-      </div>
-    </Panel>
-  );
-
-  const cov = data.coverage;
-  const liq = data.byLiqCoincidence;
-  const wps = data.byWithPriorSession;
-  const ap  = data.byAsianPosition;
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* coverage bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
-          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
-            {cov.totalClosed} closed trades
-            <span style={{ color: 'var(--qb-text-mid)' }}> ({cov.withScShadow} with session shadow, {cov.coveragePct}%)</span>
-          </span>
-          {cov.coveragePct < 50 && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)' }}>low coverage — accumulating</span>}
-          <span style={{ flex: 1 }} />
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>shadow data — not gating execution</span>
-          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
-        </div>
-
-        {/* 1. Liquidity coincidence */}
-        <OFSectionLabel>1 — Liquidity Coincidence (entry within 0.25 ATR of prior-session high/low)</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <ScStatCell label="Coincident (liq sweep)" s={liq?.coincident} />
-          <ScStatCell label="Non-coincident"          s={liq?.nonCoincident} />
-          {liq?.delta && (
-            <div style={{ flex: 1, minWidth: 140, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4 }}>
-              <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>coincident delta</div>
-              <OFMiniStat label="delta WR" value={`${liq.delta.winRateDelta >= 0 ? '+' : ''}${(liq.delta.winRateDelta * 100).toFixed(1)}%`}
-                color={Math.abs(liq.delta.winRateDelta) < 0.04 ? 'var(--qb-text-faint)' : liq.delta.winRateDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-            </div>
-          )}
-        </div>
-
-        {/* 2. With prior session direction */}
-        <OFSectionLabel>2 — Prior Session Direction (trade agrees with prior session's bias)</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <ScStatCell label="With prior session"    s={wps?.withSession} />
-          <ScStatCell label="Against prior session" s={wps?.againstSession} />
-          {wps?.delta && (
-            <div style={{ flex: 1, minWidth: 140, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4 }}>
-              <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>with vs against delta</div>
-              <OFMiniStat label="delta WR" value={`${wps.delta.winRateDelta >= 0 ? '+' : ''}${(wps.delta.winRateDelta * 100).toFixed(1)}%`}
-                color={Math.abs(wps.delta.winRateDelta) < 0.04 ? 'var(--qb-text-faint)' : wps.delta.winRateDelta > 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-            </div>
-          )}
-        </div>
-
-        {/* 3. Asian range position */}
-        <OFSectionLabel>3 — Asian Range Position at Signal</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          {['above', 'inside', 'below'].map(pos => (
-            <ScStatCell key={pos} label={`${pos} Asian range`} s={ap?.[pos]} />
-          ))}
-        </div>
-
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15e · WICK RATIO SHADOW PANEL  (v15.8 Part 2)
-// =====================================================================
-// Reads /api/wickratio-summary.
-// Shows band table + full-trust vs FX split.
-// Note: Pine OHLC not yet emitted until Pine scripts are updated.
-
-const WR_BANDS = ['0.00-0.25', '0.25-0.50', '0.50-0.75', '0.75-1.00'];
-const WR_BAND_LABEL = { '0.00-0.25': 'tight body (0–25%)', '0.25-0.50': 'moderate wick (25–50%)', '0.50-0.75': 'dominant wick (50–75%)', '0.75-1.00': 'doji / full wick (75–100%)' };
-
-function WrCell({ s, minN = 8 }) {
-  const thin = !s || s.n < minN;
-  return (
-    <td style={{ padding: '5px 10px', textAlign: 'center', opacity: thin ? 0.4 : 1 }}>
-      {thin ? (
-        <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>
-          {s?.n != null ? `n=${s.n}` : '--'}
-        </span>
-      ) : (
-        <span className="qb-mono" style={{ fontSize: 9 }}>
-          <span style={{ color: 'var(--qb-text-mid)' }}>n={s.n} </span>
-          <span style={{ color: s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>
-            {Math.round(s.winRate * 100)}%
-          </span>
-          {' '}
-          <span style={{ color: s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>{fmtUSD(s.netPnl, true)}</span>
-        </span>
-      )}
-    </td>
-  );
-}
-
-function WickRatioPanel({ gridColumn = '1 / 4', style }) {
-  const [data, setData]           = useState(null);
-  const [fetchError, setError]    = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [ready, setReady]         = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('wickratio-summary')).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok) { setData(r); setError(null); }
-        else { setData(null); setError(r?.error || 'endpoint error'); }
-      } catch (e) {
-        if (alive) { setData(null); setError(e.message); }
-      }
-      if (alive) { setLastFetch(new Date()); setReady(true); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const panelProps = {
-    title: 'Wick Ratio',
-    subtitle: 'signal bar structure — shadow only, testing in-sample signal',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'wick-ratio', defaultCollapsed: true,
-  };
-
-  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading wick ratio data..." /></div></Panel>;
-  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/wickratio-summary: ${fetchError}`} /></div></Panel>;
-
-  const cov = data?.coverage;
-  const pineReady = cov?.withBarData > 0;
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* status bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap' }}>
-          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
-            {cov?.totalClosed ?? 0} closed trades ·
-            {' '}{cov?.withWrShadow ?? 0} with wick shadow ·
-            {' '}{cov?.coveragePct ?? 0}% coverage
-          </span>
-          {!pineReady && (
-            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', fontStyle: 'italic' }}>
-              Pine OHLC not yet emitted — deploy updated Pine scripts to start accumulating wick data
-            </span>
-          )}
-          <span style={{ flex: 1 }} />
-          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
-        </div>
-
-        {!pineReady ? (
-          <div style={{ padding: '14px 0', fontSize: 9, lineHeight: 1.75, borderLeft: '3px solid var(--qb-warn)', paddingLeft: 12, marginBottom: 10 }}>
-            <div style={{ fontWeight: 700, color: 'var(--qb-warn)', marginBottom: 6, fontSize: 10 }}>
-              ⚠ MANUAL USER STEP REQUIRED — wickRatio is not collecting data yet
-            </div>
-            <div style={{ color: 'var(--qb-text-hi)', marginBottom: 6 }}>
-              Shadow records are being written ({cov?.totalShadows ?? 0} so far) but all of them store <strong>null</strong> for wickRatio because the TradingView alerts are still firing the <em>old</em> Pine scripts that do not emit <code>barOpen</code>/<code>barHigh</code>/<code>barLow</code>/<code>barClose</code>.
-            </div>
-            <div style={{ color: 'var(--qb-text-hi)', marginBottom: 6 }}>
-              <strong>To fix this you must manually:</strong>
-            </div>
-            <ol style={{ margin: '0 0 0 16px', padding: 0, color: 'var(--qb-text-mid)' }}>
-              <li>Open TradingView and navigate to the chart where <strong>qb-orb-pro</strong> and <strong>qb-reaction</strong> are loaded.</li>
-              <li>Open the Alerts panel. Find and <strong>delete</strong> every alert created from qb-orb-pro and qb-reaction.</li>
-              <li>In the Pine editor, reload each script (the updated versions in this deploy already contain the OHLC fields).</li>
-              <li><strong>Recreate</strong> all alerts from the reloaded scripts. The new alerts will fire payloads that include barOpen/barHigh/barLow/barClose.</li>
-            </ol>
-            <div style={{ marginTop: 8, color: 'var(--qb-text-faint)', fontSize: 8 }}>
-              Until alerts are recreated, this panel cannot display wick ratio bands. Existing null records are harmless — they will be skipped in the coverage count once real data arrives.
-            </div>
-          </div>
-        ) : (
-          <>
-            <OFSectionLabel>Band breakdown — all assets</OFSectionLabel>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
-                <thead>
-                  <tr style={{ color: 'var(--qb-text-faint)' }}>
-                    {['Band', 'All trades', 'Full-trust (BTC/XAUUSD/US500/NAS)', 'FX only'].map((h, i) => (
-                      <th key={h} style={{ padding: '3px 10px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i === 0 ? 'left' : 'center' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {WR_BANDS.map(band => (
-                    <tr key={band} style={{ borderBottom: '1px solid var(--qb-border)' }}>
-                      <td style={{ padding: '5px 10px', color: 'var(--qb-text-hi)', fontSize: 9 }}>{WR_BAND_LABEL[band]}</td>
-                      <WrCell s={data.byBand[band]} />
-                      <WrCell s={data.byBandFullTrust[band]} />
-                      <WrCell s={data.byBandFx[band]} />
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 8, fontStyle: 'italic' }}>
-              shadow only — testing whether in-sample wick signal holds forward. Do not gate on n&lt;{data.minN} buckets.
-            </div>
-          </>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15g · NY OPEN SPECIALIST PANEL  (v16.1)
-// =====================================================================
-// Daily journal for gold / us500 / nas100 at NY Open (13:00–16:00 UTC).
-// Templates: orb · orb-pro · am-ifvg · silver-bullet
-// Self-learning: after 14 closed sessions per asset, context-matcher activates.
-// Read-only panel — fetches /api/ny-session-summary every 2 minutes.
-
-const NY_ASSETS_ORDER = ['gold', 'us500', 'nas100'];
-const NY_ASSET_LABEL  = { gold: 'Gold', us500: 'SP500', nas100: 'NAS100' };
-const NY_ASSET_ICON   = { gold: '🥇', us500: '📈', nas100: '💻' };
-const NY_TMPL_GLYPH   = { orb: '🚀', 'orb-pro': '⚡', 'am-ifvg': '🌅', 'silver-bullet': '🥈' };
-
-function _nyOutcomeColor(outcome) {
-  if (outcome === 'WIN')       return '#10b981';
-  if (outcome === 'LOSS')      return '#f43f5e';
-  if (outcome === 'open')      return '#f59e0b';
-  if (outcome === 'no-signal') return 'var(--qb-text-faint)';
-  return 'var(--qb-text-mid)';
-}
-
-function _nyOutcomeBadge(outcome) {
-  const col = _nyOutcomeColor(outcome);
-  const label = outcome === 'WIN' ? 'WIN' : outcome === 'LOSS' ? 'LOSS' : outcome === 'open' ? 'OPEN' : '—';
-  return (
-    <span style={{
-      display: 'inline-block', padding: '1px 6px', borderRadius: 3, fontSize: 8.5,
-      fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5,
-      background: col + '22', color: col, border: `1px solid ${col}44`,
-    }}>{label}</span>
-  );
-}
-
-function NYCountdown({ nyOpenStatus, minsToOpen, nyIsLive }) {
-  const col = nyIsLive ? '#10b981' : '#f59e0b';
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: nyIsLive ? '#10b98112' : '#f59e0b08', borderRadius: 6, border: `1px solid ${col}33` }}>
-      <span style={{ fontSize: 18 }}>🗽</span>
-      <div>
-        <div className="qb-mono" style={{ fontSize: 10, fontWeight: 700, color: col }}>NY OPEN {nyIsLive ? 'IS LIVE' : `— ${nyOpenStatus}`}</div>
-        <div className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-faint)', marginTop: 1 }}>
-          {nyIsLive ? '13:00–16:00 UTC window active' : minsToOpen > 0 ? `opens in ${minsToOpen} minutes (13:00 UTC)` : 'session closed — next opens tomorrow 13:00 UTC'}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function NYInstrumentCard({ asset, sessionData, stat, matcherState }) {
-  const outcome  = sessionData?.outcome || 'no-signal';
-  const col      = _nyOutcomeColor(outcome);
-  const template = sessionData?.lastSignalTemplate;
-  const dir      = sessionData?.lastSignalDirection;
-  const ctx      = sessionData;
-
-  return (
-    <div style={{
-      flex: 1, minWidth: 160, padding: '10px 14px', borderRadius: 8,
-      border: `1px solid ${col}44`,
-      background: outcome === 'WIN' ? '#10b98108' : outcome === 'LOSS' ? '#f43f5e08' : outcome === 'open' ? '#f59e0b08' : 'var(--qb-bg-panel-hi)',
-    }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <span style={{ fontSize: 16 }}>{NY_ASSET_ICON[asset]}</span>
-        <span className="qb-mono" style={{ fontSize: 11, fontWeight: 700, color: 'var(--qb-text)' }}>{NY_ASSET_LABEL[asset]}</span>
-        <span style={{ flex: 1 }} />
-        {_nyOutcomeBadge(outcome)}
-      </div>
-
-      {/* Signal info */}
-      {template ? (
-        <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginBottom: 4 }}>
-          {NY_TMPL_GLYPH[template] || '•'} {template} · <span style={{ color: dir === 'LONG' ? '#10b981' : '#f43f5e' }}>{dir}</span>
-        </div>
-      ) : (
-        <div className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-faint)', marginBottom: 4 }}>no signal yet</div>
-      )}
-
-      {/* Context strip */}
-      {ctx && (
-        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 5 }}>
-          {ctx.sessionBias && (
-            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: ctx.sessionBias === 'bull' ? '#10b98118' : '#f43f5e18', color: ctx.sessionBias === 'bull' ? '#10b981' : '#f43f5e' }}>
-              London {ctx.sessionBias === 'bull' ? '↑' : '↓'}
-            </span>
-          )}
-          {ctx.vixRegime && (
-            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--qb-bg-void)', color: 'var(--qb-text-mid)', border: '1px solid var(--qb-border)' }}>
-              VIX {ctx.vixRegime}
-            </span>
-          )}
-          {ctx.hasMajorNews && (
-            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: '#f59e0b18', color: '#f59e0b', border: '1px solid #f59e0b33' }}>
-              news
-            </span>
-          )}
-          {ctx.cvdTrend && (
-            <span className="qb-mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--qb-bg-void)', color: ctx.cvdTrend === 'rising' ? '#10b981' : ctx.cvdTrend === 'falling' ? '#f43f5e' : 'var(--qb-text-faint)', border: '1px solid var(--qb-border)' }}>
-              CVD {ctx.cvdTrend}
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Divider */}
-      <div style={{ borderTop: '1px solid var(--qb-border)', margin: '5px 0' }} />
-
-      {/* Stats (recent sessions) */}
-      {stat && stat.n > 0 ? (
-        <div className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-mid)' }}>
-          last {stat.n} sessions · <span style={{ color: stat.winRate >= 55 ? '#10b981' : stat.winRate >= 45 ? '#f59e0b' : '#f43f5e', fontWeight: 700 }}>{stat.winRate}%</span> WR
-          {' '}· <span style={{ color: stat.pnl >= 0 ? '#10b981' : '#f43f5e' }}>{stat.pnl >= 0 ? '+' : ''}{stat.pnl?.toFixed(2)}$</span>
-        </div>
-      ) : (
-        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>no session history</div>
-      )}
-
-      {/* Matcher */}
-      {matcherState && (
-        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 3 }}>
-          {matcherState.active ? `context matcher active` : `matcher in ${matcherState.need} sessions`}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function NYSessionHeatmap({ recentSessions }) {
-  if (!recentSessions || !recentSessions.length) return null;
-
-  // Group by date, then asset
-  const dateMap = {};
-  for (const s of recentSessions) {
-    if (!dateMap[s.date]) dateMap[s.date] = {};
-    dateMap[s.date][s.asset] = s;
-  }
-  const dates = Object.keys(dateMap).sort((a, b) => b.localeCompare(a)).slice(0, 15);
-
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 460 }}>
-        <thead>
-          <tr>
-            <th style={{ padding: '3px 8px', textAlign: 'left' }}>
-              <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>DATE</span>
-            </th>
-            {NY_ASSETS_ORDER.map(a => (
-              <th key={a} style={{ padding: '3px 8px', textAlign: 'center' }}>
-                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-mid)' }}>{NY_ASSET_ICON[a]} {NY_ASSET_LABEL[a]}</span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {dates.map(date => (
-            <tr key={date} style={{ borderTop: '1px solid var(--qb-border)' }}>
-              <td style={{ padding: '4px 8px' }}>
-                <span className="qb-mono" style={{ fontSize: 8.5, color: 'var(--qb-text-faint)' }}>{date}</span>
-              </td>
-              {NY_ASSETS_ORDER.map(asset => {
-                const s = dateMap[date][asset];
-                if (!s) return <td key={asset} style={{ padding: '4px 8px', textAlign: 'center' }}><span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)' }}>—</span></td>;
-                const col = _nyOutcomeColor(s.outcome);
-                const glph = NY_TMPL_GLYPH[s.lastSignalTemplate] || '•';
-                return (
-                  <td key={asset} style={{ padding: '4px 8px', textAlign: 'center' }}>
-                    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                      <span style={{ fontSize: 11 }}>{glph}</span>
-                      <span className="qb-mono" style={{ fontSize: 7.5, color: col, fontWeight: 700 }}>
-                        {s.outcome === 'WIN' ? 'W' : s.outcome === 'LOSS' ? 'L' : s.outcome === 'open' ? '~' : '—'}
-                        {s.pnl != null ? ` ${s.pnl >= 0 ? '+' : ''}${s.pnl.toFixed(0)}$` : ''}
-                      </span>
-                      {s.hasMajorNews && <span style={{ fontSize: 7, color: '#f59e0b' }}>📰</span>}
-                    </div>
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function NYOpenPanel({ gridColumn = '1 / 4', style }) {
-  const [data, setData]           = useState(null);
-  const [fetchError, setError]    = useState(null);
-  const [ready, setReady]         = useState(false);
-  const [lastFetch, setLastFetch] = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('ny-session-summary')).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok !== false) { setData(r); setError(null); }
-        else { setData(null); setError(r?.error || 'endpoint error'); }
-      } catch (e) {
-        if (alive) { setData(null); setError(e.message); }
-      }
-      if (alive) { setLastFetch(new Date()); setReady(true); }
-    };
-    load();
-    const id = setInterval(load, 2 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const panelProps = {
-    title: 'NY Open Specialist',
-    subtitle: 'gold · sp500 · nas100 — orb · orb-pro · am-ifvg · silver-bullet · 13:00–16:00 UTC',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'ny-open-specialist', defaultCollapsed: false,
-  };
-
-  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading NY Open journal..." /></div></Panel>;
-  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/ny-session-summary: ${fetchError}`} /></div></Panel>;
-
-  const today        = data?.todayStatus  || {};
-  const stats        = data?.stats        || {};
-  const matcherState = data?.matcherState || {};
-  const recentSes    = data?.recentSessions || [];
-  const totalSes     = data?.totalSessions ?? 0;
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12 }}>
-
-        {/* NY Open countdown */}
-        <div style={{ marginBottom: 12 }}>
-          <NYCountdown
-            nyOpenStatus={data?.nyOpenStatus || '—'}
-            minsToOpen={data?.minsToOpen}
-            nyIsLive={data?.nyIsLive || false}
-          />
-        </div>
-
-        {/* Today's 3 instrument cards */}
-        <OFSectionLabel>Today's sessions — {data?.today || '—'}</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-          {NY_ASSETS_ORDER.map(asset => (
-            <NYInstrumentCard
-              key={asset}
-              asset={asset}
-              sessionData={today[asset]}
-              stat={stats[asset]}
-              matcherState={matcherState[asset]}
-            />
-          ))}
-        </div>
-
-        {/* Session heatmap */}
-        <OFSectionLabel>Recent NY sessions — {totalSes} total in journal</OFSectionLabel>
-        {recentSes.length > 0
-          ? <NYSessionHeatmap recentSessions={recentSes} />
-          : <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)', padding: '8px 0' }}>
-              No sessions recorded yet. Journal starts building on the next qualifying NY Open signal on gold, sp500, or nas100.
-            </div>
-        }
-
-        {lastFetch && (
-          <div style={{ marginTop: 10 }}>
-            <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>updated {lastFetch.toLocaleTimeString()}</span>
-          </div>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15f-LIVE · SIGNAL QUALITY PANEL  (v16.0)
-// =====================================================================
-// Combines CVD, session context, and wick ratio into one live gate panel.
-// Gates block execution — this is NOT shadow-only.
-// Gate toggles POST to /api/signal-quality-summary (G6: config only, no trades).
-// WR stats are derived from recognition-memory fuzzy-join (15-min window).
-
-function SQGateToggle({ label, description, enabled, loading, onToggle }) {
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 12, padding: '8px 14px',
-      background: 'var(--qb-bg-panel-hi)', borderRadius: 4,
-      border: `1px solid ${enabled ? 'var(--qb-accent)' : 'var(--qb-border)'}`,
-      opacity: loading ? 0.6 : 1,
-    }}>
-      <div style={{ flex: 1 }}>
-        <div className="qb-mono" style={{ fontSize: 10, fontWeight: 700, color: enabled ? 'var(--qb-accent)' : 'var(--qb-text-mid)' }}>
-          {label}
-        </div>
-        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 2 }}>
-          {description}
-        </div>
-      </div>
-      <button
-        disabled={loading}
-        onClick={onToggle}
-        style={{
-          padding: '4px 12px', borderRadius: 3, border: 'none', cursor: loading ? 'default' : 'pointer',
-          background: enabled ? 'var(--qb-accent)' : 'var(--qb-border-hi)',
-          color: enabled ? '#fff' : 'var(--qb-text-faint)',
-          fontFamily: 'var(--qb-font-mono)', fontSize: 9, fontWeight: 700,
-          minWidth: 42,
-        }}
-      >
-        {loading ? '…' : (enabled ? 'ON' : 'OFF')}
-      </button>
-    </div>
-  );
-}
-
-// ─── Signal Quality visual components ─────────────────────────────────────────
-
-const SQ_SESSIONS = [
-  { id:'asia',   label:'Asia',              start:0,  end:7,  bg:'rgba(99,102,241,0.12)', accent:'#818cf8' },
-  { id:'ldn-op', label:'London Open',       start:7,  end:9,  bg:'rgba(34,197,94,0.22)',  accent:'#4ade80' },
-  { id:'ldn',    label:'London',            start:9,  end:12, bg:'rgba(34,197,94,0.09)',  accent:'#4ade80' },
-  { id:'ny-op',  label:'NY Open',           start:13, end:16, bg:'rgba(251,146,60,0.22)', accent:'#fb923c' },
-  { id:'ny',     label:'NY',               start:16, end:20, bg:'rgba(251,146,60,0.09)', accent:'#fb923c' },
-  { id:'ny-pm',  label:'NY PM / LDN Close', start:20, end:22, bg:'rgba(251,146,60,0.05)', accent:'#fb923c' },
-];
-
-function sqSession(ts) {
-  const h = new Date(ts).getUTCHours();
-  return SQ_SESSIONS.find(s => h >= s.start && h < s.end)
-      || { id:'off', label:'Off-hours', bg:'transparent', accent:'#6b7280' };
-}
-
-function sqWickForm(ratio, direction) {
-  if (ratio == null) return { name:'No bar data',     color:'#6b7280' };
-  if (ratio < 0.12)  return { name:'Marubozu',        color:'#22c55e' };
-  if (ratio < 0.28)  return { name:'Small Wick',      color:'#4ade80' };
-  if (ratio < 0.50)  return { name:'Medium Wick',     color:'#facc15' };
-  if (ratio < 0.65)  return { name:'Doji',            color:'#f97316' };
-  if (ratio < 0.80)  return { name: direction === 'LONG' ? 'Hammer' : 'Shooting Star', color:'#ef4444' };
-  return                    { name:'Long-Legged Doji', color:'#dc2626' };
-}
-
-function SQMiniCandle({ wickRatio, direction, height = 36 }) {
-  const W = 14, isLong = direction !== 'SHORT';
-  const fill  = isLong ? '#22c55e' : '#ef4444';
-  const wr    = Math.min(0.95, Math.max(0, wickRatio ?? 0.1));
-  const total = wr * height;
-  const topW  = isLong ? total * 0.25 : total * 0.75;
-  const botW  = isLong ? total * 0.75 : total * 0.25;
-  const bodyH = Math.max(4, height - topW - botW);
-  const cx    = W / 2;
-  return (
-    <svg width={W} height={height} style={{ display:'block', flexShrink:0 }}>
-      <line x1={cx} y1={0}         x2={cx} y2={topW}          stroke={fill} strokeWidth={1.5} strokeLinecap="round" />
-      <rect x={cx-3.5} y={topW}    width={7} height={bodyH}   fill={fill}  rx={1} opacity={0.9} />
-      <line x1={cx} y1={topW+bodyH} x2={cx} y2={height}       stroke={fill} strokeWidth={1.5} strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function SQSessionTimeline({ signals }) {
-  const now = Date.now(), DAY = 86_400_000;
-  const recent = signals.filter(s => now - s.ts < 7 * DAY);
-  const W = 760, H = 88, PL = 6, PR = 6, CW = W - PL - PR;
-  const hx     = h => PL + (h / 24) * CW;
-  const tColor = (tier, pass) => !pass ? '#ef4444' : tier === 'A' ? '#22c55e' : tier === 'B' ? '#f59e0b' : '#ef4444';
-  const nowH   = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
-  return (
-    <div style={{ marginBottom:14 }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'auto', display:'block' }}>
-        {/* session bands */}
-        {SQ_SESSIONS.map(s => (
-          <rect key={s.id} x={hx(s.start)} y={2} width={hx(s.end)-hx(s.start)} height={H-20} fill={s.bg} rx={2} />
-        ))}
-        {/* session labels */}
-        {SQ_SESSIONS.map(s => s.label && (
-          <text key={`l${s.id}`} x={hx((s.start+s.end)/2)} y={14}
-            textAnchor="middle" fontSize={7} fontFamily="monospace" fill={s.accent} opacity={0.9}>{s.label}</text>
-        ))}
-        {/* hour grid */}
-        {[0,3,6,9,12,15,18,21].map(h => (
-          <g key={h}>
-            <line x1={hx(h)} y1={2} x2={hx(h)} y2={H-18} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
-            <text x={hx(h)} y={H-4} textAnchor="middle" fontSize={6} fontFamily="monospace" fill="rgba(255,255,255,0.22)">{String(h).padStart(2,'0')}</text>
-          </g>
-        ))}
-        {/* signal dots — today at bottom, 6d ago at top */}
-        {recent.map(s => {
-          const hFrac  = new Date(s.ts).getUTCHours() + new Date(s.ts).getUTCMinutes()/60;
-          const dayIdx = Math.min(6, Math.floor((now - s.ts) / DAY));
-          const x = hx(hFrac);
-          const y = (H-22) - (dayIdx/6)*(H-42);
-          const c = tColor(s.qualityTier, s.pass);
-          return (
-            <g key={s.id}>
-              {!s.pass && <circle cx={x} cy={y} r={5.8} fill="none" stroke={c} strokeWidth={0.9} opacity={0.4} />}
-              <circle cx={x} cy={y} r={s.pass ? 4 : 3.5} fill={c} opacity={0.83} />
-            </g>
-          );
-        })}
-        {/* "now" marker */}
-        <line x1={hx(nowH)} y1={2} x2={hx(nowH)} y2={H-18} stroke="rgba(255,255,255,0.3)" strokeWidth={1} strokeDasharray="3,2" />
-      </svg>
-      <div style={{ display:'flex', gap:12, padding:'2px 6px', flexWrap:'wrap', alignItems:'center' }}>
-        {[['#22c55e','Tier A'],['#f59e0b','Tier B'],['#ef4444','Blocked']].map(([c,l]) => (
-          <div key={l} style={{ display:'flex', alignItems:'center', gap:3 }}>
-            <svg width={7} height={7}><circle cx={3.5} cy={3.5} r={3} fill={c} /></svg>
-            <span style={{ fontSize:7, fontFamily:'var(--qb-font-mono)', color:'var(--qb-text-faint)' }}>{l}</span>
-          </div>
-        ))}
-        <span style={{ fontSize:7, fontFamily:'var(--qb-font-mono)', color:'var(--qb-text-faint)', marginLeft:4 }}>dots = signals · today bottom · 7d ago top · dashed line = now</span>
-      </div>
-    </div>
-  );
-}
-
-function SQGateSparklines({ signals }) {
-  const recent = signals.slice(0, 30);
-  const gates = [
-    { label:'WICK',    desc:'Heavy wick filter',        test: s => s.wickRatio == null ? null : s.wickRatio <= 0.50 },
-    { label:'SESSION', desc:'Structural context scoring (ADR · gap · IB)', test: s => {
-      if (s.sessionGrade != null) return s.sessionGrade !== 'BLOCK' && s.sessionGrade !== 'ADVERSE';
-      if (s.withPriorSession != null) return s.withPriorSession === true;
-      return null;
-    }},
-    { label:'CVD',     desc:'Order flow confirmation',  test: s => s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none') },
-  ];
-  return (
-    <div style={{ display:'flex', gap:10, marginBottom:14, flexWrap:'wrap' }}>
-      {gates.map(g => {
-        const withData  = recent.filter(s => g.test(s) !== null);
-        const passCount = withData.filter(s => g.test(s) === true).length;
-        const pRate     = withData.length ? passCount / withData.length : null;
-        const color     = pRate == null ? '#6b7280' : pRate >= 0.70 ? '#22c55e' : pRate >= 0.50 ? '#f59e0b' : '#ef4444';
-        const bW        = 200 / Math.max(1, recent.length);
-        return (
-          <div key={g.label} style={{ flex:1, minWidth:130, padding:'8px 10px', background:'var(--qb-bg-panel-hi)', border:'1px solid var(--qb-border)', borderRadius:4 }}>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
-              <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:'var(--qb-text-faint)', textTransform:'uppercase', letterSpacing:0.8 }}>{g.label}</span>
-              <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:14, fontWeight:700, color }}>{pRate != null ? `${(pRate*100).toFixed(0)}% clean` : '—'}</span>
-            </div>
-            <svg viewBox="0 0 200 14" style={{ width:'100%', height:14, display:'block', marginBottom:3 }}>
-              {recent.map((s,i) => {
-                const ok = g.test(s);
-                const c  = ok === null ? 'rgba(255,255,255,0.08)' : ok ? '#22c55e' : '#ef4444';
-                return <rect key={s.id} x={2+i*bW} y={1} width={Math.max(1.5,bW-1)} height={12} fill={c} opacity={0.75} rx={0.5} />;
-              })}
-            </svg>
-            <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:'var(--qb-text-faint)' }}>{g.desc} · last {recent.length} signals</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Session v17 grade helpers ─────────────────────────────────────────────────
-
-const SQ_GRADE_META = {
-  STRONG:    { color:'#22c55e', bg:'#22c55e14', border:'#22c55e40', label:'STRONG'    },
-  FAVORABLE: { color:'#4ade80', bg:'#4ade8014', border:'#4ade8040', label:'FAVORABLE' },
-  NEUTRAL:   { color:'#94a3b8', bg:'#94a3b814', border:'#94a3b840', label:'NEUTRAL'   },
-  WEAK:      { color:'#f59e0b', bg:'#f59e0b14', border:'#f59e0b40', label:'WEAK'      },
-  ADVERSE:   { color:'#f97316', bg:'#f9731614', border:'#f9731640', label:'ADVERSE'   },
-  BLOCK:     { color:'#ef4444', bg:'#ef444414', border:'#ef444440', label:'BLOCK'     },
-};
-
-function sqGradeMeta(grade) {
-  return SQ_GRADE_META[grade] || { color:'#6b7280', bg:'#6b728014', border:'#6b728040', label: grade || '?' };
-}
-
-const SQ_CHECK_LABELS = {
-  'adr-room':              'ADR ok',
-  'adr-exhausted':         'ADR!',
-  'prior-day-aligned':     'PD ↑',
-  'prior-day-against':     'PD ↓',
-  'large-gap-aligned':     'gap ↑',
-  'large-gap-against':     'gap ↓',
-  'tiny-gap-fills':        'gap ~',
-  'ib-aligned':            'IB ✓',
-  'ib-against':            'IB ✗',
-  'ib-extended-against':   'IB !!',
-  'first15m-aligned':      '15m ✓',
-  'first15m-against':      '15m ✗',
-  'near-key-time':         'fix ✓',
-  'gold-monday':           'Mon ↓',
-  'gold-exhausted':        'exh !',
-  'btc-monday':            'Mon ↑',
-  'btc-weekend':           'wknd ↓',
-  'btc-power-hour':        'PH ✓',
-  'btc-drain-hour':        'drain ↓',
-};
-
-function SQCheckChips({ checks }) {
-  if (!checks || checks.length === 0) return null;
-  return (
-    <div style={{ display:'flex', gap:2, flexWrap:'wrap', marginTop:3 }}>
-      {checks.map((c, i) => {
-        const pos   = c.delta > 0;
-        const color = pos ? '#22c55e' : '#ef4444';
-        const label = SQ_CHECK_LABELS[c.name] || c.name;
-        return (
-          <div key={i} style={{
-            fontFamily:'var(--qb-font-mono)', fontSize:6, color,
-            background:`${color}12`, border:`1px solid ${color}30`,
-            borderRadius:2, padding:'0px 3px', whiteSpace:'nowrap', lineHeight:'1.6',
-          }}>
-            {c.delta > 0 ? '+' : ''}{c.delta} {label}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function SQSessGrade({ grade, scoreAvailable, score }) {
-  // legacy path — Pine not yet migrated, no structural data
-  if (!grade && !scoreAvailable) {
-    return (
-      <div style={{
-        fontFamily:'var(--qb-font-mono)', fontSize:6, color:'#6b7280',
-        background:'rgba(107,114,128,0.10)', border:'1px solid rgba(107,114,128,0.25)',
-        borderRadius:2, padding:'1px 4px', whiteSpace:'nowrap', textAlign:'center',
-      }}>
-        LEGACY
-      </div>
-    );
-  }
-  const m = sqGradeMeta(grade);
-  return (
-    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:1 }}>
-      <div style={{
-        fontFamily:'var(--qb-font-mono)', fontSize:6, color:m.color,
-        background:m.bg, border:`1px solid ${m.border}`,
-        borderRadius:2, padding:'1px 4px', whiteSpace:'nowrap', letterSpacing:0.3, textAlign:'center',
-      }}>
-        {m.label}
-      </div>
-      {score != null && (
-        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:6, color:m.color, opacity:0.8 }}>
-          {score > 0 ? `+${score}` : score}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Signal card ────────────────────────────────────────────────────────────────
-
-function SQSignalCard({ s }) {
-  const sess    = sqSession(s.ts);
-  const wf      = sqWickForm(s.wickRatio, s.direction);
-  const dt      = new Date(s.ts);
-  const time    = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}`;
-  const date    = `${dt.getUTCMonth()+1}/${dt.getUTCDate()}`;
-  const isLong  = s.direction !== 'SHORT';
-  const passC   = s.pass ? '#22c55e' : '#ef4444';
-  const tierC   = { A:'#22c55e', B:'#f59e0b', C:'#f97316', D:'#ef4444' }[s.qualityTier] || '#6b7280';
-  const wickOk  = s.wickRatio == null ? null : s.wickRatio <= 0.50;
-  const sessGrade = s.sessionGrade || null;
-  const cvdOk   = s.cvdLowTrust == null ? null : !(s.cvdLowTrust && s.cvdDivergence && s.cvdDivergence !== 'none');
-  const Dot     = ({ ok }) => (
-    <div style={{ width:5, height:5, borderRadius:'50%', flexShrink:0, background: ok === null ? '#374151' : ok ? '#22c55e' : '#ef4444' }} />
-  );
-  return (
-    <div style={{ display:'flex', alignItems:'flex-start', gap:8, padding:'6px 10px', background:'var(--qb-bg-panel-hi)', border:`1px solid ${s.pass ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'}`, borderLeft:`3px solid ${passC}`, borderRadius:4 }}>
-      <div style={{ paddingTop:2 }}>
-        <SQMiniCandle wickRatio={s.wickRatio} direction={s.direction} height={36} />
-      </div>
-      <div style={{ flex:1, minWidth:0 }}>
-        <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:2 }}>
-          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:10, fontWeight:700, color:'var(--qb-text-hi)' }}>{s.assetId}</span>
-          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color: isLong ? '#22c55e' : '#ef4444' }}>{s.direction}</span>
-          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:'var(--qb-text-faint)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', maxWidth:90 }}>{s.template}</span>
-        </div>
-        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:wf.color }}>
-          {wf.name}
-          {s.wickRatio != null && <span style={{ color:'var(--qb-text-faint)', marginLeft:4 }}>{(s.wickRatio*100).toFixed(0)}%</span>}
-        </div>
-        {s.scoreAvailable && <SQCheckChips checks={s.sessionChecks} />}
-        {s.adverseBy && !s.blockedBy && (
-          <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:6, color:'#f97316', marginTop:2, opacity:0.85 }}>
-            ⚠ {s.adverseBy}
-          </div>
-        )}
-      </div>
-      <div style={{ padding:'2px 6px', background:sess.bg, border:`1px solid ${sess.accent}50`, borderRadius:3, flexShrink:0, alignSelf:'center' }}>
-        <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:sess.accent, whiteSpace:'nowrap' }}>{sess.label}</span>
-      </div>
-      <div style={{ display:'flex', flexDirection:'column', gap:4, flexShrink:0, alignItems:'flex-start' }}>
-        <div style={{ display:'flex', alignItems:'center', gap:3 }}>
-          <Dot ok={wickOk} />
-          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:6.5, color:'var(--qb-text-faint)' }}>WICK</span>
-        </div>
-        <SQSessGrade grade={sessGrade} scoreAvailable={s.scoreAvailable} score={s.sessionScore} />
-        <div style={{ display:'flex', alignItems:'center', gap:3 }}>
-          <Dot ok={cvdOk} />
-          <span style={{ fontFamily:'var(--qb-font-mono)', fontSize:6.5, color:'var(--qb-text-faint)' }}>CVD</span>
-        </div>
-      </div>
-      <div style={{ textAlign:'right', flexShrink:0 }}>
-        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:12, fontWeight:700, color:tierC }}>{s.qualityTier || '?'}</div>
-        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, fontWeight:700, color:passC }}>{s.pass ? 'PASS' : 'BLOCK'}</div>
-        {s.blockedBy && (
-          <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:6, color:'#ef4444', marginTop:1, maxWidth:60, wordBreak:'break-word', textAlign:'right', opacity:0.75 }}>
-            {s.blockedBy}
-          </div>
-        )}
-      </div>
-      <div style={{ textAlign:'right', flexShrink:0 }}>
-        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:8, color:'var(--qb-text-hi)' }}>{time}</div>
-        <div style={{ fontFamily:'var(--qb-font-mono)', fontSize:7, color:'var(--qb-text-faint)' }}>{date}</div>
-      </div>
-    </div>
-  );
-}
-
-function SQTierRow({ tier, s, highlight }) {
-  const pct     = s?.winRate != null ? (s.winRate * 100).toFixed(0) + '%' : '—';
-  const blocked = tier === 'C' || tier === 'D';
-  const color   = s?.winRate == null ? 'var(--qb-text-faint)'
-                : s.winRate >= 0.55  ? 'var(--qb-green)'
-                : s.winRate >= 0.45  ? 'var(--qb-text-hi)'
-                : 'var(--qb-red)';
-  const tierColor = tier === 'A' ? 'var(--qb-green)'
-                  : tier === 'B' ? 'var(--qb-accent)'
-                  : tier === 'C' ? 'var(--qb-warn)'
-                  : tier === 'D' ? 'var(--qb-red)'
-                  : 'var(--qb-text-faint)';
-  const rowBg = blocked   ? 'rgba(220,60,60,0.06)'
-              : highlight ? 'var(--qb-bg-panel-hi)'
-              : 'transparent';
-  return (
-    <tr style={{ borderBottom: '1px solid var(--qb-border)', background: rowBg }}>
-      <td style={{ padding: '5px 10px' }}>
-        <span style={{ color: tierColor, fontWeight: 700 }}>{tier}</span>
-        {!blocked && tier !== 'unknown' && (
-          <span style={{ fontSize: 7, color: 'var(--qb-green)', border: '1px solid var(--qb-green)', borderRadius: 2, padding: '1px 4px', marginLeft: 5, opacity: 0.7 }}>PASSES</span>
-        )}
-        {blocked && (
-          <span style={{ fontSize: 7, color: 'var(--qb-red)', border: '1px solid var(--qb-red)', borderRadius: 2, padding: '1px 4px', marginLeft: 5, opacity: 0.7 }}>BLOCKED</span>
-        )}
-      </td>
-      <td style={{ padding: '5px 10px', color, fontWeight: 700 }}>{pct}</td>
-      <td style={{ padding: '5px 10px', color: 'var(--qb-text-mid)' }}>{s?.wins ?? 0}W / {s?.losses ?? 0}L</td>
-      <td style={{ padding: '5px 10px', color: 'var(--qb-text-faint)' }}>n={s?.n ?? 0}</td>
-      <td style={{ padding: '5px 10px', color: 'var(--qb-text-faint)', fontSize: 8 }}>{s?.label || ''}</td>
-    </tr>
-  );
-}
-
-function SignalQualityPanel({ gridColumn = '1 / 4', style }) {
-  const [data, setData]       = useState(null);
-  const [fetchError, setError] = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [ready, setReady]     = useState(false);
-  const [toggling, setToggling] = useState(null);
-
-  const load = async (alive = { current: true }) => {
-    try {
-      const r = await fetch(API('signal-quality-summary')).then(res => res.json());
-      if (!alive.current) return;
-      if (r?.ok) { setData(r); setError(null); }
-      else { setData(null); setError(r?.error || 'endpoint error'); }
-    } catch (e) {
-      if (alive.current) { setData(null); setError(e.message); }
-    }
-    if (alive.current) { setLastFetch(new Date()); setReady(true); }
-  };
-
-  useEffect(() => {
-    const alive = { current: true };
-    load(alive);
-    const id = setInterval(() => load(alive), 30 * 1000);
-    return () => { alive.current = false; clearInterval(id); };
-  }, []);
-
-  const toggleGate = async (field, currentValue) => {
-    setToggling(field);
-    try {
-      await fetch(API('signal-quality-summary'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [field]: !currentValue }),
-      });
-      const alive = { current: true };
-      await load(alive);
-    } catch (_) {}
-    setToggling(null);
-  };
-
-  const panelProps = {
-    title: 'Signal Quality Gates',
-    subtitle: 'live — wick ratio · session context · CVD confirmation',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'signal-quality', defaultCollapsed: false,
-  };
-
-  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading signal quality data..." /></div></Panel>;
-  if (fetchError && !data) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={`/api/signal-quality-summary: ${fetchError}`} /></div></Panel>;
-
-  const cfg = data?.config || {};
-  const cov = data?.sqCoverage || {};
-  const ts  = data?.tierStats  || {};
-  const pvb = data?.passedVsBlocked || {};
-  const sig = data?.recentSignals   || [];
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* status bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap', marginBottom: 12 }}>
-          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
-            {cov.totalSQSignals ?? 0} signals evaluated ·
-            {' '}{cov.passedSignals ?? 0} passed ·
-            {' '}{cov.blockedSignals ?? 0} blocked ·
-            {' '}{cov.withSQRecord ?? 0}/{cov.totalClosedTrades ?? 0} closed trades joined
-          </span>
-          <span style={{ flex: 1 }} />
-          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
-        </div>
-
-        {/* gate toggles */}
-        <OFSectionLabel>Gate controls (live — toggles block real placements)</OFSectionLabel>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-          <SQGateToggle
-            label="WICK GATE"
-            description={`block when wick ratio > ${Math.round((cfg.wickThreshold ?? 0.5) * 100)}% (0% WR historically)`}
-            enabled={cfg.wickGateEnabled ?? true}
-            loading={toggling === 'wickGateEnabled'}
-            onToggle={() => toggleGate('wickGateEnabled', cfg.wickGateEnabled ?? true)}
-          />
-          <SQGateToggle
-            label="SESSION GATE"
-            description="structural: ADR exhaustion · gap vs ATR · IB alignment · prior day position (6-grade)"
-            enabled={cfg.sessionGateEnabled ?? true}
-            loading={toggling === 'sessionGateEnabled'}
-            onToggle={() => toggleGate('sessionGateEnabled', cfg.sessionGateEnabled ?? true)}
-          />
-          <SQGateToggle
-            label="CVD GATE"
-            description="block when CVD is low-trust AND shows counter-divergence (20% WR)"
-            enabled={cfg.cvdGateEnabled ?? true}
-            loading={toggling === 'cvdGateEnabled'}
-            onToggle={() => toggleGate('cvdGateEnabled', cfg.cvdGateEnabled ?? true)}
-          />
-        </div>
-
-        {/* WR by quality tier */}
-        <OFSectionLabel>Win rate by quality tier — A/B pass execution · C/D blocked (recognition memory join)</OFSectionLabel>
-        <div style={{ overflowX: 'auto', marginBottom: 16 }}>
-          <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
-            <thead>
-              <tr style={{ color: 'var(--qb-text-faint)' }}>
-                {['Tier', 'WR', 'W / L', 'n', 'Description'].map((h, i) => (
-                  <th key={h} style={{ padding: '3px 10px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.4, textAlign: i === 0 ? 'left' : 'left' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {['A', 'B', 'C', 'D', 'unknown'].map(tier => (
-                <SQTierRow key={tier} tier={tier} s={ts[tier]} highlight={tier === 'A' || tier === 'B'} />
+        <div className="modBody">
+          <div style={{display:'flex',gap:8,marginBottom:10,flexWrap:'wrap',alignItems:'center'}}>
+            <div className="tblFilter">
+              {['ALL','WIN','LOSS','BREAKEVEN'].map(f => (
+                <button key={f} className={`fBtn ${filter===f?'on':''}`} onClick={() => setFilter(f)}>{f}</button>
               ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* passed vs blocked */}
-        {(pvb.passed?.n > 0 || (cov.blockedSignals ?? 0) > 0) && (
-          <>
-            <OFSectionLabel>Gate outcomes — passed trades closed · blocked signals not placed</OFSectionLabel>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-              {/* Passed — closed trades that went through the gate */}
-              <div style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-green)', borderRadius: 4 }}>
-                <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>PASSED → CLOSED</div>
-                <div className="qb-mono" style={{ fontSize: 20, fontWeight: 700, color: 'var(--qb-green)' }}>
-                  {pvb.passed?.winRate != null ? (pvb.passed.winRate * 100).toFixed(0) + '%' : '—'}
-                </div>
-                <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginTop: 3 }}>
-                  {pvb.passed?.wins ?? 0}W / {pvb.passed?.losses ?? 0}L · n={pvb.passed?.n ?? 0} closed
-                </div>
-              </div>
-              {/* Blocked — signals stopped at the gate, never placed */}
-              <div style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-red)', borderRadius: 4 }}>
-                <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 }}>BLOCKED BY GATE</div>
-                <div className="qb-mono" style={{ fontSize: 20, fontWeight: 700, color: 'var(--qb-red)' }}>
-                  {cov.blockedSignals ?? 0}
-                </div>
-                <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-mid)', marginTop: 3 }}>
-                  signals not placed · no WR (never executed)
-                </div>
-              </div>
             </div>
-          </>
-        )}
-
-        {/* recent signals log */}
-        {/* ── Gate health sparklines ── */}
-        <OFSectionLabel>Gate health — last 30 signals</OFSectionLabel>
-        <SQGateSparklines signals={sig} />
-
-        {/* ── 24h session timeline ── */}
-        <OFSectionLabel>24h signal map — session activity (last 7 days)</OFSectionLabel>
-        {sig.length === 0 ? (
-          <div className="qb-mono" style={{ fontSize:9, color:'var(--qb-text-faint)', padding:'10px 0' }}>
-            No signals evaluated yet — gates will populate as Pine alerts fire.
+            <input
+              value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Filter by asset, template…"
+              style={{background:'rgba(0,20,48,.5)',border:'1px solid var(--b)',borderRadius:4,color:'var(--txt)',
+                fontFamily:'var(--mono)',fontSize:9,padding:'3px 8px',outline:'none',flex:1,minWidth:140}}
+            />
+            <span style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)'}}>{filtered.length} rows</span>
           </div>
-        ) : (
-          <SQSessionTimeline signals={sig} />
-        )}
-
-        {/* ── Signal feed ── */}
-        {sig.length > 0 && (
-          <>
-            <OFSectionLabel>Recent signals — gate evaluation feed</OFSectionLabel>
-            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-              {sig.slice(0, 20).map(s => <SQSignalCard key={s.id} s={s} />)}
-            </div>
-          </>
-        )}
-        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 8, fontStyle: 'italic' }}>
-          live — signals blocked here never reach the broker. toggle gates above to adjust. wick threshold: {Math.round((cfg.wickThreshold ?? 0.5)*100)}%.
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15g · SHADOW-ADVICE PANEL  (v15.9)
-// =====================================================================
-// Reads /api/shadow-advice-summary.
-// Shows whether the recognition-memory advisor predicts outcomes.
-// recMultiplier is hardcoded 1.0 in watcher.js — advice does NOT influence
-// lot sizing. This panel reports what the shadow log has accumulated.
-// Desktop: full-width grid cell. Mobile: stats tab. Never gates execution.
-
-const SA_MIN_N = 8;
-
-function SaStatBox({ label, s, accent }) {
-  const thin = !s || s.insufficient;
-  return (
-    <div style={{
-      flex: 1, minWidth: 160, padding: '10px 14px',
-      background: 'var(--qb-bg-panel-hi)',
-      border: `1px solid ${thin ? 'var(--qb-border)' : (accent || 'var(--qb-border-hi)')}`,
-      borderRadius: 4, opacity: thin ? 0.65 : 1,
-    }}>
-      <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>
-        {label}
-      </div>
-      {thin ? (
-        <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-          {s?.n != null ? `n=${s.n} — collecting (need ${SA_MIN_N})` : 'collecting'}
-        </div>
-      ) : (
-        <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <OFMiniStat label="n"    value={s.n} />
-          <OFMiniStat label="WR"   value={`${Math.round(s.winRate * 100)}%`}
-            color={s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
-          <OFMiniStat label="net"  value={fmtUSD(s.netPnl, true)}
-            color={s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-          {s.avgR != null && (
-            <OFMiniStat label="avgR" value={`${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R`}
-              color={s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ShadowAdvicePanel({ gridColumn = '1 / 4', style }) {
-  const [data, setData]           = useState(null);
-  const [fetchError, setError]    = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [ready, setReady]         = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('shadow-advice-summary')).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok) { setData(r); setError(null); }
-        else { setData(null); setError(r?.error || 'endpoint error'); }
-      } catch (e) {
-        if (alive) { setData(null); setError(e.message); }
-      }
-      if (alive) { setLastFetch(new Date()); setReady(true); }
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const panelProps = {
-    title: 'Recognition Advisor',
-    subtitle: 'shadow mode — recMultiplier = 1.0 — measuring only',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'shadow-advice', defaultCollapsed: false,
-  };
-
-  if (!ready) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '18px 14px' }}><Placeholder msg="Loading shadow-advice data..." /></div>
-    </Panel>
-  );
-
-  if (fetchError && !data) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '14px 16px' }}>
-        <PlaceholderError msg={`/api/shadow-advice-summary: ${fetchError}`} />
-      </div>
-    </Panel>
-  );
-
-  if (!data) return (
-    <Panel {...panelProps}>
-      <div style={{ padding: '14px 16px', minHeight: 100 }}>
-        <div style={{
-          padding: '10px 14px', background: 'var(--qb-bg-void)',
-          border: '1px solid var(--qb-border)', borderRadius: 4,
-          fontSize: 10, color: 'var(--qb-text-mid)', lineHeight: 1.7,
-        }}>
-          <div style={{ fontWeight: 600, color: 'var(--qb-text-hi)', marginBottom: 4 }}>
-            Collecting recognition-memory shadow data
-          </div>
-          Shadow records write on every signal. Outcomes stamp at trade close.
-          {lastFetch && (
-            <div style={{ marginTop: 6, fontSize: 8, color: 'var(--qb-text-faint)' }}>
-              Last checked: {lastFetch.toLocaleTimeString()}
-            </div>
-          )}
-        </div>
-      </div>
-    </Panel>
-  );
-
-  const cov    = data.coverage    || {};
-  const byConf = data.byConfidence || {};
-  const byMult = data.byMultiplierBucket || {};
-  const byAD   = data.byAssetDirection  || {};
-
-  const confKeys = Object.keys(byConf).sort();
-  const multKeys = Object.keys(byMult).sort((a, b) => parseFloat(a) - parseFloat(b));
-  const adKeys   = Object.keys(byAD).sort();
-
-  const anyReadable      = confKeys.some(k => !(byConf[k]?.insufficient));
-  const maxResolvedBucket = confKeys.reduce((m, k) => Math.max(m, byConf[k]?.n || 0), 0);
-  const gateNeeded       = Math.max(0, SA_MIN_N - maxResolvedBucket);
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* ── STATUS banner ────────────────────────────────────────────────── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-          padding: '7px 10px', marginBottom: 10,
-          background: 'var(--qb-bg-void)',
-          border: '1px solid var(--qb-border)', borderRadius: 4,
-        }}>
-          <span className="qb-mono" style={{ fontSize: 8, fontWeight: 700, color: 'var(--qb-warn)', letterSpacing: 0.8 }}>
-            SHADOW MODE
-          </span>
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-mid)' }}>
-            recMultiplier = 1.0 — advisor runs and logs on every signal; lot sizing is unaffected
-          </span>
-          <span style={{ flex: 1 }} />
-          {lastFetch && <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>{lastFetch.toLocaleTimeString()}</span>}
-        </div>
-
-        {/* ── COVERAGE ─────────────────────────────────────────────────────── */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, paddingBottom: 8, borderBottom: '1px solid var(--qb-border)', flexWrap: 'wrap', marginBottom: 8 }}>
-          <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-faint)' }}>
-            {cov.written ?? 0} signals written
-            <span style={{ color: 'var(--qb-text-mid)' }}>
-              {' '}({cov.resolved ?? 0} resolved, {cov.open ?? 0} open)
-            </span>
-          </span>
-          <span style={{ flex: 1 }} />
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>shadow data — not gating execution</span>
-        </div>
-
-        {/* ── 1. VERDICT ───────────────────────────────────────────────────── */}
-        <OFSectionLabel>1 — Verdict: does confidence predict outcome?</OFSectionLabel>
-        {confKeys.length === 0 ? (
-          <div style={{ padding: '10px 14px', background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 4,
-            fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-            No resolved trades yet — verdict not readable
-          </div>
-        ) : !anyReadable ? (
-          <div>
-            <div style={{ padding: '10px 14px', marginBottom: 8, background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 4,
-              fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>
-              NOT YET READABLE — all confidence buckets have n &lt; {SA_MIN_N}. Accumulating.
-            </div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {confKeys.map(k => <SaStatBox key={k} label={`confidence: ${k}`} s={byConf[k]} />)}
-            </div>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {confKeys.map(k => {
-              const s = byConf[k];
-              const accent = s.insufficient ? undefined
-                : s.winRate >= 0.55 ? 'var(--qb-ok)'
-                : s.winRate >= 0.45 ? 'var(--qb-warn)'
-                : 'var(--qb-bad)';
-              return <SaStatBox key={k} label={`confidence: ${k}`} s={s} accent={accent} />;
-            })}
-          </div>
-        )}
-
-        {/* ── 2. RE-INFLUENCE GATE ─────────────────────────────────────────── */}
-        <OFSectionLabel>2 — Re-influence gate</OFSectionLabel>
-        <div style={{
-          padding: '10px 14px',
-          background: 'var(--qb-bg-void)',
-          border: `1px solid ${anyReadable ? 'var(--qb-ok)' : 'var(--qb-border)'}`,
-          borderRadius: 4, fontSize: 9, lineHeight: 1.7,
-        }}>
-          <div className="qb-mono" style={{ fontWeight: 600, marginBottom: 4,
-            color: anyReadable ? 'var(--qb-ok)' : 'var(--qb-text-mid)' }}>
-            {anyReadable
-              ? 'GATE CONDITION MET for some buckets — verify all buckets before re-influencing'
-              : `GATE LOCKED — need n ≥ ${SA_MIN_N} per confidence bucket`}
-          </div>
-          <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>
-            Gate opens when: every confidence bucket reaches n ≥ {SA_MIN_N} clean resolved trades.
-            <br />
-            Current: {cov.resolved ?? 0} resolved total · best bucket n = {maxResolvedBucket}
-            {!anyReadable && ` · need ${gateNeeded} more in top bucket`}
-          </div>
-          <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginTop: 6, fontStyle: 'italic' }}>
-            Re-influence is a one-line code change in watcher.js — never a UI toggle.
-          </div>
-        </div>
-
-        {/* ── 3. By advisorMultiplier bucket ───────────────────────────────── */}
-        {multKeys.length > 0 && (
-          <>
-            <OFSectionLabel>3 — By advisor multiplier (getSizeMultiplier output)</OFSectionLabel>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {multKeys.map(k => <SaStatBox key={k} label={`×${k}`} s={byMult[k]} />)}
-            </div>
-          </>
-        )}
-
-        {/* ── 4. Per asset × direction ─────────────────────────────────────── */}
-        {adKeys.length > 0 && (
-          <>
-            <OFSectionLabel>4 — Per asset × direction</OFSectionLabel>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
-                <thead>
-                  <tr>
-                    {['asset:dir', 'n', 'WR', 'avgR', 'net P&L'].map(h => (
-                      <th key={h} style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--qb-border)', color: 'var(--qb-text-faint)', fontWeight: 400 }}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {adKeys.map(k => {
-                    const s = byAD[k];
-                    return (
-                      <tr key={k} style={{ opacity: s.insufficient ? 0.5 : 1 }}>
-                        <td style={{ padding: '4px 8px', color: 'var(--qb-text-hi)' }}>{k}</td>
-                        <td style={{ padding: '4px 8px', color: 'var(--qb-text-mid)' }}>{s.n}</td>
-                        <td style={{ padding: '4px 8px',
-                          color: s.insufficient ? 'var(--qb-text-faint)'
-                            : s.winRate >= 0.55 ? 'var(--qb-ok)'
-                            : s.winRate >= 0.45 ? 'var(--qb-warn)'
-                            : 'var(--qb-bad)' }}>
-                          {s.insufficient ? '—' : `${Math.round(s.winRate * 100)}%`}
-                        </td>
-                        <td style={{ padding: '4px 8px',
-                          color: s.insufficient ? 'var(--qb-text-faint)'
-                            : s.avgR != null ? (s.avgR >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)') : 'var(--qb-text-faint)' }}>
-                          {s.insufficient ? '—' : s.avgR != null ? `${s.avgR >= 0 ? '+' : ''}${s.avgR.toFixed(2)}R` : '—'}
-                        </td>
-                        <td style={{ padding: '4px 8px',
-                          color: s.insufficient ? 'var(--qb-text-faint)'
-                            : s.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)' }}>
-                          {s.insufficient ? '—' : fmtUSD(s.netPnl, true)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15f · GATING CONTROL PANEL  (v15.8 Part 3)
-// =====================================================================
-// Reads GET /api/gating-rules. Writes POST /api/gating-rules.
-// G6: toggle only on explicit confirmed user click. Never auto-triggers.
-// Shows ORB×BTC and ORB×NAS100 as OFF on load (seeded from hardcoded blocks).
-
-const GATING_SESSION_LABEL     = (s) => s === '*' ? 'Any Session' : (SESSION_LABELS[s] || s);
-const GATING_INSTRUMENT_LABEL  = (i) => i === '*' ? 'ALL instruments' : i.toUpperCase();
-
-function GatingPanel({ gridColumn = '1 / 4', style }) {
-  const [rules, setRules]           = useState(null);
-  const [loading, setLoading]       = useState(false);
-  const [saving, setSaving]         = useState(null); // key being saved
-  const [fetchError, setError]      = useState(null);
-  const [confirm, setConfirm]       = useState(null); // { key, template, session, instrument, newOn }
-  const [addMode, setAddMode]       = useState(false);
-  const [addForm, setAddForm]       = useState({ template: 'orb', session: '*', instrument: '' });
-  const [lastFetch, setLastFetch]   = useState(null);
-
-  const loadRules = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(API('gating-rules')).then(res => res.json());
-      if (r?.ok) { setRules(r.rules); setError(null); }
-      else setError(r?.error || 'endpoint error');
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-      setLastFetch(new Date());
-    }
-  }, []);
-
-  useEffect(() => { loadRules(); }, [loadRules]);
-
-  const handleToggle = useCallback((rule, newOn) => {
-    // First click: show confirmation
-    setConfirm({ key: rule.key, template: rule.template, session: rule.session, instrument: rule.instrument, newOn });
-  }, []);
-
-  const handleConfirm = useCallback(async () => {
-    if (!confirm) return;
-    setSaving(confirm.key);
-    setConfirm(null);
-    try {
-      const r = await fetch(API('gating-rules'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ template: confirm.template, session: confirm.session, instrument: confirm.instrument, on: confirm.newOn }),
-      }).then(res => res.json());
-      if (r?.ok) await loadRules();
-      else setError(r?.error || 'save failed');
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(null);
-    }
-  }, [confirm, loadRules]);
-
-  const handleAddRule = useCallback(async () => {
-    if (!addForm.instrument.trim()) return;
-    setSaving('add');
-    try {
-      const r = await fetch(API('gating-rules'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ template: addForm.template, session: addForm.session, instrument: addForm.instrument.trim().toLowerCase(), on: false }),
-      }).then(res => res.json());
-      if (r?.ok) { setAddMode(false); setAddForm({ template: 'orb', session: '*', instrument: '' }); await loadRules(); }
-      else setError(r?.error || 'add failed');
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(null);
-    }
-  }, [addForm, loadRules]);
-
-  const panelProps = {
-    title: 'Signal Gating',
-    subtitle: 'template × instrument control — writes flags only, never trades',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'gating-control', defaultCollapsed: false,
-  };
-
-  const onRules  = (rules || []).filter(r => r.on !== false);
-  const offRules = (rules || []).filter(r => r.on === false);
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* safety callout */}
-        <div style={{ padding: '7px 12px', background: 'var(--qb-warn-soft)', border: '1px solid var(--qb-warn)', borderRadius: 3, marginBottom: 10 }}>
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', textTransform: 'uppercase', letterSpacing: 0.8 }}>
-            G6 — gating flag writes only. Never places, closes, or modifies trades. Each toggle requires explicit confirmation.
-          </span>
-        </div>
-
-        {fetchError && <div style={{ marginBottom: 8 }}><PlaceholderError msg={fetchError} /></div>}
-
-        {/* confirmation dialog */}
-        {confirm && (
-          <div style={{ padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '2px solid var(--qb-warn)', borderRadius: 4, marginBottom: 10 }}>
-            <div className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-warn)', marginBottom: 6 }}>
-              Confirm: set {confirm.template.toUpperCase()} × {confirm.instrument.toUpperCase()} × {GATING_SESSION_LABEL(confirm.session)} to <strong>{confirm.newOn ? 'ON (allow)' : 'OFF (block)'}</strong>?
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={handleConfirm}
-                style={{ padding: '5px 14px', background: confirm.newOn ? 'var(--qb-ok-soft)' : 'var(--qb-bad-soft)', border: `1px solid ${confirm.newOn ? 'var(--qb-ok)' : 'var(--qb-bad)'}`, borderRadius: 3, cursor: 'pointer', fontSize: 10, color: confirm.newOn ? 'var(--qb-ok)' : 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)' }}>
-                Confirm {confirm.newOn ? 'ALLOW' : 'BLOCK'}
-              </button>
-              <button onClick={() => setConfirm(null)} style={{ padding: '5px 14px', background: 'transparent', border: '1px solid var(--qb-border)', borderRadius: 3, cursor: 'pointer', fontSize: 10, color: 'var(--qb-text-mid)', fontFamily: 'var(--qb-font-mono)' }}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-
-        {loading && !rules ? (
-          <Placeholder msg="Loading gating rules..." />
-        ) : (
-          <>
-            {/* BLOCKED rules */}
-            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-bad)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
-              Blocked ({offRules.length})
-            </div>
-            {offRules.length === 0 ? (
-              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic', marginBottom: 10 }}>No blocked combinations.</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-                {offRules.map(rule => (
-                  <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3 }}>
-                    <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-hi)', flex: 1 }}>
-                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{GATING_INSTRUMENT_LABEL(rule.instrument)}</strong>
-                      {' '}<span style={{ color: 'var(--qb-text-faint)' }}>({GATING_SESSION_LABEL(rule.session)} session)</span>
-                    </span>
-                    <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-bad)', fontWeight: 700, minWidth: 36 }}>OFF</span>
-                    {rule.updatedAt && <span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', minWidth: 80 }}>{new Date(rule.updatedAt).toLocaleString()}</span>}
-                    <button
-                      disabled={saving === rule.key}
-                      onClick={() => handleToggle(rule, true)}
-                      style={{ padding: '3px 10px', background: 'var(--qb-ok-soft)', border: '1px solid var(--qb-ok)', borderRadius: 3, cursor: saving === rule.key ? 'not-allowed' : 'pointer', fontSize: 9, color: 'var(--qb-ok)', fontFamily: 'var(--qb-font-mono)', opacity: saving === rule.key ? 0.5 : 1 }}>
-                      {saving === rule.key ? '…' : 'Enable'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* ALLOWED rules */}
-            <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-mid)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
-              Explicitly allowed ({onRules.length}) <span style={{ color: 'var(--qb-text-faint)', fontStyle: 'normal', textTransform: 'none', fontSize: 8 }}>— combinations without a rule are also allowed</span>
-            </div>
-            {onRules.length === 0 ? (
-              <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic', marginBottom: 10 }}>No explicit allow rules (default: all combinations allowed).</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-                {onRules.map(rule => (
-                  <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 3 }}>
-                    <span className="qb-mono" style={{ fontSize: 9, color: 'var(--qb-text-hi)', flex: 1 }}>
-                      <strong>{rule.template.toUpperCase()}</strong> × <strong>{GATING_INSTRUMENT_LABEL(rule.instrument)}</strong>
-                      {' '}<span style={{ color: 'var(--qb-text-faint)' }}>({GATING_SESSION_LABEL(rule.session)} session)</span>
-                    </span>
-                    <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-ok)', fontWeight: 700, minWidth: 36 }}>ON</span>
-                    {rule.updatedAt && <span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', minWidth: 80 }}>{new Date(rule.updatedAt).toLocaleString()}</span>}
-                    <button
-                      disabled={saving === rule.key}
-                      onClick={() => handleToggle(rule, false)}
-                      style={{ padding: '3px 10px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3, cursor: saving === rule.key ? 'not-allowed' : 'pointer', fontSize: 9, color: 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)', opacity: saving === rule.key ? 0.5 : 1 }}>
-                      {saving === rule.key ? '…' : 'Block'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Add rule */}
-            {!addMode ? (
-              <button onClick={() => setAddMode(true)} style={{ padding: '5px 14px', background: 'transparent', border: '1px solid var(--qb-border)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-text-mid)', fontFamily: 'var(--qb-font-mono)' }}>
-                + Add block rule
-              </button>
-            ) : (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', padding: '8px 10px', background: 'var(--qb-bg-void)', border: '1px solid var(--qb-border)', borderRadius: 3 }}>
-                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Template:</span>
-                <select value={addForm.template} onChange={e => setAddForm(f => ({ ...f, template: e.target.value }))} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
-                  {['orb','orb-pro','reaction','reaction-fvg','reaction-ifvg','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','alexg'].map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Session:</span>
-                <select value={addForm.session} onChange={e => setAddForm(f => ({ ...f, session: e.target.value }))} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
-                  {['*','ASIAN','LONDON','NY_AM','NY_PM','OVERLAP'].map(s => <option key={s} value={s}>{GATING_SESSION_LABEL(s)}</option>)}
-                </select>
-                <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Instrument:</span>
-                <select value={addForm.instrument} onChange={e => setAddForm(f => ({ ...f, instrument: e.target.value }))} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
-                  <option value="">— pick —</option>
-                  <option value="*">* (ALL instruments)</option>
-                  {['gold','btc','nas100','us500','eurusd','gbpusd','usdjpy'].map(i => <option key={i} value={i}>{i}</option>)}
-                </select>
-                <button onClick={handleAddRule} disabled={saving === 'add' || !addForm.instrument.trim()} style={{ padding: '4px 12px', background: 'var(--qb-bad-soft)', border: '1px solid var(--qb-bad)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-bad)', fontFamily: 'var(--qb-font-mono)' }}>
-                  {saving === 'add' ? '…' : 'Add Block'}
-                </button>
-                <button onClick={() => setAddMode(false)} style={{ padding: '4px 12px', background: 'transparent', border: '1px solid var(--qb-border)', borderRadius: 3, cursor: 'pointer', fontSize: 9, color: 'var(--qb-text-mid)', fontFamily: 'var(--qb-font-mono)' }}>Cancel</button>
-              </div>
-            )}
-
-            <div style={{ marginTop: 8 }}>
-              <span className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)' }}>
-                {lastFetch && `Last refresh: ${lastFetch.toLocaleTimeString()}`}
-                {' · '}Rules stored in Redis v14:gating:rules · changes logged to v14:gating:audit
-              </span>
-            </div>
-          </>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-// =====================================================================
-// 15g · INSTRUMENT HEATMAP  (v15.8 Part 4a)
-// =====================================================================
-// Template (rows) × session (cols) grid for a selected instrument.
-// Data from /api/perf-ranking. Cell coloring by WR or net PnL (toggle).
-// n < 8 cells are greyed. FX/NAS100 contamination note when applicable.
-
-const HEATMAP_SESSIONS = ['ASIAN', 'LONDON', 'NY_AM', 'NY_PM', 'OVERLAP'];
-const HEATMAP_SESSION_LABEL = { ASIAN: 'Asia', LONDON: 'London', NY_AM: 'NY AM', NY_PM: 'NY PM', OVERLAP: 'Overlap' };
-const HEATMAP_MIN_N = 5;
-
-function heatmapColor(v, min, max) {
-  if (v == null) return 'transparent';
-  if (max === min) return 'transparent';
-  const norm = (v - min) / (max - min); // 0 = worst, 1 = best
-  if (norm >= 0.6) return 'rgba(74,222,128,0.18)';
-  if (norm >= 0.4) return 'rgba(74,222,128,0.07)';
-  if (norm <= 0.15) return 'rgba(248,113,113,0.2)';
-  return 'transparent';
-}
-
-function InstrumentHeatmapPanel({ gridColumn = '1 / 4', style }) {
-  const [raw, setRaw]             = useState(null);
-  const [fetchError, setError]    = useState(null);
-  const [ready, setReady]         = useState(false);
-  const [instrument, setInstr]    = useState('xauusd');
-  const [metric, setMetric]       = useState('wr'); // 'wr' | 'net'
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch(API('perf-ranking')).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok) { setRaw(r); setError(null); }
-        else setError(r?.error || 'endpoint error');
-      } catch (e) {
-        if (alive) setError(e.message);
-      }
-      if (alive) setReady(true);
-    };
-    load();
-    const id = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  const panelProps = {
-    title: 'Instrument Heatmap',
-    subtitle: 'template × session — filtered by instrument',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'instrument-heatmap', defaultCollapsed: true,
-  };
-
-  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading perf-ranking data..." /></div></Panel>;
-  if (fetchError) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={fetchError} /></div></Panel>;
-  if (!raw?.trades) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><Placeholder msg="No trade data." /></div></Panel>;
-
-  const allInstruments = [...new Set(raw.trades.map(t => (t.asset || '').toLowerCase()).filter(Boolean))].sort();
-
-  // Build matrix for selected instrument
-  const instrTrades = raw.trades.filter(t => (t.asset || '').toLowerCase() === instrument);
-  const matrix = {};
-  for (const t of instrTrades) {
-    const tmpl = t.template;
-    const sess = t.session;
-    if (!tmpl || !sess) continue;
-    if (!matrix[tmpl]) matrix[tmpl] = {};
-    if (!matrix[tmpl][sess]) matrix[tmpl][sess] = { n: 0, wins: 0, netPnl: 0, rList: [] };
-    const cell = matrix[tmpl][sess];
-    cell.n++;
-    if (t.outcome === 'WIN') cell.wins++;
-    cell.netPnl += t.netPnl || 0;
-    if (t.pnlR != null) cell.rList.push(t.pnlR);
-  }
-
-  const tplRows = TEMPLATE_ORDER.filter(t => matrix[t]);
-  const allVals = tplRows.flatMap(t => HEATMAP_SESSIONS.map(s => {
-    const c = matrix[t]?.[s];
-    if (!c || c.n < HEATMAP_MIN_N) return null;
-    return metric === 'wr' ? c.wins / c.n : c.netPnl;
-  }).filter(v => v != null));
-  const minV = allVals.length ? Math.min(...allVals) : 0;
-  const maxV = allVals.length ? Math.max(...allVals) : 1;
-
-  const isFxInstr = !['xauusd', 'gold', 'btcusd', 'btc', 'nas100', 'us500', 'spx500usd'].includes(instrument);
-
-  return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
-
-        {/* controls */}
-        <div style={{ display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Instrument:</span>
-          <select value={instrument} onChange={e => setInstr(e.target.value)} style={{ fontFamily: 'var(--qb-font-mono)', fontSize: 9, padding: '3px 6px', background: 'var(--qb-bg-panel)', border: '1px solid var(--qb-border)', color: 'var(--qb-text-hi)', borderRadius: 2 }}>
-            {allInstruments.map(i => <option key={i} value={i}>{i}</option>)}
-          </select>
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Color by:</span>
-          {['wr', 'net'].map(m => (
-            <button key={m} onClick={() => setMetric(m)} style={{ padding: '3px 8px', fontSize: 8, fontFamily: 'var(--qb-font-mono)', border: `1px solid ${metric === m ? 'var(--qb-accent)' : 'var(--qb-border)'}`, background: metric === m ? 'var(--qb-accent-soft)' : 'transparent', color: metric === m ? 'var(--qb-accent)' : 'var(--qb-text-mid)', borderRadius: 2, cursor: 'pointer' }}>
-              {m === 'wr' ? 'Win Rate' : 'Net $'}
-            </button>
-          ))}
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 'auto' }}>
-            {instrTrades.length} trades for {instrument}
-          </span>
-        </div>
-
-        {isFxInstr && (
-          <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', marginBottom: 6 }}>
-            FX instrument — pre-fix preFix trades may be included; use excludePreFix filter in perf-analysis for clean signal.
-          </div>
-        )}
-
-        {tplRows.length === 0 ? (
-          <Placeholder msg={`No trades for ${instrument}.`} />
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ borderCollapse: 'collapse', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
+          <div className="tblWrap">
+            <table className="tbl">
               <thead>
                 <tr>
-                  <th style={{ padding: '4px 10px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, color: 'var(--qb-text-faint)', textAlign: 'left' }}>Template</th>
-                  {HEATMAP_SESSIONS.map(s => (
-                    <th key={s} style={{ padding: '4px 8px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, color: 'var(--qb-text-faint)', textAlign: 'center' }}>{HEATMAP_SESSION_LABEL[s]}</th>
-                  ))}
+                  <th>Time</th><th>Asset</th><th>Dir</th><th>Template</th>
+                  <th>Session</th><th>Outcome</th><th>PnL</th><th>R</th><th>Hold</th><th>KNN</th>
                 </tr>
               </thead>
               <tbody>
-                {tplRows.map(tmpl => {
-                  const meta = TEMPLATE_DISPLAY[tmpl];
+                {filtered.slice(0,300).map((t,i) => {
+                  const oc = t.outcome === 'WIN' ? 'tblWin' : t.outcome === 'LOSS' ? 'tblLoss' : 'tblBE';
                   return (
-                    <tr key={tmpl} style={{ borderBottom: '1px solid var(--qb-border)' }}>
-                      <td style={{ padding: '4px 10px', color: 'var(--qb-text-hi)', whiteSpace: 'nowrap' }}>
-                        <span style={{ marginRight: 4, fontSize: 10 }}>{meta?.glyph || ''}</span>
-                        <span style={{ fontSize: 9 }}>{meta?.label || tmpl}</span>
+                    <tr key={i}>
+                      <td style={{color:'var(--dim)',whiteSpace:'nowrap'}}>{fmtTime(t.closedAt)}</td>
+                      <td style={{color:'var(--ion)',fontWeight:700}}>{(t.asset||'?').toUpperCase()}</td>
+                      <td>
+                        <span style={{fontSize:7,padding:'1px 4px',borderRadius:3,
+                          background: t.direction==='long'?'rgba(0,255,157,.1)':'rgba(255,45,85,.1)',
+                          color: t.direction==='long'?'var(--pulse)':'var(--thr)'}}>
+                          {(t.direction||'?').toUpperCase()}
+                        </span>
                       </td>
-                      {HEATMAP_SESSIONS.map(sess => {
-                        const cell = matrix[tmpl]?.[sess];
-                        if (!cell || cell.n === 0) return <td key={sess} style={{ padding: '4px 8px', textAlign: 'center' }}><span style={{ color: 'var(--qb-text-faint)', fontSize: 8 }}>—</span></td>;
-                        const thin = cell.n < HEATMAP_MIN_N;
-                        const wr   = cell.n > 0 ? cell.wins / cell.n : null;
-                        const val  = metric === 'wr' ? wr : cell.netPnl;
-                        const bg   = thin ? 'transparent' : heatmapColor(val, minV, maxV);
-                        return (
-                          <td key={sess} style={{ padding: '4px 8px', textAlign: 'center', background: bg, opacity: thin ? 0.45 : 1 }}>
-                            <div className="qb-mono" style={{ fontSize: 8, lineHeight: 1.6 }}>
-                              <div style={{ color: 'var(--qb-text-lo)' }}>n={cell.n}{thin ? '★' : ''}</div>
-                              {!thin && (
-                                <>
-                                  <div style={{ color: wr >= 0.55 ? 'var(--qb-ok)' : wr >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>{Math.round(wr * 100)}%</div>
-                                  <div style={{ color: cell.netPnl >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)', fontSize: 7 }}>{fmtUSD(cell.netPnl, true)}</div>
-                                </>
-                              )}
-                            </div>
-                          </td>
-                        );
-                      })}
+                      <td style={{color:'var(--txt)'}}>{tplLabel(t.template)}</td>
+                      <td style={{color:'var(--dim)'}}>{sessLabel(t.session)}</td>
+                      <td className={oc}>{t.outcome}</td>
+                      <td className={oc}>{fmtMoney(t.pnl,2)}</td>
+                      <td className={oc}>{fmtR(t.pnlR)}</td>
+                      <td style={{color:'var(--dim)'}}>{t.holdTimeMinutes != null ? `${t.holdTimeMinutes}m` : '—'}</td>
+                      <td style={{color:'var(--dim)'}}>{t.qualityTier || '—'}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-            <div className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', marginTop: 6 }}>
-              ★ n&lt;{HEATMAP_MIN_N} — insufficient sample, greyed. Counts from perf-ranking (includes preFix trades for FX/NAS100).
-            </div>
           </div>
-        )}
+        </div>
       </div>
-    </Panel>
+    </div>
   );
 }
 
-// =====================================================================
-// 15h · TREND VS COUNTER-TREND HEATMAP  (v15.8 Part 4b)
-// =====================================================================
-// Classifies TREND/COUNTER using static Daily HTF rule per asset.
-// Caveat labeled: htfTrend is static per asset across the ledger era.
-// Per-asset grid: TREND vs COUNTER breakdown by template.
+// ─── QB Nexus Modal ───────────────────────────────────────────────────────────
+function NexusModal({ trades, onClose }) {
+  const nexus = useMemo(() => computeNexus(trades), [trades]);
 
-function TrendHeatmapPanel({ gridColumn = '1 / 4', style }) {
-  const [raw, setRaw]           = useState(null);
-  const [fetchError, setError]  = useState(null);
-  const [ready, setReady]       = useState(false);
-  const [selectedAsset, setSel] = useState(null);
+  if (!nexus) return (
+    <div className="overlay" onClick={e => e.target.className.includes('overlay') && onClose()}>
+      <div className="modCard nexCard" style={{padding:24,textAlign:'center'}}>
+        <div style={{color:'var(--pur)',fontFamily:'var(--mono)',fontSize:14,fontWeight:800,marginBottom:8}}>⬡ QB-NEXUS</div>
+        <div style={{color:'var(--dim)',fontSize:10}}>Insufficient trade data (need ≥ 10 closed trades)</div>
+        <button className="nexClose" style={{marginTop:16}} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
 
+  const realWR  = pct(nexus.nexusWR,1);
+  const baseWR  = pct(nexus.overallWR,1);
+  const lift    = ((nexus.nexusWR - nexus.overallWR)*100).toFixed(1);
+
+  return (
+    <div className="overlay" onClick={e => e.target.className.includes('overlay') && onClose()}>
+      <div className="modCard nexCard">
+        <div className="modH">
+          <span className="modHN pur">⬡ QB-NEXUS · Real Analysis</span>
+          <span style={{fontFamily:'var(--mono)',fontSize:8,color:'var(--dim)'}}>{nexus.total} trades analysed</span>
+          <button className="modClose" onClick={onClose}>✕</button>
+        </div>
+        <div className="modBody">
+          <div className="nexGrid">
+            <div className="nexCard">
+              <div className="nexCT">Nexus WR</div>
+              <div className="nexCV" style={{color:'var(--pulse)'}}>{realWR}</div>
+              <div className="nexCL">vs {baseWR} overall ({lift >= 0 ? '+':''}{lift}pp lift)</div>
+            </div>
+            <div className="nexCard">
+              <div className="nexCT">Nexus Avg R</div>
+              <div className="nexCV" style={{color:'var(--ion)'}}>{fmtR(nexus.nexusAvgR)}</div>
+              <div className="nexCL">vs {fmtR(nexus.overallAvgR)} overall</div>
+            </div>
+            <div className="nexCard">
+              <div className="nexCT">Confidence</div>
+              <div className="nexCV" style={{color:'var(--pur)'}}>{nexus.confidence}</div>
+              <div className="nexCL">{nexus.nexusSample} qualifying trades</div>
+            </div>
+          </div>
+
+          <div className="nexRec">
+            <b>⬡ QB-NEXUS</b> optimal conditions identified from real data:<br/>
+            {nexus.bestTpl && <><b>Best template:</b> {tplLabel(nexus.bestTpl.id)} ({pct(nexus.bestTpl.wr,1)} WR on {nexus.bestTpl.total} trades) <br/></>}
+            {nexus.bestSess && <><b>Best session:</b> {sessLabel(nexus.bestSess.id)} ({pct(nexus.bestSess.wr,1)} WR on {nexus.bestSess.total} trades)<br/></>}
+            <b>No-news filter:</b> exclude trades within 60m of high-impact events<br/>
+            <b>Intersection sample:</b> {nexus.nexusSample} trades · {realWR} WR · {fmtR(nexus.nexusAvgR)} avg R
+            {nexus.confidence === 'LOW' && <><br/><span style={{color:'var(--amb)'}}>⚠ Sample size low — use as directional guidance only</span></>}
+          </div>
+
+          <div style={{fontSize:9,color:'var(--dim)',marginBottom:6,fontFamily:'var(--mono)',textTransform:'uppercase',letterSpacing:.5}}>Template Breakdown (all {nexus.total} trades)</div>
+          <div className="tplStatGrid">
+            {nexus.tplStats.map((s,i) => (
+              <div className="tplStat" key={i}>
+                <div className="tplStatV" style={{color: s.wr>=0.6?'var(--pulse)':s.wr>=0.45?'var(--ion)':'var(--thr)'}}>
+                  {pct(s.wr,1)}
+                </div>
+                <div style={{fontFamily:'var(--mono)',fontSize:7,color:'var(--ion)',marginBottom:3}}>{tplLabel(s.id)}</div>
+                <div className="tplStatL">{s.total} trades · {fmtR(s.avgR)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{fontSize:9,color:'var(--dim)',marginBottom:6,marginTop:10,fontFamily:'var(--mono)',textTransform:'uppercase',letterSpacing:.5}}>Session Breakdown</div>
+          <div className="tplStatGrid">
+            {nexus.sessStats.map((s,i) => (
+              <div className="tplStat" key={i}>
+                <div className="tplStatV" style={{color: s.wr>=0.6?'var(--pulse)':s.wr>=0.45?'var(--ion)':'var(--thr)'}}>
+                  {pct(s.wr,1)}
+                </div>
+                <div style={{fontFamily:'var(--mono)',fontSize:7,color:'var(--ion)',marginBottom:3}}>{sessLabel(s.id)}</div>
+                <div className="tplStatL">{s.total} trades · {fmtR(s.avgR)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Template Detail Modal ────────────────────────────────────────────────────
+function TemplateModal({ tplId, trades, rules, onClose }) {
+  const meta  = TPLS[tplId] || { glyph:'⊕', label: tplId };
+  const tTrades = useMemo(() => (trades||[]).filter(t => t.template === tplId), [trades, tplId]);
+  const wins  = tTrades.filter(t => t.outcome === 'WIN').length;
+  const losses= tTrades.filter(t => t.outcome === 'LOSS').length;
+  const wr    = tTrades.length ? wins/tTrades.length : 0;
+  const rVals = tTrades.map(t=>t.pnlR).filter(v=>typeof v==='number'&&isFinite(v));
+  const avgR  = rVals.length ? rVals.reduce((a,b)=>a+b,0)/rVals.length : 0;
+  const recent= tTrades.slice().sort((a,b)=>(b.closedAt||0)-(a.closedAt||0)).slice(0,50);
+  const ov    = rules?.templateOverrides?.[tplId] || {};
+
+  return (
+    <div className="overlay" onClick={e => e.target.className.includes('overlay') && onClose()}>
+      <div className="modCard logCard">
+        <div className="modH">
+          <span style={{fontSize:20}}>{meta.glyph}</span>
+          <span className="modHN">{meta.label}</span>
+          <button className="modClose" onClick={onClose}>✕</button>
+        </div>
+        <div className="modBody">
+          <div className="tplStatGrid" style={{gridTemplateColumns:'repeat(4,1fr)'}}>
+            <div className="tplStat"><div className="tplStatV" style={{color:'var(--pulse)'}}>{pct(wr,1)}</div><div className="tplStatL">Win Rate</div></div>
+            <div className="tplStat"><div className="tplStatV" style={{color:'var(--ion)'}}>{fmtR(avgR)}</div><div className="tplStatL">Avg R</div></div>
+            <div className="tplStat"><div className="tplStatV">{tTrades.length}</div><div className="tplStatL">Total Trades</div></div>
+            <div className="tplStat"><div className="tplStatV" style={{color: ov.enabled!==false?'var(--pulse)':'var(--thr)'}}>{ov.enabled!==false?'ON':'OFF'}</div><div className="tplStatL">Status</div></div>
+          </div>
+          <div style={{display:'flex',gap:1.5,margin:'10px 0',overflow:'hidden',height:24,borderRadius:4}}>
+            {tTrades.slice(-60).map((t,i) => (
+              <div key={i} style={{flex:1,minWidth:4,background:t.outcome==='WIN'?'rgba(0,255,157,.7)':t.outcome==='LOSS'?'rgba(255,45,85,.7)':'rgba(0,229,255,.25)',borderRadius:1}} />
+            ))}
+            {tTrades.length === 0 && <div style={{color:'var(--dim)',fontSize:9,padding:'4px 0'}}>No trade data</div>}
+          </div>
+          <div style={{fontSize:8,color:'var(--dim)',marginBottom:8,fontFamily:'var(--mono)'}}>Recent trades (trade DNA · last 60)</div>
+          <div className="tblWrap">
+            <table className="tbl">
+              <thead><tr><th>Time</th><th>Asset</th><th>Dir</th><th>Session</th><th>Outcome</th><th>PnL</th><th>R</th></tr></thead>
+              <tbody>
+                {recent.map((t,i) => {
+                  const oc = t.outcome==='WIN'?'tblWin':t.outcome==='LOSS'?'tblLoss':'tblBE';
+                  return (
+                    <tr key={i}>
+                      <td style={{color:'var(--dim)'}}>{fmtTime(t.closedAt)}</td>
+                      <td style={{color:'var(--ion)',fontWeight:700}}>{(t.asset||'?').toUpperCase()}</td>
+                      <td><span style={{fontSize:7,padding:'1px 4px',borderRadius:3,background:t.direction==='long'?'rgba(0,255,157,.1)':'rgba(255,45,85,.1)',color:t.direction==='long'?'var(--pulse)':'var(--thr)'}}>{(t.direction||'?').toUpperCase()}</span></td>
+                      <td style={{color:'var(--dim)'}}>{sessLabel(t.session)}</td>
+                      <td className={oc}>{t.outcome}</td>
+                      <td className={oc}>{fmtMoney(t.pnl,2)}</td>
+                      <td className={oc}>{fmtR(t.pnlR)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+export default function App() {
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [account,     setAccount]     = useState(null);
+  const [positions,   setPositions]   = useState([]);
+  const [rules,       setRules]       = useState(null);
+  const [activity,    setActivity]    = useState([]);
+  const [dailyPnL,    setDailyPnL]    = useState(0);
+  const [trades,      setTrades]      = useState([]);
+  const [jarvisState, setJarvisState] = useState(null);
+  const [goals,       setGoals]       = useState(null);
+  const [news,        setNews]        = useState(null);
+  const [messages,    setMessages]    = useState([]);
+  const [thinking,    setThinking]    = useState(false);
+  const [modal,       setModal]       = useState(null); // null | {type:'log'|'nexus'|'tpl'|'estop', id?}
+  const [focusDock,   setFocusDock]   = useState(null);
+  const [clock,       setClock]       = useState('');
+  const [input,       setInput]       = useState('');
+  const [ambClass,    setAmbClass]    = useState('monitor');
+  const inputRef = useRef(null);
+
+  // ── Clock ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const tick = () => {
+      const d = new Date();
+      const ny = new Date(d.toLocaleString('en-US',{timeZone:'America/New_York'}));
+      setClock(ny.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) + ' NY');
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Data polling ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    let alive = true;
+    const fast = async () => {
+      try {
+        const [a, p] = await Promise.all([
+          fetch(API('broker?action=account')).then(r=>r.json()).catch(()=>null),
+          fetch(API('broker?action=positions')).then(r=>r.json()).catch(()=>[]),
+        ]);
+        if (!alive) return;
+        if (a && !a.error) setAccount(a);
+        setPositions(Array.isArray(p) ? p : []);
+      } catch (_) {}
+    };
+    fast();
+    const id = setInterval(fast, 5000);
+    return () => { alive=false; clearInterval(id); };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const slow = async () => {
+      try {
+        const [r, act, pnl, js, g, n] = await Promise.all([
+          fetch(API('rules')).then(r=>r.json()).catch(()=>null),
+          fetch(API('rules?action=activity&limit=60')).then(r=>r.json()).catch(()=>null),
+          fetch(API('manage-trades?action=today-pnl')).then(r=>r.json()).catch(()=>null),
+          fetch(API('jarvis-state')).then(r=>r.json()).catch(()=>null),
+          fetch(API('jarvis-goal')).then(r=>r.json()).catch(()=>null),
+          fetch(API('news-context')).then(r=>r.json()).catch(()=>null),
+        ]);
+        if (!alive) return;
+        if (r && !r.error)            setRules(r);
+        if (act?.activity)            setActivity(act.activity);
+        if (pnl?.pnl != null)         setDailyPnL(pnl.pnl);
+        else if (pnl?.ok === false) {
+          // fallback
+          fetch(API('rules?action=daily-pnl')).then(r=>r.json()).then(r2 => { if(alive && r2?.pnl!=null) setDailyPnL(r2.pnl); }).catch(()=>{});
+        }
+        if (js && !js.error)          setJarvisState(js);
+        if (g && !g.error)            setGoals(g);
+        if (n && !n.error)            setNews(n);
+      } catch (_) {}
+    };
+    slow();
+    const id = setInterval(slow, 20000);
+    return () => { alive=false; clearInterval(id); };
+  }, []);
+
+  // Load all trades once, then refresh every 5 minutes
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
-        // Uses /api/trend-heatmap which computes H4 20/50 EMA per trade at openedAt.
-        // (Daily EMA unavailable: MetaAPI caps this account at ~50 1d bars.)
-        const r = await fetch(API('trend-heatmap')).then(res => res.json());
-        if (!alive) return;
-        if (r?.ok) { setRaw(r); setError(null); }
-        else setError(r?.error || 'endpoint error');
-      } catch (e) {
-        if (alive) setError(e.message);
-      }
-      if (alive) setReady(true);
+        const r = await fetch(API('recognition-memory?action=list&limit=600')).then(r=>r.json());
+        if (alive && Array.isArray(r)) setTrades(r);
+        else if (alive && Array.isArray(r?.trades)) setTrades(r.trades);
+      } catch (_) {}
     };
     load();
-    const id = setInterval(load, 30 * 60 * 1000); // 30 min (endpoint caches 1h)
-    return () => { alive = false; clearInterval(id); };
+    const id = setInterval(load, 300000);
+    return () => { alive=false; clearInterval(id); };
   }, []);
 
-  const panelProps = {
-    title: 'Trend vs Counter-Trend',
-    subtitle: 'H4 20/50 EMA per trade at entry — not a static map',
-    style: { gridColumn, ...(style || {}) },
-    collapsible: true, panelId: 'trend-heatmap', defaultCollapsed: true,
-  };
+  // ── Ambient glow from jarvis urgency ──────────────────────────────────────
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== 'jarvis') return;
+    if (last.urgency === 'critical')      setAmbClass('critical');
+    else if (last.urgency === 'elevated') setAmbClass('warn');
+    else                                  setAmbClass('monitor');
+  }, [messages]);
 
-  if (!ready) return <Panel {...panelProps}><div style={{ padding: '18px 14px' }}><Placeholder msg="Loading trend classification..." /></div></Panel>;
-  if (fetchError) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><PlaceholderError msg={fetchError} /></div></Panel>;
-  if (!raw?.trades) return <Panel {...panelProps}><div style={{ padding: '14px 16px' }}><Placeholder msg="No trade data." /></div></Panel>;
+  // ── JARVIS send ────────────────────────────────────────────────────────────
+  const sendToJarvis = useCallback(async (text) => {
+    if (!text.trim() || thinking) return;
+    const userMsg = { role:'user', text: text.trim(), ts: Date.now() };
+    setMessages(m => [...m, userMsg]);
+    setInput('');
+    setThinking(true);
+    try {
+      const res = await fetch(API('jarvis'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text.trim(), base: window.location.origin }),
+      });
+      const data = await res.json();
+      const reply = {
+        role: 'jarvis',
+        text: data.speech || 'No response.',
+        urgency: data.urgency,
+        focusPanel: data.focusPanel,
+        action: data.action,
+        ts: Date.now(),
+      };
+      setMessages(m => [...m, reply]);
 
-  // Server has already classified each trade as TREND / COUNTER / UNCLEAR / EXCLUDED
-  const allTrades     = raw.trades;
-  const classifiedTrades = allTrades.filter(t => t.trendClass !== 'EXCLUDED');
-  const excludedTrades   = allTrades.filter(t => t.trendClass === 'EXCLUDED');
-  const unclearTrades    = classifiedTrades.filter(t => t.trendClass === 'UNCLEAR');
+      // Build focus dock from JARVIS response
+      if (data.focusPanel === 'goal' && goals) {
+        const achieved = goals.daily.achieved ?? dailyPnL;
+        const target   = goals.daily.target;
+        setFocusDock({
+          title: 'GOAL PROGRESS',
+          rows: [
+            { k: 'Today banked', v: fmtMoneyAbs(achieved,2), color: 'var(--pulse)' },
+            { k: 'Daily target', v: fmtMoneyAbs(target,2) },
+            { k: 'Remaining',   v: fmtMoneyAbs(Math.max(0,target-achieved),2), color: 'var(--amb)' },
+          ],
+          bar: target > 0 ? Math.min(1, achieved / target) : null,
+        });
+      } else if (data.focusPanel && data.action) {
+        setFocusDock(null);
+      }
 
-  // Asset selector — only assets with at least one TREND or COUNTER trade
-  const classifiableAssets = [...new Set(
-    classifiedTrades
-      .filter(t => t.trendClass === 'TREND' || t.trendClass === 'COUNTER')
-      .map(t => (t.asset || '').toLowerCase())
-  )].sort();
+      if (data.urgency === 'critical' || (data.urgency === 'elevated' && data.action?.type === 'pending_trade')) {
+        setAmbClass('signal');
+      }
+    } catch (e) {
+      setMessages(m => [...m, { role:'jarvis', text:`Error: ${e.message}`, urgency:'elevated', ts: Date.now() }]);
+    } finally {
+      setThinking(false);
+    }
+  }, [thinking, goals, dailyPnL]);
 
-  const activeAsset = selectedAsset || classifiableAssets[0] || null;
-  const assetTrades = activeAsset ? classifiedTrades.filter(t => (t.asset || '').toLowerCase() === activeAsset) : [];
-  const trendTrades   = assetTrades.filter(t => t.trendClass === 'TREND');
-  const counterTrades = assetTrades.filter(t => t.trendClass === 'COUNTER');
+  // ── E-Stop ─────────────────────────────────────────────────────────────────
+  const fireEStop = useCallback(async () => {
+    try {
+      await fetch(API('rules?action=emergency-stop'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: true }),
+      });
+      setModal(null);
+      setAmbClass('critical');
+      setMessages(m => [...m, { role:'jarvis', text:'Emergency stop activated. All new trade execution halted. Existing positions are still managed.', urgency:'critical', ts: Date.now() }]);
+    } catch (e) {
+      setMessages(m => [...m, { role:'jarvis', text:`E-Stop failed: ${e.message}`, urgency:'critical', ts: Date.now() }]);
+    }
+  }, []);
 
-  function miniStats(trades) {
-    const n    = trades.length;
-    const wins = trades.filter(t => t.outcome === 'WIN').length;
-    const net  = trades.reduce((s, t) => s + (t.netPnl || 0), 0);
-    return { n, wins, winRate: n > 0 ? wins / n : null, net };
-  }
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const mode  = rules?.activeMode || 'active';
+  const orbState = positions.length > 0 && positions.some(p => (p.profit??0) < -50) ? 'warn'
+                 : positions.length > 0 ? 'signal' : 'monitor';
 
-  const tplKeys = TEMPLATE_ORDER.filter(t => assetTrades.some(x => x.template === t));
+  // Greeting on first load
+  useEffect(() => {
+    const eq = account?.equity;
+    const msg = eq
+      ? `Good ${new Date().getHours()<12?'morning':new Date().getHours()<18?'afternoon':'evening'}, Sir. Quantum Bot v17 online. Equity $${eq.toLocaleString('en-US',{maximumFractionDigits:2})} · ${trades.length} trades in memory · Mode: ${(rules?.activeMode||'active').toUpperCase()}. How can I assist?`
+      : `JARVIS online. Type any command or question, Sir.`;
+    if (messages.length === 0 && (account || trades.length > 0)) {
+      setMessages([{ role:'jarvis', text: msg, urgency:'normal', ts: Date.now() }]);
+    }
+  }, [account, trades.length, rules?.activeMode]);
 
+  const quickBtns = [
+    { label:'⚡ Signal',      q:'What is the current signal?' },
+    { label:'🔒 Gates',       q:'Show me all gates status' },
+    { label:'📊 Performance', q:'What is my performance today?' },
+    { label:'🌍 Briefing',    q:'Market briefing and news' },
+    { label:'📡 Pine',        q:'Show pine vision across all timeframes' },
+    { label:'🎯 Calibrate',   q:'Calibrate sizing for my goal' },
+    { label:'🧠 Advise',      q:'What should I do right now?' },
+    { label:'⬡ QB-NEXUS',    q:null, action:()=>setModal({type:'nexus'}), cls:'p' },
+    { label:'📋 Trade Log',  q:null, action:()=>setModal({type:'log'}), cls:'g' },
+    { label:'⛔ E-STOP',     q:null, action:()=>setModal({type:'estop'}), cls:'r' },
+  ];
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <Panel {...panelProps}>
-      <div style={{ padding: 12, overflow: 'auto' }}>
+    <>
+      <style>{CSS}</style>
+      <div className="hud">
+        <div id="amb" className={ambClass} />
 
-        {/* rule + caveat */}
-        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-warn)', marginBottom: 8, lineHeight: 1.6 }}>
-          Rule: {raw.rule || 'H4 20/50 EMA'} at each trade's openedAt — up = close&gt;ema50 AND ema20&gt;ema50; down = inverse; else unclear.
-          {raw.caveat && <span> {raw.caveat}</span>}
-        </div>
-
-        {/* coverage bar */}
-        <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginBottom: 8 }}>
-          {raw.classifiedCount} classified · {raw.excludedCount} excluded (recog-only or &lt;{raw.minBarsRequired || 50} H4 bars before entry) · {unclearTrades.length} unclear (mixed EMA state)
-        </div>
-
-        {/* global byClass summary — TREND / COUNTER / UNCLEAR across all assets */}
-        {raw.byClass && (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-            {['TREND', 'COUNTER', 'UNCLEAR'].map(cls => {
-              const s = raw.byClass[cls] || {};
-              const hasData = s.n >= (HEATMAP_MIN_N || 8);
-              return (
-                <div key={cls} style={{ flex: 1, minWidth: 120, padding: '8px 12px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4, opacity: hasData ? 1 : 0.55 }}>
-                  <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 }}>{cls}</div>
-                  {!hasData ? (
-                    <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>n={s.n || 0} — collecting</div>
-                  ) : (
-                    <div className="qb-mono" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                      <OFMiniStat label="n"   value={s.n} />
-                      <OFMiniStat label="WR"  value={`${Math.round((s.winRate || 0) * 100)}%`} color={(s.winRate || 0) >= 0.55 ? 'var(--qb-ok)' : (s.winRate || 0) >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
-                      <OFMiniStat label="net" value={fmtUSD(s.netPnl, true)} color={(s.netPnl || 0) >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+        {/* TOP BAR */}
+        <div id="top">
+          <div className="tLogo">
+            <div className="tDot" />
+            JARVIS · QB v17
           </div>
-        )}
-
-        {/* asset selector */}
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)' }}>Asset:</span>
-          {classifiableAssets.map(a => (
-            <button key={a} onClick={() => setSel(a)} style={{ padding: '3px 8px', fontSize: 9, fontFamily: 'var(--qb-font-mono)', border: `1px solid ${activeAsset === a ? 'var(--qb-accent)' : 'var(--qb-border)'}`, background: activeAsset === a ? 'var(--qb-accent-soft)' : 'transparent', color: activeAsset === a ? 'var(--qb-accent)' : 'var(--qb-text-mid)', borderRadius: 2, cursor: 'pointer', textTransform: 'uppercase' }}>
-              {a}
-            </button>
-          ))}
-          <span className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', marginLeft: 8 }}>
-            {excludedTrades.length} excluded (FX + recog-only + insufficient bars)
-          </span>
+          <div className="tSep" />
+          <div className="tSt">
+            <span className={`tV ${dailyPnL >= 0 ? 'g' : 'r'}`}>{fmtMoney(dailyPnL, 2)}</span>
+            <span className="tL">Today P&L</span>
+          </div>
+          <div className="tSep" />
+          <div className="tSt">
+            <span className="tV" style={{color:'var(--ion)'}}>
+              {account?.equity ? `$${Math.round(account.equity).toLocaleString()}` : '—'}
+            </span>
+            <span className="tL">Equity</span>
+          </div>
+          <div className="tSep" />
+          <div className="tSt">
+            <span className="tV" style={{color: positions.length?'var(--pulse)':'var(--dim)'}}>
+              {positions.length}
+            </span>
+            <span className="tL">Positions</span>
+          </div>
+          <div className="tSep" />
+          <div className="tSt">
+            <span className="tV" style={{color:'var(--txt)'}}>{trades.length}</span>
+            <span className="tL">Trades</span>
+          </div>
+          <div className="tR">
+            <span style={{fontFamily:'var(--mono)',fontSize:9.5,color:'var(--ion)',letterSpacing:.5}}>{clock}</span>
+            <span className={`mBadge ${mode}`} onClick={() => sendToJarvis(`Set mode to ${mode==='active'?'defensive':'active'}`)}>
+              {MODE_LABELS[mode] || mode.toUpperCase()}
+            </span>
+            <button className="tbBtn tbBtnP" onClick={() => setModal({type:'nexus'})}>⬡ NEXUS</button>
+            <button className="tbBtn tbBtnB" onClick={() => setModal({type:'log'})}>📋 LOG</button>
+            <button className="tbBtn tbBtnR" onClick={() => setModal({type:'estop'})}>⛔ E-STOP</button>
+          </div>
         </div>
 
-        {activeAsset && (
-          <>
-            {/* summary row */}
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
-              {[{ label: 'TREND', trades: trendTrades }, { label: 'COUNTER-TREND', trades: counterTrades }].map(({ label, trades }) => {
-                const s = miniStats(trades);
-                return (
-                  <div key={label} style={{ flex: 1, minWidth: 160, padding: '10px 14px', background: 'var(--qb-bg-panel-hi)', border: '1px solid var(--qb-border)', borderRadius: 4, opacity: s.n < HEATMAP_MIN_N ? 0.55 : 1 }}>
-                    <div className="qb-mono" style={{ fontSize: 8, color: 'var(--qb-text-faint)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 5 }}>{label}</div>
-                    {s.n < HEATMAP_MIN_N ? (
-                      <div style={{ fontSize: 9, color: 'var(--qb-text-faint)', fontStyle: 'italic' }}>n={s.n} — collecting (need {HEATMAP_MIN_N})</div>
-                    ) : (
-                      <div className="qb-mono" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                        <OFMiniStat label="n" value={s.n} />
-                        <OFMiniStat label="WR" value={`${Math.round(s.winRate * 100)}%`} color={s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)'} />
-                        <OFMiniStat label="net" value={fmtUSD(s.net, true)} color={s.net >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)'} />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+        {/* WORKSPACE */}
+        <div id="ws">
+          {/* LEFT */}
+          <div id="lCol">
+            <SignalPanel jarvisState={jarvisState} />
+            <GatesPanel jarvisState={jarvisState} rules={rules} />
+            <NewsPanel news={news} />
+          </div>
 
-            {/* per-template breakdown */}
-            {tplKeys.length > 0 && (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ borderCollapse: 'collapse', fontFamily: 'var(--qb-font-mono)', fontSize: 9, whiteSpace: 'nowrap' }}>
-                  <thead>
-                    <tr>
-                      {['Template', 'TREND  n / WR / net', 'COUNTER  n / WR / net'].map((h, i) => (
-                        <th key={h} style={{ padding: '3px 8px 6px', borderBottom: '1px solid var(--qb-border)', fontWeight: 400, fontSize: 8, color: 'var(--qb-text-faint)', textAlign: i === 0 ? 'left' : 'center' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tplKeys.map(tmpl => {
-                      const trd  = miniStats(trendTrades.filter(t => t.template === tmpl));
-                      const ctr  = miniStats(counterTrades.filter(t => t.template === tmpl));
-                      const meta = TEMPLATE_DISPLAY[tmpl];
-                      return (
-                        <tr key={tmpl} style={{ borderBottom: '1px solid var(--qb-border)' }}>
-                          <td style={{ padding: '4px 8px', color: 'var(--qb-text-hi)' }}>
-                            <span style={{ marginRight: 5, fontSize: 10 }}>{meta?.glyph || ''}</span>
-                            <span>{meta?.label || tmpl}</span>
-                          </td>
-                          {[trd, ctr].map((s, idx) => (
-                            <td key={idx} style={{ padding: '4px 8px', textAlign: 'center', opacity: s.n < HEATMAP_MIN_N ? 0.4 : 1 }}>
-                              {s.n < HEATMAP_MIN_N ? (
-                                <span style={{ color: 'var(--qb-text-faint)' }}>n={s.n}</span>
-                              ) : (
-                                <span>
-                                  <span style={{ color: 'var(--qb-text-mid)' }}>n={s.n} </span>
-                                  <span style={{ color: s.winRate >= 0.55 ? 'var(--qb-ok)' : s.winRate >= 0.45 ? 'var(--qb-warn)' : 'var(--qb-bad)' }}>{Math.round(s.winRate * 100)}%</span>
-                                  {' '}
-                                  <span style={{ color: s.net >= 0 ? 'var(--qb-ok)' : 'var(--qb-bad)', fontSize: 8 }}>{fmtUSD(s.net, true)}</span>
-                                </span>
-                              )}
-                            </td>
-                          ))}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                <div className="qb-mono" style={{ fontSize: 7, color: 'var(--qb-text-faint)', marginTop: 6 }}>
-                  Note: for assets that stayed in the same trend state across the entire ledger era (e.g. gold=DOWN throughout), TREND classification ≈ direction — treat these cells as directional analysis, not true HTF-trend signal.
-                </div>
+          {/* CENTER */}
+          <div id="cCol">
+            <div id="orbWrap" style={{height:175}}>
+              <OrbCanvas state={orbState} />
+              <div className="orbStatus">
+                <div className="orbDot" />
+                {jarvisState?.killZone?.inKillZone ? jarvisState.killZone.label : 'SCANNING'} ·{' '}
+                {rules?.tradingMode === 'auto' ? 'AUTO' : 'MANUAL'}
               </div>
-            )}
-          </>
-        )}
+            </div>
+            <JarvisChat
+              messages={messages}
+              thinking={thinking}
+              focusDock={focusDock}
+              onDismissFocus={() => setFocusDock(null)}
+            />
+            <TemplateStrip
+              rules={rules}
+              trades={trades}
+              onSelectTpl={id => id === 'log' ? setModal({type:'log'}) : setModal({type:'tpl', id})}
+            />
+          </div>
+
+          {/* RIGHT */}
+          <div id="rCol">
+            <EquityPanel account={account} dailyPnL={dailyPnL} goals={goals} />
+            <PositionsPanel positions={positions} />
+            <ActivityPanel activity={activity} />
+          </div>
+        </div>
+
+        {/* COMMAND BAR */}
+        <div id="cmd">
+          <div className="cmdR1">
+            <button className="vBtn" title="Voice (coming soon)">🎙</button>
+            <input
+              id="cmdIn"
+              ref={inputRef}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendToJarvis(input)}
+              placeholder="Ask JARVIS anything…  e.g. 'I want $1000 today' · 'Close gold' · 'Show performance'"
+              disabled={thinking}
+            />
+            <button className="vBtn" onClick={() => sendToJarvis(input)} title="Send" style={{background:'rgba(0,229,255,.12)'}}>⚡</button>
+          </div>
+          <div className="qBtns">
+            {quickBtns.map((b,i) => (
+              <button
+                key={i}
+                className={`qB ${b.cls||''}`}
+                onClick={() => b.action ? b.action() : sendToJarvis(b.q)}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
-    </Panel>
+
+      {/* MODALS */}
+      {modal?.type === 'log' && (
+        <TradeLogModal trades={trades} onClose={() => setModal(null)} />
+      )}
+      {modal?.type === 'nexus' && (
+        <NexusModal trades={trades} onClose={() => setModal(null)} />
+      )}
+      {modal?.type === 'tpl' && (
+        <TemplateModal tplId={modal.id} trades={trades} rules={rules} onClose={() => setModal(null)} />
+      )}
+      {modal?.type === 'estop' && (
+        <div className="overlay">
+          <div className="eSBox">
+            <div className="eST">⛔ EMERGENCY STOP</div>
+            <div className="eSM">All new trade execution will be immediately halted. Open positions continue to be managed. This is a config change — it does not close any position.</div>
+            <div className="eSBtns">
+              <button className="eSGo" onClick={fireEStop}>CONFIRM STOP</button>
+              <button className="eSCancel" onClick={() => setModal(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

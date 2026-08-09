@@ -28,6 +28,8 @@ const { fetchPositions, fetchCandles } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
+const goalHandler = require('./jarvis-goal');
+const addGoalPnL  = goalHandler.addGoalPnL;
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
 const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired } = require('./telegram');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
@@ -678,6 +680,26 @@ async function managePosition(position) {
 // CLOSE DETECTION + RECOGNITION FEED
 // =================================================================
 
+// Reads updated daily goal and pushes a brief Telegram progress message.
+// No-ops silently if no target is set or on any error.
+async function pushGoalProgress(r, pnl, assetLabel) {
+  try {
+    const rawD = await r.get('v1:jarvis:goal:daily').catch(() => null);
+    if (!rawD) return;
+    const gd = safeParse(rawD);
+    if (!gd || gd.target <= 0) return;
+    const pct  = Math.min(100, (gd.achieved / gd.target * 100)).toFixed(0);
+    const rem  = Math.max(0, gd.target - gd.achieved).toFixed(0);
+    const icon = gd.achieved >= gd.target ? '🏆' : pct >= 75 ? '🔥' : pct >= 50 ? '✅' : '📊';
+    const { telegramPush } = require('./telegram');
+    await telegramPush(
+      `${icon} <b>Goal Update</b>\n` +
+      `${assetLabel ? assetLabel.toUpperCase() : 'Trade'} closed <b>${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</b>\n` +
+      `$${gd.achieved.toFixed(0)} of $${gd.target} — ${pct}% · $${rem} to go`
+    ).catch(() => {});
+  } catch (_) {}
+}
+
 async function detectAndProcessClosed(currentOpenIds) {
   const r = getRedis();
   if (!r) return [];
@@ -738,6 +760,7 @@ async function detectAndProcessClosed(currentOpenIds) {
       } catch (_) {}
       try { await storeClosedTrade(noStateTrade); } catch (_) {}
       try { await addDailyPnL(nsPnL); } catch (_) {}
+      try { await addGoalPnL(r, nsPnL); await pushGoalProgress(r, nsPnL, nsAsset); } catch (_) {}
       const nsOutcome = nsPnL > 0.5 ? '✓ WIN' : nsPnL < -0.5 ? '✗ LOSS' : '— BE';
       recordings.push({ positionId, asset: nsAsset, pnl: nsPnL, stored: true, noPositionState: true });
       await pushCommentary(nsAsset, 'trade-closed',
@@ -777,6 +800,7 @@ async function detectAndProcessClosed(currentOpenIds) {
         try { await storeClosedTrade(reconstructed); } catch (_) {}
         try { await writeLedgerRecord({ state, matchedPending: null, positionDeals, positionId, extraFlags: { reconstructedClose: true } }); } catch (_) {}
         try { await addDailyPnL(totalPnL); } catch (_) {}
+        try { await addGoalPnL(r, totalPnL); await pushGoalProgress(r, totalPnL, state.asset); } catch (_) {}
         recordings.push({ positionId, asset: state.asset, pnl: totalPnL, stored: true, reconstructedClose: true });
         await updatePendingSetup(state.asset, state.pendingId, { status: 'closed', finalPnL: totalPnL, closedAt: Date.now() }).catch(() => {});
         const outcome = totalPnL > 0.5 ? '✓ WIN' : totalPnL < -0.5 ? '✗ LOSS' : '— BE';
@@ -871,6 +895,10 @@ async function detectAndProcessClosed(currentOpenIds) {
     } catch (e) {
       console.error('[manage-trades] addDailyPnL failed:', e.message);
     }
+    try {
+      await addGoalPnL(r, totalPnL);
+      await pushGoalProgress(r, totalPnL, state.asset);
+    } catch (_) {}
 
     recordings.push({ positionId, asset: state.asset, pnl: totalPnL, stored });
 
@@ -1069,6 +1097,7 @@ async function backfillOrphanedPositions(positionIds) {
       ledgerResult = { error: e.message };
     }
     try { await addDailyPnL(totalPnL); } catch (_) {}
+    try { await addGoalPnL(r, totalPnL); } catch (_) {}
     results.push({
       positionId, status: 'backfilled', tradeId,
       asset: state.asset, pnl: Math.round(totalPnL * 100) / 100,
