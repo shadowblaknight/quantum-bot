@@ -281,5 +281,42 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9996;
 .eSCancel{background:none;border:1px solid var(--dim);color:var(--dim);padding:8px 16px;border-radius:5px;font-size:11px;font-family:var(--mono);cursor:pointer}
 .eSCancel:hover{border-color:var(--ion);color:var(--ion)}
 
+/* NY Specialist */
+.nyStatBlock{flex:1;background:rgba(0,229,255,.04);border:1px solid rgba(0,229,255,.1);border-radius:4px;padding:4px;text-align:center}
+.nyStatV{font-family:var(--mono);font-size:12px;font-weight:200}
+.nyStatL{font-size:6.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;margin-top:1px}
+.nyChip{display:inline-flex;align-items:center;font-family:var(--mono);font-size:7px;padding:1px 5px;border-radius:5px;background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.18);color:var(--ion);font-weight:700;letter-spacing:.2px}
+.nyChip.pulse{background:rgba(0,255,157,.08);border-color:rgba(0,255,157,.28);color:var(--pulse)}
+.scRow{display:flex;justify-content:space-between;padding:1.5px 0;border-bottom:1px solid rgba(0,229,255,.04)}
+.scRow:last-child{border-bottom:none}
+
+/* gates fill bar */
+.gFillBar{height:2px;background:rgba(0,229,255,.07);border-radius:1px;overflow:hidden;margin-top:2px}
+
+/* pine vision tabs */
+.pvTab{flex:1;padding:5px 0;background:none;border:none;border-bottom:2px solid transparent;font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.4px;cursor:pointer;transition:all .2s;color:var(--dim)}
+.pvTab.active{border-bottom-color:currentColor;background:rgba(0,229,255,.04)}
+.pvRow{display:flex;justify-content:space-between;align-items:center;padding:2.5px 0;border-bottom:1px solid rgba(0,229,255,.04)}
+.pvRow:last-child{border-bottom:none}
+.pvLbl{font-size:7.5px;color:var(--dim)}
+.pvVal{font-family:var(--mono);font-size:8.5px;color:var(--txt);text-align:right}
+
+/* trade log filter buttons */
+.tFBtn{background:rgba(0,229,255,.05);border:1px solid rgba(0,229,255,.16);color:var(--dim);font-family:var(--mono);font-size:7.5px;padding:2px 7px;border-radius:3px;cursor:pointer;transition:all .2s}
+.tFBtn.on{background:rgba(0,229,255,.12);border-color:var(--ion);color:var(--ion)}
+
+/* jarvis typing indicator */
+.jTyp{height:17px;padding:0 10px;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:8px;color:var(--dim);flex-shrink:0}
+.tD{display:inline-flex;gap:3px;align-items:center}
+.tD span{width:4px;height:4px;border-radius:50%;background:var(--pur);animation:jThinkDot 1.2s ease-in-out infinite}
+.tD span:nth-child(2){animation-delay:.2s}.tD span:nth-child(3){animation-delay:.4s}
+#jTypTxt{font-family:var(--mono);font-size:8px;color:var(--dim)}
+
+/* template toggle switch */
+.tTog3{width:24px;height:13px;border-radius:7px;background:rgba(0,229,255,.1);border:1px solid rgba(0,229,255,.2);cursor:pointer;position:relative;transition:all .2s;flex-shrink:0}
+.tTog3::after{content:'';position:absolute;top:1px;left:2px;width:9px;height:9px;border-radius:50%;background:var(--dim);transition:all .2s}
+.tTog3.on{background:rgba(0,255,157,.15);border-color:rgba(0,255,157,.4)}
+.tTog3.on::after{left:12px;background:var(--pulse);box-shadow:0 0 5px var(--pulse)}
+
 ::-webkit-scrollbar{width:3px;height:3px}
 ::-webkit-scrollbar-thumb{background:rgba(0,229,255,.18);border-radius:2px}
