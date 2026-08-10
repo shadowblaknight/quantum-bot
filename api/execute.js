@@ -334,9 +334,15 @@ async function tryPlace(pending, brokerSymbol) {
     // If candle fetch fails, fall through and let MT5 reject if entry is bad.
   }
 
-  let tpPrice = tpLevels && tpLevels.length > 0 ? tpLevels[0].price : null;
+  // v14 all-or-nothing: park broker TP at the FINAL target so the full position
+  // rides there. manage-trades ratchets SL to intermediate TPs as they are hit.
+  // Previously this was TP1, which caused the broker to auto-close the position at
+  // TP1 before manage-trades could protect it with the SL ratchet.
+  const _finalTP = tpLevels && tpLevels.length > 0 ? tpLevels[tpLevels.length - 1].price : null;
+  let tpPrice = _finalTP;
 
-  // CHECK 6: TP1 must be a meaningful distance from entry.
+  // CHECK 6: broker TP (= final TP) must be a meaningful distance from entry.
+  // Fallback: if the final TP is too close, try intermediate TPs then synthesize 1R.
   if (tpPrice != null) {
     const tp1Dist = Math.abs(tpPrice - plannedEntry);
     const minTPByPip = (asset.pipSize || 0.0001) * 2;

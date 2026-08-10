@@ -411,12 +411,12 @@ async function managePosition(position) {
   const stopBuffer = Math.min(Math.max(initialSLForR * 0.25, pipSz * 2), pipSz * 8);
 
   // ─── TP TOUCH DETECTION (wick-aware, CONFIRMED) ──────────────────
-  // A TP counts as hit only when price trades a confirmation buffer BEYOND it —
-  // not a bare wick that instantly reverses. (A 1-tick stab that bounces used to
-  // record a "hit" and yank the stop to breakeven, strangling a winner.) The
-  // TP-hit Telegram fires immediately at detection (see sendOnce below each push).
-  // The SL-lock Telegram (tplock:...) fires separately, only after broker verification.
-  const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || 0.10); // 0.1R beyond the TP
+  // A TP counts as hit only when price trades a confirmation buffer BEYOND it.
+  // Default: 3% of the SL distance (was 10%). The old 10% was far too conservative —
+  // on a 80-pip gold SL it required 8 pips of confirmation past TP, meaning a trade
+  // that peaked exactly at TP1 ($80) was never confirmed and never got SL protection.
+  // 3% ≈ 2-3 pips for typical gold/forex setups — enough to filter spread noise.
+  const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || 0.03);
   let finalTouched = false;
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
@@ -505,6 +505,27 @@ async function managePosition(position) {
     if (valid && improves) { chosen = c; break; }
   }
 
+  // ─── RETRACE EMERGENCY LOCK ────────────────────────────────────────────────
+  // Fires when a TP was confirmed but price retraced below TP + stopBuffer before
+  // the ratchet could submit the SL (e.g. wick confirmation, immediate reversal).
+  // The deadlock: once price is below TP, the valid check above always fails, so
+  // the confirmed TP never generates SL protection and the trade rides back to the
+  // original SL. Fix: lock at currentPrice - stopBuffer (any positive profit above
+  // entry) so at least some R is captured. This fires repeatedly until a better
+  // (improving) level exists — it self-cancels once the normal ratchet can fire.
+  if (!chosen && USE_SL_RATCHET && hitRungs.length > 0) {
+    const retraceLock = isLong ? currentPrice - stopBuffer : currentPrice + stopBuffer;
+    const locksProfit = isLong
+      ? retraceLock > state.entry + pipSz
+      : retraceLock < state.entry - pipSz;
+    const lockImproves = curSL == null
+      ? locksProfit
+      : (isLong ? retraceLock > curSL : retraceLock < curSL);
+    if (locksProfit && lockImproves) {
+      chosen = { name: hitRungs[0].name + '-retrace', price: retraceLock };
+    }
+  }
+
   if (USE_SL_RATCHET && chosen) {
     // Pre-submit: broker minimum stop distance.
     // assetMeta.brokerMinStopDist is the minimum PRICE distance from market
@@ -591,12 +612,16 @@ async function managePosition(position) {
             const ridingTo      = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
             // When the SL was clamped, label it clearly — the stop is NOT at TP price.
             const pFmt = (v) => v.toFixed(v > 100 ? 2 : 5);
+            const isRetraceLock = chosen.name.endsWith('-retrace');
+            const displayName   = isRetraceLock ? hitRungs[0].name + ' (retrace-lock)' : chosen.name;
             const stopDesc = slClamped
-              ? `<code>${pFmt(slCandidate)}</code> ⚠️ clamped (${chosen.name} ${pFmt(chosen.price)} too close to market)`
-              : `${chosen.name} <code>${pFmt(slCandidate)}</code>`;
+              ? `<code>${pFmt(slCandidate)}</code> ⚠️ clamped (${displayName} ${pFmt(chosen.price)} too close to market)`
+              : isRetraceLock
+                ? `<code>${pFmt(slCandidate)}</code> ↩️ retrace-lock (${displayName} retraced before SL could move)`
+                : `${chosen.name} <code>${pFmt(slCandidate)}</code>`;
             try {
               await sendOnce(`tplock:${position.id}:${chosen.name}`,
-                `\u{1F3AF} <b>${chosen.name} LOCKED — ${asset.toUpperCase()}</b>\n\n` +
+                `\u{1F3AF} <b>${displayName} LOCKED — ${asset.toUpperCase()}</b>\n\n` +
                 `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · stop now at ${stopDesc} (${rMult.toFixed(1)}R)\n` +
                 (lockedDollars != null ? `Locked in: <b>${lockedDollars >= 0 ? '+' : ''}$${lockedDollars.toFixed(2)}</b> guaranteed if stopped\n` : '') +
                 (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
