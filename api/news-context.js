@@ -198,6 +198,22 @@ async function getNewsFeature(assetId) {
 module.exports = async (req, res) => {
   try {
     const assetId = req.query.asset;
+    // ?all=1 → flat upcoming list across all assets, used by JARVIS fetchCtx
+    if (req.query.all === '1') {
+      const events = await fetchCalendar();
+      const now = Date.now();
+      const upcoming = events
+        .map(e => ({
+          event:      e.title,
+          currency:   e.currency,
+          impact:     e.impact,
+          minutesAway: Math.round((e.ts - now) / 60000),
+          time:       new Date(e.ts).toISOString(),
+          forecast:   e.forecast || null,
+        }))
+        .filter(e => e.minutesAway > -5 && e.minutesAway < 24 * 60);
+      return res.status(200).json({ upcoming });
+    }
     if (!assetId) return res.status(400).json({ error: 'asset required' });
     const ctx = await getNewsContext(assetId);
     return res.status(200).json(ctx);

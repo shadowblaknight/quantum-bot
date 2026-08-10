@@ -234,6 +234,23 @@ async function clearPendingAction(r) {
   await r.del(PENDING_KEY).catch(() => {});
 }
 
+// Direct action executor — called by jarvis.js to avoid self-referential HTTP
+async function executeAction(r, body) {
+  const { action, dryRun = false, triggeredBy, ...params } = body || {};
+  if (!action) return { ok: false, error: 'action required', speech: 'No action specified.' };
+  switch (action.toUpperCase()) {
+    case 'MODIFY_POSITION': return doModifyPosition(params, dryRun);
+    case 'MOVE_BREAKEVEN':  return doMoveBreakeven(params, dryRun);
+    case 'CLOSE_POSITION':
+      if (!params.confirmed && !dryRun)
+        return { ok: false, error: 'confirmed required', speech: 'Set confirmed:true to close a position, Sir.' };
+      return doClosePosition(params, dryRun);
+    case 'SET_MODE':     return doSetMode(r, params, dryRun);
+    case 'SET_LOT_MULT': return doSetLotMult(r, params, dryRun);
+    default: return { ok: false, error: `unknown action: ${action}`, speech: `Unknown action: ${action}` };
+  }
+}
+
 // ─── Audit logger ─────────────────────────────────────────────────────────────
 async function auditLog(r, action, params, result, triggeredBy) {
   if (!r) return;
@@ -286,7 +303,8 @@ module.exports = async function handler(req, res) {
         if (!pending || !pending.action)
           return res.status(404).json({ ok: false, speech: 'No pending action found, Sir. Please specify the action again.' });
         await clearPendingAction(r);
-        return module.exports({ body: { ...pending, dryRun: false, triggeredBy: 'CONFIRM' }, method: 'POST', headers: req.headers }, res);
+        result = await executeAction(r, { ...pending, dryRun: false, triggeredBy: 'CONFIRM' });
+        break;
       }
       default:
         return res.status(400).json({ ok: false, error: `unknown action: ${action}` });
@@ -311,3 +329,5 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ ok: false, error: err.message, speech: `Action failed with an error, Sir: ${err.message}` });
   }
 };
+
+module.exports.executeAction = executeAction;

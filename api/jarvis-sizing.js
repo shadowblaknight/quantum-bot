@@ -93,7 +93,7 @@ function computeSizing(params, rulesDefaults) {
     const clamped = Math.max(0.5, Math.min(2.5, rawMultiplier));
     tierBMult = +clamped.toFixed(2);
     tierAMult = +(clamped * 0.75).toFixed(2);
-    mode      = clamped >= 2.0 ? 'active' : 'active';
+    mode      = clamped >= 2.0 ? 'aggressive' : 'active';
     // Raise KNN threshold proportionally when we need to push harder
     minKNN    = clamped >= 1.8 ? 82 : clamped >= 1.3 ? 78 : 72;
     maxTrades = clamped >= 2.0 ? 5 : clamped >= 1.3 ? 4 : 3;

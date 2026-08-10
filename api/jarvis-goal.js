@@ -99,7 +99,7 @@ async function addGoalPnL(r, pnl) {
       r.set(DAILY_KEY,   JSON.stringify(daily),   { ex: Math.max(3600, secondsUntilMidnight) }),
       r.set(MONTHLY_KEY, JSON.stringify(monthly), { ex: 35 * 24 * 3600 }),
     ]);
-  } catch (_) {}
+  } catch (e) { console.error('[addGoalPnL] Redis write failed:', e.message); }
 }
 
 module.exports = async function handler(req, res) {
@@ -115,8 +115,8 @@ module.exports = async function handler(req, res) {
         r.get(DAILY_KEY).catch(() => null),
         r.get(MONTHLY_KEY).catch(() => null),
       ]);
-      const daily   = safeParse(rawD) || { target: 0, achieved: 0, currency: 'EUR' };
-      const monthly = safeParse(rawM) || { target: 0, achieved: 0, currency: 'EUR' };
+      const daily   = safeParse(rawD) || { target: 0, achieved: 0, currency: 'USD' };
+      const monthly = safeParse(rawM) || { target: 0, achieved: 0, currency: 'USD' };
       return res.status(200).json({ daily, monthly, derived: derivedMetrics(daily, monthly) });
     } catch (err) {
       return res.status(500).json({ error: err.message });
@@ -131,8 +131,8 @@ module.exports = async function handler(req, res) {
         r.get(DAILY_KEY).catch(() => null),
         r.get(MONTHLY_KEY).catch(() => null),
       ]);
-      let daily   = safeParse(rawD) || { target: 0, achieved: 0, currency: 'EUR' };
-      let monthly = safeParse(rawM) || { target: 0, achieved: 0, currency: 'EUR' };
+      let daily   = safeParse(rawD) || { target: 0, achieved: 0, currency: 'USD' };
+      let monthly = safeParse(rawM) || { target: 0, achieved: 0, currency: 'USD' };
       const body  = req.body || {};
 
       if (action === 'add') {

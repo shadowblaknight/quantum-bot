@@ -40,6 +40,26 @@ async function fetchCtx(base) {
   const get = (path) => fetch(`${base}${path}`, sig ? { signal: sig } : {})
     .then(r => r.ok ? r.json() : null).catch(() => null);
 
+  // News fetched directly from module to avoid self-referential HTTP on Vercel
+  const getNews = async () => {
+    try {
+      const { fetchCalendar } = require('./news-context');
+      const events = await fetchCalendar();
+      const now = Date.now();
+      const upcoming = events
+        .map(e => ({
+          event:       e.title,
+          currency:    e.currency,
+          impact:      e.impact,
+          minutesAway: Math.round((e.ts - now) / 60000),
+          time:        new Date(e.ts).toISOString(),
+          forecast:    e.forecast || null,
+        }))
+        .filter(e => e.minutesAway > -5 && e.minutesAway < 24 * 60);
+      return { upcoming };
+    } catch (_) { return null; }
+  };
+
   // jarvis-state is the primary quantum bot snapshot (Redis + chart bias)
   // All other endpoints provide live broker/session data
   const [qState, analyst, account, positions, session, news, sigQual] = await Promise.all([
@@ -48,7 +68,7 @@ async function fetchCtx(base) {
     get('/api/broker?action=account'),
     get('/api/broker?action=positions'),
     get('/api/session-context-summary'),
-    get('/api/news-context?all=1'),
+    getNews(),
     get('/api/signal-quality-summary'),
   ]);
 
@@ -198,7 +218,7 @@ function parseIntent(msg) {
   const v = msg.toLowerCase();
   if (/fomc|nfp|cpi|pce|gdp|news|event|macro|calendar|inflation|payroll|interest rate/i.test(v))
     return 'MACRO';
-  if (/^(yes|confirm|go|ok|apply\s+it|do\s+it|go\s+ahead|apply\s+sizing|execute\s+it)[.,!?\s]*$/i.test(v.trim()))
+  if (/^(please\s+)?(yes|confirm|go|ok|apply\s+it|do\s+it|go\s+ahead|apply\s+sizing|execute\s+it)[.,!?\s]*$/i.test(v.trim()))
     return 'CONFIRM';
   if (/close\s+(my\s+)?(trade|position|order|gold|nas|btc|eurusd|gbpusd|usdjpy|us500|cable)|breakeven|move\s+(to\s+)?be\b|lock\s+in\s+profit|tighten\s+(the\s+)?(stop|sl)|move\s+(the\s+)?(stop|sl|tp)\b|modify\s+(the\s+)?(position|trade|stop|sl|tp)/i.test(v))
     return 'TRADE_ACTION';
@@ -208,7 +228,10 @@ function parseIntent(msg) {
     return 'WATCHER';
   if (/filter|block(ed)?|why.*not.*fire|why.*reject|gate.*reason|block.*reason|why.*fail|template.*block|circuit breaker|disabled/i.test(v))
     return 'FILTER';
-  if (/signal|entry|setup|confirm|fire|armed|reaction|orb|silver.?bullet|fvg/i.test(v))
+  if (/switch.*mode|set.*mode|mode.*to|vacation\s*mode|sleep\s*mode|defensive\s*mode|active\s*mode/i.test(v))
+    return 'MODE';
+  // 'confirm' removed — already caught above by CONFIRM; leaving it here steals "please confirm" etc.
+  if (/signal|entry|setup|fire|armed|reaction|orb|silver.?bullet|fvg/i.test(v))
     return 'SIGNAL';
   if (/gate|filter|check|ready|block|pass|fail/i.test(v))
     return 'GATES';
@@ -546,7 +569,7 @@ function reasonPerformance(ctx, goals) {
   };
 }
 
-async function reasonGoal(goals, ctx, message, r, base) {
+async function reasonGoal(goals, ctx, message, r) {
   // ── Try to set a new goal from the message ─────────────────────────────
   const newGoal = message ? parseNewGoal(message) : null;
 
@@ -591,7 +614,13 @@ async function reasonGoal(goals, ctx, message, r, base) {
         action:     sizing.action,
       };
     } catch (_) {
-      // Fall through to reporting on Redis error
+      // Goal was written to Redis above — confirm it even if calibration threw
+      const typeStr2 = newGoal.isMonthly ? 'Monthly' : 'Daily';
+      return {
+        speech:     `${typeStr2} target set at ${fmt$(newGoal.amount)}, Sir. I will compute sizing on the next session check-in.`,
+        focusPanel: 'goal',
+        urgency:    'normal',
+      };
     }
   }
 
@@ -934,7 +963,10 @@ async function reasonTradeAction(ctx, message, r) {
       || (asset === 'us500'  && (sym.includes('us500')  || sym.includes('spx')));
   }) || positions[0];
 
-  const positionId = match.id || match.positionId;
+  const positionId = match.id || match.positionId || match.ticket || match._id || null;
+  if (!positionId) {
+    return { speech: `Cannot identify the position ID, Sir. The broker connection may not be returning position identifiers — check MetaAPI status.`, focusPanel: 'performance', urgency: 'elevated' };
+  }
   const assetId    = asset || (match.symbol || '').toLowerCase();
   const direction  = (match.type === 'SELL' || match.type === 'SHORT') ? 'SELL' : 'BUY';
   const entry      = match.openPrice || match.entryPrice || match.price;
@@ -1024,21 +1056,21 @@ async function reasonCalibrate(ctx, goals, r) {
 }
 
 // CONFIRM: Execute the staged pending action or apply the pending sizing recommendation
-async function reasonConfirm(ctx, message, r, base) {
+async function reasonConfirm(ctx, message, r) {
   if (!r) return { speech: 'Redis unavailable — cannot execute the pending action, Sir.', focusPanel: null, urgency: 'elevated' };
+  const { executeAction } = require('./jarvis-action');
   const v = message.toLowerCase();
 
   const rawSizing = await r.get('v1:jarvis:sizing_rec').catch(() => null);
-  if (rawSizing && /apply\s*(sizing|it|the\s*lot|lot)/i.test(v)) {
+  const isSizingConfirm = rawSizing && (
+    /apply\s*(sizing|it|the\s*lot|lot)/i.test(v) ||
+    /^(please\s+)?(yes|ok|go|confirm|do\s+it|go\s+ahead)[.,!?\s]*$/i.test(v.trim())
+  );
+  if (isSizingConfirm) {
     const sizing = safeParse(rawSizing);
     if (!sizing) return { speech: 'No sizing recommendation found. Run calibrate first, Sir.', focusPanel: 'goal', urgency: 'normal' };
     try {
-      const resp = await fetch(`${base}/api/jarvis-action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'SET_LOT_MULT', tierA: sizing.tierA, tierB: sizing.tierB, triggeredBy: 'JARVIS:CALIBRATE:CONFIRM' }),
-      });
-      const data = await resp.json().catch(() => ({}));
+      const data = await executeAction(r, { action: 'SET_LOT_MULT', tierA: sizing.tierA, tierB: sizing.tierB, triggeredBy: 'JARVIS:CALIBRATE:CONFIRM' });
       await r.del('v1:jarvis:sizing_rec').catch(() => {});
       return { speech: data.speech || 'Sizing applied, Sir.', focusPanel: 'goal', urgency: 'normal' };
     } catch (e) {
@@ -1053,12 +1085,7 @@ async function reasonConfirm(ctx, message, r, base) {
   if (!pending?.action) return { speech: 'Pending action corrupted. Please repeat the command, Sir.', focusPanel: null, urgency: 'normal' };
 
   try {
-    const resp = await fetch(`${base}/api/jarvis-action`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...pending, confirmed: true, triggeredBy: 'JARVIS:CONFIRM' }),
-    });
-    const data = await resp.json().catch(() => ({}));
+    const data = await executeAction(r, { ...pending, confirmed: true, triggeredBy: 'JARVIS:CONFIRM' });
     await r.del('v1:jarvis:pending_action').catch(() => {});
     return {
       speech:     data.speech || (data.ok ? 'Action executed, Sir.' : `Execution failed: ${data.error || 'unknown error'}`),
@@ -1070,8 +1097,29 @@ async function reasonConfirm(ctx, message, r, base) {
   }
 }
 
+// MODE: Switch trading mode by voice
+async function reasonMode(message, r) {
+  const v = message.toLowerCase();
+  const mode = /vacation/i.test(v) ? 'vacation'
+    : /sleep/i.test(v)    ? 'sleep'
+    : /defensive/i.test(v) ? 'defensive'
+    : /active/i.test(v)   ? 'active'
+    : null;
+  if (!mode) {
+    return { speech: `Valid modes are: active, defensive, sleep, vacation. Which would you like, Sir?`, focusPanel: 'gates', urgency: 'normal' };
+  }
+  const pending = { action: 'SET_MODE', mode };
+  if (r) await r.set('v1:jarvis:pending_action', JSON.stringify(pending), { ex: 300 }).catch(() => {});
+  const descriptions = { active: 'normal execution across all templates', defensive: 'Tier A setups only, tighter gates, reduced size', sleep: 'no new trades, monitoring only', vacation: 'all execution suspended, alerts muted' };
+  return {
+    speech: `Ready to switch to ${mode.toUpperCase()} mode — ${descriptions[mode]}. Say confirm to apply.`,
+    focusPanel: 'gates', urgency: mode === 'defensive' ? 'elevated' : 'normal',
+    action: { type: 'pending_trade', pending },
+  };
+}
+
 // OPEN: Scans everything — surfaces the highest-priority insight from the FULL quantum state
-function reasonOpen(ctx, goals) {
+async function reasonOpen(ctx, goals) {
   const { account, positions, analyst, session, news, sigQual, qState } = ctx;
   const pos    = Array.isArray(positions) ? positions : [];
   const eq     = account?.balance || account?.equity || 0;
@@ -1123,7 +1171,7 @@ function reasonOpen(ctx, goals) {
     const now = new Date();
     const expected = goals.monthly.target * (now.getDate() / new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate());
     if (goals.monthly.achieved < expected * 0.6) {
-      return reasonGoal(goals, ctx, null, null, null);
+      return await reasonGoal(goals, ctx, null, null);
     }
   }
 
@@ -1204,9 +1252,10 @@ module.exports = async function handler(req, res) {
   if (!message?.trim()) return res.status(400).json({ error: 'message required' });
 
   const r    = getRedis();
-  const base = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : (process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000');
+  const base = process.env.QB_PUBLIC_URL
+    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null)
+    || process.env.NEXT_PUBLIC_BASE_URL
+    || 'http://localhost:3000';
 
   try {
     const [ctx, goals] = await Promise.all([fetchCtx(base), getGoals(r)]);
@@ -1220,7 +1269,7 @@ module.exports = async function handler(req, res) {
       case 'GATES':       result = reasonGates(ctx);                   break;
       case 'POSITIONS':   result = reasonPositions(ctx);               break;
       case 'PERFORMANCE': result = reasonPerformance(ctx, goals);      break;
-      case 'GOAL':        result = await reasonGoal(goals, ctx, message, r, base); break;
+      case 'GOAL':        result = await reasonGoal(goals, ctx, message, r);       break;
       case 'SESSION':     result = reasonSession(ctx);                 break;
       case 'MACRO':       result = reasonMacro(ctx, message);          break;
       case 'PINE':        result = reasonPine(ctx, message);           break;
@@ -1230,8 +1279,9 @@ module.exports = async function handler(req, res) {
       case 'RISK':        result = reasonRisk(ctx, goals);                          break;
       case 'TRADE_ACTION':result = await reasonTradeAction(ctx, message, r);        break;
       case 'CALIBRATE':   result = await reasonCalibrate(ctx, goals, r);            break;
-      case 'CONFIRM':     result = await reasonConfirm(ctx, message, r, base);      break;
-      default:            result = reasonOpen(ctx, goals);                          break;
+      case 'CONFIRM':     result = await reasonConfirm(ctx, message, r);            break;
+      case 'MODE':        result = await reasonMode(message, r);                    break;
+      default:            result = await reasonOpen(ctx, goals);                    break;
     }
 
     // Push critical and elevated alerts to Telegram proactively
