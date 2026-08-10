@@ -1,0 +1,549 @@
+//@version=6
+indicator("Quantum Bot — Gold Specialist", "QB GOLD", overlay=true,
+          max_bars_back=500, max_labels_count=100, max_lines_count=50, max_boxes_count=40)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QUANTUM BOT — GOLD SPECIALIST  (XAUUSD, 15m recommended)
+//  ─────────────────────────────────────────────────────────────────────
+//  Three signal templates, all firing JSON alerts to your webhook:
+//
+//    A) reaction-ifvg — FVG entry during London KZ / NY-Lon Overlap
+//                       BOS confirmation + ADR gate + H1 bias
+//
+//    B) judas-swing   — Asian range sweep + close-back in London KZ
+//                       one trade per day, direction from sweep side
+//
+//    C) silver-bullet — FVG retest in the 15-16 UTC window
+//                       same FVG pool as (A), dedicated session gate
+//
+//  Gold-specific gates on every signal:
+//    • ADR exhaustion   (skip when today's range > adrMaxConsumed × 14d ATR)
+//    • LBMA/COMEX key-time flag (sent in payload as nearKeyTime)
+//    • H1/H4 bias → Tier A (aligned) or Tier B (counter)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── INPUTS ──────────────────────────────────────────────────────────
+G_CORE = "Core"
+modFVG        = input.bool(true,  "A) FVG Signal (reaction-ifvg)",  group=G_CORE)
+modJudas      = input.bool(true,  "B) Judas Sweep Signal",           group=G_CORE)
+modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_CORE)
+alertApiKey   = input.string("x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk", "Webhook API Key", group=G_CORE)
+
+G_FILT = "Filters"
+adrMaxConsumed = input.float(0.80, "ADR max consumed (block at X)",    group=G_FILT, minval=0.50, maxval=1.00, step=0.05,
+                              tooltip="No trade when today's range > this × 14-day ATR. 0.80 = 80%.")
+atrLength      = input.int(14,    "ATR period",                        group=G_FILT, minval=2, maxval=50)
+emaLength      = input.int(20,    "HTF bias EMA period",               group=G_FILT, minval=5, maxval=100)
+fvgMinGapATR   = input.float(0.10,"FVG min gap (× ATR)",               group=G_FILT, minval=0.03, step=0.03)
+fvgMaxFillPct  = input.float(0.50,"FVG max fill before entry fires",   group=G_FILT, minval=0.0, maxval=1.0, step=0.05)
+fvgMaxAgeBars  = input.int(20,    "FVG max age (bars)",                 group=G_FILT, minval=4, maxval=100)
+slMinH1ATR     = input.float(0.30,"SL min (× H1 ATR)",                 group=G_FILT, minval=0.1, step=0.05)
+slMaxH1ATR     = input.float(3.00,"SL max (× H1 ATR)",                 group=G_FILT, minval=1.0, step=0.10)
+
+G_VIS = "Visuals"
+showPosBox    = input.bool(true, "Position box on fire",        group=G_VIS)
+posBoxBars    = input.int(40,    "Position box width (bars)",   group=G_VIS, minval=5, maxval=200)
+showStatusTbl = input.bool(true, "Corner status table",         group=G_VIS)
+showFVGZones  = input.bool(true, "FVG zones on chart",          group=G_VIS)
+
+// ─── HTF BIAS (H1 / H4 / D) ──────────────────────────────────────────
+f_htfBias(int emaLen, int atrLen) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    [b, a]
+
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[hdB, hdATR] = request.security(syminfo.tickerid, "D",   f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+
+atrVal = ta.atr(atrLength)
+
+// ─── SESSION CONTEXT v17 ──────────────────────────────────────────────
+_hourUtc    = hour(time, "UTC")
+_minOfDay   = _hourUtc * 60 + minute(time, "UTC")
+_dayOfWeek  = dayofweek(time, "UTC") - 1
+
+_atr14d     = request.security(syminfo.tickerid, "D", ta.atr(14))
+_todayOpen  = request.security(syminfo.tickerid, "D", open)
+_todayHigh  = request.security(syminfo.tickerid, "D", high)
+_todayLow   = request.security(syminfo.tickerid, "D", low)
+_priorClose = request.security(syminfo.tickerid, "D", close[1])
+_priorDayHi = request.security(syminfo.tickerid, "D", high[1])
+_priorDayLo = request.security(syminfo.tickerid, "D", low[1])
+
+_adrConsumed = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
+_gapRaw      = _todayOpen - _priorClose
+_gapAtr      = _atr14d > 0 ? math.abs(_gapRaw) / _atr14d : 0.0
+_gapSign     = _gapRaw > 0 ? 1 : _gapRaw < 0 ? -1 : 0
+_gapDirLong  = _gapSign
+_gapDirShort = _gapSign * -1
+_priorDayPos = _todayOpen > _priorDayHi ? 1 : _todayOpen < _priorDayLo ? -1 : 0
+// Gold key times: LBMA AM fix ~10:30 UTC ±45min, COMEX open ~13:30 UTC ±45min
+_nearKeyTime = (_minOfDay >= 585 and _minOfDay <= 675) or (_minOfDay >= 765 and _minOfDay <= 855) ? 1 : 0
+
+// ─── CVD ──────────────────────────────────────────────────────────────
+_signedVol   = close > open ? volume : close < open ? -volume : 0.0
+_newDay      = ta.change(time("D")) != 0
+
+var float _cvdRunning = 0.0
+_cvdRunning  := _cvdRunning + _signedVol
+var float _cvdBase = 0.0
+if _newDay
+    _cvdBase := _cvdRunning - _signedVol
+cvd       = _cvdRunning - _cvdBase
+cvdMa     = ta.ema(cvd, 14)
+cvdSlope  = cvd > cvd[1] and cvd > cvdMa ? "rising" : cvd < cvd[1] and cvd < cvdMa ? "falling" : "flat"
+
+// ─── SESSION GATES (UTC) ──────────────────────────────────────────────
+in_asian    = timeframe.isintraday and (_minOfDay >= 0    and _minOfDay < 480)   // 00-08 UTC
+in_london   = timeframe.isintraday and (_minOfDay >= 480  and _minOfDay < 660)   // 08-11 UTC
+in_overlap  = timeframe.isintraday and (_minOfDay >= 780  and _minOfDay < 1020)  // 13-17 UTC
+in_sb_win   = timeframe.isintraday and (_minOfDay >= 900  and _minOfDay < 960)   // 15-16 UTC
+in_kz       = in_london or in_overlap
+
+string sess_label = in_sb_win ? "NY_PM" : in_overlap ? "NY_AM" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
+
+adr_ok = _adrConsumed < adrMaxConsumed
+
+// ─── ASIAN RANGE TRACKING ─────────────────────────────────────────────
+var float ar_hi     = na
+var float ar_lo     = na
+var bool  ar_locked = false
+
+if _newDay
+    ar_hi     := na
+    ar_lo     := na
+    ar_locked := false
+
+if in_asian
+    ar_hi := na(ar_hi) ? high : math.max(ar_hi, high)
+    ar_lo := na(ar_lo) ? low  : math.min(ar_lo, low)
+
+asian_ended = not in_asian and in_asian[1]
+if asian_ended and not na(ar_hi)
+    ar_locked := true
+
+// ─── BOS TRACKING ─────────────────────────────────────────────────────
+// Lightweight: a "bullish BOS" = new confirmed swing high above the prior one
+SWG = 3
+var float _prev_sh   = na
+var float _prev_sl   = na
+var int   bos_bull_b = na
+var int   bos_bear_b = na
+
+_sh_now = ta.pivothigh(high, SWG, SWG)
+_sl_now = ta.pivotlow(low,   SWG, SWG)
+
+if not na(_sh_now)
+    if not na(_prev_sh) and _sh_now > _prev_sh
+        bos_bull_b := bar_index[SWG]
+    _prev_sh := _sh_now
+
+if not na(_sl_now)
+    if not na(_prev_sl) and _sl_now < _prev_sl
+        bos_bear_b := bar_index[SWG]
+    _prev_sl := _sl_now
+
+bos_bull_ok = not na(bos_bull_b) and (bar_index - bos_bull_b) <= 30
+bos_bear_ok = not na(bos_bear_b) and (bar_index - bos_bear_b) <= 30
+
+// ─── FVG POOL ─────────────────────────────────────────────────────────
+var array<float> fU     = array.new<float>(0)
+var array<float> fL     = array.new<float>(0)
+var array<int>   fDir   = array.new<int>(0)
+var array<int>   fBar   = array.new<int>(0)
+var array<float> fFill  = array.new<float>(0)
+var array<bool>  fFired = array.new<bool>(0)
+var array<box>   fBoxes = array.new<box>(0)
+
+// Detect new FVGs on every confirmed bar
+if barstate.isconfirmed and atrVal > 0
+    bull_fvg  = low > high[2]
+    bear_fvg  = high < low[2]
+    bull_gap  = bull_fvg ? (low - high[2]) : 0.0
+    bear_gap  = bear_fvg ? (low[2] - high) : 0.0
+
+    if bull_fvg and bull_gap >= atrVal * fvgMinGapATR
+        array.push(fU, low)
+        array.push(fL, high[2])
+        array.push(fDir, 1)
+        array.push(fBar, bar_index - 1)
+        array.push(fFill, 0.0)
+        array.push(fFired, false)
+        bx = showFVGZones ?
+             box.new(bar_index - 2, low, bar_index + fvgMaxAgeBars, high[2],
+                     border_color=color.new(color.green, 40), border_width=1,
+                     bgcolor=color.new(color.green, 86)) : na
+        array.push(fBoxes, bx)
+
+    if bear_fvg and bear_gap >= atrVal * fvgMinGapATR
+        array.push(fU, low[2])
+        array.push(fL, high)
+        array.push(fDir, -1)
+        array.push(fBar, bar_index - 1)
+        array.push(fFill, 0.0)
+        array.push(fFired, false)
+        bx = showFVGZones ?
+             box.new(bar_index - 2, low[2], bar_index + fvgMaxAgeBars, high,
+                     border_color=color.new(color.red, 40), border_width=1,
+                     bgcolor=color.new(color.red, 86)) : na
+        array.push(fBoxes, bx)
+
+    // Cap pool
+    while array.size(fU) > 25
+        old = array.shift(fBoxes)
+        if not na(old)
+            box.delete(old)
+        array.shift(fU)
+        array.shift(fL)
+        array.shift(fDir)
+        array.shift(fBar)
+        array.shift(fFill)
+        array.shift(fFired)
+
+// Update fill percentages
+if barstate.isconfirmed and array.size(fU) > 0
+    for idx = array.size(fU) - 1 to 0
+        u    = array.get(fU,    idx)
+        l    = array.get(fL,    idx)
+        d    = array.get(fDir,  idx)
+        gsz  = u - l
+        if gsz <= 0
+            continue
+        if d == 1 and low < u
+            array.set(fFill, idx, math.min(1.0, math.max(0.0, u - math.max(l, low)) / gsz))
+        if d == -1 and high > l
+            array.set(fFill, idx, math.min(1.0, math.max(0.0, math.min(u, high) - l) / gsz))
+
+// ─── ALERT BUILDER ────────────────────────────────────────────────────
+f_buildAlert(string tmpl, string dir, float entry, float slP,
+             float tp1, float tp2, float tp3,
+             float zU, float zL, string zType,
+             string sess, string tier, string conf,
+             string filters, int minsIntoWin) =>
+    slRisk  = math.abs(entry - slP)
+    rr1     = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2     = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3     = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    scGapDir = dir == "LONG" ? _gapDirLong : _gapDirShort
+    cvdOk    = dir == "LONG" ? cvdSlope == "rising" : cvdSlope == "falling"
+    dEmoji   = dir == "LONG" ? "🟢" : "🔴"
+    readable = dEmoji + " " + syminfo.ticker + " · " + (dir == "LONG" ? "BUY" : "SELL") +
+               " · " + str.upper(tmpl) + " · " + timeframe.period + "m · Tier " + tier +
+               "\nZone: " + str.tostring(zL, format.mintick) + " – " + str.tostring(zU, format.mintick) +
+               "\nFilters: " + filters + "\n---\n"
+    head   = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"" + tmpl +
+              "\",\"direction\":\"" + dir +
+              "\",\"symbol\":\"" + syminfo.tickerid +
+              "\",\"timeframe\":\"" + timeframe.period +
+              "\",\"timestamp\":" + str.tostring(time)
+    prices = ",\"entry\":\""  + str.tostring(entry, format.mintick) +
+              "\",\"sl\":\""  + str.tostring(slP,   format.mintick) +
+              "\",\"tp1\":\"" + str.tostring(tp1,   format.mintick) +
+              "\",\"tp2\":\"" + str.tostring(tp2,   format.mintick) +
+              "\",\"tp3\":\"" + str.tostring(tp3,   format.mintick) +
+              "\",\"rr1\":"   + str.tostring(rr1,   "0.00") +
+              ",\"rr2\":"     + str.tostring(rr2,   "0.00") +
+              ",\"rr3\":"     + str.tostring(rr3,   "0.00")
+    zone   = ",\"zoneUpper\":\"" + str.tostring(zU, format.mintick) +
+              "\",\"zoneLower\":\"" + str.tostring(zL, format.mintick) +
+              "\",\"zoneType\":\"" + zType + "\""
+    htf    = ",\"activeSession\":\"" + sess +
+              "\",\"htfTier\":\"" + tier +
+              "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) +
+              "\",\"htfBiasAlign\":" + str.tostring(tier == "A" ? 1 : 0) +
+              ",\"htfConfluence\":\"" + conf + "\""
+    ctx    = ",\"window\":\"" + sess +
+              "\",\"swept\":\"\",\"impulseATR\":\"0.00\"" +
+              ",\"filters\":\"" + filters + "\"" +
+              ",\"cvdSlope\":\"" + cvdSlope + "\"" +
+              ",\"cvdConfirms\":" + str.tostring(cvdOk) +
+              ",\"cvdDivergence\":\"none\",\"cvdLowTrust\":false" +
+              ",\"barOpen\":\""  + str.tostring(open,  format.mintick) + "\"" +
+              ",\"barHigh\":\""  + str.tostring(high,  format.mintick) + "\"" +
+              ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
+              ",\"barClose\":\"" + str.tostring(close, format.mintick) + "\"" +
+              ",\"adrConsumed\":\"" + str.tostring(_adrConsumed,  "#.####") + "\"" +
+              ",\"gapAtr\":\""      + str.tostring(_gapAtr,        "#.####") + "\"" +
+              ",\"gapDir\":\""      + str.tostring(scGapDir)                 + "\"" +
+              ",\"priorDayPos\":\"" + str.tostring(_priorDayPos)             + "\"" +
+              ",\"hourUtc\":\""     + str.tostring(_hourUtc)                 + "\"" +
+              ",\"dayOfWeek\":\""   + str.tostring(_dayOfWeek)               + "\"" +
+              ",\"nearKeyTime\":\"" + str.tostring(_nearKeyTime)             + "\"" +
+              ",\"ibSide\":\"null\",\"ibPosition\":\"-1\",\"first15mDir\":\"0\"" +
+              ",\"minsIntoWindow\":" + str.tostring(minsIntoWin) +
+              ",\"apiKey\":\"" + alertApiKey + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+f_drawPosBox(float e, float slP, float tp3) =>
+    r = bar_index + posBoxBars
+    box.new(bar_index, math.max(e, tp3), r, math.min(e, tp3),
+            border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+    box.new(bar_index, math.max(e, slP), r, math.min(e, slP),
+            border_color=color.new(color.red,  55), bgcolor=color.new(color.red,  90))
+    line.new(bar_index, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL A — Gold FVG  (template: reaction-ifvg)
+// ─────────────────────────────────────────────────────────────────────
+// During London KZ or NY-Lon Overlap, price retests a fresh FVG that
+// has recent BOS in the same direction. SL beyond the FVG proximal edge.
+// ═══════════════════════════════════════════════════════════════════════
+
+if modFVG and barstate.isconfirmed and in_kz and adr_ok and not na(h1ATR) and h1ATR > 0
+    firedA = false
+    for idx = array.size(fU) - 1 to 0
+        if firedA or array.get(fFired, idx)
+            continue
+        u       = array.get(fU,    idx)
+        l       = array.get(fL,    idx)
+        d       = array.get(fDir,  idx)
+        birth   = array.get(fBar,  idx)
+        fillPct = array.get(fFill, idx)
+
+        if (bar_index - birth) > fvgMaxAgeBars or fillPct > fvgMaxFillPct
+            continue
+
+        // Price enters FVG zone (retest)
+        touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+        if not touch
+            continue
+
+        // BOS in same direction required
+        if not ((d == 1 and bos_bull_ok) or (d == -1 and bos_bear_ok))
+            continue
+
+        dirStr = d == 1 ? "LONG" : "SHORT"
+        h1ok   = h1B == d
+        h4ok   = h4B == d
+        aligned = h1ok or h4ok
+        tier   = aligned ? "A" : "B"
+        conf   = (h1ok ? "h1-bias" : "") + (h4ok ? (h1ok ? "+h4-bias" : "h4-bias") : "")
+        if str.length(conf) == 0
+            conf := "counter-bias"
+
+        buf      = math.max(0.20 * atrVal, 0.08 * h1ATR)
+        entryP   = d == 1 ? l : u           // proximal edge (near price)
+        slP      = d == 1 ? l - buf : u + buf
+        slDist   = math.abs(entryP - slP)
+        slH1     = slDist / h1ATR
+
+        if slDist <= 0 or slH1 < slMinH1ATR or slH1 > slMaxH1ATR
+            continue
+
+        tp1 = d == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
+        tp2 = d == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
+        tp3 = d == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
+
+        slSide = d == 1 ? slP < entryP : slP > entryP
+        tpSide = d == 1 ? tp1 > entryP : tp1 < entryP
+        if not (slSide and tpSide)
+            continue
+
+        array.set(fFired, idx, true)
+        firedA := true
+
+        minsIn  = in_london ? math.max(0, _minOfDay - 480) : math.max(0, _minOfDay - 780)
+        fStr    = "FVG✓ BOS✓" + (aligned ? " H1✓" : " H1✗") +
+                  " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                  (_nearKeyTime == 1 ? " KEY-TIME" : "")
+
+        alert(f_buildAlert("reaction-ifvg", dirStr, entryP, slP, tp1, tp2, tp3,
+                            u, l, "FVG", sess_label, tier, conf, fStr, minsIn),
+              alert.freq_once_per_bar)
+
+        if showPosBox
+            f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL B — Judas Sweep  (template: judas-swing)
+// ─────────────────────────────────────────────────────────────────────
+// During London KZ, price sweeps the Asian high or low and closes back
+// inside the range. Entry at the swept level, SL beyond the wick.
+// One trade per direction per day.
+// ═══════════════════════════════════════════════════════════════════════
+
+var bool judas_hi_done = false
+var bool judas_lo_done = false
+
+if _newDay
+    judas_hi_done := false
+    judas_lo_done := false
+
+if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_ok
+    if not na(ar_hi) and not na(ar_lo) and not na(h1ATR) and h1ATR > 0
+        aRef = nz(atrVal, h1ATR)
+
+        // SHORT: swept Asian high, closed back inside → expect move down
+        if not judas_hi_done and high > ar_hi and close < ar_hi
+            sweepSz = high - ar_hi
+            if sweepSz >= aRef * 0.15
+                entryP  = ar_hi
+                buf     = aRef * 0.20
+                slP     = high + buf
+                slDist  = math.abs(entryP - slP)
+                slH1    = slDist / h1ATR
+                if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
+                    tp1 = entryP - slDist * 1.0
+                    tp2 = entryP - slDist * 2.0
+                    tp3 = entryP - slDist * 3.0
+                    judas_hi_done := true
+                    tier = (h1B == -1 or h4B == -1) ? "A" : "B"
+                    fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+                    alert(f_buildAlert("judas-swing", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                        ar_hi + 1, ar_hi - 1, "Asian-H",
+                                        "LONDON", tier, "judas-hi-sweep", fStr,
+                                        math.max(0, _minOfDay - 480)),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, high, "⚡ Judas SHORT",
+                              style=label.style_label_down, color=color.new(color.red, 5),
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(entryP, slP, tp3)
+
+        // LONG: swept Asian low, closed back inside → expect move up
+        if not judas_lo_done and low < ar_lo and close > ar_lo
+            sweepSz = ar_lo - low
+            if sweepSz >= aRef * 0.15
+                entryP  = ar_lo
+                buf     = aRef * 0.20
+                slP     = low - buf
+                slDist  = math.abs(entryP - slP)
+                slH1    = slDist / h1ATR
+                if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
+                    tp1 = entryP + slDist * 1.0
+                    tp2 = entryP + slDist * 2.0
+                    tp3 = entryP + slDist * 3.0
+                    judas_lo_done := true
+                    tier = (h1B == 1 or h4B == 1) ? "A" : "B"
+                    fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+                    alert(f_buildAlert("judas-swing", "LONG", entryP, slP, tp1, tp2, tp3,
+                                        ar_lo + 1, ar_lo - 1, "Asian-L",
+                                        "LONDON", tier, "judas-lo-sweep", fStr,
+                                        math.max(0, _minOfDay - 480)),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, low, "⚡ Judas LONG",
+                              style=label.style_label_up, color=color.new(color.teal, 5),
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL C — Silver Bullet  (template: silver-bullet)
+// ─────────────────────────────────────────────────────────────────────
+// 15-16 UTC only. FVG retest inside the window. One trade per day.
+// TPs extended slightly vs FVG signal (1.5R / 2.5R / 4R) to capture
+// the typical 15-16 UTC directional move.
+// ═══════════════════════════════════════════════════════════════════════
+
+var bool sb_done = false
+if _newDay
+    sb_done := false
+
+if modSB and barstate.isconfirmed and in_sb_win and not sb_done and adr_ok
+    if not na(h1ATR) and h1ATR > 0
+        firedC = false
+        for idx = array.size(fU) - 1 to 0
+            if firedC or array.get(fFired, idx)
+                continue
+            u       = array.get(fU,    idx)
+            l       = array.get(fL,    idx)
+            d       = array.get(fDir,  idx)
+            birth   = array.get(fBar,  idx)
+            fillPct = array.get(fFill, idx)
+
+            if (bar_index - birth) > 48 or fillPct > 0.50
+                continue
+
+            touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+            if not touch
+                continue
+
+            dirStr  = d == 1 ? "LONG" : "SHORT"
+            aligned = (d == 1 and (h1B == 1 or h4B == 1)) or (d == -1 and (h1B == -1 or h4B == -1))
+            tier    = aligned ? "A" : "B"
+
+            buf    = math.max(0.20 * atrVal, 0.08 * h1ATR)
+            entryP = d == 1 ? l : u
+            slP    = d == 1 ? l - buf : u + buf
+            slDist = math.abs(entryP - slP)
+            slH1   = slDist / h1ATR
+
+            if slDist <= 0 or slH1 < slMinH1ATR or slH1 > slMaxH1ATR
+                continue
+
+            tp1 = d == 1 ? entryP + slDist * 1.5 : entryP - slDist * 1.5
+            tp2 = d == 1 ? entryP + slDist * 2.5 : entryP - slDist * 2.5
+            tp3 = d == 1 ? entryP + slDist * 4.0 : entryP - slDist * 4.0
+
+            if not (d == 1 ? (slP < entryP and tp1 > entryP) : (slP > entryP and tp1 < entryP))
+                continue
+
+            array.set(fFired, idx, true)
+            sb_done  := true
+            firedC   := true
+
+            fStr = "SB-FVG✓" + (aligned ? " H1✓" : " H1✗") +
+                   " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("silver-bullet", dirStr, entryP, slP, tp1, tp2, tp3,
+                                u, l, "SB-FVG", "NY_PM", tier, "sb-fvg", fStr,
+                                math.max(0, _minOfDay - 900)),
+                  alert.freq_once_per_bar)
+
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
+// ─── STATUS TABLE ─────────────────────────────────────────────────────
+var table stTbl = na
+
+if showStatusTbl and barstate.islast
+    if na(stTbl)
+        stTbl := table.new(position.top_right, 2, 8,
+                           bgcolor=color.new(color.black, 70),
+                           border_color=color.new(color.gray, 60), border_width=1,
+                           frame_color=color.new(color.gray, 60), frame_width=1)
+
+    adrPct  = math.round(_adrConsumed * 100)
+    adrCol  = _adrConsumed >= adrMaxConsumed ? color.red : _adrConsumed >= 0.65 ? color.orange : color.lime
+    h1Str   = h1B == 1 ? "LONG" : h1B == -1 ? "SHORT" : "NEUT"
+    h4Str   = h4B == 1 ? "LONG" : h4B == -1 ? "SHORT" : "NEUT"
+    h1Col   = h1B == 1 ? color.lime : h1B == -1 ? color.red : color.gray
+    h4Col   = h4B == 1 ? color.lime : h4B == -1 ? color.red : color.gray
+    sCol    = in_kz ? color.lime : in_asian ? color.blue : color.gray
+    arStr   = ar_locked and not na(ar_hi) ?
+              str.tostring(ar_hi, format.mintick) + " / " + str.tostring(ar_lo, format.mintick) : "—"
+
+    table.cell(stTbl, 0, 0, "QB GOLD",     text_color=color.new(#D4A017, 0),     text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_left)
+    table.cell(stTbl, 1, 0, "XAUUSD · " + timeframe.period + "m", text_color=color.new(color.white,20), text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_right)
+
+    table.cell(stTbl, 0, 1, "Session",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 1, sess_label,   text_color=color.new(sCol,0),        text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(stTbl, 0, 2, "ADR",        text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 2, str.tostring(adrPct) + "%" + (adr_ok ? " ✓" : " ✗ BLOCK"),
+               text_color=color.new(adrCol,0), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(stTbl, 0, 3, "H1 bias",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 3, h1Str,        text_color=color.new(h1Col,0),       text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(stTbl, 0, 4, "H4 bias",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 4, h4Str,        text_color=color.new(h4Col,0),       text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(stTbl, 0, 5, "Asian R",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 5, arStr,        text_color=color.new(color.aqua,0),  text_size=size.tiny, text_halign=text.align_right)
+
+    fvgCount = array.size(fU)
+    table.cell(stTbl, 0, 6, "FVGs",       text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 6, str.tostring(fvgCount) + " live",
+               text_color=color.new(color.white,20), text_size=size.tiny, text_halign=text.align_right)
+
+    keyStr = _nearKeyTime == 1 ? "⚡ LBMA/COMEX" : "—"
+    table.cell(stTbl, 0, 7, "Key time",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 7, keyStr,       text_color=color.new(_nearKeyTime==1 ? color.orange : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+
+// ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
+bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
+bgcolor(in_london  ? color.new(color.yellow, 90) : na, title="London KZ")
+bgcolor(in_overlap ? color.new(color.orange, 88) : na, title="NY-Lon Overlap")
+bgcolor(in_sb_win  ? color.new(color.lime,   75) : na, title="Silver Bullet")

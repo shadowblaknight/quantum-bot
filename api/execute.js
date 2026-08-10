@@ -248,7 +248,7 @@ async function tryPlace(pending, brokerSymbol) {
   // CHECK 2: Lot size sanity cap, by category.
   const lotCapsByCategory = {
     forex:     5.0,
-    metal:     1.0,
+    metal:     10.0,
     crypto:    1.0,
     index:     2.0,
     commodity: 5.0,

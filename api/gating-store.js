@@ -43,9 +43,11 @@ const HARDCODED_BLOCKS = [
   { template: 'reaction-fvg', session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:poor-template-fit' },
   { template: 'reaction-fvg', session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
   { template: 'reaction-fvg', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
-  { template: 'reaction-ifvg', session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:poor-template-fit' },
+  // reaction-ifvg on gold: 5-for-5 WIN (100% WR, +5.31R) — ALLOWED on gold, blocked everywhere else
   { template: 'reaction-ifvg', session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
   { template: 'reaction-ifvg', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
+  // orb-pro on gold: 50% WR, -1.49R across 6 trades — no edge in either scalp or day mode
+  { template: 'orb-pro',       session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:negative-expectancy' },
 ];
 
 function ruleKey(template, session, instrument) {

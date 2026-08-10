@@ -403,6 +403,10 @@ async function managePosition(position) {
   const initialSLForR = Math.abs(state.entry - matchedPending.slPrice) || 1;
   const finalIdx = tpLevels.length - 1;
 
+  // Trade style: ORB template → scalp (target TP1, exit ≤30min, lock to break-even after TP1).
+  // All other templates → day (ride to TP2/TP3, lock SL at TP price after each rung).
+  const isScalp = matchedPending.setup?.template === 'orb' || matchedPending.setup?.style === 'scalp';
+
   // Hoisted here so the TP-detection Telegram can reference stopBuffer.
   const pipSz      = (assetMeta && assetMeta.pipSize) || (currentPrice > 100 ? 0.01 : 0.0001);
   // Proportional buffer: 25% of SL, floored at 2 pips, capped at 8 pips.
@@ -412,11 +416,9 @@ async function managePosition(position) {
 
   // ─── TP TOUCH DETECTION (wick-aware, CONFIRMED) ──────────────────
   // A TP counts as hit only when price trades a confirmation buffer BEYOND it.
-  // Default: 3% of the SL distance (was 10%). The old 10% was far too conservative —
-  // on a 80-pip gold SL it required 8 pips of confirmation past TP, meaning a trade
-  // that peaked exactly at TP1 ($80) was never confirmed and never got SL protection.
-  // 3% ≈ 2-3 pips for typical gold/forex setups — enough to filter spread noise.
-  const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || 0.03);
+  // Scalp (ORB): 1% of SL — fast confirmation, near-zero spread noise for tight setups.
+  // Day (reaction-ifvg, am-ifvg, etc.): 3% of SL — enough to filter spread on larger moves.
+  const confirmBuffer = initialSLForR * (matchedPending.tpConfirmR || (isScalp ? 0.01 : 0.03));
   let finalTouched = false;
   for (let i = 0; i < tpLevels.length && i < 3; i++) {
     const tpName = `TP${i + 1}`;
@@ -503,6 +505,19 @@ async function managePosition(position) {
     const valid    = isLong ? c.price <= currentPrice - stopBuffer : c.price >= currentPrice + stopBuffer;
     const improves = curSL == null ? true : (isLong ? c.price > curSL : c.price < curSL);
     if (valid && improves) { chosen = c; break; }
+  }
+
+  // ─── SCALP: override SL target to entry (break-even) after any TP hit ───────
+  // Day trades lock SL at the TP price and ride to the next target.
+  // Scalp (ORB) trades lock SL at entry — capturing 0R guaranteed — then let
+  // the trade close at TP1 or break-even. Never ride a scalp back to the original SL.
+  if (isScalp && chosen && !chosen.name.endsWith('-retrace')) {
+    const beSL       = isLong ? state.entry : state.entry;
+    const beImproves = curSL == null || (isLong ? beSL > curSL : beSL < curSL);
+    const beValid    = isLong ? beSL <= currentPrice - stopBuffer : beSL >= currentPrice + stopBuffer;
+    if (beImproves && beValid) {
+      chosen = { name: chosen.name + '-be', price: beSL };
+    }
   }
 
   // ─── RETRACE EMERGENCY LOCK ────────────────────────────────────────────────
@@ -613,11 +628,16 @@ async function managePosition(position) {
             // When the SL was clamped, label it clearly — the stop is NOT at TP price.
             const pFmt = (v) => v.toFixed(v > 100 ? 2 : 5);
             const isRetraceLock = chosen.name.endsWith('-retrace');
-            const displayName   = isRetraceLock ? hitRungs[0].name + ' (retrace-lock)' : chosen.name;
+            const isScalpBELock = chosen.name.endsWith('-be');
+            const displayName   = isRetraceLock ? hitRungs[0].name + ' (retrace-lock)'
+                                : isScalpBELock ? chosen.name.replace('-be', '') + ' (break-even lock)'
+                                : chosen.name;
             const stopDesc = slClamped
               ? `<code>${pFmt(slCandidate)}</code> ⚠️ clamped (${displayName} ${pFmt(chosen.price)} too close to market)`
               : isRetraceLock
                 ? `<code>${pFmt(slCandidate)}</code> ↩️ retrace-lock (${displayName} retraced before SL could move)`
+              : isScalpBELock
+                ? `<code>${pFmt(slCandidate)}</code> ⚡ break-even locked (scalp — riding to TP or zero)`
                 : `${chosen.name} <code>${pFmt(slCandidate)}</code>`;
             try {
               await sendOnce(`tplock:${position.id}:${chosen.name}`,
@@ -692,6 +712,38 @@ async function managePosition(position) {
           actions.push({ action: 'trail-sl', newSL: trailSL });
           await pushCommentary(asset, 'sl-trailing',
             `Trailing SL moved to ${trailSL.toFixed(trailSL > 100 ? 2 : 5)} (${profitR.toFixed(1)}R profit secured)`);
+          await setPositionState(position.id, state);
+        }
+      }
+    }
+  }
+
+  // ─── SCALP TIME PRESSURE ─────────────────────────────────────────────────────
+  // ORB trades must close within 30 min. If no TP1 hit after 30 min, the momentum
+  // is gone — move SL to break-even so the trade exits at zero rather than a full loss.
+  // Does not fire if SL was already moved (state.slMoves.length > 0).
+  if (isScalp && USE_SL_RATCHET && state.tpsHit.length === 0 && state.slMoves.length === 0 && !state.scalpTimeoutLocked) {
+    const openMinutes = (Date.now() - (state.createdAt || Date.now())) / 60000;
+    if (openMinutes >= 30) {
+      const beSL      = isLong ? state.entry : state.entry;
+      const beValid   = isLong ? beSL <= currentPrice - stopBuffer : beSL >= currentPrice + stopBuffer;
+      const beImproves = curSL == null || (isLong ? beSL > curSL : beSL < curSL);
+      if (beValid && beImproves) {
+        const modResult = await modifyPosition(position.id, beSL, finalTPPrice, asset);
+        if (modResult.ok) {
+          state.scalpTimeoutLocked = true;
+          state.slMoves.push({ atTP: 'scalp-timeout', newSL: beSL, ts: Date.now() });
+          state.lastVerifiedSL = beSL;
+          actions.push({ action: 'scalp-timeout-lock', newSL: beSL, openMinutes: Math.round(openMinutes) });
+          await pushCommentary(asset, 'sl-moved',
+            `Scalp 30-min limit — SL moved to break-even ${beSL.toFixed(beSL > 100 ? 2 : 5)} (no TP1 in ${Math.round(openMinutes)}m)`);
+          try {
+            await sendOnce(`scalp-timeout:${position.id}`,
+              `⏰ <b>SCALP TIME LIMIT — ${asset.toUpperCase()}</b>\n\n` +
+              `${isLong ? '🟢' : '🔴'} ${direction} · ${Math.round(openMinutes)}min elapsed, TP1 not reached\n` +
+              `SL → break-even <code>${beSL.toFixed(beSL > 100 ? 2 : 5)}</code>\n` +
+              `Trade exits at zero or better. Momentum window closed.`);
+          } catch (_) {}
           await setPositionState(position.id, state);
         }
       }
@@ -936,6 +988,17 @@ async function detectAndProcessClosed(currentOpenIds) {
     const outcome = totalPnL > 0.5 ? '✓ WIN' : totalPnL < -0.5 ? '✗ LOSS' : '— BE';
     await pushCommentary(state.asset, 'trade-closed',
       `${outcome} — ${state.direction} closed: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
+
+    // Gold win-streak: consecutive wins → progressive lot sizing (0.1 per win, reset on loss)
+    if (state.asset === 'gold') {
+      try {
+        if (totalPnL > 0.5) {
+          await r.incr('v14:gold:winstreak');
+        } else if (totalPnL < -0.5) {
+          await r.set('v14:gold:winstreak', '0');
+        }
+      } catch (_) {}
+    }
 
     try {
       const tpsHit = state.tpsHit || [];

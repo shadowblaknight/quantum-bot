@@ -440,6 +440,17 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
   }
 
+  // Gold win-streak progressive sizing: 0.1 lot base, +0.1 per consecutive win, capped at maxLot
+  if (assetId === 'gold') {
+    try {
+      const _sr = getRedis();
+      const _streakRaw = _sr ? await _sr.get('v14:gold:winstreak').catch(() => null) : null;
+      const _streak    = Math.max(0, parseInt(_streakRaw || '0', 10));
+      const _goldLot   = Math.round((0.1 + _streak * 0.1) * 100) / 100;
+      const _maxLot    = decision.instrument?.maxLot || 0.50;
+      decision.finalLot = Math.min(_goldLot, _maxLot);
+    } catch (_) {}
+  }
   const finalLot = decision.finalLot;
   const finalSL = decision.finalSL;
   const finalTP1 = decision.finalTP1 != null ? decision.finalTP1 : tp1;

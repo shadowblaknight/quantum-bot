@@ -99,7 +99,7 @@ const DEFAULT_RULES = {
   },
 
   instruments: {
-    gold:   makeInstrumentDefault('gold',   { fixedLot: 0.20, maxLot: 0.50, fixedSLPips: 40 }),
+    gold:   makeInstrumentDefault('gold',   { fixedLot: 0.10, maxLot: 10.0, fixedSLPips: 40 }),
     eurusd: makeInstrumentDefault('eurusd', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 15 }),
     gbpusd: makeInstrumentDefault('gbpusd', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 18 }),
     usdjpy: makeInstrumentDefault('usdjpy', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 15 }),
