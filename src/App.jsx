@@ -986,6 +986,208 @@ function BrainTradingData({trades}) {
   );
 }
 
+function JarvisOrbModal({onClose,orbState,positions,goals,account,jarvisState}){
+  const canvasRef=useRef(null),rafRef=useRef(null);
+  const [closing,setClosing]=useState(false);
+  const dismiss=()=>{setClosing(true);setTimeout(onClose,300);};
+
+  useEffect(()=>{
+    const c=canvasRef.current; if(!c) return;
+    let t=0;
+    const resize=()=>{c.width=window.innerWidth;c.height=window.innerHeight;};
+    resize(); window.addEventListener('resize',resize);
+
+    const col=orbState==='signal'?'0,255,157':orbState==='warn'?'245,158,11':orbState==='critical'?'255,45,85':'0,229,255';
+    const pos=Array.isArray(positions)?positions:[];
+    const eq=account?.balance||account?.equity||0;
+    const todayPnl=account?.todayPnl||0;
+    const ddPct=eq>0?Math.abs(Math.min(0,todayPnl)/eq*100):0;
+    const kz=jarvisState?.killZone;
+    const adrPct=jarvisState?.adr?.percentConsumed||0;
+    const regime=jarvisState?.regime?.type;
+    const mode=jarvisState?.currentMode||'active';
+    const goalPct=goals?.daily?.target>0?Math.min(1,Math.max(0,(goals.daily.achieved||0)/goals.daily.target)):0;
+
+    // 8 gate health states: 1=pass(cyan), 0=fail(red), null=checking(dim)
+    const gateOk=[
+      kz?.inKillZone===true?1:0,
+      null,
+      adrPct>0&&adrPct<85?1:null,
+      null,
+      1,
+      regime?1:null,
+      pos.length<3?1:0,
+      ddPct<2.0?1:0,
+    ];
+    const GATE_LBL=['KZ','EMA','ADR','CVD','NEWS','CHG','MAX','RSK'];
+
+    // Position orbit nodes
+    const posNodes=pos.map((p,i)=>({
+      angle:(i/Math.max(1,pos.length))*Math.PI*2+1.5,
+      speed:.003+i*.0007,
+      profit:(p.unrealizedProfit||p.profit||0)>=0,
+    }));
+
+    // Data stream particles (flow from outer ring toward center)
+    const streams=Array.from({length:10},(_,i)=>({
+      angle:(i/10)*Math.PI*2,
+      progress:Math.random(),
+      speed:.006+Math.random()*.004,
+    }));
+
+    // Neural mesh nodes
+    const meshNodes=Array.from({length:20},()=>({
+      x:Math.random(),y:Math.random(),
+      vx:(Math.random()-.5)*.002,vy:(Math.random()-.5)*.002,
+      r:.8+Math.random()*1.2,
+    }));
+
+    const ctx=c.getContext('2d');
+    const draw=()=>{
+      const W=c.width,H=c.height,cx=W/2,cy=H/2;
+      const R=Math.min(W,H)*.34;
+      ctx.clearRect(0,0,W,H);
+
+      // Background
+      const bg=ctx.createRadialGradient(cx,cy,0,cx,cy,Math.max(W,H)*.75);
+      bg.addColorStop(0,`rgba(0,8,22,.97)`);bg.addColorStop(.55,`rgba(0,4,14,.99)`);bg.addColorStop(1,'rgba(0,0,6,1)');
+      ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+
+      // Faint radar rings
+      [.42,.68,.92,1.18,1.42].forEach(f=>{
+        ctx.strokeStyle=`rgba(${col},${f>1?.018:.032})`;ctx.lineWidth=.5;
+        ctx.beginPath();ctx.arc(cx,cy,R*f,0,Math.PI*2);ctx.stroke();
+      });
+      // Radial spokes (8, aligning with gate segments)
+      for(let i=0;i<8;i++){
+        const a=(i/8)*Math.PI*2-Math.PI/2;
+        ctx.strokeStyle=`rgba(${col},.025)`;ctx.lineWidth=.4;
+        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+R*1.55*Math.cos(a),cy+R*1.55*Math.sin(a));ctx.stroke();
+      }
+
+      // Goal progress arc (outermost — thin, behind gates)
+      if(goalPct>0){
+        ctx.strokeStyle=`rgba(${col},.22)`;ctx.lineWidth=2.5;ctx.lineCap='round';
+        ctx.beginPath();ctx.arc(cx,cy,R*1.42,-Math.PI/2,-Math.PI/2+goalPct*Math.PI*2);ctx.stroke();
+        const endA=-Math.PI/2+goalPct*Math.PI*2;
+        ctx.fillStyle=`rgba(${col},.85)`;ctx.shadowColor=`rgba(${col},1)`;ctx.shadowBlur=10;
+        ctx.beginPath();ctx.arc(cx+R*1.42*Math.cos(endA),cy+R*1.42*Math.sin(endA),3.5,0,Math.PI*2);ctx.fill();
+        ctx.shadowBlur=0;
+      }
+
+      // GATE SEGMENTS — the primary health ring
+      const gapA=.055;const segA=Math.PI*2/8-gapA;
+      gateOk.forEach((g,i)=>{
+        const sA=(i/8)*Math.PI*2-Math.PI/2+gapA/2;const eA=sA+segA;
+        const pulse=.5+.5*Math.sin(t*.04+i*.8);
+        let gc,ga,blur;
+        if(g===1){gc=col;ga=.55+.25*pulse;blur=12;}
+        else if(g===0){gc='255,45,85';ga=.38+.28*pulse;blur=8;}
+        else{gc=col;ga=.08+.05*pulse;blur=0;}
+        ctx.strokeStyle=`rgba(${gc},${ga})`;ctx.lineWidth=5;ctx.lineCap='round';
+        ctx.shadowColor=`rgba(${gc},${ga*.55})`;ctx.shadowBlur=blur;
+        ctx.beginPath();ctx.arc(cx,cy,R*1.12,sA,eA);ctx.stroke();ctx.shadowBlur=0;
+        // Label at gate midpoint
+        const mA=sA+segA/2;const lr=R*1.28;
+        ctx.fillStyle=g===1?`rgba(${col},.65)`:g===0?'rgba(255,45,85,.65)':`rgba(${col},.2)`;
+        ctx.font=`600 ${R*.065}px monospace`;ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText(GATE_LBL[i],cx+lr*Math.cos(mA),cy+lr*Math.sin(mA));
+      });
+
+      // Data streams — particles flowing inward along gate spokes
+      streams.forEach(s=>{
+        s.progress+=s.speed; if(s.progress>1)s.progress=0;
+        const sR=R*1.1,eR=R*.18,curR=sR-(sR-eR)*s.progress;
+        const fi=s.progress<.15?s.progress/.15:1;const fo=s.progress>.8?(1-s.progress)/.2:1;
+        ctx.fillStyle=`rgba(${col},${fi*fo*.45})`;
+        ctx.beginPath();ctx.arc(cx+curR*Math.cos(s.angle),cy+curR*Math.sin(s.angle),1.5,0,Math.PI*2);ctx.fill();
+      });
+
+      // Neural mesh (same as OrbCanvas)
+      meshNodes.forEach(n=>{n.x+=n.vx;n.y+=n.vy;if(n.x<.02||n.x>.98)n.vx*=-1;if(n.y<.02||n.y>.98)n.vy*=-1;});
+      meshNodes.forEach((a,i)=>meshNodes.forEach((b,j)=>{
+        if(j<=i)return;
+        const dx=(a.x-b.x)*W,dy=(a.y-b.y)*H,d=Math.sqrt(dx*dx+dy*dy);
+        if(d<R*.75){ctx.strokeStyle=`rgba(${col},${.18*(1-d/(R*.75))})`;ctx.lineWidth=.35;ctx.beginPath();ctx.moveTo(a.x*W,a.y*H);ctx.lineTo(b.x*W,b.y*H);ctx.stroke();}
+      }));
+      meshNodes.forEach(n=>{ctx.fillStyle=`rgba(${col},.45)`;ctx.beginPath();ctx.arc(n.x*W,n.y*H,n.r,0,Math.PI*2);ctx.fill();});
+
+      // Three spinning orbital rings
+      [{r:R*.9,spd:.005,gap:.18,lc:`rgba(${col},.65)`,w:1.5},
+       {r:R*.66,spd:-.008,gap:.25,lc:`rgba(${col},.6)`,w:1.5},
+       {r:R*.43,spd:.013,gap:.32,lc:'rgba(167,139,250,.55)',w:1}
+      ].forEach(ring=>{
+        const rot=t*ring.spd*60;
+        ctx.save();ctx.translate(cx,cy);ctx.rotate(rot);
+        ctx.strokeStyle=ring.lc;ctx.lineWidth=ring.w;ctx.lineCap='round';
+        ctx.shadowColor=ring.lc;ctx.shadowBlur=6;
+        ctx.beginPath();ctx.arc(0,0,ring.r,ring.gap/2,Math.PI*2-ring.gap/2);ctx.stroke();
+        ctx.restore();ctx.shadowBlur=0;
+      });
+
+      // Session mode arc (bottom band — thin colored arc)
+      const modeColMap={active:`rgba(${col},.45)`,defensive:'rgba(245,158,11,.45)',sleep:'rgba(80,100,140,.35)',vacation:'rgba(60,60,80,.25)'};
+      ctx.strokeStyle=modeColMap[mode]||modeColMap.active;ctx.lineWidth=2.5;ctx.lineCap='round';
+      ctx.beginPath();ctx.arc(cx,cy,R*.97,Math.PI*.2,Math.PI*.8);ctx.stroke();
+
+      // Kill zone pulse ring (when active)
+      if(kz?.inKillZone){
+        const kzAlpha=.15+.12*Math.sin(t*.06);
+        ctx.strokeStyle=`rgba(245,158,11,${kzAlpha})`;ctx.lineWidth=2;
+        ctx.beginPath();ctx.arc(cx,cy,R*.97,-Math.PI*.8,-Math.PI*.2);ctx.stroke();
+      }
+
+      // Open position orbit nodes
+      posNodes.forEach(n=>{
+        n.angle+=n.speed;
+        const oR=R*.72;const nx=cx+oR*Math.cos(n.angle),ny=cy+oR*Math.sin(n.angle);
+        const nc=n.profit?'0,255,157':'255,45,85';
+        ctx.strokeStyle=`rgba(${nc},.18)`;ctx.lineWidth=1.5;
+        ctx.beginPath();ctx.arc(cx,cy,oR,n.angle-.35,n.angle);ctx.stroke();
+        ctx.fillStyle=`rgba(${nc},.9)`;ctx.shadowColor=`rgba(${nc},.65)`;ctx.shadowBlur=14;
+        ctx.beginPath();ctx.arc(nx,ny,5.5,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+      });
+
+      // Core sphere (larger)
+      const cr=R*.17;
+      const pulse=1+.06*Math.sin(t*.04);
+      const sphG=ctx.createRadialGradient(cx-cr*.3,cy-cr*.3,0,cx,cy,cr*pulse);
+      sphG.addColorStop(0,'rgba(200,255,255,.97)');
+      sphG.addColorStop(.35,`rgba(${col},.75)`);
+      sphG.addColorStop(.75,'rgba(0,50,120,.5)');
+      sphG.addColorStop(1,'rgba(0,20,48,.85)');
+      ctx.shadowColor=`rgba(${col},.9)`;ctx.shadowBlur=28+10*Math.sin(t*.04);
+      ctx.fillStyle=sphG;ctx.beginPath();ctx.arc(cx,cy,cr*pulse,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+      for(let i=0;i<6;i++){const a=(i/6)*Math.PI*2+t*.01;ctx.strokeStyle=`rgba(${col},.2)`;ctx.lineWidth=.6;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+cr*1.15*Math.cos(a),cy+cr*1.15*Math.sin(a));ctx.stroke();}
+
+      // Ghost status word (very faint, large — readable at a glance, not intrusive)
+      const word=orbState==='signal'?'SIGNAL READY':orbState==='warn'?'CAUTION':orbState==='critical'?'ALERT':'SCANNING';
+      ctx.font=`900 ${R*.19}px monospace`;ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillStyle=`rgba(${col},.038)`;ctx.fillText(word,cx,cy+R*.82);
+
+      t++;rafRef.current=requestAnimationFrame(draw);
+    };
+    draw();
+    return()=>{window.removeEventListener('resize',resize);cancelAnimationFrame(rafRef.current);};
+  },[]);// eslint-disable-line
+
+  const pos=Array.isArray(positions)?positions:[];
+  return(
+    <div className={`jOrbOverlay${closing?' closing':''}`} onClick={dismiss}>
+      <canvas ref={canvasRef}/>
+      <div className="jOrbFooter">
+        {pos.map((p,i)=>(
+          <div key={i} className="jOrbPosDot" style={{
+            background:(p.unrealizedProfit||p.profit||0)>=0?'rgba(0,255,157,.8)':'rgba(255,45,85,.8)',
+            boxShadow:(p.unrealizedProfit||p.profit||0)>=0?'0 0 7px rgba(0,255,157,.6)':'0 0 7px rgba(255,45,85,.6)',
+          }}/>
+        ))}
+      </div>
+      <div className="jOrbDismiss">tap anywhere · close</div>
+    </div>
+  );
+}
+
 function BrainModal({trades,onClose}) {
   const TABS=[
     {id:'grid',    label:'Hour×Day Grid'},
@@ -1214,6 +1416,7 @@ export default function App() {
   const [clock,      setClock]      = useState('');
   const [input,      setInput]      = useState('');
   const [ambClass,   setAmbClass]   = useState('monitor');
+  const [orbRipple,  setOrbRipple]  = useState(false);
   const inputRef = useRef(null);
 
   // Clock
@@ -1366,8 +1569,11 @@ export default function App() {
 
           {/* CENTER COLUMN */}
           <div id="cCol">
-            <div id="orbArea"><div className="cl"/><div className="cr"/>
+            <div id="orbArea" style={{cursor:'pointer',position:'relative'}}
+              onClick={()=>{setOrbRipple(true);setTimeout(()=>setOrbRipple(false),700);setModal({type:'orb'});}}
+            ><div className="cl"/><div className="cr"/>
               <OrbCanvas state={orbState}/>
+              {orbRipple&&<div className="jRipple"/>}
               <div className="orbStatus"><div className="orbStatusDot"/><span id="orbLabel">{jarvisState?.killZone?.inKillZone?jarvisState.killZone.label+' · ACTIVE':'QUANTUM CORE · ANALYZING'}</span></div>
             </div>
             <JarvisChat messages={messages} thinking={thinking} focusDock={focusDock} onDismissFocus={()=>setFocusDock(null)}/>
@@ -1409,6 +1615,7 @@ export default function App() {
       </div>
 
       {/* MODALS */}
+      {modal?.type==='orb'   && <JarvisOrbModal orbState={orbState} positions={positions} goals={goals} account={account} jarvisState={jarvisState} onClose={()=>setModal(null)}/>}
       {modal?.type==='log'   && <TradeLogModal trades={trades} onClose={()=>setModal(null)}/>}
       {modal?.type==='nexus' && <BrainModal trades={trades} onClose={()=>setModal(null)}/>}
       {modal?.type==='tpl'   && <TemplateModal tplId={modal.id} trades={trades} rules={rules} jarvisState={jarvisState} onClose={()=>setModal(null)}/>}
