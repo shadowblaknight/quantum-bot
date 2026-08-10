@@ -1188,6 +1188,216 @@ function JarvisOrbModal({onClose,orbState,positions,goals,account,jarvisState}){
   );
 }
 
+function LearningModal({onClose,trades}){
+  const canvasRef=useRef(null),rafRef=useRef(null);
+  const [closing,setClosing]=useState(false);
+  const dismiss=()=>{setClosing(true);setTimeout(onClose,300);};
+
+  useEffect(()=>{
+    const c=canvasRef.current; if(!c) return;
+    let t=0,reveal=0;
+    const resize=()=>{c.width=window.innerWidth;c.height=window.innerHeight;};
+    resize(); window.addEventListener('resize',resize);
+
+    // ── DATA ──
+    const sorted=[...trades].sort((a,b)=>(a.closedAt||0)-(b.closedAt||0));
+    const N=sorted.length;
+    const overallWins=sorted.filter(tr=>tr.outcome==='WIN').length;
+    const overallWR=N>0?overallWins/N:0;
+
+    // Rolling 20-trade win rate
+    const rolling=sorted.map((_,i)=>{
+      const w=sorted.slice(Math.max(0,i-19),i+1);
+      return w.filter(tr=>tr.outcome==='WIN').length/w.length;
+    });
+
+    // 20-trade trend
+    const trend20=rolling.length>=21
+      ?rolling[rolling.length-1]-rolling[rolling.length-21]:0;
+
+    // Template stats
+    const tMap={};
+    sorted.forEach(tr=>{
+      const k=(tr.template||'?').toUpperCase().replace(/-/g,' ').slice(0,10);
+      if(!tMap[k])tMap[k]={wins:0,total:0,rSum:0,rCount:0};
+      tMap[k].total++;
+      if(tr.outcome==='WIN')tMap[k].wins++;
+      if(typeof tr.pnlR==='number'&&isFinite(tr.pnlR)){tMap[k].rSum+=tr.pnlR;tMap[k].rCount++;}
+    });
+    const tplList=Object.entries(tMap)
+      .map(([name,s])=>({name,total:s.total,wr:s.total>0?s.wins/s.total:0,avgR:s.rCount>0?s.rSum/s.rCount:0}))
+      .sort((a,b)=>b.total-a.total).slice(0,8);
+    const maxTotal=Math.max(...tplList.map(tp=>tp.total),1);
+
+    // Streak
+    let streak=0;
+    for(let i=sorted.length-1;i>=0;i--){
+      const w=sorted[i].outcome==='WIN',l=sorted[i].outcome==='LOSS';
+      if(i===sorted.length-1){if(w)streak=1;else if(l)streak=-1;else break;}
+      else{if(streak>0&&w)streak++;else if(streak<0&&l)streak--;else break;}
+    }
+
+    // Recent strip (last 60)
+    const recent=sorted.slice(-60);
+    const maxR=Math.max(...recent.map(tr=>Math.abs(tr.pnlR||0)),1);
+
+    // Win-rate → rgb color helper (red→yellow→cyan)
+    const wrCol=(wr)=>{
+      if(wr>=0.5){const f=(wr-.5)/.5;return `${Math.round(245*(1-f))},${Math.round(158*(1-f)+229*f)},${Math.round(11*(1-f)+255*f)}`;}
+      const f=wr/.5;return `${Math.round(255*(1-f)+245*f)},${Math.round(45*(1-f)+158*f)},${Math.round(85*(1-f)+11*f)}`;
+    };
+
+    const ctx=c.getContext('2d');
+    const draw=()=>{
+      const W=c.width,H=c.height;
+      reveal=Math.min(1,reveal+.01);
+      ctx.clearRect(0,0,W,H);
+      ctx.fillStyle='rgba(0,3,12,1)';ctx.fillRect(0,0,W,H);
+
+      const leftW=W*.42,chartX=W*.46,chartW=W-chartX-24,footY=H-68;
+      const lCx=leftW/2,lCy=(footY-50)/2+50;
+      const webR=Math.min(leftW*.38,footY*.38);
+
+      // ── HEADER ──
+      ctx.fillStyle='rgba(0,229,255,.55)';ctx.font='700 11px monospace';ctx.textAlign='left';ctx.textBaseline='top';
+      ctx.fillText('RECOGNITION ENGINE',22,14);
+      ctx.fillStyle='rgba(0,229,255,.22)';ctx.font='9px monospace';
+      ctx.fillText(`${N} trades in memory`,22,30);
+      const wrc=wrCol(overallWR);
+      ctx.font='700 22px monospace';ctx.textAlign='right';ctx.fillStyle=`rgba(${wrc},.9)`;
+      ctx.fillText(`${(overallWR*100).toFixed(0)}% WR`,W-22,14);
+      ctx.font='700 9px monospace';
+      const ta=trend20>.03?'↑ IMPROVING':trend20<-.03?'↓ DECLINING':'→ STABLE';
+      const tc=trend20>.03?'0,255,157':trend20<-.03?'255,45,85':'100,130,160';
+      ctx.fillStyle=`rgba(${tc},.75)`;ctx.fillText(ta,W-22,40);
+
+      // Divider
+      ctx.strokeStyle='rgba(0,229,255,.05)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(leftW+14,50);ctx.lineTo(leftW+14,footY-8);ctx.stroke();
+
+      // Radar rings (left panel context)
+      [.35,.6,.88,1.06].forEach(f=>{
+        ctx.strokeStyle=`rgba(0,229,255,${f>1?.018:.03})`;ctx.lineWidth=.35;
+        ctx.beginPath();ctx.arc(lCx,lCy,webR*f,0,Math.PI*2);ctx.stroke();
+      });
+
+      // ── TEMPLATE CONSTELLATION ──
+      ctx.fillStyle='rgba(0,229,255,.2)';ctx.font='700 8px monospace';ctx.textAlign='center';ctx.textBaseline='top';
+      ctx.fillText('TEMPLATE MASTERY',lCx,54);
+
+      tplList.forEach((tp,i)=>{
+        const angle=(i/tplList.length)*Math.PI*2-Math.PI/2+t*.003*(i%2===0?1:-.7);
+        const sR=8+24*Math.sqrt(tp.total/maxTotal);
+        const dist=webR*(.45+.5*(tp.total/maxTotal));
+        const nx=lCx+dist*Math.cos(angle),ny=lCy+dist*Math.sin(angle);
+        const nc=wrCol(tp.wr);const pulse=.8+.2*Math.sin(t*.04+i*1.1);
+        const tier=tp.total>=50?3:tp.total>=20?2:tp.total>=8?1:0;
+        // Connector
+        ctx.strokeStyle=`rgba(${nc},${.07+.12*(tp.total/maxTotal)})`;ctx.lineWidth=.8;
+        ctx.beginPath();ctx.moveTo(lCx,lCy);ctx.lineTo(nx,ny);ctx.stroke();
+        // Node
+        ctx.shadowColor=`rgba(${nc},${.5*pulse})`;ctx.shadowBlur=[0,8,16,24][tier]*pulse;
+        ctx.fillStyle=`rgba(${nc},${.1+.07*pulse})`;
+        ctx.beginPath();ctx.arc(nx,ny,sR,0,Math.PI*2);ctx.fill();
+        ctx.strokeStyle=`rgba(${nc},${.5+.3*pulse})`;ctx.lineWidth=1.5;
+        ctx.beginPath();ctx.arc(nx,ny,sR,0,Math.PI*2);ctx.stroke();ctx.shadowBlur=0;
+        // WR arc
+        ctx.strokeStyle=`rgba(${nc},.75)`;ctx.lineWidth=2.5;ctx.lineCap='round';
+        ctx.beginPath();ctx.arc(nx,ny,sR+3.5,-Math.PI/2,-Math.PI/2+tp.wr*Math.PI*2);ctx.stroke();
+        // Expert dashed ring
+        if(tier>=3){ctx.strokeStyle=`rgba(${nc},.5)`;ctx.lineWidth=.8;ctx.setLineDash([2,2]);ctx.beginPath();ctx.arc(nx,ny,sR+8,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);}
+        // Labels
+        ctx.fillStyle=`rgba(${nc},.85)`;ctx.font=`700 ${Math.max(6,Math.min(8,sR*.5))}px monospace`;ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText(tp.name.slice(0,7),nx,ny-1);
+        ctx.fillStyle=`rgba(${nc},.5)`;ctx.font='6.5px monospace';
+        ctx.fillText(`${(tp.wr*100).toFixed(0)}%  ${tp.total}t`,nx,ny+sR+10);
+      });
+
+      // CORE node
+      const jc=wrCol(overallWR);const jp=.9+.1*Math.sin(t*.05);
+      ctx.shadowColor=`rgba(${jc},.5)`;ctx.shadowBlur=18*jp;
+      ctx.fillStyle=`rgba(${jc},${.3*jp})`;ctx.beginPath();ctx.arc(lCx,lCy,10,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle=`rgba(${jc},.65)`;ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(lCx,lCy,10,0,Math.PI*2);ctx.stroke();ctx.shadowBlur=0;
+      ctx.fillStyle=`rgba(${jc},.7)`;ctx.font='600 7px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('CORE',lCx,lCy);
+
+      // ── LEARNING CURVE ──
+      const cY=56,cH=footY-72;
+      ctx.fillStyle='rgba(0,229,255,.015)';ctx.fillRect(chartX,cY,chartW,cH);
+      // 50% line
+      const mid=cY+cH*.5;
+      ctx.strokeStyle='rgba(0,229,255,.14)';ctx.lineWidth=1;ctx.setLineDash([5,5]);
+      ctx.beginPath();ctx.moveTo(chartX,mid);ctx.lineTo(chartX+chartW,mid);ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle='rgba(0,229,255,.3)';ctx.font='7px monospace';ctx.textAlign='left';ctx.textBaseline='middle';
+      ctx.fillText('50%',chartX+3,mid-5);
+      // 75% line
+      ctx.strokeStyle='rgba(0,255,157,.05)';ctx.lineWidth=.4;
+      ctx.beginPath();ctx.moveTo(chartX,cY+cH*.25);ctx.lineTo(chartX+chartW,cY+cH*.25);ctx.stroke();
+
+      if(rolling.length>1){
+        const revN=Math.max(2,Math.floor(rolling.length*reveal));
+        const pts=rolling.slice(0,revN).map((wr,i)=>({x:chartX+(i/(rolling.length-1))*chartW,y:cY+cH-wr*cH}));
+        const ep=pts[pts.length-1];
+        // Fill
+        const grad=ctx.createLinearGradient(0,cY,0,cY+cH);
+        grad.addColorStop(0,'rgba(0,229,255,.16)');grad.addColorStop(1,'rgba(0,229,255,.01)');
+        ctx.fillStyle=grad;ctx.beginPath();ctx.moveTo(pts[0].x,cY+cH);
+        pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.lineTo(ep.x,cY+cH);ctx.closePath();ctx.fill();
+        // Line
+        ctx.strokeStyle='rgba(0,229,255,.75)';ctx.lineWidth=2;ctx.lineCap='round';ctx.lineJoin='round';
+        ctx.shadowColor='rgba(0,229,255,.3)';ctx.shadowBlur=5;
+        ctx.beginPath();pts.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y));ctx.stroke();ctx.shadowBlur=0;
+        // Endpoint
+        const ep2=.6+.4*Math.sin(t*.07);
+        ctx.fillStyle='rgba(0,229,255,1)';ctx.shadowColor='rgba(0,229,255,.8)';ctx.shadowBlur=10*ep2;
+        ctx.beginPath();ctx.arc(ep.x,ep.y,3.5,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+        // Current WR display
+        const curWR=rolling[revN-1];const crc=wrCol(curWR);
+        ctx.font='700 30px monospace';ctx.textAlign='left';ctx.textBaseline='top';
+        ctx.fillStyle=`rgba(${crc},.9)`;ctx.fillText(`${(curWR*100).toFixed(0)}%`,chartX,cY-2);
+        ctx.font='8px monospace';ctx.fillStyle='rgba(0,229,255,.3)';
+        ctx.fillText('20-TRADE ROLLING WIN RATE',chartX+62,cY+9);
+      }
+      // X label
+      ctx.fillStyle='rgba(0,229,255,.15)';ctx.font='7px monospace';ctx.textAlign='center';
+      ctx.fillText(`← oldest   ${N} trades   newest →`,chartX+chartW/2,cY+cH+8);
+      // Streak
+      if(streak!==0){
+        const sc=streak>0?'0,255,157':'255,45,85';
+        ctx.font='700 10px monospace';ctx.textAlign='right';
+        ctx.fillStyle=`rgba(${sc},.75)`;
+        ctx.fillText(`${streak>0?'+':''}${streak} streak`,W-24,cY+cH+8);
+      }
+
+      // ── TRADE MEMORY STRIP ──
+      const sY=H-44;
+      ctx.fillStyle='rgba(0,229,255,.18)';ctx.font='7px monospace';ctx.textAlign='left';ctx.textBaseline='middle';
+      ctx.fillText('MEMORY',22,sY);
+      const dSp=(W-120)/Math.max(1,recent.length);
+      recent.forEach((tr,i)=>{
+        const x=78+i*dSp+dSp/2,age=.3+.7*(i/recent.length);
+        const iW=tr.outcome==='WIN',iBE=tr.outcome==='BREAKEVEN';
+        const dr=Math.max(2,Math.min(6,2.5+3.5*Math.abs(tr.pnlR||0)/maxR));
+        const nc=iBE?'160,140,40':iW?'0,255,157':'255,45,85';
+        if(i===recent.length-1){ctx.shadowColor=`rgba(${nc},.8)`;ctx.shadowBlur=8;}
+        ctx.fillStyle=`rgba(${nc},${age})`;ctx.beginPath();ctx.arc(x,sY,dr,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+      });
+      ctx.fillStyle='rgba(0,229,255,.12)';ctx.font='6.5px monospace';ctx.textAlign='right';
+      ctx.fillText(`last ${recent.length} →`,W-22,sY);
+
+      t++;rafRef.current=requestAnimationFrame(draw);
+    };
+    draw();
+    return()=>{window.removeEventListener('resize',resize);cancelAnimationFrame(rafRef.current);};
+  },[]);// eslint-disable-line
+
+  return(
+    <div className={`jOrbOverlay${closing?' closing':''}`} onClick={dismiss}>
+      <canvas ref={canvasRef}/>
+      <div className="jOrbDismiss">tap anywhere · close</div>
+    </div>
+  );
+}
+
 function BrainModal({trades,onClose}) {
   const TABS=[
     {id:'grid',    label:'Hour×Day Grid'},
@@ -1517,7 +1727,8 @@ export default function App() {
     {label:'📡 Pine',       q:'Show pine vision across all timeframes'},
     {label:'🎯 Calibrate',  q:'Calibrate sizing for my goal'},
     {label:'🧠 Advise',     q:'What should I do right now?'},
-    {label:'⬡ QB-NEXUS',   q:null,action:()=>setModal({type:'nexus'}),cls:'p'},
+    {label:'🧬 Neural',    q:null,action:()=>setModal({type:'learning'}),cls:'p'},
+    {label:'⬡ QB-NEXUS',  q:null,action:()=>setModal({type:'nexus'}),cls:'p'},
     {label:'📋 Trade Log', q:null,action:()=>setModal({type:'log'}),cls:'g'},
     {label:'⛔ E-STOP',    q:null,action:()=>setModal({type:'estop'}),cls:'r'},
   ];
@@ -1615,7 +1826,8 @@ export default function App() {
       </div>
 
       {/* MODALS */}
-      {modal?.type==='orb'   && <JarvisOrbModal orbState={orbState} positions={positions} goals={goals} account={account} jarvisState={jarvisState} onClose={()=>setModal(null)}/>}
+      {modal?.type==='orb'      && <JarvisOrbModal orbState={orbState} positions={positions} goals={goals} account={account} jarvisState={jarvisState} onClose={()=>setModal(null)}/>}
+      {modal?.type==='learning' && <LearningModal trades={trades} onClose={()=>setModal(null)}/>}
       {modal?.type==='log'   && <TradeLogModal trades={trades} onClose={()=>setModal(null)}/>}
       {modal?.type==='nexus' && <BrainModal trades={trades} onClose={()=>setModal(null)}/>}
       {modal?.type==='tpl'   && <TemplateModal tplId={modal.id} trades={trades} rules={rules} jarvisState={jarvisState} onClose={()=>setModal(null)}/>}
