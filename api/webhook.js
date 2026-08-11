@@ -47,7 +47,7 @@ const PINE_TO_ASSET = {
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60;
-const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','orb-pro','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg'];
+const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','orb-pro','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','gold-fvg','gold-sb'];
 
 // ── Reversible template circuit breakers ─────────────────────────────────
 // DISABLED_TEMPLATES: any template in this array is skipped before the rules
@@ -555,7 +555,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // immediate market fills. A pending limit at the FVG edge is never placed —
   // price fills NOW at market. This avoids missed entries when price is already
   // past the FVG by the time the limit would trigger.
-  if (SB_IMMEDIATE_ONLY && p.template === 'silver-bullet' && !useMarket) {
+  if (SB_IMMEDIATE_ONLY && (p.template === 'silver-bullet' || p.template === 'gold-sb') && !useMarket) {
     useMarket  = true;
     entryType  = 'immediate';
     try { await logActivity({ type: 'sb-retest-to-immediate', asset: assetId, template: p.template, direction: p.direction, note: 'retest converted to market fill' }); } catch (_) {}
