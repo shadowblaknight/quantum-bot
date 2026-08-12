@@ -231,6 +231,9 @@ function parseIntent(msg) {
   if (/switch.*mode|set.*mode|mode.*to|vacation\s*mode|sleep\s*mode|defensive\s*mode|active\s*mode/i.test(v))
     return 'MODE';
   // 'confirm' removed — already caught above by CONFIRM; leaving it here steals "please confirm" etc.
+  if (/judas|lbma|comex|gold.?fvg|gold.?sb|gold.*specialist|specialist.*gold/i.test(v) ||
+      (/gold|xau/i.test(v) && /signal|setup|sweep|range|psych|round|key.?time|asian|silver.?bullet|specialist|fvg/i.test(v)))
+    return 'GOLD';
   if (/signal|entry|setup|fire|armed|reaction|orb|silver.?bullet|fvg/i.test(v))
     return 'SIGNAL';
   if (/gate|filter|check|ready|block|pass|fail/i.test(v))
@@ -748,6 +751,9 @@ function reasonPine(ctx, message) {
   let script = 'ict';
   if (/rxn|reaction|impulse|tap/.test(v)) script = 'rxn';
   if (/orb/.test(v)) script = 'orb';
+  if (/gold|specialist|xau/.test(v))      script = 'gold';
+
+  if (script === 'gold') return reasonGold(ctx, message);
 
   const panels = { ict: 'pine-ict', rxn: 'pine-rxn', orb: 'pine-orb' };
   const labels = { ict: 'QB-ICT', rxn: 'QB-Reaction', orb: 'QB-ORB-Pro' };
@@ -791,6 +797,127 @@ function reasonPine(ctx, message) {
   }
 
   return { speech, focusPanel: panels[script], urgency: 'normal' };
+}
+
+// GOLD: Gold Specialist intelligence — 4 signals, key times, Asian range, psych levels
+function reasonGold(ctx, message) {
+  const { qState } = ctx;
+  const v         = message.toLowerCase();
+  const watchers  = qState?.watchers  || {};
+  const chartBias = qState?.chartBias || {};
+  const goldW     = watchers.gold     || {};
+  const goldBias  = chartBias.gold    || {};
+  const pending   = goldW.activePending || [];
+  const conf      = goldBias.confluence;
+
+  // Live UTC clock
+  const nowUtc   = new Date();
+  const minOfDay = nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes();
+
+  // Session gates (mirror of Pine)
+  const inAsian   = minOfDay < 480;
+  const inLondon  = minOfDay >= 480  && minOfDay < 660;
+  const inOverlap = minOfDay >= 780  && minOfDay < 1020;
+  const inSbWin   = minOfDay >= 900  && minOfDay < 960;
+  const inKz      = inLondon || inOverlap;
+
+  // Gold institutional key times
+  const nearLBMA  = minOfDay >= 585 && minOfDay <= 675;   // LBMA AM fix ±45min around 10:30 UTC
+  const nearCOMEX = minOfDay >= 765 && minOfDay <= 855;   // COMEX open ±45min around 13:30 UTC
+
+  // ── Specific query handlers ────────────────────────────────────────────────
+  if (/judas|sweep|asian.?range|range.?sweep/i.test(v)) {
+    let s = `The Judas Sweep is Gold's primary London open play, Sir.`;
+    s += ` Logic: during London session, price sweeps the Asian range high or low — the range built between midnight and 08:00 UTC — then CLOSES BACK INSIDE it.`;
+    s += ` Entry at the Asian level that was swept. Stop beyond the sweep wick plus a buffer. Targets at 1R, 2R, 3R. One signal per direction per day.`;
+    s += ` Zero FVG dependency — it is a pure price-action sweep play.`;
+    if (inAsian)       s += ` We are currently building the Asian range. Judas fires only after London open locks that range.`;
+    else if (inLondon) s += ` London is active — this is the prime Judas window. Watch for a wick beyond the Asian high or low that closes back inside.`;
+    else               s += ` London window has closed for today. Judas opportunity is done until tomorrow.`;
+    return { speech: s, focusPanel: 'signal', urgency: inLondon ? 'elevated' : 'normal' };
+  }
+
+  if (/psych|round.?number|50.?point|100.?point/i.test(v)) {
+    let s = `Gold respects round numbers more than any other instrument, Sir.`;
+    s += ` The Specialist fires a reaction signal when price wicks into the nearest 50-point level — 3000, 3050, 3100, 3150 — and closes back away from it.`;
+    s += ` Major 100-point levels carry stronger reactions. Entry at the round number, stop beyond the wick, targets 1R, 2R, 3R.`;
+    s += inKz ? ` Kill zone is active — psych signals are scanning right now.`
+              : ` Psych signals only fire inside London or NY-AM kill zones.`;
+    return { speech: s, focusPanel: 'signal', urgency: 'normal' };
+  }
+
+  if (/lbma|comex|fix|key.?time/i.test(v)) {
+    let s = `Gold has two institutional key times, Sir.`;
+    s += ` First: the LBMA AM Fix at 10:30 UTC — the London bullion benchmark. Prime move window is 09:45 to 11:15 UTC.`;
+    s += ` Second: COMEX open at 13:30 UTC — New York gold futures. Move window is 12:45 to 14:15 UTC.`;
+    s += ` The Pine script flags both windows and the status table shows "KEY-TIME" when we are inside one.`;
+    if (nearLBMA)        s += ` We are INSIDE the LBMA fix window right now — prime time for gold-fvg and psych signals.`;
+    else if (nearCOMEX)  s += ` We are INSIDE the COMEX open window — second major gold move window of the day.`;
+    else {
+      const mL = 585  - minOfDay;
+      const mC = 765  - minOfDay;
+      if (mL > 0 && mL < 300) s += ` LBMA window opens in ${mL} minutes.`;
+      else if (mC > 0 && mC < 300) s += ` COMEX window opens in ${mC} minutes.`;
+      else s += ` Both key windows have passed for today.`;
+    }
+    return { speech: s, focusPanel: 'signal', urgency: (nearLBMA || nearCOMEX) ? 'elevated' : 'normal' };
+  }
+
+  if (/gold.?sb|silver.?bullet.*gold|15.*16.*utc|3.?pm.*gold/i.test(v)) {
+    let s = `Gold Silver Bullet fires between 15:00 and 16:00 UTC, Sir.`;
+    s += ` It retests a fresh FVG inside that one-hour window — the same FVG pool used by gold-fvg, but with extended targets: 1.5R, 2.5R, 4R to capture the typical 3pm futures move.`;
+    s += ` One gold-sb per day. The template name is gold-sb — distinct from the ICT silver-bullet on other instruments.`;
+    if (inSbWin) s += ` We are INSIDE the window right now.`;
+    else { const mS = 900 - minOfDay; if (mS > 0 && mS < 480) s += ` Window opens in ${mS} minutes.`; else s += ` Window has closed for today.`; }
+    return { speech: s, focusPanel: 'signal', urgency: inSbWin ? 'elevated' : 'normal' };
+  }
+
+  if (/adr|range.*consumed|consumed/i.test(v)) {
+    return {
+      speech: `Gold's ADR gate blocks all four Specialist signals when today's range exceeds 80% of the 14-day average daily range, Sir. It prevents chasing a session that has already made its move. When triggered, the chart status table shows "ADR BLOCK". The gate resets every day at midnight UTC.`,
+      focusPanel: 'signal', urgency: 'normal',
+    };
+  }
+
+  if (/gold.?fvg|fvg.*gold/i.test(v)) {
+    let s = `Gold FVG fires when price retests a fresh fair-value gap during the London or NY-overlap kill zone, Sir.`;
+    s += ` Conditions: FVG must be less than 20 bars old, less than 50% filled, AND there must be a recent Break of Structure in the same direction within the last 30 bars.`;
+    s += ` Entry at the FVG proximal edge. Stop below the distal edge plus buffer. Targets 1R, 2R, 3R.`;
+    s += ` HTF bias from H1, H4, and Daily all factor into Tier A or B classification.`;
+    return { speech: s, focusPanel: 'signal', urgency: 'normal' };
+  }
+
+  // ── General gold overview ──────────────────────────────────────────────────
+  let speech = `Gold Specialist overview, Sir. Four signals: gold-fvg, judas-swing, gold-sb, and psych-level reaction.`;
+
+  if (inSbWin)        speech += ` Currently in the Silver Bullet window (15-16 UTC) — gold-sb scanning for FVG retest.`;
+  else if (inOverlap) speech += ` NY-London overlap active (13-17 UTC) — gold-fvg and psych signals live.`;
+  else if (inLondon)  speech += ` London kill zone active (08-11 UTC) — Judas Sweep and gold-fvg are the prime setups.`;
+  else if (inAsian)   speech += ` Asian session (00-08 UTC) — building the range that Judas will trade at London open.`;
+  else                speech += ` Outside kill zones — no new signals until London open at 08:00 UTC.`;
+
+  if (nearLBMA)  speech += ` LBMA fix window active — prime institutional gold move time.`;
+  if (nearCOMEX) speech += ` COMEX open window active — second major gold move window.`;
+
+  if (conf?.aligned) {
+    const dir = conf.htfDirection === 'LONG' ? 'bullish' : 'bearish';
+    const n   = conf.htfDirection === 'LONG' ? conf.longTFs?.length : conf.shortTFs?.length;
+    speech += ` Gold HTF bias: ${dir} across ${n} of ${conf.totalTFs} timeframes — Tier A signals expected.`;
+  } else if (conf?.countertrend) {
+    speech += ` Gold is countertrend — HTF ${conf.htfDirection === 'LONG' ? 'bullish' : 'bearish'}, LTF opposite. Tier B signals only, tighter sizing.`;
+  } else {
+    const h1b = goldBias.tfs?.['1h']?.bias;
+    const h4b = goldBias.tfs?.['4h']?.bias;
+    if (h4b) speech += ` H4 ${h4b === 'LONG' ? 'bullish' : 'bearish'}.`;
+    if (h1b) speech += ` H1 ${h1b === 'LONG' ? 'bullish' : 'bearish'}.`;
+  }
+
+  if (pending.length > 0) {
+    const p = pending[0];
+    speech += ` Active pending: ${p.templateName || 'setup'} on Gold — ${p.narrative || 'armed for entry'}.`;
+  }
+
+  return { speech, focusPanel: 'signal', urgency: (inKz || nearLBMA || nearCOMEX || pending.length > 0) ? 'elevated' : 'normal' };
 }
 
 function reasonCompass(ctx) {
@@ -1226,6 +1353,7 @@ function scanForAnomalies(ctx) {
       'silver-bullet','unicorn','turtle-soup','judas-swing',
       'ote-continuation','am-ifvg','reaction','reaction-fvg',
       'reaction-ifvg','reaction-impulse','orb','orb-pro','alexg',
+      'gold-fvg','gold-sb',
     ];
     const stale = qState.gatingRules.filter(g =>
       g.template !== '*' && !knownTemplates.includes(g.template)
@@ -1263,6 +1391,7 @@ module.exports = async function handler(req, res) {
 
     let result;
     switch (intent) {
+      case 'GOLD':        result = reasonGold(ctx, message);           break;
       case 'WATCHER':     result = reasonWatcher(ctx, message);        break;
       case 'FILTER':      result = reasonFilter(ctx, message);         break;
       case 'SIGNAL':      result = reasonSignal(ctx);                  break;

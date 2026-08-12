@@ -29,7 +29,7 @@ WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
 
 // ─── INPUTS ──────────────────────────────────────────────────────────
 G_CORE = "Core"
-modFVG        = input.bool(true,  "A) FVG Signal (reaction-ifvg)",  group=G_CORE)
+modFVG        = input.bool(true,  "A) FVG Signal (gold-fvg)",  group=G_CORE)
 modJudas      = input.bool(true,  "B) Judas Sweep — pure sweep, no FVG",  group=G_CORE)
 modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_CORE)
 modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_CORE)

@@ -43,7 +43,8 @@ const HARDCODED_BLOCKS = [
   { template: 'reaction-fvg', session: '*', instrument: 'gold',   on: false, reason: 'hardcoded-block:poor-template-fit' },
   { template: 'reaction-fvg', session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
   { template: 'reaction-fvg', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
-  // reaction-ifvg on gold: 5-for-5 WIN (100% WR, +5.31R) — ALLOWED on gold, blocked everywhere else
+  // reaction-ifvg on gold: 5-for-5 WIN (100% WR, +5.31R) — force-enabled on gold (on:true entries always win)
+  { template: 'reaction-ifvg', session: '*', instrument: 'gold',   on: true,  reason: 'hardcoded-allow:5-for-5-wins', force: true },
   { template: 'reaction-ifvg', session: '*', instrument: 'us500',  on: false, reason: 'hardcoded-block:poor-template-fit' },
   { template: 'reaction-ifvg', session: '*', instrument: 'nas100', on: false, reason: 'hardcoded-block:poor-template-fit' },
   // orb-pro on gold: 50% WR, -1.49R across 6 trades — no edge in either scalp or day mode
@@ -55,14 +56,14 @@ function ruleKey(template, session, instrument) {
 }
 
 // Seeds HARDCODED_BLOCKS entries that don't yet have any rule in the store.
-// Unlike the old seedIfEmpty (which only ran when the store was completely empty),
-// this runs every loadRules() call and picks up new blocks added to the list
-// without disturbing any rule the user has explicitly set via the panel.
+// Entries with force:true are always written (overrides stale panel disables).
+// Entries with force:false/absent are only seeded when the key is missing.
 async function seedMissingBlocks(r, rules) {
-  const missing = HARDCODED_BLOCKS.filter(b => !(ruleKey(b.template, b.session, b.instrument) in rules));
-  if (missing.length === 0) return rules;
+  const forced  = HARDCODED_BLOCKS.filter(b => b.force && rules[ruleKey(b.template, b.session, b.instrument)]?.on !== b.on);
+  const missing = HARDCODED_BLOCKS.filter(b => !b.force && !(ruleKey(b.template, b.session, b.instrument) in rules));
+  if (forced.length === 0 && missing.length === 0) return rules;
   const now = Date.now();
-  for (const b of missing) {
+  for (const b of [...forced, ...missing]) {
     const k = ruleKey(b.template, b.session, b.instrument);
     rules[k] = { on: b.on, updatedAt: now, updatedBy: 'seed', reason: b.reason };
   }

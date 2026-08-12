@@ -10,7 +10,7 @@ indicator("Quantum Bot — Gold Specialist", "QB GOLD", overlay=true,
 //    A) gold-fvg      — FVG retest during London KZ / NY-Lon Overlap
 //                       Needs: FVG fresh (<20 bars, <50% filled) + BOS
 //
-//    B) judas-swing   — PURE Asian-range sweep play (ZERO FVG dependency)
+//    B) gold-judas    — PURE Asian-range sweep play (ZERO FVG dependency)
 //                       Needs: wick > Asian H or L + close back inside
 //
 //    C) gold-sb       — FVG retest locked to 15-16 UTC Silver Bullet window
@@ -29,7 +29,7 @@ WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
 
 // ─── INPUTS ──────────────────────────────────────────────────────────
 G_CORE = "Core"
-modFVG        = input.bool(true,  "A) FVG Signal (reaction-ifvg)",  group=G_CORE)
+modFVG        = input.bool(true,  "A) FVG Signal (gold-fvg)",  group=G_CORE)
 modJudas      = input.bool(true,  "B) Judas Sweep — pure sweep, no FVG",  group=G_CORE)
 modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_CORE)
 modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_CORE)
@@ -363,7 +363,7 @@ if modFVG and barstate.isconfirmed and in_kz and adr_ok and not na(h1ATR) and h1
             f_drawPosBox(entryP, slP, tp3)
 
 // ═══════════════════════════════════════════════════════════════════════
-// SIGNAL B — Judas Sweep  (template: judas-swing)
+// SIGNAL B — Judas Sweep  (template: gold-judas)
 // ─────────────────────────────────────────────────────────────────────
 // Pure sweep play — NO FVG dependency whatsoever.
 // Logic: London open sweeps Asian H or L and CLOSES BACK INSIDE the range.
@@ -401,7 +401,7 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_ok
                     judas_hi_done := true
                     tier = (h1B == -1 or h4B == -1 or hdB == -1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("judas-swing", "SHORT", entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("gold-judas", "SHORT", entryP, slP, tp1, tp2, tp3,
                                         ar_hi + 1, ar_hi - 1, "Asian-H",
                                         "LONDON", tier, "judas-hi-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
@@ -428,7 +428,7 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_ok
                     judas_lo_done := true
                     tier = (h1B == 1 or h4B == 1 or hdB == 1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("judas-swing", "LONG", entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("gold-judas", "LONG", entryP, slP, tp1, tp2, tp3,
                                         ar_lo + 1, ar_lo - 1, "Asian-L",
                                         "LONDON", tier, "judas-lo-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
@@ -566,7 +566,7 @@ if modPsych and barstate.isconfirmed and in_kz and adr_ok and not psych_done
                     fStr   = "PSYCH-" + lvlStr + (aligned ? " H1" : "") +
                              " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
 
-                    alert(f_buildAlert("reaction", dirStr, entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("gold-reaction", dirStr, entryP, slP, tp1, tp2, tp3,
                                         nearLevel + tol, nearLevel - tol, "PSYCH",
                                         sess_label, tier, conf, fStr, minsIn),
                           alert.freq_once_per_bar)
