@@ -139,10 +139,23 @@ async function evalWick(p, threshold, assetId, ts) {
 // (gold Monday weakness), Quantpedia/Gemini (BTC hourly seasonality),
 // Sprott Money (gold 54yr London bias).
 
+// Reversal/exhaustion templates benefit from high ADR — exhaustion is the edge.
+// Momentum/continuation templates need room to run — high ADR is a headwind.
+const REVERSAL_TEMPLATES = new Set([
+  'reaction', 'reaction-fvg', 'reaction-ifvg',
+  'gold-reaction',                // psych bounce — best at 90-100% ADR
+]);
+const SWEEP_TEMPLATES = new Set([
+  'judas-swing', 'gold-judas',   // fires at London open while ADR still building
+]);
+
 function evalSessionStructural(p, assetId, dir) {
   const isLong = dir === 'LONG';
   let sessionScore = 0;
   const checks = [];
+  const template = p.template || '';
+  const isReversal = REVERSAL_TEMPLATES.has(template);
+  const isSweep    = SWEEP_TEMPLATES.has(template);
 
   const adrConsumed = p.adrConsumed != null ? parseFloat(p.adrConsumed)    : null;
   const gapAtr      = p.gapAtr      != null ? parseFloat(p.gapAtr)         : null;
@@ -157,14 +170,35 @@ function evalSessionStructural(p, assetId, dir) {
   const first15mDir = p.first15mDir != null ? parseInt(p.first15mDir, 10)  : null;
   const nearKeyTime = p.nearKeyTime === true || p.nearKeyTime === 'true';
 
-  // ── Universal: ADR consumed ───────────────────────────────────────────────
+  // ── ADR consumed — template-aware scoring ────────────────────────────────
+  // Reversal setups (psych, reaction-ifvg) BENEFIT from exhaustion — the liquidity grab
+  // at 90-100% ADR is precisely the edge. Momentum/FVG setups need room to run.
   if (adrConsumed != null) {
-    if (adrConsumed < 0.40) {
-      sessionScore += 1; checks.push({ name: 'adr-room',      delta: +1, v: adrConsumed });
-    } else if (adrConsumed > 0.85) {
-      sessionScore -= 2; checks.push({ name: 'adr-exhausted', delta: -2, v: adrConsumed });
-    } else if (adrConsumed > 0.70) {
-      sessionScore -= 1; checks.push({ name: 'adr-tight',     delta: -1, v: adrConsumed });
+    if (isReversal) {
+      // High ADR = exhaustion = liquidity grab opportunity for reversal templates
+      if (adrConsumed >= 0.90 && adrConsumed < 1.50) {
+        sessionScore += 2; checks.push({ name: 'adr-exhaustion-reversal', delta: +2, v: adrConsumed });
+      } else if (adrConsumed >= 0.75) {
+        sessionScore += 1; checks.push({ name: 'adr-highprob-reversal', delta: +1, v: adrConsumed });
+      } else if (adrConsumed < 0.40) {
+        sessionScore -= 1; checks.push({ name: 'adr-fresh-reversal', delta: -1, v: adrConsumed });
+      }
+      // News extension (150%+) and outlier (250%+) are neutral for reversals — Pine already blocked or allowed
+    } else if (isSweep) {
+      // Sweep templates fire at London open while ADR is still building — neutral at high ADR
+      if (adrConsumed < 0.40) {
+        sessionScore += 1; checks.push({ name: 'adr-room', delta: +1, v: adrConsumed });
+      }
+      // No penalty — Pine gate already blocked judas above 90%
+    } else {
+      // Momentum/FVG/continuation: needs room, penalise high ADR
+      if (adrConsumed < 0.40) {
+        sessionScore += 1; checks.push({ name: 'adr-room',      delta: +1, v: adrConsumed });
+      } else if (adrConsumed > 0.85) {
+        sessionScore -= 2; checks.push({ name: 'adr-exhausted', delta: -2, v: adrConsumed });
+      } else if (adrConsumed > 0.70) {
+        sessionScore -= 1; checks.push({ name: 'adr-tight',     delta: -1, v: adrConsumed });
+      }
     }
   }
 
@@ -186,7 +220,8 @@ function evalSessionStructural(p, assetId, dir) {
       // Lucey & Tully (2006): GARCH-confirmed Monday gold weakness
       sessionScore -= 1; checks.push({ name: 'gold-monday', delta: -1 });
     }
-    if (adrConsumed != null && adrConsumed > 0.85) {
+    // Gold daytime exhaustion applies to momentum templates only — reversals thrive at exhaustion
+    if (!isReversal && adrConsumed != null && adrConsumed > 0.85) {
       // 54-yr structural pattern (Sprott Money): London/NY is distribution window for gold
       sessionScore -= 1; checks.push({ name: 'gold-daytime-exhaustion', delta: -1, v: adrConsumed });
     }

@@ -1163,8 +1163,11 @@ async function reasonCalibrate(ctx, goals, r) {
   // Fall back to broker's todayPnl only if goal tracking hasn't fired yet today.
   const achieved   = daily.achieved !== 0 ? daily.achieved : Math.max(0, todayPnl);
 
+  // Pull most recent ADR consumed from qState (populated by webhook on last signal)
+  const adrConsumed = qState?.lastSignalAdr ?? qState?.adrConsumed ?? null;
+
   const sizing = computeSizing(
-    { equity: eq, dailyTarget: daily.target, achieved, winRate: knnWR, avgR: knnAvgR, sessionsLeft, drawdownPct },
+    { equity: eq, dailyTarget: daily.target, achieved, winRate: knnWR, avgR: knnAvgR, sessionsLeft, drawdownPct, adrConsumed },
     rules
   );
 

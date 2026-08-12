@@ -10,7 +10,7 @@ indicator("Quantum Bot — Gold Specialist", "QB GOLD", overlay=true,
 //    A) gold-fvg      — FVG retest during London KZ / NY-Lon Overlap
 //                       Needs: FVG fresh (<20 bars, <50% filled) + BOS
 //
-//    B) gold-judas    — PURE Asian-range sweep play (ZERO FVG dependency)
+//    B) judas-swing   — PURE Asian-range sweep play (ZERO FVG dependency)
 //                       Needs: wick > Asian H or L + close back inside
 //
 //    C) gold-sb       — FVG retest locked to 15-16 UTC Silver Bullet window
@@ -35,8 +35,15 @@ modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_COR
 modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_CORE)
 
 G_FILT = "Filters"
-adrMaxConsumed = input.float(0.80, "ADR max consumed (block at X)",    group=G_FILT, minval=0.50, maxval=1.00, step=0.05,
-                              tooltip="No trade when today's range > this × 14-day ATR. 0.80 = 80%.")
+// Per-signal ADR thresholds — each setup has different tolerance for range consumption.
+// FVG/SB need room to run (block at 85%). Judas fires during build phase (block at 90%).
+// Psych bounces are BEST at exhaustion — only block extreme outliers (block at 120%).
+adrFVGMax      = input.float(0.85, "FVG / SB max ADR consumed",        group=G_FILT, minval=0.50, maxval=1.50, step=0.05,
+                              tooltip="gold-fvg and gold-sb blocked above this. FVG needs room to run. 0.85 = 85%.")
+adrJudasMax    = input.float(0.90, "Judas max ADR consumed",           group=G_FILT, minval=0.50, maxval=1.50, step=0.05,
+                              tooltip="judas-swing fires during London build phase — allow extra room vs FVG. 0.90 = 90%.")
+adrPsychMax    = input.float(1.20, "Psych bounce max ADR consumed",    group=G_FILT, minval=0.70, maxval=2.50, step=0.05,
+                              tooltip="Psych reversal is BEST at exhaustion (90-100%+). Only block extreme extensions. 1.20 = 120%.")
 atrLength      = input.int(14,    "ATR period",                        group=G_FILT, minval=2, maxval=50)
 emaLength      = input.int(20,    "HTF bias EMA period",               group=G_FILT, minval=5, maxval=100)
 fvgMinGapATR   = input.float(0.10,"FVG min gap (× ATR)",               group=G_FILT, minval=0.03, step=0.03)
@@ -87,6 +94,19 @@ _priorDayPos = _todayOpen > _priorDayHi ? 1 : _todayOpen < _priorDayLo ? -1 : 0
 // Gold key times: LBMA AM fix ~10:30 UTC ±45min, COMEX open ~13:30 UTC ±45min
 _nearKeyTime = (_minOfDay >= 585 and _minOfDay <= 675) or (_minOfDay >= 765 and _minOfDay <= 855) ? 1 : 0
 
+// ─── ADR TIER CLASSIFICATION ──────────────────────────────────────────────────
+// Research-based tiers: 75-80% High-Prob, 90-100% Exhaustion,
+// 150-200% News Extension, 250%+ Outlier. Each tier changes gates and TP targets.
+_prevMonthMaxBar = request.security(syminfo.tickerid, "D", ta.highest(high - low, 22)[1])
+_adrTierStr      = _adrConsumed >= 2.50 ? "OUTLIER" :
+                   _adrConsumed >= 1.50 ? "NEWS-EXT" :
+                   _adrConsumed >= 0.90 ? "EXHAUST" :
+                   _adrConsumed >= 0.75 ? "HIGH-PROB" : "BUILDING"
+// Quiet day flag: ADR < 75% → compress TP1 to conservative target (75% of ADR)
+_adrQuiet        = _adrConsumed < 0.75
+// Remaining space to 75% of ADR from today's extreme (used for TP cap on quiet days)
+_adrRemainTo75   = math.max(0.0, _atr14d * 0.75 - (_todayHigh - _todayLow))
+
 // ─── CVD ──────────────────────────────────────────────────────────────
 _signedVol   = close > open ? volume : close < open ? -volume : 0.0
 _newDay      = ta.change(time("D")) != 0
@@ -109,7 +129,11 @@ in_kz       = in_london or in_overlap
 
 string sess_label = in_sb_win ? "NY_PM" : in_overlap ? "NY_AM" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
 
-adr_ok = _adrConsumed < adrMaxConsumed
+// Per-signal ADR gates — never share a single flat threshold across different setup types
+adr_fvg_ok   = _adrConsumed < adrFVGMax    // FVG + SB: needs room to extend (85%)
+adr_judas_ok = _adrConsumed < adrJudasMax  // Judas: fires at London open, allow more (90%)
+adr_psych_ok = _adrConsumed < adrPsychMax  // Psych: exhaustion IS the edge (120%)
+adr_hard_ok  = _adrConsumed < 2.50         // Outlier hard-stop — all signals halt above 250%
 
 // ─── ASIAN RANGE TRACKING ─────────────────────────────────────────────
 var float ar_hi     = na
@@ -270,6 +294,7 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
               ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
               ",\"barClose\":\"" + str.tostring(close, format.mintick) + "\"" +
               ",\"adrConsumed\":\"" + str.tostring(_adrConsumed,  "#.####") + "\"" +
+              ",\"adrTier\":\""    + _adrTierStr                              + "\"" +
               ",\"gapAtr\":\""      + str.tostring(_gapAtr,        "#.####") + "\"" +
               ",\"gapDir\":\""      + str.tostring(scGapDir)                 + "\"" +
               ",\"priorDayPos\":\"" + str.tostring(_priorDayPos)             + "\"" +
@@ -296,7 +321,7 @@ f_drawPosBox(float e, float slP, float tp3) =>
 // has recent BOS in the same direction. SL beyond the FVG proximal edge.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modFVG and barstate.isconfirmed and in_kz and adr_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0
+if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0
     firedA = false
     for idx = array.size(fU) - 1 to 0
         if firedA or array.get(fFired, idx)
@@ -338,7 +363,10 @@ if modFVG and barstate.isconfirmed and in_kz and adr_ok and not na(h1ATR) and h1
         if slDist <= 0 or slH1 < slMinH1ATR or slH1 > slMaxH1ATR
             continue
 
-        tp1 = d == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
+        // Quiet-day TP compression: if ADR < 75% and market has little room left,
+        // pull TP1 back to 0.75R to lock in gains before session slows down.
+        tp1Mult = (_adrQuiet and _adrRemainTo75 > 0 and _adrRemainTo75 < slDist * 1.5) ? 0.75 : 1.0
+        tp1 = d == 1 ? entryP + slDist * tp1Mult : entryP - slDist * tp1Mult
         tp2 = d == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
         tp3 = d == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
 
@@ -363,7 +391,7 @@ if modFVG and barstate.isconfirmed and in_kz and adr_ok and not na(h1ATR) and h1
             f_drawPosBox(entryP, slP, tp3)
 
 // ═══════════════════════════════════════════════════════════════════════
-// SIGNAL B — Judas Sweep  (template: gold-judas)
+// SIGNAL B — Judas Sweep  (template: judas-swing)
 // ─────────────────────────────────────────────────────────────────────
 // Pure sweep play — NO FVG dependency whatsoever.
 // Logic: London open sweeps Asian H or L and CLOSES BACK INSIDE the range.
@@ -381,7 +409,7 @@ if _newDay
     judas_hi_done := false
     judas_lo_done := false
 
-if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_ok
+if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_ok and adr_hard_ok
     if not na(ar_hi) and not na(ar_lo) and not na(h1ATR) and h1ATR > 0
         aRef = nz(atrVal, h1ATR)
 
@@ -401,7 +429,7 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_ok
                     judas_hi_done := true
                     tier = (h1B == -1 or h4B == -1 or hdB == -1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("gold-judas", "SHORT", entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("judas-swing", "SHORT", entryP, slP, tp1, tp2, tp3,
                                         ar_hi + 1, ar_hi - 1, "Asian-H",
                                         "LONDON", tier, "judas-hi-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
@@ -428,7 +456,7 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_ok
                     judas_lo_done := true
                     tier = (h1B == 1 or h4B == 1 or hdB == 1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("gold-judas", "LONG", entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("judas-swing", "LONG", entryP, slP, tp1, tp2, tp3,
                                         ar_lo + 1, ar_lo - 1, "Asian-L",
                                         "LONDON", tier, "judas-lo-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
@@ -451,7 +479,7 @@ var bool sb_done = false
 if _newDay
     sb_done := false
 
-if modSB and barstate.isconfirmed and in_sb_win and not sb_done and adr_ok
+if modSB and barstate.isconfirmed and in_sb_win and not sb_done and adr_fvg_ok and adr_hard_ok
     if not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0
         firedC = false
         for idx = array.size(fU) - 1 to 0
@@ -483,7 +511,9 @@ if modSB and barstate.isconfirmed and in_sb_win and not sb_done and adr_ok
             if slDist <= 0 or slH1 < slMinH1ATR or slH1 > slMaxH1ATR
                 continue
 
-            tp1 = d == 1 ? entryP + slDist * 1.5 : entryP - slDist * 1.5
+            // Quiet-day TP compression: pull TP1 from 1.5R → 1.0R when little room remains
+            tp1Mult_sb = (_adrQuiet and _adrRemainTo75 > 0 and _adrRemainTo75 < slDist * 1.5) ? 1.0 : 1.5
+            tp1 = d == 1 ? entryP + slDist * tp1Mult_sb : entryP - slDist * tp1Mult_sb
             tp2 = d == 1 ? entryP + slDist * 2.5 : entryP - slDist * 2.5
             tp3 = d == 1 ? entryP + slDist * 4.0 : entryP - slDist * 4.0
 
@@ -521,7 +551,7 @@ var bool psych_done = false
 if _newDay
     psych_done := false
 
-if modPsych and barstate.isconfirmed and in_kz and adr_ok and not psych_done
+if modPsych and barstate.isconfirmed and in_kz and adr_psych_ok and adr_hard_ok and not psych_done
     if not na(h1ATR) and h1ATR > 0
         // Nearest 50-point level and nearest 100-point level
         lvl50  = math.round(close / 50.0)  * 50.0
@@ -566,7 +596,7 @@ if modPsych and barstate.isconfirmed and in_kz and adr_ok and not psych_done
                     fStr   = "PSYCH-" + lvlStr + (aligned ? " H1" : "") +
                              " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
 
-                    alert(f_buildAlert("gold-reaction", dirStr, entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("reaction", dirStr, entryP, slP, tp1, tp2, tp3,
                                         nearLevel + tol, nearLevel - tol, "PSYCH",
                                         sess_label, tier, conf, fStr, minsIn),
                           alert.freq_once_per_bar)
@@ -605,7 +635,11 @@ if showStatusTbl and barstate.islast
                            frame_color=color.new(color.gray, 60), frame_width=1)
 
     adrPct  = math.round(_adrConsumed * 100)
-    adrCol  = _adrConsumed >= adrMaxConsumed ? color.red : _adrConsumed >= 0.65 ? color.orange : color.lime
+    adrCol  = _adrConsumed >= 2.50 ? color.red :
+              _adrConsumed >= 1.50 ? color.orange :
+              _adrConsumed >= 0.90 ? color.yellow :
+              _adrConsumed >= 0.75 ? color.lime : color.aqua
+    adrGates = (adr_fvg_ok ? "F" : "f") + (adr_judas_ok ? "J" : "j") + (adr_psych_ok ? "P" : "p")
     h1Str   = h1B == 1 ? "LONG" : h1B == -1 ? "SHORT" : "NEUT"
     h4Str   = h4B == 1 ? "LONG" : h4B == -1 ? "SHORT" : "NEUT"
     h1Col   = h1B == 1 ? color.lime : h1B == -1 ? color.red : color.gray
@@ -623,7 +657,7 @@ if showStatusTbl and barstate.islast
     table.cell(stTbl, 1, 1, sess_label,   text_color=color.new(sCol,0),        text_size=size.tiny, text_halign=text.align_right)
 
     table.cell(stTbl, 0, 2, "ADR",        text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 2, str.tostring(adrPct) + "%" + (adr_ok ? " ✓" : " ✗ BLOCK"),
+    table.cell(stTbl, 1, 2, str.tostring(adrPct) + "% · " + _adrTierStr + " [" + adrGates + "]",
                text_color=color.new(adrCol,0), text_size=size.tiny, text_halign=text.align_right)
 
     table.cell(stTbl, 0, 3, "H1 bias",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
@@ -647,8 +681,8 @@ if showStatusTbl and barstate.islast
     table.cell(stTbl, 0, 8, "Key time",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
     table.cell(stTbl, 1, 8, keyStr,       text_color=color.new(_nearKeyTime==1 ? color.orange : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
 
-    psychStr = psych_done ? "fired" : (adr_ok and in_kz ? "watching" : "off")
-    psychCol = psych_done ? color.purple : (adr_ok and in_kz ? color.lime : color.gray)
+    psychStr = psych_done ? "fired" : (adr_psych_ok and adr_hard_ok and in_kz ? "watching" : "off")
+    psychCol = psych_done ? color.purple : (adr_psych_ok and adr_hard_ok and in_kz ? color.lime : color.gray)
     table.cell(stTbl, 0, 9, "Psych",      text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
     table.cell(stTbl, 1, 9, psychStr,     text_color=color.new(psychCol, 0),   text_size=size.tiny, text_halign=text.align_right)
 

@@ -35,6 +35,16 @@ const DEFAULT_SESSIONS_LEFT = 2;     // morning + afternoon if no data
 const SESSIONS_PER_DAY = 3;
 
 // ─── Core sizing engine ───────────────────────────────────────────────────────
+// ADR tier from consumption ratio (mirrors Pine _adrTierStr)
+function _adrTier(adrConsumed) {
+  if (adrConsumed == null) return null;
+  if (adrConsumed >= 2.50) return 'OUTLIER';
+  if (adrConsumed >= 1.50) return 'NEWS-EXT';
+  if (adrConsumed >= 0.90) return 'EXHAUST';
+  if (adrConsumed >= 0.75) return 'HIGH-PROB';
+  return 'BUILDING';
+}
+
 function computeSizing(params, rulesDefaults) {
   const {
     equity       = 0,
@@ -44,7 +54,10 @@ function computeSizing(params, rulesDefaults) {
     avgR         = DEFAULT_AVG_R,
     sessionsLeft = DEFAULT_SESSIONS_LEFT,
     drawdownPct  = 0,      // current drawdown as percentage (e.g. 1.5 = 1.5%)
+    adrConsumed  = null,   // 0.0-3.0+ — from Pine signal payload or null
   } = params;
+
+  const adrTier = _adrTier(adrConsumed);
 
   const riskPct    = rulesDefaults?.maxRiskPerTradePct != null
     ? rulesDefaults.maxRiskPerTradePct / 100
@@ -65,6 +78,19 @@ function computeSizing(params, rulesDefaults) {
 
   const warnings = [];
   let tierBMult, tierAMult, mode, minKNN, maxTrades, intensity;
+
+  // ── ADR tier guardrails (applied before drawdown checks) ─────────────────
+  // Outlier days (250%+): stop all trading — structural exhaustion only
+  if (adrTier === 'OUTLIER') {
+    return {
+      tierBMultiplier: 0, tierAMultiplier: 0, maxTrades: 0,
+      minKNN: 99, intensity: 0, mode: 'blocked', safe: false,
+      adrTier,
+      warnings: [`ADR ${adrConsumed != null ? Math.round(adrConsumed * 100) : '?'}% — outlier extension (250%+). Stop fighting momentum. No new entries until structural exhaustion confirmed.`],
+      speech: `ADR has reached outlier territory above 250%. I recommend zero new positions until structural exhaustion is confirmed on the chart.`,
+      debug: { adrConsumed, adrTier },
+    };
+  }
 
   // ── Safety guardrails ─────────────────────────────────────────────────────
   if (drawdownPct > 3.5) {
@@ -100,6 +126,24 @@ function computeSizing(params, rulesDefaults) {
     intensity = tierBMult;
   }
 
+  // ── Post-sizing ADR adjustments ───────────────────────────────────────────
+  if (adrTier === 'NEWS-EXT') {
+    // 150-249%: news day — ignore 14d ADR, use prev-month max bar as ceiling.
+    // Cap max trades to 2 and size conservatively regardless of goal pressure.
+    maxTrades = Math.min(maxTrades, 2);
+    tierBMult = Math.min(tierBMult, 1.0);
+    tierAMult = Math.min(tierAMult, 0.75);
+    warnings.push(`ADR ${Math.round(adrConsumed * 100)}% — news extension (150-249%). Use prev-month largest daily bar as ceiling, not 14d ATR. Max 2 trades.`);
+  } else if (adrTier === 'EXHAUST') {
+    // 90-99%: exhaustion zone — standard ceiling approaching. Prefer reversal setups only.
+    maxTrades = Math.min(maxTrades, 2);
+    minKNN = Math.max(minKNN, 80);
+    warnings.push(`ADR ${Math.round(adrConsumed * 100)}% — exhaustion zone. Standard ceiling. High-confidence setups only. Look for liquidity grabs near 100%.`);
+  } else if (adrTier === 'HIGH-PROB') {
+    // 75-89%: conservative zone — compress targets, don't push.
+    warnings.push(`ADR ${Math.round(adrConsumed * 100)}% — high-prob zone. Pull TP1 back to 75% ADR target. Secure gains before session slows.`);
+  }
+
   if (rawMultiplier > 2.5) {
     warnings.push(`Raw multiplier ${rawMultiplier.toFixed(2)}× exceeds cap of 2.5×. Goal may require extending to tomorrow's sessions.`);
   }
@@ -132,6 +176,7 @@ function computeSizing(params, rulesDefaults) {
     intensity,
     mode,
     safe,
+    adrTier: adrTier ?? 'UNKNOWN',
     warnings,
     speech: lines,
     debug: {
@@ -148,6 +193,8 @@ function computeSizing(params, rulesDefaults) {
       avgR,
       sessions,
       drawdownPct,
+      adrConsumed,
+      adrTier: adrTier ?? null,
     },
   };
 }
@@ -162,6 +209,7 @@ function parseParams(source) {
     avgR:         parseFloat(source.avgR)         || DEFAULT_AVG_R,
     sessionsLeft: parseInt(source.sessionsLeft)   || DEFAULT_SESSIONS_LEFT,
     drawdownPct:  parseFloat(source.drawdownPct)  || 0,
+    adrConsumed:  source.adrConsumed != null ? parseFloat(source.adrConsumed) : null,
   };
 }
 
