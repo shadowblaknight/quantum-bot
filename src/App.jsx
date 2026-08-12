@@ -273,7 +273,7 @@ export default function App() {
   const [acct, setAcct]         = useState(null);   // /api/dashboard-feed?action=summary
   const [openPos, setOpenPos]   = useState(null);   // /api/dashboard-feed?action=positions
   const [ledger, setLedger]     = useState([]);     // /api/ledger?action=list
-  const [tplPerf, setTplPerf]   = useState(null);   // /api/template-performance?days=30
+  const [tplPerf, setTplPerf]   = useState(null);   // /api/template-performance (all-time)
 
   // ── Derived from real data (with fallbacks) ────────────────────────────────
   const realPrice    = quote?.price ?? null;
@@ -637,7 +637,7 @@ export default function App() {
   useEffect(()=>{
     (async()=>{
       try {
-        const r=await fetch('/api/template-performance?days=30');
+        const r=await fetch('/api/template-performance');
         const d=await r.json();
         if(d.byTemplate) setTplPerf(d);
       } catch {}

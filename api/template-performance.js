@@ -134,8 +134,12 @@ function statsFor(trades) {
   for (const t of trades) {
     const p = t.profit || 0;
     const r = t.rMultiple || 0;
-    if (p > 0) { wins++; grossProfit += p; }
-    else if (p < 0) { losses++; grossLoss += Math.abs(p); }
+    const oc = t.outcome; // 'WIN' | 'LOSS' | 'BREAKEVEN' | null
+    // outcome is the ground truth; fall back to pnl sign only when missing
+    const isWin  = oc === 'WIN'  || (oc == null && p > 0);
+    const isLoss = oc === 'LOSS' || (oc == null && p < 0);
+    if (isWin)  { wins++;   if (p > 0) grossProfit += p; }
+    if (isLoss) { losses++; if (p < 0) grossLoss += Math.abs(p); }
     sumR += r;
   }
 
