@@ -33,6 +33,7 @@ modFVG        = input.bool(true,  "A) FVG Signal (gold-fvg)",  group=G_CORE)
 modJudas      = input.bool(true,  "B) Judas Sweep — pure sweep, no FVG",  group=G_CORE)
 modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_CORE)
 modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_CORE)
+modPsychExt   = input.bool(true,  "D2) Psych Extended — outside kill zones (2/3 HTF required)", group=G_CORE)
 
 G_FILT = "Filters"
 // Per-signal ADR thresholds — each setup has different tolerance for range consumption.
@@ -610,6 +611,74 @@ if modPsych and barstate.isconfirmed and in_kz and adr_psych_ok and adr_hard_ok 
                     if showPosBox
                         f_drawPosBox(entryP, slP, tp3)
 
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL D2 — Psych Extended  (template: reaction-ext)
+// ─────────────────────────────────────────────────────────────────────
+// Same psych-level detection as Signal D but fires OUTSIDE London / NY
+// kill zones — catches Asian-session and off-session setups that Signal D
+// silently skips. Stricter gate: 2 of 3 HTF biases must align with the
+// trade direction. Major 100-point levels only (safer in thinner windows).
+// One signal per day, independent of psych_done.
+// ═══════════════════════════════════════════════════════════════════════
+
+var bool psych_ext_done = false
+if _newDay
+    psych_ext_done := false
+
+if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_hard_ok and not psych_ext_done
+    if not na(h1ATR) and h1ATR > 0
+        // Major 100-point levels only — conservative choice for lower-liquidity windows
+        nearLevel = math.round(close / 100.0) * 100.0
+        tol = atrVal * 0.25
+
+        bounceLong  = low  <= nearLevel + tol and low  <= nearLevel and close > nearLevel
+        bounceShort = high >= nearLevel - tol and high >= nearLevel and close < nearLevel
+
+        dir = bounceLong and not bounceShort ? 1 : bounceShort and not bounceLong ? -1 : 0
+
+        if dir != 0
+            h1ok       = h1B == dir
+            h4ok       = h4B == dir
+            hdok       = hdB == dir
+            alignCount = (h1ok ? 1 : 0) + (h4ok ? 1 : 0) + (hdok ? 1 : 0)
+
+            if alignCount >= 2
+                conf   = (h1ok ? "h1" : "") + (h4ok ? (h1ok ? "+h4" : "h4") : "") + (hdok ? ((h1ok or h4ok) ? "+D" : "D") : "")
+                dirStr = dir == 1 ? "LONG" : "SHORT"
+
+                buf    = math.max(0.30 * atrVal, 0.10 * h1ATR)
+                wick   = dir == 1 ? low : high
+                entryP = nearLevel
+                slP    = dir == 1 ? wick - buf : wick + buf
+                slDist = math.abs(entryP - slP)
+                slH1   = slDist / h1ATR
+
+                if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
+                    tp1 = dir == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
+                    tp2 = dir == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
+                    tp3 = dir == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
+
+                    if (dir == 1 ? (slP < entryP and tp1 > entryP) : (slP > entryP and tp1 < entryP))
+                        psych_ext_done := true
+                        lvlStr = str.tostring(math.round(nearLevel))
+                        fStr   = "PSYCH-EXT-" + lvlStr + " " + str.tostring(alignCount) + "/3-HTF" +
+                                 " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                                 " OUT-KZ:" + sess_label
+
+                        alert(f_buildAlert("reaction-ext", dirStr, entryP, slP, tp1, tp2, tp3,
+                                            nearLevel + tol, nearLevel - tol, "PSYCH-EXT",
+                                            sess_label, "A", conf, fStr, _minOfDay),
+                              alert.freq_once_per_bar)
+
+                        label.new(bar_index, dir == 1 ? low : high,
+                                  "⚡ " + lvlStr + " Psych " + (dir == 1 ? "Bounce" : "Reject") + " [EXT]",
+                                  style=dir == 1 ? label.style_label_up : label.style_label_down,
+                                  color=color.new(color.orange, 10),
+                                  textcolor=color.white, size=size.tiny)
+
+                        if showPosBox
+                            f_drawPosBox(entryP, slP, tp3)
+
 // Psychological level guide lines — persistent array prevents line count blowout
 var array<line> _psych_lines = array.new<line>()
 if barstate.islast
@@ -629,7 +698,7 @@ var table stTbl = na
 
 if showStatusTbl and barstate.islast
     if na(stTbl)
-        stTbl := table.new(position.top_right, 2, 10,
+        stTbl := table.new(position.top_right, 2, 11,
                            bgcolor=color.new(color.black, 70),
                            border_color=color.new(color.gray, 60), border_width=1,
                            frame_color=color.new(color.gray, 60), frame_width=1)
@@ -685,6 +754,11 @@ if showStatusTbl and barstate.islast
     psychCol = psych_done ? color.purple : (adr_psych_ok and adr_hard_ok and in_kz ? color.lime : color.gray)
     table.cell(stTbl, 0, 9, "Psych",      text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
     table.cell(stTbl, 1, 9, psychStr,     text_color=color.new(psychCol, 0),   text_size=size.tiny, text_halign=text.align_right)
+
+    psychExtStr = psych_ext_done ? "fired" : (adr_psych_ok and adr_hard_ok ? "armed" : "ADR-block")
+    psychExtCol = psych_ext_done ? color.orange : (adr_psych_ok and adr_hard_ok ? color.yellow : color.gray)
+    table.cell(stTbl, 0, 10, "Psych-Ext", text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 10, psychExtStr, text_color=color.new(psychExtCol, 0),   text_size=size.tiny, text_halign=text.align_right)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")

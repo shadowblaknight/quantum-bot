@@ -47,7 +47,7 @@ const PINE_TO_ASSET = {
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60;
-const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','orb','orb-pro','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','gold-fvg','gold-sb'];
+const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','reaction-ext','orb','orb-pro','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','gold-fvg','gold-sb'];
 
 // ── Reversible template circuit breakers ─────────────────────────────────
 // DISABLED_TEMPLATES: any template in this array is skipped before the rules
@@ -913,7 +913,7 @@ module.exports = async (req, res) => {
   // by the time the signal fires price is already at/through the zone — a limit would
   // either sit above market (INVALID_PRICE) or miss the move. Convert to 'immediate'
   // so the background executor routes to placeMarketOrder instead of placeLimitOrder.
-  if (['reaction', 'reaction-fvg', 'reaction-ifvg'].includes(p.template) && p.actualStyle === 'retest') {
+  if (['reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-ext'].includes(p.template) && p.actualStyle === 'retest') {
     p.actualStyle = 'immediate';
   }
 
