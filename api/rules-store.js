@@ -126,7 +126,10 @@ const DEFAULT_RULES = {
     'reaction':         { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction') },
     'reaction-fvg':     { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-fvg') },
     'reaction-ifvg':    { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: templateLabel('reaction-ifvg') },
+    'reaction-ext':     { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🔮 Psych Ext' },
     'alexg':            { enabled: true, tradingStyle: 'swing',    lotMultiplier: 1.0, label: '📐 Alex G Set&Forget' },
+    'gold-fvg':         { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥇 Gold FVG' },
+    'gold-sb':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥇 Gold Silver Bullet' },
   },
 
   lastModified: null,

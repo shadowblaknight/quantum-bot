@@ -130,11 +130,13 @@ in_kz       = in_london or in_overlap
 
 string sess_label = in_sb_win ? "NY_PM" : in_overlap ? "NY_AM" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
 
-// Per-signal ADR gates — never share a single flat threshold across different setup types
-adr_fvg_ok   = _adrConsumed < adrFVGMax    // FVG + SB: needs room to extend (85%)
-adr_judas_ok = _adrConsumed < adrJudasMax  // Judas: fires at London open, allow more (90%)
-adr_psych_ok = _adrConsumed < adrPsychMax  // Psych: exhaustion IS the edge (120%)
-adr_hard_ok  = _adrConsumed < 2.50         // Outlier hard-stop — all signals halt above 250%
+// Per-signal ADR gates — all use _adrConsumed[1] (previous bar) so the trigger
+// bar's own wick cannot self-block its detection. adr_hard_ok uses the current
+// bar intentionally: it is a live safety stop, not an opportunity gate.
+adr_fvg_ok   = _adrConsumed[1] < adrFVGMax    // FVG + SB: needs room to extend (85%)
+adr_judas_ok = _adrConsumed[1] < adrJudasMax  // Judas: London build phase (90%)
+adr_psych_ok = _adrConsumed[1] < adrPsychMax  // Psych: exhaustion IS the edge (120%)
+adr_hard_ok  = _adrConsumed    < 2.50         // Outlier safety stop — always reads live ADR
 
 // ─── ASIAN RANGE TRACKING ─────────────────────────────────────────────
 var float ar_hi     = na

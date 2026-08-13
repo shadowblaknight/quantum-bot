@@ -12,10 +12,17 @@ const SOFF = new Set([
   'reaction-fvg|*|gold','reaction-fvg|*|us500','reaction-fvg|*|nas100',
   'reaction-ifvg|*|us500','reaction-ifvg|*|nas100','orb-pro|*|gold'
 ]);
+const QB_GOLD_SIGNALS = [
+  {id:'gold-fvg',    glyph:'🥇', label:'Gold FVG',    sub:'FVG · London / NY'},
+  {id:'judas-swing', glyph:'🎭', label:'Judas Swing', sub:'Asian sweep'},
+  {id:'gold-sb',     glyph:'🥇', label:'Gold SB',     sub:'SB 15–16 UTC'},
+  {id:'reaction',    glyph:'🎯', label:'Reaction',     sub:'In KZ · Psych level'},
+  {id:'reaction-ext',glyph:'🔮', label:'Psych Ext',   sub:'Outside KZ · 2/3 HTF'},
+];
 const GATE_GROUPS = [
   { name:'QB GOLD', color:'#D4A017', templates:[
-    {id:'gold-fvg',sub:'FVG London/NY'},{id:'gold-judas',sub:'Asian Sweep'},
-    {id:'gold-sb',sub:'SB 15-16'},{id:'gold-reaction',sub:'Psych'}]},
+    {id:'gold-fvg',sub:'FVG London/NY'},{id:'judas-swing',sub:'Asian Sweep'},
+    {id:'gold-sb',sub:'SB 15-16'},{id:'reaction',sub:'Psych'},{id:'reaction-ext',sub:'Psych Ext'}]},
   { name:'QB ICT', color:'#0EA5E9', templates:[
     {id:'judas-swing',sub:'Sweep'},{id:'silver-bullet',sub:'15-16'},{id:'am-ifvg',sub:'AM IFVG'}]},
   { name:'QB REACT', color:'#8B5CF6', templates:[
@@ -274,6 +281,7 @@ export default function App() {
   const [openPos, setOpenPos]   = useState(null);   // /api/dashboard-feed?action=positions
   const [ledger, setLedger]     = useState([]);     // /api/ledger?action=list
   const [tplPerf, setTplPerf]   = useState(null);   // /api/template-performance (all-time)
+  const [tplRules, setTplRules] = useState({});     // /api/rules → templateOverrides enabled map
 
   // ── Derived from real data (with fallbacks) ────────────────────────────────
   const realPrice    = quote?.price ?? null;
@@ -387,10 +395,12 @@ export default function App() {
   const gLiveRef    = useRef(false);
   const gRulesRef   = useRef({});
   const gSessionRef = useRef('*');
+  const tplRulesRef = useRef({});
 
   useEffect(()=>{gRulesRef.current=gRules;},[gRules]);
   useEffect(()=>{gLiveRef.current=gLive;},[gLive]);
   useEffect(()=>{gSessionRef.current=gSession;},[gSession]);
+  useEffect(()=>{tplRulesRef.current=tplRules;},[tplRules]);
 
   // ── Clock ──────────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -712,6 +722,32 @@ export default function App() {
   },[showToast]);
 
   useEffect(()=>{gLoad();},[gLoad]);
+
+  const tplLoad=useCallback(async()=>{
+    try{
+      const r=await fetch('/api/rules',{cache:'no-store'});
+      const d=await r.json();
+      if(d.templateOverrides){
+        const m={};
+        Object.entries(d.templateOverrides).forEach(([k,v])=>{m[k]=v.enabled!==false;});
+        setTplRules(m);
+      }
+    }catch{}
+  },[]);
+
+  const tplToggle=useCallback(async(tpl)=>{
+    const cur=tplRulesRef.current[tpl]!==false;
+    const next=!cur;
+    setTplRules(prev=>({...prev,[tpl]:next}));
+    try{
+      const r=await fetch('/api/rules?action=update-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({template:tpl,patch:{enabled:next}})});
+      const d=await r.json();
+      if(d.ok) showToast(`${tpl} → ${next?'ENABLED':'DISABLED'}`);
+      else{setTplRules(prev=>({...prev,[tpl]:cur}));showToast(d.error||'API error',true);}
+    }catch{setTplRules(prev=>({...prev,[tpl]:cur}));showToast('API unreachable',true);}
+  },[showToast]);
+
+  useEffect(()=>{tplLoad();},[tplLoad]);
 
   // ── Display values ─────────────────────────────────────────────────────────
   const dayOffset = Math.round(251-(251*dayPct/100));
@@ -1167,6 +1203,54 @@ export default function App() {
                 <button className="goal-set" onClick={()=>setGoal('week')}>SET</button>
               </div>
             </div>
+          </div>
+        </div></div>
+
+        {/* ─── QB GOLD SIGNAL CONTROLS ────────────────────────────────── */}
+        <div className="sec"><div className="scn">QB Gold · Signal Controls</div><div className="scl"/></div>
+        <div className="gate-panel"><div className="gate-wrap">
+          <div className="gate-toolbar" style={{justifyContent:'space-between'}}>
+            <span style={{font:'700 7px/1 system-ui',letterSpacing:'.14em',textTransform:'uppercase',color:'var(--t3)'}}>Enable / disable per template — affects all instruments &amp; sessions</span>
+            <button onClick={tplLoad} style={{padding:'3px 8px',font:'700 7px/1 system-ui',letterSpacing:'.1em',textTransform:'uppercase',color:'var(--in)',border:'1px solid rgba(14,165,233,.3)',background:'transparent',cursor:'pointer'}}>↺ Refresh</button>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4,padding:'4px 0'}}>
+            {QB_GOLD_SIGNALS.map(sig=>{
+              const on=tplRules[sig.id]!==false;
+              const p=perfFor(sig.id);
+              const wr=p?.winRate!=null?(p.winRate*100).toFixed(1)+'%':'--';
+              const n=p?.sample??0;
+              const avg=p?.avgR!=null?p.avgR.toFixed(2)+'R':'--';
+              return(
+                <div key={sig.id} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 8px',background:on?'rgba(212,160,23,.07)':'rgba(239,68,68,.05)',borderRadius:6,border:`1px solid ${on?'rgba(212,160,23,.2)':'rgba(239,68,68,.15)'}`,transition:'all .2s'}}>
+                  <span style={{fontSize:14,lineHeight:1}}>{sig.glyph}</span>
+                  <div style={{flex:'0 0 100px'}}>
+                    <div style={{font:'600 9px/1 system-ui',color:'var(--t1)',letterSpacing:'.04em'}}>{sig.label}</div>
+                    <div style={{font:'400 7px/1.4 system-ui',color:'var(--t3)',marginTop:2}}>{sig.sub}</div>
+                  </div>
+                  <div style={{flex:1,display:'flex',gap:16}}>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{font:'700 9px/1 system-ui',color:n>0?'var(--gr)':'var(--t3)',fontVariantNumeric:'tabular-nums'}}>{wr}</div>
+                      <div style={{font:'400 6px/1.4 system-ui',color:'var(--t3)',letterSpacing:'.06em',textTransform:'uppercase'}}>Win Rate</div>
+                    </div>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{font:'700 9px/1 system-ui',color:'var(--t2)',fontVariantNumeric:'tabular-nums'}}>{avg}</div>
+                      <div style={{font:'400 6px/1.4 system-ui',color:'var(--t3)',letterSpacing:'.06em',textTransform:'uppercase'}}>Avg R</div>
+                    </div>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{font:'700 9px/1 system-ui',color:'var(--t2)',fontVariantNumeric:'tabular-nums'}}>{n}</div>
+                      <div style={{font:'400 6px/1.4 system-ui',color:'var(--t3)',letterSpacing:'.06em',textTransform:'uppercase'}}>Trades</div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={()=>tplToggle(sig.id)}
+                    style={{padding:'5px 12px',font:'700 8px/1 system-ui',letterSpacing:'.08em',textTransform:'uppercase',cursor:'pointer',borderRadius:4,border:'none',
+                      background:on?'rgba(34,197,94,.15)':'rgba(239,68,68,.15)',
+                      color:on?'#22C55E':'#EF4444',transition:'all .2s'}}>
+                    {on?'● ENABLED':'○ DISABLED'}
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </div></div>
 

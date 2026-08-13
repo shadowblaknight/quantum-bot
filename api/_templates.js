@@ -26,6 +26,7 @@ const TEMPLATE_META = {
   'reaction-fvg':     { glyph: '🌀', label: 'Reaction (FVG)' },
   'reaction-ifvg':    { glyph: '🔄', label: 'Reaction (IFVG)' },
   'reaction-impulse': { glyph: '⚡', label: 'Reaction (impulse tap)' },
+  'reaction-ext':     { glyph: '🔮', label: 'Psych Ext (outside KZ)' },
   'alexg':            { glyph: '📐', label: 'Alex G Set&Forget' },
   'gold-fvg':         { glyph: '🥇', label: 'Gold FVG (Specialist)' },
   'gold-sb':          { glyph: '🥇', label: 'Gold Silver Bullet' },
@@ -48,24 +49,24 @@ function templateLabelMap() {
 // Display order (heatmaps, cards).
 const TEMPLATE_ORDER = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb',
 ];
 
 // UI groupings — separately MEASURED, grouped only for a tidy screen.
 const ICT_TEMPLATES      = ['silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg', 'gold-sb'];
-const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'gold-fvg'];
+const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'gold-fvg'];
 
 // Accepted templates by active mode. Active = everything; defensive = the
 // higher-conviction subset (drops the two most aggressive ICT setups).
 const ACCEPTED_ACTIVE = [
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
-  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb',
 ];
 const ACCEPTED_DEFENSIVE = [
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
-  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'alexg',
+  'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb',
 ];
 
