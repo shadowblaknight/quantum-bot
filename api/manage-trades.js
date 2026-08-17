@@ -31,7 +31,8 @@ const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
 const goalHandler = require('./jarvis-goal');
 const addGoalPnL  = goalHandler.addGoalPnL;
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
-const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired } = require('./telegram');
+const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired, notifySpecialistTradeClosed } = require('./telegram');
+const { SPECIALIST_SIGNALS } = require('./_templates');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
 const { runEntryStyleEvaluator } = require('./entrystyle-evaluator');
 
@@ -254,7 +255,11 @@ async function setPositionState(positionId, state) {
 async function managePosition(position) {
   if (!isTradingEnabled()) return { id: position.id, skipped: 'trading-disabled' };
 
-  if (!position.comment || !(position.comment.startsWith('QB-V12-') || position.comment.startsWith('QB-V13-'))) {
+  if (!position.comment || !(
+    position.comment.startsWith('QB-V12-') ||
+    position.comment.startsWith('QB-V13-') ||
+    position.comment.startsWith('QB-V20-')
+  )) {
     return { id: position.id, skipped: 'not-managed-position' };
   }
 
@@ -989,47 +994,72 @@ async function detectAndProcessClosed(currentOpenIds) {
     await pushCommentary(state.asset, 'trade-closed',
       `${outcome} — ${state.direction} closed: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`);
 
-    // Gold win-streak: consecutive wins → progressive lot sizing (0.1 per win, reset on loss)
+    // Gold V20 lot adjustment: +0.1 per win, -0.1 per loss, clamped 0.10–10.00
     if (state.asset === 'gold') {
       try {
-        if (totalPnL > 0.5) {
-          await r.incr('v14:gold:winstreak');
-        } else if (totalPnL < -0.5) {
-          await r.set('v14:gold:winstreak', '0');
-        }
+        const _lotRaw  = await r.get('v20:gold:lot').catch(() => null);
+        const _curLot  = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 0.10;
+        let   _newLot  = _curLot;
+        if      (totalPnL > 0.5)  _newLot = Math.min(10.00, Math.round((_curLot + 0.1) * 100) / 100);
+        else if (totalPnL < -0.5) _newLot = Math.max(0.10, Math.round((_curLot - 0.1) * 100) / 100);
+        if (_newLot !== _curLot) await r.set('v20:gold:lot', _newLot.toFixed(2)).catch(() => {});
       } catch (_) {}
     }
 
     try {
-      const tpsHit = state.tpsHit || [];
-      const isCleanSLHit = tpsHit.length === 0 && totalPnL < -0.5;
+      const tpsHit    = state.tpsHit || [];
+      const _tmpl     = matchedPending.setup?.template || null;
+      const _isV20    = SPECIALIST_SIGNALS.includes(_tmpl);
 
-      if (isCleanSLHit) {
-        const lastSL = state.slMoves && state.slMoves.length > 0
-          ? state.slMoves[state.slMoves.length - 1].newSL
-          : matchedPending.slPrice;
-        await notifySLHit({
-          asset:       state.asset,
-          direction:   state.direction,
-          slPrice:     lastSL,
-          dollarsLost: totalPnL,
-          positionId,
-          riskDollars: matchedPending.sizing?.baseRisk || null,
-          openedAt:    state.createdAt,
-        });
-      } else {
-        await notifyTradeClosed({
-          asset:       state.asset,
-          direction:   state.direction,
+      if (_isV20) {
+        // V20 specialist close — for gold, read updated lot so message shows next trade size
+        let _nextLot = null;
+        if (state.asset === 'gold') {
+          const _lotAfterRaw = await r.get('v20:gold:lot').catch(() => null);
+          _nextLot = _lotAfterRaw ? Math.round(parseFloat(_lotAfterRaw) * 100) / 100 : null;
+        }
+        const _zoneType    = matchedPending.setup?.zoneType || null;
+        await notifySpecialistTradeClosed({
+          asset:      state.asset,
+          direction:  state.direction,
+          template:   _tmpl,
+          zoneType:   _zoneType,
+          session:    matchedPending.setup?.session || null,
           totalPnL,
           tpsHit,
           positionId,
-          openedAt:    state.createdAt,
-          closedAt:    Date.now(),
-          template:    matchedPending.setup?.template   || null,
-          session:     matchedPending.setup?.session    || null,
-          riskDollars: matchedPending.sizing?.baseRisk  || null,
+          openedAt:   state.createdAt,
+          nextLot:    _nextLot,
         });
+      } else {
+        const isCleanSLHit = tpsHit.length === 0 && totalPnL < -0.5;
+        if (isCleanSLHit) {
+          const lastSL = state.slMoves && state.slMoves.length > 0
+            ? state.slMoves[state.slMoves.length - 1].newSL
+            : matchedPending.slPrice;
+          await notifySLHit({
+            asset:       state.asset,
+            direction:   state.direction,
+            slPrice:     lastSL,
+            dollarsLost: totalPnL,
+            positionId,
+            riskDollars: matchedPending.sizing?.baseRisk || null,
+            openedAt:    state.createdAt,
+          });
+        } else {
+          await notifyTradeClosed({
+            asset:       state.asset,
+            direction:   state.direction,
+            totalPnL,
+            tpsHit,
+            positionId,
+            openedAt:    state.createdAt,
+            closedAt:    Date.now(),
+            template:    _tmpl,
+            session:     matchedPending.setup?.session    || null,
+            riskDollars: matchedPending.sizing?.baseRisk  || null,
+          });
+        }
       }
     } catch (_) {}
   }
@@ -1056,7 +1086,11 @@ async function runManageTick() {
     };
   }
 
-  const managedPositions = positions.filter((p) => p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-')));
+  const managedPositions = positions.filter((p) => p.comment && (
+    p.comment.startsWith('QB-V12-') ||
+    p.comment.startsWith('QB-V13-') ||
+    p.comment.startsWith('QB-V20-')
+  ));
 
   const manageResults = await Promise.all(managedPositions.map(managePosition));
 

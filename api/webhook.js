@@ -14,11 +14,26 @@ const { notifyTradePlaced, sendOnce } = require('./telegram');
 const { getAssetById } = require('./asset-registry');
 const { applyRulesToSignal, logActivity, getTodaysPnL } = require('./rules-store');
 const { addWatchedSetup } = require('./watched-setups');
-const { templateLabelMap, REACTION_TEMPLATES } = require('./_templates');
+const { templateLabelMap, REACTION_TEMPLATES, SPECIALIST_SIGNALS, LEGACY_TEMPLATES } = require('./_templates');
 const { evaluateReactionMTF, tfSetForMode } = require('./reaction-filter');
 const { evaluateSignalQuality }             = require('./signal-quality');
 const { checkKillZone }                     = require('./kill-zones');
+const { notifySpecialistTradePlaced }       = require('./telegram');
 const TEMPLATE_LABELS = templateLabelMap();
+
+// ── V20 Specialist Mode ───────────────────────────────────────────────────────
+// true  = only specialist signals accepted; ALL legacy templates are history
+// false = legacy templates still active alongside specialists (pre-V20 behaviour)
+const V20_SPECIALIST_MODE = true;
+
+// Active sub-signals per specialist — API-level hard gate.
+// If zoneType is NOT in this list the signal is silently dropped.
+// Update here when a new confirmed signal is unlocked in a specialist Pine.
+const SPECIALIST_ALLOWED_ZONES = {
+  // Signal M (Frankfurt ORB) + Signal H (NY ORB) — both confirmed, H1+H4 bias, 0.75× TP
+  'gold-specialist':   ['FRB', 'NYORB'],
+  'nas100-specialist': ['ORB'],            // NYSE ORB LONG — H4 EMA200, 1.0× TP
+};
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
 // import is ever undefined, calling it would throw mid-placement and silently
@@ -47,13 +62,21 @@ const PINE_TO_ASSET = {
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';
 const DEDUPE_TTL = 60 * 60;
-const ACCEPTED_TEMPLATES = ['reaction','reaction-fvg','reaction-ifvg','reaction-ext','orb','orb-pro','silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation','am-ifvg','gold-fvg','gold-sb'];
 
-// ── Reversible template circuit breakers ─────────────────────────────────
-// DISABLED_TEMPLATES: any template in this array is skipped before the rules
-// engine or broker are called. Returns 200 so TradingView does not retry.
-// To re-enable ote-continuation: remove it from the array.
-const DISABLED_TEMPLATES = ['ote-continuation'];
+// V20: specialists accepted; legacy templates still listed so stale TV alerts
+// get a 200 (not a 400) and are silently classified as history.
+const ACCEPTED_TEMPLATES = V20_SPECIALIST_MODE
+  ? [...SPECIALIST_SIGNALS, ...LEGACY_TEMPLATES]
+  : ['reaction','reaction-fvg','reaction-ifvg','reaction-ext','orb','orb-pro',
+     'silver-bullet','unicorn','turtle-soup','judas-swing','ote-continuation',
+     'am-ifvg','gold-fvg','gold-sb','frankfurt-orb','ny-orb',
+     ...SPECIALIST_SIGNALS];
+
+// V20: ALL legacy templates are history — silently accepted but never executed.
+// Returns 200 with executed:false so TradingView does not retry.
+const DISABLED_TEMPLATES = V20_SPECIALIST_MODE
+  ? LEGACY_TEMPLATES
+  : ['ote-continuation'];
 
 // SB_IMMEDIATE_ONLY: when true, silver-bullet signals that route as retest
 // (limit) entries are suppressed. Immediate (market) entries are unaffected.
@@ -196,6 +219,17 @@ async function bgSkip({ dedupeKey, pineTicker, template, reason, extras = {}, no
 
 // The heavy pipeline. Runs AFTER TradingView has been acked. NEVER touches res.
 async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 }) {
+  const isSpecialist = SPECIALIST_SIGNALS.includes(p.template);
+
+  // Specialist sub-signal gate: only the confirmed-active zoneType executes.
+  // Any other zoneType (inactive Pine module that still fires) is dropped silently.
+  if (isSpecialist) {
+    const allowed = SPECIALIST_ALLOWED_ZONES[p.template];
+    if (allowed && p.zoneType && !allowed.includes(p.zoneType)) {
+      try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction || null, reason: `specialist-zone-inactive:${p.zoneType}` }); } catch (_) {}
+      return; // silent — expected; Pine module is disabled but can still compile an alert
+    }
+  }
   // ── SESSION OPEN COOLDOWN ─────────────────────────────────────────────────
   // Block signals fired within SESSION_OPEN_COOLDOWN_MINS of London (08:00 UTC)
   // or NY (13:30 UTC). Checked before shadows/positions so no wasted work.
@@ -284,32 +318,32 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     getCapitalFast(),
   ]);
 
-  // 7. Position-already-open check — TEMPLATE-AWARE (v14 testing mode).
-  // Block only a SECOND position of the SAME template on the same instrument.
-  // A DIFFERENT template is allowed to fire even if the instrument already has an
-  // open position — so templates the old "any open position" block was starving
-  // (Judas, AM IFVG, Reaction IFVG, Unicorn, Turtle Soup) finally get tested.
-  // NOTE: requires a HEDGING account (multiple positions per symbol). On a NETTING
-  // account a 2nd order on the same symbol nets against the first.
+  // 7. Position-already-open check.
+  // Specialists (V20): one position per asset — any open QB-V20 position on the
+  //   same instrument blocks a second specialist entry. Specialists handle their
+  //   own multi-position logic at the Pine level.
+  // Legacy templates: block only the SAME template on the same instrument.
   const _known = Object.keys(TEMPLATE_LABELS).sort((a, b) => b.length - a.length);
   const _tmplFromComment = (c) => {
     if (!c) return null;
+    if (/^QB-V20-/.test(c)) return 'specialist'; // V20: any specialist comment
     const m = c.match(/^QB-V1[23]-(.+)$/);
     if (!m) return null;
     const rest = m[1];
     for (const t of _known) { if (rest === t || rest.startsWith(t + '-')) return t; }
-    return rest.split('-')[0]; // fallback: first segment, so an unknown template still dedups
+    return rest.split('-')[0];
   };
   const existing = (Array.isArray(positions) ? positions : []).find((pos) => {
     const sameInstrument = (pos.assetId === assetId) ||
       (pos.symbol && pineTicker && pos.symbol.toUpperCase().includes(pineTicker));
     if (!sameInstrument) return false;
-    return _tmplFromComment(pos.comment) === p.template; // only the SAME template blocks
+    if (isSpecialist) return _tmplFromComment(pos.comment) === 'specialist'; // 1 specialist per asset
+    return _tmplFromComment(pos.comment) === p.template;
   });
   if (existing) {
     return bgSkip({
       dedupeKey, pineTicker, template: p.template,
-      reason: 'same-template-already-open',
+      reason: isSpecialist ? 'specialist-already-open' : 'same-template-already-open',
       extras: { assetId, positionTicket: existing.id }, notify: true,
     });
   }
@@ -333,7 +367,11 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // 11. RULES ENGINE
   const todaysPnL = await getTodaysPnL();
   const managedOpen = (positions || []).filter((pos) =>
-    pos.comment && (pos.comment.startsWith('QB-V12-') || pos.comment.startsWith('QB-V13-'))
+    pos.comment && (
+      pos.comment.startsWith('QB-V12-') ||
+      pos.comment.startsWith('QB-V13-') ||
+      pos.comment.startsWith('QB-V20-')
+    )
   );
   const decision = await applyRulesToSignal({
     assetId, template: p.template, direction: p.direction,
@@ -404,12 +442,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   }
 
   // \u2550\u2550\u2550\u2550\u2550\u2550\u2550 AUTO MODE \u2550\u2550\u2550\u2550\u2550\u2550\u2550
-  // 11b. v14.3 — REACTION multi-timeframe confirmation. Mode-aware: SWING uses
-  // [D1,H4] bias + [H1,M15] trigger; DAY uses [H4,H1] bias + [M15,M5] trigger.
-  // Each pair is OR-combined (no single timeframe blocks the other); bias is a
-  // vote, not a veto. Gate only SKIPS — never places. Runs here so the mode
-  // (decision.activeMode) is known.
-  if (REACTION_TEMPLATES.includes(p.template)) {
+  // 11b. Reaction MTF and signal-quality gates are SKIPPED for specialist signals.
+  // Specialists embed bias + quality checks directly in the Pine script — these
+  // generic middleware gates would add false positives on top of stricter
+  // instrument-specific logic that already ran at the source.
+
+  // 11b. v14.3 — REACTION MTF confirmation (legacy templates only).
+  if (!isSpecialist && REACTION_TEMPLATES.includes(p.template)) {
     const rxnMode = decision.activeMode === 'sleep' ? 'swing' : 'day';
     const TFS = tfSetForMode(rxnMode);
     const grab = async (tf, n) => {
@@ -440,15 +479,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
   }
 
-  // Gold win-streak progressive sizing: 0.1 lot base, +0.1 per consecutive win, capped at maxLot
+  // Gold V20 win-streak sizing: reads current lot from Redis, ±0.1 per win/loss, 0.10–10.00
   if (assetId === 'gold') {
     try {
       const _sr = getRedis();
-      const _streakRaw = _sr ? await _sr.get('v14:gold:winstreak').catch(() => null) : null;
-      const _streak    = Math.max(0, parseInt(_streakRaw || '0', 10));
-      const _goldLot   = Math.round((0.1 + _streak * 0.1) * 100) / 100;
-      const _maxLot    = decision.instrument?.maxLot || 0.50;
-      decision.finalLot = Math.min(_goldLot, _maxLot);
+      const _lotRaw = _sr ? await _sr.get('v20:gold:lot').catch(() => null) : null;
+      const _lot    = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 0.10;
+      decision.finalLot = Math.max(0.10, Math.min(10.00, _lot));
     } catch (_) {}
   }
   const finalLot = decision.finalLot;
@@ -459,7 +496,10 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const _bTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
   const _bTP3 = decision.finalTP3 != null ? decision.finalTP3 : tp3;
   const brokerTP = _bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1);
-  const comment = `QB-V13-${p.template}-${(p.window || p.swept || '').slice(0, 12)}`.slice(0, 64);
+  // V20 specialists use QB-V20-{asset}-{signalType}; legacy stays QB-V13-{template}-{window}
+  const comment = isSpecialist
+    ? `QB-V20-${assetId.slice(0, 5)}-${(p.zoneType || p.window || 'sig').slice(0, 10)}`.slice(0, 64)
+    : `QB-V13-${p.template}-${(p.window || p.swept || '').slice(0, 12)}`.slice(0, 64);
 
   // v14: round to the broker's tick increment. Raw Pine prices can carry more
   // decimals than the symbol allows, which the broker rejects as INVALID_PRICE.
@@ -575,12 +615,14 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     });
   }
 
-  // v16.0 signal-quality gate: wick ratio > 50%, counter-session, or CVD low-trust+divergence.
-  // All three sub-gates are independently togglable via Redis config (v15:squality:config).
-  // Result is stored in Redis for recognition-memory to pick up when the trade closes.
-  let sqQualityTier = null; // captured outside the block so notifyTradePlaced can use it
+  // v16.0 signal-quality gate (legacy templates only).
+  // Specialists skip this — their Pine scripts already apply stricter quality gates.
+  // sqQualityTier is still written for both paths (null for specialists).
+  let sqQualityTier = null;
   {
-    const sq = await evaluateSignalQuality(p, assetId, dedupeKey).catch(() => ({ pass: true }));
+    const sq = isSpecialist
+      ? { pass: true, qualityTier: null }
+      : await evaluateSignalQuality(p, assetId, dedupeKey).catch(() => ({ pass: true }));
     if (!sq.pass) {
       try { await logActivity({ type: 'skip', asset: assetId, template: p.template, direction: p.direction, reason: `signal-quality-blocked`, blockedBy: sq.blockedBy, qualityTier: sq.qualityTier }); } catch (_) {}
       // ── Telegram: rich blocked-signal notification ───────────────────────────
@@ -713,6 +755,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
           { price: finalTP3, rMultiple: rOf(finalTP3) },
         ].filter((t) => t.price != null),
         template: p.template,
+        zoneType: p.zoneType || null,
       },
       recognition: { advice: 'neutral', matchCount: 0, wins: 0, losses: 0, confidence: 'none' },
       sizing: { baseLot: finalLot, recommendedLot: finalLot, baseRisk: slDistance * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot },
@@ -788,19 +831,37 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     brokerOrderId: placement.orderId,
   });
 
+  const _tpLevels = [
+    { price: decision.finalTP1, rMultiple: rOf(decision.finalTP1), source: decision.rulesApplied.tpMode },
+    { price: decision.finalTP2, rMultiple: rOf(decision.finalTP2), source: decision.rulesApplied.tpMode },
+    { price: decision.finalTP3, rMultiple: rOf(decision.finalTP3), source: decision.rulesApplied.tpMode },
+  ].filter((t) => t.price != null);
+
   try {
-    await notifyTradePlaced({
-      asset: assetId, direction: p.direction,
-      lot: finalLot, entry, sl: finalSL,
-      tpLevels: [
-        { price: decision.finalTP1, rMultiple: rOf(decision.finalTP1), source: decision.rulesApplied.tpMode },
-        { price: decision.finalTP2, rMultiple: rOf(decision.finalTP2), source: decision.rulesApplied.tpMode },
-        { price: decision.finalTP3, rMultiple: rOf(decision.finalTP3), source: decision.rulesApplied.tpMode },
-      ].filter((t) => t.price != null),
-      riskDollars: Math.abs(entry - finalSL) * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot,
-      brokerOrderId: placement.orderId, template: p.template,
-      qualityTier: sqQualityTier,
-    });
+    if (isSpecialist) {
+      await notifySpecialistTradePlaced({
+        asset: assetId, direction: p.direction,
+        lot: finalLot, entry, sl: finalSL,
+        tpLevels: _tpLevels,
+        riskDollars: Math.abs(entry - finalSL) * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot,
+        brokerOrderId: placement.orderId,
+        template: p.template,
+        zoneType:  p.zoneType  || null,   // FVG / Judas / SB / ORB / PSYCH / FRB / NYORB
+        session:   p.window    || null,   // LONDON / NY_AM / NY_PM …
+        tier:      p.htfTier   || null,   // A / B
+        filterStr: p.filters   || null,
+      });
+    } else {
+      const { notifyTradePlaced: _ntp } = require('./telegram');
+      await _ntp({
+        asset: assetId, direction: p.direction,
+        lot: finalLot, entry, sl: finalSL,
+        tpLevels: _tpLevels,
+        riskDollars: Math.abs(entry - finalSL) * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot,
+        brokerOrderId: placement.orderId, template: p.template,
+        qualityTier: sqQualityTier,
+      });
+    }
   } catch (_) {}
 }
 

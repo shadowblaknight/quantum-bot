@@ -10,9 +10,16 @@
 //   4. Consistent   — all prices, R-multiples, and asset names use the same helpers
 
 const { getRedis } = require('./_lib');
-const { templateLabelMap, TEMPLATE_META } = require('./_templates');
+const { templateLabelMap, TEMPLATE_META, SPECIALIST_META_MAP } = require('./_templates');
 
 const TEMPLATE_LABELS = templateLabelMap();
+
+// Active specialist sub-signal labels (confirmed signals only)
+const ZONE_TYPE_LABELS = {
+  'FRB':   'Frankfurt ORB',   // Gold — Signal M
+  'NYORB': 'NY ORB',          // Gold — Signal H
+  'ORB':   'NYSE ORB',        // NAS100 — Signal A
+};
 
 const TG_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN';
 const TG_CHAT_ID_ENV   = 'TELEGRAM_CHAT_ID';
@@ -413,6 +420,70 @@ async function notifyTradeClosed({ asset, direction, totalPnL, tpsHit, positionI
   return sendOnce(dedupeKey, text);
 }
 
+// =================================================================
+// V20 EVENT: SPECIALIST TRADE PLACED
+// =================================================================
+// zoneType: 'FVG' | 'SB-FVG' | 'Asian-H' | 'Asian-L' | 'PSYCH' |
+//           'FRB' | 'NYORB' | 'ORB' (etc.)
+// session:  'LONDON' | 'NY_AM' | 'NY_PM' | 'NY_KZ' …
+// tier:     'A' | 'B'
+// filterStr: raw Pine filters string (shown at bottom)
+
+async function notifySpecialistTradePlaced({ asset, direction, lot, entry, sl, tpLevels, riskDollars, brokerOrderId, template, zoneType, session, tier, filterStr }) {
+  const dedupeKey = `placed:${brokerOrderId || `${asset}-${entry}-${Date.now()}`}`;
+
+  const meta        = SPECIALIST_META_MAP[template] || { glyph: '🎯', label: template };
+  const signalLabel = ZONE_TYPE_LABELS[zoneType] || zoneType || 'Signal';
+  const sessLabel   = session  ? session.replace('_', ' ')  : '';
+  const tierLabel   = tier     ? `Tier ${tier}`             : '';
+  const ctxParts    = [sessLabel, tierLabel].filter(Boolean);
+
+  const tpLines = (tpLevels || []).slice(0, 3).map((tp, i) => {
+    const r = tp.rMultiple != null ? `${tp.rMultiple.toFixed(1)}R` : '';
+    return `TP${i + 1}   <code>${formatPrice(tp.price, asset)}</code>    ${r}`;
+  }).join('\n');
+
+  const slDist   = (entry != null && sl != null) ? Math.abs(entry - sl) : null;
+  const riskStr  = riskDollars != null
+    ? `${slDist?.toFixed(slDist > 10 ? 1 : 2) ?? '?'} pts  ·  <b>$${Math.abs(riskDollars).toFixed(2)} risk</b>`
+    : (slDist?.toFixed(slDist > 10 ? 1 : 2) ?? '?') + ' pts';
+
+  const filterLine = filterStr ? `\n<i>${filterStr.slice(0, 120)}</i>` : '';
+
+  const text =
+    `${meta.glyph} <b>${meta.label} — ${signalLabel}</b>\n` +
+    (ctxParts.length ? `${ctxParts.join('  ·  ')}\n` : '') +
+    `\n${dirArrow(direction)}  ·  ${lot} lot\n\n` +
+    `Entry  <code>${formatPrice(entry, asset)}</code>\n` +
+    `SL     <code>${formatPrice(sl, asset)}</code>    (${riskStr})\n` +
+    (tpLines ? `\n${tpLines}` : '') +
+    filterLine;
+
+  return sendOnce(dedupeKey, text);
+}
+
+// ─── Specialist trade closed ─────────────────────────────────────────────────
+async function notifySpecialistTradeClosed({ asset, direction, template, zoneType, session, totalPnL, tpsHit, positionId, openedAt, nextLot }) {
+  const dedupeKey = `v20:closed:${positionId}`;
+  const meta       = SPECIALIST_META_MAP[template] || { glyph: '🎯', label: template };
+  const signalLabel = ZONE_TYPE_LABELS[zoneType] || zoneType || 'Signal';
+  const isWin = totalPnL > 0.5;
+  const isLoss = totalPnL < -0.5;
+  const outcomeEmoji = isWin ? '✅' : isLoss ? '❌' : '⚖️';
+  const outcomeLabel = isWin ? 'WIN' : isLoss ? 'LOSS' : 'BREAKEVEN';
+  const pnlStr = `${totalPnL >= 0 ? '+' : ''}$${Math.abs(totalPnL).toFixed(2)}`;
+  const durMin = openedAt ? Math.round((Date.now() - openedAt) / 60000) : null;
+  const tpLine = tpsHit && tpsHit.length > 0 ? `TPs: ${tpsHit.join(', ')}` : 'No TPs hit';
+  const lotLine = nextLot != null ? `\nNext lot: <b>${nextLot.toFixed(2)}</b>` : '';
+  const sessLine = session ? `${session.replace('_', ' ')}  ·  ` : '';
+  const text =
+    `${meta.glyph} <b>${meta.label} — ${signalLabel}</b>  ${assetLabel(asset)}\n` +
+    `${outcomeEmoji} <b>${outcomeLabel}  ${pnlStr}</b>\n\n` +
+    `${dirArrow(direction)}  ·  ${sessLine}${durMin != null ? durMin + 'min' : ''}\n` +
+    `${tpLine}${lotLine}`;
+  return sendOnce(dedupeKey, text);
+}
+
 // ─── Session-expiry alert ─────────────────────────────────────────────────────
 // Fires once when a managed position is still open after its session kill zone
 // has closed. Telegram only — no broker action. Redis flag prevents duplicates.
@@ -452,4 +523,6 @@ module.exports = {
   notifySLHit,
   notifyTradeClosed,
   notifySessionExpired,
+  notifySpecialistTradePlaced,
+  notifySpecialistTradeClosed,
 };

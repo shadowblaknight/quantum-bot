@@ -1,11 +1,11 @@
 //@version=6
 indicator("Quantum Bot — Gold Specialist", "QB GOLD", overlay=true,
-          max_bars_back=500, max_labels_count=100, max_lines_count=100, max_boxes_count=50)
+          max_bars_back=500, max_labels_count=200, max_lines_count=100, max_boxes_count=100)
 
 // ═══════════════════════════════════════════════════════════════════════
 //  QUANTUM BOT — GOLD SPECIALIST  (XAUUSD, 15m recommended)
 //  ─────────────────────────────────────────────────────────────────────
-//  Four gold-specific signal modules, all firing JSON alerts to webhook:
+//  Six gold-specific signal modules, all firing JSON alerts to webhook:
 //
 //    A) gold-fvg      — FVG retest during London KZ / NY-Lon Overlap
 //                       Needs: FVG fresh (<20 bars, <50% filled) + BOS
@@ -19,9 +19,17 @@ indicator("Quantum Bot — Gold Specialist", "QB GOLD", overlay=true,
 //    D) reaction      — Psychological level bounce (gold round-number play)
 //                       Needs: wick to 50-pt or 100-pt level + close away
 //
-//  10 engine components: ADR gate, session gate, Asian range tracker,
-//  FVG pool, BOS tracker, HTF bias (H1/H4/D), CVD, key-time flag,
-//  psych levels, status table — all gold-specific, all XAUUSD-tuned.
+//    M) frankfurt-orb — Frankfurt ORB (07:00-07:30 UTC range) SHORT only
+//                       Best config locked: H1+H4 bearish + Asian lo break
+//                       orbTPMult=0.75 · Wide SL  (PF 1.976, WR 63%)
+//
+//    H) ny-orb        — NY ORB (14:00-14:30 UTC range) both directions
+//                       Best config locked: H1+H4 bias filter
+//                       orbTPMult=0.75 · Wide SL
+//
+//  Engine: ADR gate, session gate, Asian range tracker, FRB/NYORB range
+//  tracker, FVG pool, BOS tracker, HTF bias (H1/H4/D), CVD, key-time
+//  flag, psych levels, status table — all gold-specific, XAUUSD-tuned.
 // ═══════════════════════════════════════════════════════════════════════
 
 // ─── WEBHOOK KEY (hardcoded — never move to input or it breaks alerts) ─
@@ -34,6 +42,8 @@ modJudas      = input.bool(true,  "B) Judas Sweep — pure sweep, no FVG",  grou
 modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_CORE)
 modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_CORE)
 modPsychExt   = input.bool(true,  "D2) Psych Extended — outside kill zones (2/3 HTF required)", group=G_CORE)
+modFRB        = input.bool(true,  "M) Frankfurt ORB — Short only, H1+H4 required",              group=G_CORE)
+modNYORB      = input.bool(true,  "H) NY ORB — Both directions, H1+H4 required",                group=G_CORE)
 
 G_FILT = "Filters"
 // Per-signal ADR thresholds — each setup has different tolerance for range consumption.
@@ -125,8 +135,11 @@ cvdSlope  = cvd > cvd[1] and cvd > cvdMa ? "rising" : cvd < cvd[1] and cvd < cvd
 in_asian    = timeframe.isintraday and (_minOfDay >= 0    and _minOfDay < 480)   // 00-08 UTC
 in_london   = timeframe.isintraday and (_minOfDay >= 480  and _minOfDay < 660)   // 08-11 UTC
 in_overlap  = timeframe.isintraday and (_minOfDay >= 780  and _minOfDay < 1020)  // 13-17 UTC
-in_sb_win   = timeframe.isintraday and (_minOfDay >= 900  and _minOfDay < 960)   // 15-16 UTC
-in_kz       = in_london or in_overlap
+in_sb_win       = timeframe.isintraday and (_minOfDay >= 900  and _minOfDay < 960)   // 15-16 UTC
+in_kz           = in_london or in_overlap
+in_frb_window   = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 450)  // 07:00-07:30 UTC range build
+in_frb_trade    = timeframe.isintraday and (_minOfDay >= 450 and _minOfDay < 660)  // 07:30-11:00 UTC trade window
+in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)  // 14:00-14:30 UTC range build
 
 string sess_label = in_sb_win ? "NY_PM" : in_overlap ? "NY_AM" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
 
@@ -155,6 +168,47 @@ if in_asian
 asian_ended = not in_asian and in_asian[1]
 if asian_ended and not na(ar_hi)
     ar_locked := true
+
+// ─── FRANKFURT ORB + NY ORB RANGE TRACKING ───────────────────────────
+// ar_lo_prefrb: Asian low accumulated BEFORE the FRB window (00:00-07:00 UTC)
+// Used by Signal M to verify close breaks below overnight Asian lows.
+var float ar_lo_prefrb = na
+var float frb_hi       = na
+var float frb_lo       = na
+var bool  frb_locked   = false
+var bool  frb_done     = false
+var float nyorb_hi     = na
+var float nyorb_lo     = na
+var bool  nyorb_locked = false
+var bool  nyorb_done   = false
+
+if _newDay
+    ar_lo_prefrb := na
+    frb_hi       := na
+    frb_lo       := na
+    frb_locked   := false
+    frb_done     := false
+    nyorb_hi     := na
+    nyorb_lo     := na
+    nyorb_locked := false
+    nyorb_done   := false
+
+if _minOfDay >= 0 and _minOfDay < 420
+    ar_lo_prefrb := na(ar_lo_prefrb) ? low : math.min(ar_lo_prefrb, low)
+
+if in_frb_window
+    frb_hi := na(frb_hi) ? high : math.max(frb_hi, high)
+    frb_lo := na(frb_lo) ? low  : math.min(frb_lo, low)
+
+if not in_frb_window and in_frb_window[1] and not na(frb_hi)
+    frb_locked := true
+
+if in_nyorb_window
+    nyorb_hi := na(nyorb_hi) ? high : math.max(nyorb_hi, high)
+    nyorb_lo := na(nyorb_lo) ? low  : math.min(nyorb_lo, low)
+
+if not in_nyorb_window and in_nyorb_window[1] and not na(nyorb_hi)
+    nyorb_locked := true
 
 // ─── BOS TRACKING ─────────────────────────────────────────────────────
 // Lightweight: a "bullish BOS" = new confirmed swing high above the prior one
@@ -386,7 +440,7 @@ if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and 
                   " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
                   (_nearKeyTime == 1 ? " KEY-TIME" : "")
 
-        alert(f_buildAlert("gold-fvg", dirStr, entryP, slP, tp1, tp2, tp3,
+        alert(f_buildAlert("gold-specialist", dirStr, entryP, slP, tp1, tp2, tp3,
                             u, l, "FVG", sess_label, tier, conf, fStr, minsIn),
               alert.freq_once_per_bar)
 
@@ -432,7 +486,7 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_o
                     judas_hi_done := true
                     tier = (h1B == -1 or h4B == -1 or hdB == -1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("judas-swing", "SHORT", entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
                                         ar_hi + 1, ar_hi - 1, "Asian-H",
                                         "LONDON", tier, "judas-hi-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
@@ -459,7 +513,7 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_o
                     judas_lo_done := true
                     tier = (h1B == 1 or h4B == 1 or hdB == 1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("judas-swing", "LONG", entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
                                         ar_lo + 1, ar_lo - 1, "Asian-L",
                                         "LONDON", tier, "judas-lo-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
@@ -529,7 +583,7 @@ if modSB and barstate.isconfirmed and in_sb_win and not sb_done and adr_fvg_ok a
 
             fStr = "SB-FVG✓" + (aligned ? " H1✓" : " H1✗") +
                    " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gold-sb", dirStr, entryP, slP, tp1, tp2, tp3,
+            alert(f_buildAlert("gold-specialist", dirStr, entryP, slP, tp1, tp2, tp3,
                                 u, l, "SB-FVG", "NY_PM", tier, "sb-fvg", fStr,
                                 math.max(0, _minOfDay - 900)),
                   alert.freq_once_per_bar)
@@ -599,7 +653,7 @@ if modPsych and barstate.isconfirmed and in_kz and adr_psych_ok and adr_hard_ok 
                     fStr   = "PSYCH-" + lvlStr + (aligned ? " H1" : "") +
                              " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
 
-                    alert(f_buildAlert("reaction", dirStr, entryP, slP, tp1, tp2, tp3,
+                    alert(f_buildAlert("gold-specialist", dirStr, entryP, slP, tp1, tp2, tp3,
                                         nearLevel + tol, nearLevel - tol, "PSYCH",
                                         sess_label, tier, conf, fStr, minsIn),
                           alert.freq_once_per_bar)
@@ -667,7 +721,7 @@ if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_h
                                  " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
                                  " OUT-KZ:" + sess_label
 
-                        alert(f_buildAlert("reaction-ext", dirStr, entryP, slP, tp1, tp2, tp3,
+                        alert(f_buildAlert("gold-specialist", dirStr, entryP, slP, tp1, tp2, tp3,
                                             nearLevel + tol, nearLevel - tol, "PSYCH-EXT",
                                             sess_label, "A", conf, fStr, _minOfDay),
                               alert.freq_once_per_bar)
@@ -680,6 +734,91 @@ if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_h
 
                         if showPosBox
                             f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL M — Frankfurt ORB  (template: frankfurt-orb)
+// ─────────────────────────────────────────────────────────────────────
+// Best config locked in: SHORT only, H1+H4 both bearish, entry must
+// close below Asian session low (00:00-07:00 UTC). Wide SL at frb_hi.
+// TP1 = frb_lo – 0.75 × orb_range  (confirmed PF 1.976, WR 63%)
+// One signal per day.
+// ═══════════════════════════════════════════════════════════════════════
+
+if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok
+    orb_range_frb = frb_hi - frb_lo
+    buf_frb       = math.max(atrVal * 0.10, 0.50)
+    if orb_range_frb > 0.50
+        if close < frb_lo and h1B == -1 and h4B == -1 and not na(ar_lo_prefrb) and close < ar_lo_prefrb
+            entryP = close
+            slP    = frb_hi + buf_frb
+            slDist = slP - entryP
+            tp1    = frb_lo - orb_range_frb * 0.75
+            tp2    = frb_lo - orb_range_frb * 1.50
+            tp3    = frb_lo - orb_range_frb * 2.25
+            frb_done := true
+            fStr   = "FRB✓ H1-H4-SHORT✓ ASIAN-LO✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                frb_hi, frb_lo, "FRB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 450)),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, high, "⚡ FRB SHORT",
+                      style=label.style_label_down, color=color.new(color.red, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL H — NY ORB  (template: ny-orb)
+// ─────────────────────────────────────────────────────────────────────
+// Best config locked in: both directions, H1+H4 must align with trade.
+// Wide SL at opposite ORB extreme. TP1 = 0.75 × orb_range from ORB edge.
+// One signal per day.
+// ═══════════════════════════════════════════════════════════════════════
+
+if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok
+    orb_range_ny = nyorb_hi - nyorb_lo
+    buf_ny       = math.max(atrVal * 0.10, 0.50)
+    if orb_range_ny > 0.50
+        if close > nyorb_hi and h1B == 1 and h4B == 1
+            entryP = close
+            slP    = nyorb_lo - buf_ny
+            slDist = entryP - slP
+            tp1    = nyorb_hi + orb_range_ny * 0.75
+            tp2    = nyorb_hi + orb_range_ny * 1.50
+            tp3    = nyorb_hi + orb_range_ny * 2.25
+            nyorb_done := true
+            fStr   = "NYORB✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+                                nyorb_hi, nyorb_lo, "NYORB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 870)),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, low, "⚡ NYORB LONG",
+                      style=label.style_label_up, color=color.new(color.teal, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
+        else if close < nyorb_lo and h1B == -1 and h4B == -1
+            entryP = close
+            slP    = nyorb_hi + buf_ny
+            slDist = slP - entryP
+            tp1    = nyorb_lo - orb_range_ny * 0.75
+            tp2    = nyorb_lo - orb_range_ny * 1.50
+            tp3    = nyorb_lo - orb_range_ny * 2.25
+            nyorb_done := true
+            fStr   = "NYORB✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                nyorb_hi, nyorb_lo, "NYORB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 870)),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, high, "⚡ NYORB SHORT",
+                      style=label.style_label_down, color=color.new(color.red, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
 
 // Psychological level guide lines — persistent array prevents line count blowout
 var array<line> _psych_lines = array.new<line>()
@@ -700,7 +839,7 @@ var table stTbl = na
 
 if showStatusTbl and barstate.islast
     if na(stTbl)
-        stTbl := table.new(position.top_right, 2, 11,
+        stTbl := table.new(position.top_right, 2, 13,
                            bgcolor=color.new(color.black, 70),
                            border_color=color.new(color.gray, 60), border_width=1,
                            frame_color=color.new(color.gray, 60), frame_width=1)
@@ -761,6 +900,16 @@ if showStatusTbl and barstate.islast
     psychExtCol = psych_ext_done ? color.orange : (adr_psych_ok and adr_hard_ok ? color.yellow : color.gray)
     table.cell(stTbl, 0, 10, "Psych-Ext", text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
     table.cell(stTbl, 1, 10, psychExtStr, text_color=color.new(psychExtCol, 0),   text_size=size.tiny, text_halign=text.align_right)
+
+    frbStr = frb_done ? "fired" : (frb_locked and in_frb_trade and adr_hard_ok ? "watching" : in_frb_window ? "building" : "off")
+    frbCol = frb_done ? color.red : (frb_locked and in_frb_trade and adr_hard_ok ? color.lime : color.gray)
+    table.cell(stTbl, 0, 11, "FRB (M)",  text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 11, frbStr,     text_color=color.new(frbCol, 0),     text_size=size.tiny, text_halign=text.align_right)
+
+    nyorbStr = nyorb_done ? "fired" : (nyorb_locked and adr_hard_ok ? "watching" : in_nyorb_window ? "building" : "off")
+    nyorbCol = nyorb_done ? color.teal : (nyorb_locked and adr_hard_ok ? color.lime : color.gray)
+    table.cell(stTbl, 0, 12, "NY ORB (H)", text_color=color.new(color.gray,15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 12, nyorbStr,     text_color=color.new(nyorbCol, 0),    text_size=size.tiny, text_halign=text.align_right)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")

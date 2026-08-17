@@ -13,7 +13,16 @@
 // Adding a template = add ONE entry here (+ the App.jsx mirror).
 // ----------------------------------------------------------------------------
 
-const TEMPLATE_META = {
+// ── V20 Specialist signals (active) ──────────────────────────────────────────
+// Each instrument gets one specialist entry. The zoneType field in the payload
+// carries the sub-signal name (FVG / Judas / SB / ORB / PSYCH / FRB).
+const SPECIALIST_META_MAP = {
+  'gold-specialist':   { glyph: '🥇', label: 'Gold Specialist' },
+  'nas100-specialist': { glyph: '📈', label: 'NAS100 Specialist' },
+};
+
+// ── Legacy templates (history — disabled in V20 mode) ─────────────────────────
+const LEGACY_TEMPLATE_META = {
   'silver-bullet':    { glyph: '🥈', label: 'Silver Bullet' },
   'unicorn':          { glyph: '🦄', label: 'Unicorn' },
   'turtle-soup':      { glyph: '🐢', label: 'Turtle Soup' },
@@ -28,9 +37,13 @@ const TEMPLATE_META = {
   'reaction-impulse': { glyph: '⚡', label: 'Reaction (impulse tap)' },
   'reaction-ext':     { glyph: '🔮', label: 'Psych Ext (outside KZ)' },
   'alexg':            { glyph: '📐', label: 'Alex G Set&Forget' },
-  'gold-fvg':         { glyph: '🥇', label: 'Gold FVG (Specialist)' },
+  'gold-fvg':         { glyph: '🥇', label: 'Gold FVG' },
   'gold-sb':          { glyph: '🥇', label: 'Gold Silver Bullet' },
+  'frankfurt-orb':    { glyph: '🏛️', label: 'Frankfurt ORB' },
+  'ny-orb':           { glyph: '🗽', label: 'NY ORB' },
 };
+
+const TEMPLATE_META = { ...SPECIALIST_META_MAP, ...LEGACY_TEMPLATE_META };
 
 // "🥈 Silver Bullet" for one id (falls back to the raw id if unknown).
 function templateLabel(id) {
@@ -46,25 +59,33 @@ function templateLabelMap() {
   return out;
 }
 
-// Display order (heatmaps, cards).
+// V20 specialist signals — the only accepted signals when V20_SPECIALIST_MODE is on
+const SPECIALIST_SIGNALS = Object.keys(SPECIALIST_META_MAP);
+
+// Legacy template ids — disabled in V20 mode, kept for historical query/display
+const LEGACY_TEMPLATES = Object.keys(LEGACY_TEMPLATE_META);
+
+// Display order (heatmaps, cards) — specialists first, legacy after
 const TEMPLATE_ORDER = [
+  'gold-specialist', 'nas100-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
-  'gold-fvg', 'gold-sb',
+  'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',
 ];
 
-// UI groupings — separately MEASURED, grouped only for a tidy screen.
+// UI groupings (legacy, kept for history views)
 const ICT_TEMPLATES      = ['silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg', 'gold-sb'];
 const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'gold-fvg'];
 
-// Accepted templates by active mode. Active = everything; defensive = the
-// higher-conviction subset (drops the two most aggressive ICT setups).
+// Accepted — V20: specialists only. Pre-V20 retained for reference.
 const ACCEPTED_ACTIVE = [
+  'gold-specialist', 'nas100-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
-  'gold-fvg', 'gold-sb',
+  'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',
 ];
 const ACCEPTED_DEFENSIVE = [
+  'gold-specialist', 'nas100-specialist',
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb',
@@ -72,11 +93,15 @@ const ACCEPTED_DEFENSIVE = [
 
 module.exports = {
   TEMPLATE_META,
+  SPECIALIST_META_MAP,
+  LEGACY_TEMPLATE_META,
   templateLabel,
   templateLabelMap,
   TEMPLATE_ORDER,
   ICT_TEMPLATES,
   REACTION_TEMPLATES,
+  SPECIALIST_SIGNALS,
+  LEGACY_TEMPLATES,
   ACCEPTED_ACTIVE,
   ACCEPTED_DEFENSIVE,
 };

@@ -1,0 +1,607 @@
+//@version=6
+strategy("QB NAS100 Specialist — Strategy", "QB NAS · STRAT", overlay=true,
+         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=2, pyramiding=0, calc_on_every_tick=false,
+         close_entries_rule="ANY")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QB NAS100 SPECIALIST — STRATEGY VERSION  (US100 / NAS100 / NQ  15m)
+//  ─────────────────────────────────────────────────────────────────────
+//  Deep-research-backed strategy combining 4 NQ edge setups:
+//
+//  A) NYSE ORB  — 15-min opening range (13:30-13:45 UTC, 9:30-9:45 ET)
+//     Trade window 13:45-15:30 UTC.  Base WR 56% → 65-78% with filters.
+//     SL: opposite ORB extreme.  TP1: 0.5× range, TP2: 1.0×, TP3: 1.5×.
+//
+//  B) Judas ONR Sweep  — London KZ (07:00-10:00 UTC) sweeps Globex
+//     overnight range (ONR = NQ's "Asian range"), NY reverses it.
+//     Limit order at swept level, same model as gold Judas setup.
+//
+//  C) Silver Bullet FVG  — 14:00-15:00 UTC (10-11am ET).  Best NQ
+//     window by volume.  Designed natively for NQ/ES by ICT.
+//     FVG retest + BOS + HTF bias alignment.
+//
+//  D) PM Continuation  — 18:00-19:30 UTC (2-3:30pm ET).  Second
+//     institutional window.  15-min ORB at 18:00, trade breakout.
+//     Most reliable on trend days and FOMC follow-through sessions.
+//
+//  E) Psych Level Bounce  — 500pt (major) / 100pt (minor) round numbers
+//     during NY Kill Zone or PM window.  Requires 2-of-3 HTF alignment.
+//
+//  Key session map (UTC):
+//    ONR range     00:00 – 07:00  Globex overnight
+//    London KZ     07:00 – 10:00  Judas sweep window
+//    NYSE ORB      13:30 – 13:45  Range formation
+//    NY Kill Zone  13:45 – 15:30  Primary entry window
+//    Silver Bullet 14:00 – 15:00  Sub-window (overlaps KZ)
+//    Lunch / Chop  16:00 – 18:00  Avoid — 40-60% volume drop
+//    PM window     18:00 – 19:30  Second institutional window
+//    Hard close    19:45           No new entries
+//
+//  Research sources: tradingstats.net (6142d ORB), edgeful.com (FVG),
+//  innercircletrader.net (ICT), edgeful.com (opening candle).
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── INPUTS ──────────────────────────────────────────────────────────
+G_CORE = "Core Signals"
+modORB   = input.bool(true,  "A) NYSE ORB — 13:30-13:45 UTC (primary)",              group=G_CORE)
+modJudas = input.bool(true,  "B) Judas Sweep — ONR sweep reversal 07:00-10:00 UTC",  group=G_CORE)
+modSB    = input.bool(true,  "C) Silver Bullet FVG — 14:00-15:00 UTC",               group=G_CORE)
+modPM    = input.bool(false, "D) PM Continuation — 18:00-19:30 UTC",                 group=G_CORE)
+modPsych = input.bool(false, "E) Psych Level Bounce — 500/100pt levels",             group=G_CORE)
+
+G_STRAT = "Strategy"
+exitMode = input.string("TP1 · 0.5R", "Exit target",
+            options=["TP1 · 0.5R", "TP2 · 1.0R", "TP3 · 1.5R", "Split TP1+TP2", "Trail after TP1"],
+            tooltip="TP1: 0.5× ORB range (higher WR). TP2: 1.0× (full range). TP3: 1.5× (trend days). Split: 50% at TP1 + 50% at TP2. Trail: trail after TP1 hit.",
+            group=G_STRAT)
+showBoxes      = input.bool(true, "Show position boxes", group=G_STRAT)
+orbSLMode      = input.string("Wide SL", "A/B/C) SL mode",
+                 options=["Wide SL", "Tight SL"],
+                 tooltip="Wide SL: SL at opposite ORB extreme minus buffer (baseline). Tight SL: SL just beyond entry bar wick (smaller risk, lower WR).",
+                 group=G_STRAT)
+orbBiasFilter  = input.bool(true, "A/B/C) HTF bias filter — skip trades against trend", group=G_STRAT)
+orbBiasTF      = input.string("H4", "A/B/C) Bias timeframe",
+                 options=["H1", "H4", "H1+H4", "H1+H4+D"],
+                 tooltip="H4 = confirmed best (PF 1.874, 58/yr). H1+H4 = kills trades (44/yr) and drops PF to 1.413 — too strict. H4 alone is the sweet spot on NQ.",
+                 group=G_STRAT)
+orbDirFilter   = input.string("Long only", "A) Direction filter", options=["Both", "Long only", "Short only"],
+                 tooltip="Long only = confirmed best. NQ shorts are catastrophic — structural bullish bias, ORB shorts have deeply negative PF. Never trade short ORB on NQ.",
+                 group=G_STRAT)
+orbTPMult      = input.float(1.00, "A) TP1 multiplier (× ORB range)", minval=0.25, maxval=2.0, step=0.25,
+                 tooltip="1.0× = confirmed best on 6yr (PF 1.202, WR 64.92%, 325 trades). 0.5× scores PF 1.138 over same period — smaller TP underperforms on NQ trend days. Full range projection is the optimal exit.",
+                 group=G_STRAT)
+orbMinRange    = input.float(20.0, "A) Min ORB range (pts)", minval=5.0, maxval=200.0, step=5.0,
+                 tooltip="Skip session if ORB H−L < this value. Research: 40 pts preferred (cleaner signals), 20 pts absolute minimum.",
+                 group=G_STRAT)
+orbADRGuard    = input.bool(false, "A/C/D) Skip when >80% ADR already consumed",
+                 tooltip="OFF = confirmed best. Enabling ADR guard does not improve PF on NQ ORB longs — the instrument trends, so high-ADR days are often strong continuation days.",
+                 group=G_STRAT)
+orbOpenCandle  = input.bool(true, "A) Opening candle bias (ORB bar bull→long only, bear→short only)",
+                 tooltip="ON = confirmed best. Bullish ORB bar (13:30-13:45) = long bias filter. Research: green first 60-min → green day 80% of time. Keeps trade count at 58/yr, raises PF to 1.874.",
+                 group=G_STRAT)
+
+G_FILT = "Filters"
+atrLength     = input.int(14,    "ATR period",               group=G_FILT, minval=2,    maxval=50)
+emaH1Length   = input.int(50,    "H1 EMA period",            group=G_FILT, minval=5,    maxval=200)
+emaH4Length   = input.int(200,   "H4 EMA period",            group=G_FILT, minval=10,   maxval=500)
+fvgMinGap     = input.float(10.0, "FVG min gap (pts)",       group=G_FILT, minval=2.0,  step=2.0,
+                tooltip="Minimum FVG body in NQ points. Research: 10 pts filters micro-gaps in chop. FVGs on NQ fill faster than gold (72-78% within 20-50 bars).")
+fvgMaxFillPct = input.float(0.50, "FVG max fill before entry", group=G_FILT, minval=0.0, maxval=1.0, step=0.05)
+fvgMaxAgeBars = input.int(48,    "FVG max age (bars)",        group=G_FILT, minval=4,    maxval=200)
+adrMax        = input.float(0.80, "ADR gate threshold",      group=G_FILT, minval=0.30, maxval=1.50, step=0.05,
+                tooltip="Block entries when (today_high - today_low) / 14d ATR > this value. Research optimal for NQ: 80%.")
+
+// ─── HTF BIAS ─────────────────────────────────────────────────────────
+f_htfBias(int emaLen, int atrLen) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    [b, a]
+
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_htfBias(emaH1Length, atrLength), lookahead=barmerge.lookahead_off)
+[h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_htfBias(emaH4Length, atrLength), lookahead=barmerge.lookahead_off)
+[hdB, hdATR] = request.security(syminfo.tickerid, "D",   f_htfBias(200, atrLength),          lookahead=barmerge.lookahead_off)
+
+atrVal = ta.atr(atrLength)
+
+_biasLong  = orbBiasTF == "H1" ? h1B >= 0 : orbBiasTF == "H4" ? h4B >= 0 : orbBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : orbBiasTF == "H1+H4+D" ? (h1B == 1 and h4B == 1 and hdB == 1) : h4B >= 0
+_biasShort = orbBiasTF == "H1" ? h1B <= 0 : orbBiasTF == "H4" ? h4B <= 0 : orbBiasTF == "H1+H4" ? (h1B == -1 and h4B == -1) : orbBiasTF == "H1+H4+D" ? (h1B == -1 and h4B == -1 and hdB == -1) : h4B <= 0
+
+// ─── SESSION CONTEXT ──────────────────────────────────────────────────
+_hourUtc   = hour(time, "UTC")
+_minOfDay  = _hourUtc * 60 + minute(time, "UTC")
+_newDay    = ta.change(time("D")) != 0
+
+_atr14d    = request.security(syminfo.tickerid, "D", ta.atr(14))
+_todayHigh = request.security(syminfo.tickerid, "D", high)
+_todayLow  = request.security(syminfo.tickerid, "D", low)
+
+_adrConsumed = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
+_adrGateOk   = not orbADRGuard or _adrConsumed[1] < adrMax
+
+// ─── CVD ──────────────────────────────────────────────────────────────
+_signedVol = close > open ? volume : close < open ? -volume : 0.0
+var float _cvdRunning = 0.0
+_cvdRunning := _cvdRunning + _signedVol
+var float _cvdBase = 0.0
+if _newDay
+    _cvdBase := _cvdRunning - _signedVol
+cvd   = _cvdRunning - _cvdBase
+cvdMa = ta.ema(cvd, 14)
+
+// ─── SESSION GATES (UTC minutes-of-day) ──────────────────────────────
+in_onr_build  = timeframe.isintraday and (_minOfDay >= 0   and _minOfDay < 420)   // 00:00-07:00  ONR
+in_london_kz  = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 600)   // 07:00-10:00  London KZ
+in_orb_window = timeframe.isintraday and (_minOfDay >= 810 and _minOfDay < 825)   // 13:30-13:45  ORB range
+in_ny_kz      = timeframe.isintraday and (_minOfDay >= 825 and _minOfDay < 930)   // 13:45-15:30  NY Kill Zone
+in_sb_win     = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 900)   // 14:00-15:00  Silver Bullet
+in_pm_orb_w   = timeframe.isintraday and (_minOfDay >= 1080 and _minOfDay < 1095) // 18:00-18:15  PM ORB
+in_pm_trade   = timeframe.isintraday and (_minOfDay >= 1095 and _minOfDay < 1170) // 18:15-19:30  PM trade
+in_pm_win     = timeframe.isintraday and (_minOfDay >= 1080 and _minOfDay < 1170) // 18:00-19:30  full PM
+in_hard_close = timeframe.isintraday and _minOfDay >= 1185                         // 19:45+  no new entries
+
+// ─── ONR — Globex Overnight Range (NQ's "Asian range") ───────────────
+var float onr_hi     = na
+var float onr_lo     = na
+var bool  onr_locked = false
+
+if _newDay
+    onr_hi     := na
+    onr_lo     := na
+    onr_locked := false
+
+if in_onr_build
+    onr_hi := na(onr_hi) ? high : math.max(onr_hi, high)
+    onr_lo := na(onr_lo) ? low  : math.min(onr_lo, low)
+
+if not in_onr_build and in_onr_build[1] and not na(onr_hi)
+    onr_locked := true
+
+// ─── NYSE ORB Range (13:30-13:45 UTC, one 15-min bar) ────────────────
+var float orb_hi          = na
+var float orb_lo          = na
+var bool  orb_locked      = false
+var bool  orb_done        = false
+var float orb_candle_open = na   // ORB bar open (for opening candle direction)
+var int   orb_candle_dir  = 0    // +1 bull, -1 bear, 0 neutral
+
+if _newDay
+    orb_hi          := na
+    orb_lo          := na
+    orb_locked      := false
+    orb_done        := false
+    orb_candle_open := na
+    orb_candle_dir  := 0
+
+if in_orb_window
+    orb_hi := na(orb_hi) ? high : math.max(orb_hi, high)
+    orb_lo := na(orb_lo) ? low  : math.min(orb_lo, low)
+    if na(orb_candle_open)
+        orb_candle_open := open
+
+// On the bar following the ORB window: lock range and measure ORB bar direction
+if not in_orb_window and in_orb_window[1] and not na(orb_hi)
+    orb_locked     := true
+    orb_candle_dir := not na(orb_candle_open) ? (close[1] > orb_candle_open ? 1 : close[1] < orb_candle_open ? -1 : 0) : 0
+
+// ─── PM ORB Range (18:00-18:15 UTC) ──────────────────────────────────
+var float pm_orb_hi     = na
+var float pm_orb_lo     = na
+var bool  pm_orb_locked = false
+var bool  pm_orb_done   = false
+
+if _newDay
+    pm_orb_hi     := na
+    pm_orb_lo     := na
+    pm_orb_locked := false
+    pm_orb_done   := false
+
+if in_pm_orb_w
+    pm_orb_hi := na(pm_orb_hi) ? high : math.max(pm_orb_hi, high)
+    pm_orb_lo := na(pm_orb_lo) ? low  : math.min(pm_orb_lo, low)
+
+if not in_pm_orb_w and in_pm_orb_w[1] and not na(pm_orb_hi)
+    pm_orb_locked := true
+
+// ─── FVG POOL ─────────────────────────────────────────────────────────
+var array<float> fU     = array.new<float>(0)
+var array<float> fL     = array.new<float>(0)
+var array<int>   fDir   = array.new<int>(0)
+var array<int>   fBar   = array.new<int>(0)
+var array<float> fFill  = array.new<float>(0)
+var array<bool>  fFired = array.new<bool>(0)
+
+if barstate.isconfirmed and atrVal > 0
+    bull_fvg = low > high[2]
+    bear_fvg = high < low[2]
+    bull_gap = bull_fvg ? (low - high[2])  : 0.0
+    bear_gap = bear_fvg ? (low[2] - high)  : 0.0
+
+    if bull_fvg and bull_gap >= fvgMinGap
+        array.push(fU,     low)
+        array.push(fL,     high[2])
+        array.push(fDir,   1)
+        array.push(fBar,   bar_index - 1)
+        array.push(fFill,  0.0)
+        array.push(fFired, false)
+
+    if bear_fvg and bear_gap >= fvgMinGap
+        array.push(fU,     low[2])
+        array.push(fL,     high)
+        array.push(fDir,   -1)
+        array.push(fBar,   bar_index - 1)
+        array.push(fFill,  0.0)
+        array.push(fFired, false)
+
+    while array.size(fU) > 25
+        array.shift(fU)
+        array.shift(fL)
+        array.shift(fDir)
+        array.shift(fBar)
+        array.shift(fFill)
+        array.shift(fFired)
+
+if barstate.isconfirmed and array.size(fU) > 0
+    for idx = array.size(fU) - 1 to 0
+        u   = array.get(fU,   idx)
+        l   = array.get(fL,   idx)
+        d   = array.get(fDir, idx)
+        gsz = u - l
+        if gsz <= 0
+            continue
+        if d == 1 and low < u
+            array.set(fFill, idx, math.min(1.0, math.max(0.0, u - math.max(l, low)) / gsz))
+        if d == -1 and high > l
+            array.set(fFill, idx, math.min(1.0, math.max(0.0, math.min(u, high) - l) / gsz))
+
+// ─── BOS TRACKING ─────────────────────────────────────────────────────
+SWG = 3
+var float _prev_sh   = na
+var float _prev_sl   = na
+var int   bos_bull_b = na
+var int   bos_bear_b = na
+
+_sh_now = ta.pivothigh(high, SWG, SWG)
+_sl_now = ta.pivotlow(low,   SWG, SWG)
+
+if not na(_sh_now)
+    if not na(_prev_sh) and _sh_now > _prev_sh
+        bos_bull_b := bar_index[SWG]
+    _prev_sh := _sh_now
+
+if not na(_sl_now)
+    if not na(_prev_sl) and _sl_now < _prev_sl
+        bos_bear_b := bar_index[SWG]
+    _prev_sl := _sl_now
+
+bos_bull_ok = not na(bos_bull_b) and (bar_index - bos_bull_b) <= 30
+bos_bear_ok = not na(bos_bear_b) and (bar_index - bos_bear_b) <= 30
+
+// ─── HELPERS ──────────────────────────────────────────────────────────
+f_drawPosBox(float e, float slP, float tp3) =>
+    if showBoxes
+        r = bar_index + 40
+        box.new(bar_index, math.max(e, tp3), r, math.min(e, tp3),
+                border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+        box.new(bar_index, math.max(e, slP), r, math.min(e, slP),
+                border_color=color.new(color.red, 55), bgcolor=color.new(color.red, 90))
+        line.new(bar_index, e, r, e,
+                 color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+f_exitLim(float tp1, float tp2, float tp3) =>
+    exitMode == "TP1 · 0.5R" ? tp1 : exitMode == "TP3 · 1.5R" ? tp3 : tp2
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL A — NYSE ORB  (ny-orb)
+// 15-min opening range 13:30-13:45 UTC.  Entry on first close outside OR
+// within the NY Kill Zone (13:45-15:30 UTC).
+// Research: base WR 56% → 65-78% with H1+H4 bias + ADR gate + volume.
+// One trade per day.
+// ═══════════════════════════════════════════════════════════════════════
+if modORB and barstate.isconfirmed and in_ny_kz and orb_locked and not orb_done and not na(orb_hi) and not na(orb_lo) and _adrGateOk and not in_hard_close and strategy.position_size == 0
+    orb_range = orb_hi - orb_lo
+    buf       = math.max(atrVal * 0.03, 5.0)
+    if orb_range >= orbMinRange
+        _ocOkL = not orbOpenCandle or orb_candle_dir >= 0
+        _ocOkS = not orbOpenCandle or orb_candle_dir <= 0
+        if close > orb_hi and (not orbBiasFilter or _biasLong) and orbDirFilter != "Short only" and _ocOkL
+            entryP = close
+            slP    = orbSLMode == "Wide SL" ? (orb_lo - buf) : (entryP - atrVal * 0.30)
+            slDist = entryP - slP
+            tp1    = orb_hi + orb_range * orbTPMult
+            tp2    = orb_hi + orb_range * 1.00
+            tp3    = orb_hi + orb_range * 1.50
+            orb_done := true
+            strategy.entry("ORB-L", strategy.long, comment="ny-orb · LONG")
+            if exitMode == "Trail after TP1"
+                strategy.exit("ORB-L-X", from_entry="ORB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
+            else if exitMode == "Split TP1+TP2"
+                strategy.exit("ORB-L-X1", from_entry="ORB-L", qty_percent=50, stop=slP, limit=tp1)
+                strategy.exit("ORB-L-X2", from_entry="ORB-L", stop=slP, limit=tp2)
+            else
+                strategy.exit("ORB-L-X", from_entry="ORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            label.new(bar_index, low, "ORB L", style=label.style_label_up,
+                      color=color.new(color.lime, 5), textcolor=color.black, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+        else if close < orb_lo and (not orbBiasFilter or _biasShort) and orbDirFilter != "Long only" and _ocOkS
+            entryP = close
+            slP    = orbSLMode == "Wide SL" ? (orb_hi + buf) : (entryP + atrVal * 0.30)
+            slDist = slP - entryP
+            tp1    = orb_lo - orb_range * orbTPMult
+            tp2    = orb_lo - orb_range * 1.00
+            tp3    = orb_lo - orb_range * 1.50
+            orb_done := true
+            strategy.entry("ORB-S", strategy.short, comment="ny-orb · SHORT")
+            if exitMode == "Trail after TP1"
+                strategy.exit("ORB-S-X", from_entry="ORB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
+            else if exitMode == "Split TP1+TP2"
+                strategy.exit("ORB-S-X1", from_entry="ORB-S", qty_percent=50, stop=slP, limit=tp1)
+                strategy.exit("ORB-S-X2", from_entry="ORB-S", stop=slP, limit=tp2)
+            else
+                strategy.exit("ORB-S-X", from_entry="ORB-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            label.new(bar_index, high, "ORB S", style=label.style_label_down,
+                      color=color.new(color.red, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL B — Judas ONR Sweep  (judas-onr)
+// ONR = Globex overnight range 00:00-07:00 UTC (NQ's "Asian range").
+// London Kill Zone (07:00-10:00 UTC) sweeps ONR H or L to grab
+// stop-loss orders, then NY session reverses the move.
+// Limit order at the swept level — same model as gold Judas.
+// One sweep per level per day.
+// ═══════════════════════════════════════════════════════════════════════
+var bool judas_hi_done = false
+var bool judas_lo_done = false
+
+if _newDay
+    judas_hi_done := false
+    judas_lo_done := false
+    strategy.cancel("JON-S")
+    strategy.cancel("JON-L")
+
+if not in_london_kz and in_london_kz[1]
+    strategy.cancel("JON-S")
+    strategy.cancel("JON-L")
+
+if modJudas and barstate.isconfirmed and in_london_kz and onr_locked and not na(onr_hi) and not na(onr_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+    aRef = nz(atrVal, h1ATR)
+
+    if not judas_hi_done and high > onr_hi and close < onr_hi and (high - onr_hi) >= aRef * 0.08
+        buf    = aRef * 0.12
+        slP    = high + buf
+        entryP = onr_hi
+        slDist = slP - entryP
+        if slDist > 0 and (not orbBiasFilter or _biasShort)
+            tp1 = entryP - slDist * 1.0
+            tp2 = entryP - slDist * 2.0
+            tp3 = entryP - slDist * 3.0
+            judas_hi_done := true
+            strategy.entry("JON-S", strategy.short, limit=entryP, comment="judas-onr · SHORT")
+            strategy.exit("JON-S-X", from_entry="JON-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            label.new(bar_index, high, "Judas S", style=label.style_label_down,
+                      color=color.new(color.red, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+    if not judas_lo_done and low < onr_lo and close > onr_lo and (onr_lo - low) >= aRef * 0.08 and strategy.position_size == 0
+        buf    = aRef * 0.12
+        slP    = low - buf
+        entryP = onr_lo
+        slDist = entryP - slP
+        if slDist > 0 and (not orbBiasFilter or _biasLong)
+            tp1 = entryP + slDist * 1.0
+            tp2 = entryP + slDist * 2.0
+            tp3 = entryP + slDist * 3.0
+            judas_lo_done := true
+            strategy.entry("JON-L", strategy.long, limit=entryP, comment="judas-onr · LONG")
+            strategy.exit("JON-L-X", from_entry="JON-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            label.new(bar_index, low, "Judas L", style=label.style_label_up,
+                      color=color.new(color.teal, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL C — Silver Bullet FVG  (nas-sb)
+// Best NQ window by volume: 14:00-15:00 UTC (10-11am ET).
+// Designed natively for NQ/ES by ICT.  FVG retest + BOS + HTF bias.
+// NQ FVGs fill at 72-78% within 20-50 bars (faster than gold).
+// One trade per day.
+// ═══════════════════════════════════════════════════════════════════════
+var bool sb_done = false
+
+if _newDay
+    sb_done := false
+
+if modSB and barstate.isconfirmed and in_sb_win and not sb_done and _adrGateOk and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
+    firedC = false
+    for idx = array.size(fU) - 1 to 0
+        if firedC or array.get(fFired, idx)
+            continue
+        u       = array.get(fU,    idx)
+        l       = array.get(fL,    idx)
+        d       = array.get(fDir,  idx)
+        birth   = array.get(fBar,  idx)
+        fillPct = array.get(fFill, idx)
+
+        if (bar_index - birth) > fvgMaxAgeBars or fillPct > fvgMaxFillPct
+            continue
+
+        touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+        if not touch
+            continue
+
+        if not ((d == 1 and bos_bull_ok) or (d == -1 and bos_bear_ok))
+            continue
+
+        if orbBiasFilter and not ((d == 1 and _biasLong) or (d == -1 and _biasShort))
+            continue
+
+        buf      = math.max(atrVal * 0.05, 5.0)
+        proximal = d == 1 ? u : l
+        distal   = d == 1 ? l : u
+        entryP   = proximal
+        slP      = d == 1 ? distal - buf : distal + buf
+        slDist   = math.abs(entryP - slP)
+
+        if slDist <= 0
+            continue
+
+        tp1 = d == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
+        tp2 = d == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
+        tp3 = d == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
+
+        if not ((d == 1 ? slP < entryP : slP > entryP) and (d == 1 ? tp1 > entryP : tp1 < entryP))
+            continue
+
+        array.set(fFired, idx, true)
+        sb_done := true
+        firedC  := true
+
+        eId = d == 1 ? "SB-L" : "SB-S"
+        strategy.entry(eId, d == 1 ? strategy.long : strategy.short, comment="nas-sb")
+        strategy.exit(eId + "-X", from_entry=eId, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+        label.new(bar_index, d == 1 ? low : high, "SB " + (d == 1 ? "L" : "S"),
+                  style=d == 1 ? label.style_label_up : label.style_label_down,
+                  color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
+        f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL D — PM Continuation  (pm-cont)
+// Second institutional window 18:00-19:30 UTC (2-3:30pm ET).
+// Builds a 15-min ORB at 18:00-18:15 UTC, trades first breakout.
+// Most reliable on trend days and FOMC continuation sessions.
+// One trade per day.
+// ═══════════════════════════════════════════════════════════════════════
+if modPM and barstate.isconfirmed and in_pm_trade and pm_orb_locked and not pm_orb_done and not na(pm_orb_hi) and not na(pm_orb_lo) and _adrGateOk and not in_hard_close and strategy.position_size == 0
+    pm_range = pm_orb_hi - pm_orb_lo
+    buf      = math.max(atrVal * 0.03, 5.0)
+    if pm_range >= 10.0
+        if close > pm_orb_hi and (not orbBiasFilter or _biasLong)
+            entryP = close
+            slP    = pm_orb_lo - buf
+            tp1    = pm_orb_hi + pm_range * 0.50
+            tp2    = pm_orb_hi + pm_range * 1.00
+            tp3    = pm_orb_hi + pm_range * 1.50
+            pm_orb_done := true
+            strategy.entry("PM-L", strategy.long, comment="pm-cont · LONG")
+            strategy.exit("PM-L-X", from_entry="PM-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            label.new(bar_index, low, "PM L", style=label.style_label_up,
+                      color=color.new(color.aqua, 10), textcolor=color.black, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+        else if close < pm_orb_lo and (not orbBiasFilter or _biasShort)
+            entryP = close
+            slP    = pm_orb_hi + buf
+            tp1    = pm_orb_lo - pm_range * 0.50
+            tp2    = pm_orb_lo - pm_range * 1.00
+            tp3    = pm_orb_lo - pm_range * 1.50
+            pm_orb_done := true
+            strategy.entry("PM-S", strategy.short, comment="pm-cont · SHORT")
+            strategy.exit("PM-S-X", from_entry="PM-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            label.new(bar_index, high, "PM S", style=label.style_label_down,
+                      color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL E — Psychological Level Bounce  (reaction)
+// NQ respects round numbers: 500pt (major) and 100pt (minor).
+// Less reliable than gold $50/$100 — use as zone, not exact level.
+// Requires 2-of-3 HTF alignment (H1+H4+D).
+// Fires in NY Kill Zone or PM window only.  One trade per day.
+// ═══════════════════════════════════════════════════════════════════════
+var bool psych_done = false
+
+if _newDay
+    psych_done := false
+
+if modPsych and barstate.isconfirmed and (in_ny_kz or in_pm_win) and not psych_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
+    lvl500    = math.round(close / 500.0) * 500.0
+    lvl100    = math.round(close / 100.0) * 100.0
+    nearLevel = math.abs(close - lvl500) <= math.abs(close - lvl100) ? lvl500 : lvl100
+    tol       = atrVal * 0.30
+
+    bounceLong  = low  <= nearLevel + tol and low  <= nearLevel and close > nearLevel
+    bounceShort = high >= nearLevel - tol and high >= nearLevel and close < nearLevel
+    dir = bounceLong and not bounceShort ? 1 : bounceShort and not bounceLong ? -1 : 0
+
+    if dir != 0
+        h1ok       = h1B == dir
+        h4ok       = h4B == dir
+        hdok       = hdB == dir
+        alignCount = (h1ok ? 1 : 0) + (h4ok ? 1 : 0) + (hdok ? 1 : 0)
+
+        if alignCount >= 2
+            buf    = math.max(atrVal * 0.08, 10.0)
+            wick   = dir == 1 ? low : high
+            entryP = nearLevel
+            slP    = dir == 1 ? wick - buf : wick + buf
+            slDist = math.abs(entryP - slP)
+
+            if slDist > 0
+                tp1 = dir == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
+                tp2 = dir == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
+                tp3 = dir == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
+
+                if (dir == 1 ? (slP < entryP and tp1 > entryP) : (slP > entryP and tp1 < entryP))
+                    psych_done := true
+                    eId = dir == 1 ? "PSY-L" : "PSY-S"
+                    strategy.entry(eId, dir == 1 ? strategy.long : strategy.short, comment="reaction")
+                    strategy.exit(eId + "-X", from_entry=eId, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+                    lvlStr = str.tostring(math.round(nearLevel))
+                    label.new(bar_index, dir == 1 ? low : high,
+                              lvlStr + " " + (dir == 1 ? "Bounce" : "Reject"),
+                              style=dir == 1 ? label.style_label_up : label.style_label_down,
+                              color=color.new(color.purple, 10), textcolor=color.white, size=size.tiny)
+                    f_drawPosBox(entryP, slP, tp3)
+
+// ─── STATUS TABLE ──────────────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 14,
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 40), frame_width=1)
+
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    table.cell(info, 0, 0, "QB NAS100 · STRAT", bgcolor=color.new(color.navy, 10),  text_color=color.white,  text_size=size.small, text_halign=text.align_center)
+    table.cell(info, 1, 0, syminfo.ticker,       bgcolor=color.new(color.navy, 10),  text_color=color.yellow, text_size=size.small, text_halign=text.align_center)
+
+    table.cell(info, 0, 1, "ONR",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 1, onr_locked ? str.tostring(math.round(onr_lo)) + "–" + str.tostring(math.round(onr_hi)) : "building", text_size=size.tiny, text_color=onr_locked ? color.lime : color.gray)
+
+    table.cell(info, 0, 2, "ORB",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 2, orb_locked ? (orb_done ? "DONE " + str.tostring(math.round(orb_hi - orb_lo)) + "pt" : "OPEN " + str.tostring(math.round(orb_hi - orb_lo)) + "pt") : "pending", text_size=size.tiny, text_color=orb_done ? color.gray : orb_locked ? color.lime : color.orange)
+
+    table.cell(info, 0, 3, "ADR%", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 3, str.tostring(math.round(_adrConsumed * 100)) + "%", text_size=size.tiny, text_color=_adrConsumed > 0.80 ? color.red : color.lime)
+
+    table.cell(info, 0, 4, "H1",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 4, h1B == 1 ? "BULL" : h1B == -1 ? "BEAR" : "NEUT", text_size=size.tiny, text_color=h1B == 1 ? color.lime : h1B == -1 ? color.red : color.gray)
+
+    table.cell(info, 0, 5, "H4",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 5, h4B == 1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT", text_size=size.tiny, text_color=h4B == 1 ? color.lime : h4B == -1 ? color.red : color.gray)
+
+    table.cell(info, 0, 6,  "Sig A",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 6,  modORB   ? (orb_done ? "FIRED" : orb_locked ? "READY" : "WAIT") : "OFF", text_size=size.tiny, text_color=modORB   ? (orb_done ? color.gray : orb_locked ? color.lime : color.orange) : color.gray)
+
+    table.cell(info, 0, 7,  "Sig B",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 7,  modJudas ? ((judas_hi_done or judas_lo_done) ? "FIRED" : onr_locked ? "READY" : "WAIT") : "OFF", text_size=size.tiny, text_color=modJudas ? ((judas_hi_done or judas_lo_done) ? color.gray : onr_locked ? color.lime : color.orange) : color.gray)
+
+    table.cell(info, 0, 8,  "Sig C",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 8,  modSB    ? (sb_done   ? "FIRED" : "WATCH")  : "OFF", text_size=size.tiny, text_color=modSB    ? (sb_done   ? color.gray : color.lime) : color.gray)
+
+    table.cell(info, 0, 9,  "Sig D",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 9,  modPM    ? (pm_orb_done ? "FIRED" : pm_orb_locked ? "READY" : "WAIT") : "OFF", text_size=size.tiny, text_color=modPM ? (pm_orb_done ? color.gray : pm_orb_locked ? color.lime : color.orange) : color.gray)
+
+    table.cell(info, 0, 10, "Sig E",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 10, modPsych ? (psych_done ? "FIRED" : "WATCH") : "OFF", text_size=size.tiny, text_color=modPsych ? (psych_done ? color.gray : color.lime) : color.gray)
+
+    table.cell(info, 0, 11, "ATR",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 11, str.tostring(math.round(atrVal, 1)) + " pts", text_size=size.tiny, text_color=color.white)
+
+    table.cell(info, 0, 12, "CVD",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 12, str.tostring(math.round(cvd, 0)), text_size=size.tiny, text_color=cvd > cvdMa ? color.lime : color.red)
+
+    sessStr = in_hard_close ? "CLOSED" : in_pm_win ? "PM WIN" : in_sb_win ? "SILV BULL" : in_ny_kz ? "NY KZ" : in_london_kz ? "LONDON KZ" : in_orb_window ? "ORB BUILD" : "OUT"
+    table.cell(info, 0, 13, "Session", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 13, sessStr, text_size=size.tiny, text_color=in_ny_kz or in_sb_win ? color.lime : in_pm_win ? color.aqua : in_london_kz ? color.orange : in_orb_window ? color.yellow : color.gray)
