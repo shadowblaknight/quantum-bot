@@ -1,0 +1,316 @@
+//@version=6
+strategy("QB NAS100 AMD-IFVG", "AMD-IFVG", overlay=true,
+         default_qty_type        = strategy.fixed,
+         default_qty_value       = 1,
+         initial_capital         = 100000,
+         commission_type         = strategy.commission.cash_per_contract,
+         commission_value        = 0,
+         slippage                = 2,
+         process_orders_on_close = true,
+         max_bars_back           = 500)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  IFVG = Inverse FVG
+//  LONG  setup: bearish FVG (gap DOWN) forms during Judas sweep OR early SB
+//               → price recovers and rises ABOVE the gap (inversion)
+//               → gap zone now acts as SUPPORT
+//               → entry: first retrace back to zone with BULLISH rejection bar
+//
+//  SHORT setup: bullish FVG (gap UP) forms during Judas spike OR early SB
+//               → price drops BELOW the gap (inversion)
+//               → gap zone now acts as RESISTANCE
+//               → entry: first retrace up to zone with BEARISH rejection bar
+//
+//  Tier system:
+//   A+ : Judas sweep confirmed  +  SMT divergence
+//   A  : Judas sweep  OR  SMT divergence
+//   B  : H4 bias only (fires every qualifying day)
+// ════════════════════════════════════════════════════════════════════════════
+
+G0 = "Tier Gate"
+minTier = input.string("B", "Min tier to trade", options=["B","A","A+"], group=G0,
+            tooltip="B=every day  A=Judas OR SMT  A+=both")
+
+G1 = "Entry"
+tpMult      = input.float(1.50, "TP (x R)",              group=G1, minval=0.5, maxval=5.0, step=0.25)
+atrBuffer   = input.float(0.20, "SL buffer (x ATR)",     group=G1, minval=0.05, maxval=1.0, step=0.05)
+minGapMul   = input.float(0.10, "Min IFVG gap (x ATR)",  group=G1, minval=0.01, maxval=1.0, step=0.01,
+                tooltip="Minimum gap size to qualify as IFVG source.")
+minSweepMul = input.float(0.05, "Min Judas sweep (x ATR)",group=G1, minval=0.01, maxval=0.5, step=0.01)
+
+G2 = "Levels"
+usePmLvl = input.bool(true, "Use PM H/L as Judas target",       group=G2)
+usePdLvl = input.bool(true, "Use prev-day H/L as Judas target", group=G2)
+
+G3 = "Filters"
+reqH4  = input.bool(true,  "Require H4 EMA200 bias",  group=G3)
+both   = input.bool(true,  "Trade LONG + SHORT",       group=G3)
+emaLen = input.int(200,    "EMA length",               group=G3, minval=50, maxval=500)
+atrLen = input.int(14,     "ATR length",               group=G3, minval=5,  maxval=50)
+
+G4 = "Visuals"
+showBox = input.bool(true, "Show boxes", group=G4)
+
+// ─── HTF BIAS ─────────────────────────────────────────────────────────────────
+f_bias(int p) =>
+    e = ta.ema(close, p)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+
+h4B    = request.security(syminfo.tickerid, "240", f_bias(emaLen), lookahead=barmerge.lookahead_off)
+atrVal = ta.atr(atrLen)
+
+// ─── US500 ────────────────────────────────────────────────────────────────────
+us5lo = request.security("CAPITALCOM:US500", timeframe.period, low,  lookahead=barmerge.lookahead_off)
+us5hi = request.security("CAPITALCOM:US500", timeframe.period, high, lookahead=barmerge.lookahead_off)
+
+// ─── SESSION WINDOWS (UTC minutes) ───────────────────────────────────────────
+_mu      = hour(time,"UTC")*60 + minute(time,"UTC")
+in_pm    = timeframe.isintraday and _mu >= 660 and _mu < 810
+in_judas = timeframe.isintraday and _mu >= 810 and _mu < 840
+in_sb    = timeframe.isintraday and _mu >= 840 and _mu < 900
+_newDay  = ta.change(time("D")) != 0
+_dow     = dayofweek(time,"UTC")
+_dn      = _dow==4?"WED":_dow==3?"TUE":_dow==2?"MON":_dow==6?"FRI":"THU"
+
+// ─── PREV DAY H/L ─────────────────────────────────────────────────────────────
+pdH = request.security(syminfo.tickerid,"D", high[1], lookahead=barmerge.lookahead_off)
+pdL = request.security(syminfo.tickerid,"D", low[1],  lookahead=barmerge.lookahead_off)
+
+// ─── PM RANGE ─────────────────────────────────────────────────────────────────
+var float pmH  = na
+var float pmL  = na
+var bool  pmOk = false
+var float s5H  = na
+var float s5L  = na
+
+if _newDay
+    pmH  := na
+    pmL  := na
+    pmOk := false
+    s5H  := na
+    s5L  := na
+
+if in_pm and not pmOk
+    pmH := na(pmH) ? high  : math.max(pmH, high)
+    pmL := na(pmL) ? low   : math.min(pmL, low)
+    s5H := na(s5H) ? us5hi : math.max(s5H, us5hi)
+    s5L := na(s5L) ? us5lo : math.min(s5L, us5lo)
+
+if not in_pm and in_pm[1] and not na(pmH)
+    pmOk := true
+    if showBox
+        box.new(bar_index-24, pmH, bar_index+250, pmL, border_color=color.new(color.blue,55), bgcolor=color.new(color.blue,92))
+    if usePdLvl and not na(pdH)
+        line.new(bar_index-40, pdH, bar_index+250, pdH, color=color.new(color.orange,35), style=line.style_dotted)
+        line.new(bar_index-40, pdL, bar_index+250, pdL, color=color.new(color.orange,35), style=line.style_dotted)
+
+// ─── JUDAS WINDOW: track extremes ─────────────────────────────────────────────
+var float njL = na
+var float njH = na
+var float ujL = na
+var float ujH = na
+
+if _newDay
+    njL := na
+    njH := na
+    ujL := na
+    ujH := na
+
+if in_judas and pmOk
+    njL := na(njL) ? low   : math.min(njL, low)
+    njH := na(njH) ? high  : math.max(njH, high)
+    ujL := na(ujL) ? us5lo : math.min(ujL, us5lo)
+    ujH := na(ujH) ? us5hi : math.max(ujH, us5hi)
+
+// ─── JUDAS SWEEP ──────────────────────────────────────────────────────────────
+var bool  jL  = false
+var bool  jS  = false
+var float jwL = na
+var float jwH = na
+
+if _newDay
+    jL  := false
+    jS  := false
+    jwL := na
+    jwH := na
+
+if pmOk and in_judas and barstate.isconfirmed
+    ms    = atrVal * minSweepMul
+    loArr = array.new_float(0)
+    hiArr = array.new_float(0)
+    if usePmLvl and not na(pmL)
+        array.push(loArr, pmL)
+    if usePmLvl and not na(pmH)
+        array.push(hiArr, pmH)
+    if usePdLvl and not na(pdL)
+        array.push(loArr, pdL)
+    if usePdLvl and not na(pdH)
+        array.push(hiArr, pdH)
+    if not jL
+        for i = 0 to array.size(loArr)-1
+            lv = array.get(loArr, i)
+            if low < lv and close > lv and (lv-low) >= ms
+                jL  := true
+                jwL := na(jwL) ? low : math.min(jwL, low)
+                label.new(bar_index, low, "J.L", style=label.style_label_up, color=color.new(color.teal,5), textcolor=color.white, size=size.tiny)
+                break
+    if both and not jS
+        for i = 0 to array.size(hiArr)-1
+            lv = array.get(hiArr, i)
+            if high > lv and close < lv and (high-lv) >= ms
+                jS  := true
+                jwH := na(jwH) ? high : math.max(jwH, high)
+                label.new(bar_index, high, "J.S", style=label.style_label_down, color=color.new(color.red,5), textcolor=color.white, size=size.tiny)
+                break
+
+// ─── SMT DIVERGENCE (after Judas window) ─────────────────────────────────────
+var bool smtL = false
+var bool smtS = false
+
+if _newDay
+    smtL := false
+    smtS := false
+
+if not in_judas and in_judas[1] and pmOk
+    if not na(njL) and not na(pmL) and not na(s5L)
+        smtL := njL < pmL and ujL >= s5L
+        if smtL and not jL
+            label.new(bar_index, pmL, "SMT.L", style=label.style_label_up, color=color.new(color.aqua,20), textcolor=color.white, size=size.tiny)
+    if both and not na(njH) and not na(pmH) and not na(s5H)
+        smtS := njH > pmH and ujH <= s5H
+        if smtS and not jS
+            label.new(bar_index, pmH, "SMT.S", style=label.style_label_down, color=color.new(color.orange,20), textcolor=color.white, size=size.tiny)
+
+// ─── IFVG DETECTION ───────────────────────────────────────────────────────────
+// Scan during Judas window AND early Silver Bullet for the first qualifying gap.
+//
+// LONG IFVG:  bearish gap (current high < 2-bars-ago low)
+//   Zone = [high, low[2]]  → ifLoL (bottom) to ifHiL (top)
+//   Activated when close > ifHiL  (price rose above the gap → zone inverted to support)
+//   Entry: low touches zone + close > open (bullish rejection inside zone)
+//
+// SHORT IFVG: bullish gap (current low > 2-bars-ago high)
+//   Zone = [high[2], low]  → ifLoS (bottom) to ifHiS (top)
+//   Activated when close < ifLoS  (price fell below the gap → zone inverted to resistance)
+//   Entry: high touches zone + close < open (bearish rejection inside zone)
+
+var float ifLoL  = na
+var float ifHiL  = na
+var bool  ifSetL = false
+var bool  ifActL = false
+
+var float ifLoS  = na
+var float ifHiS  = na
+var bool  ifSetS = false
+var bool  ifActS = false
+
+var float sbLo = na
+var float sbHi = na
+
+if _newDay
+    ifLoL  := na
+    ifHiL  := na
+    ifSetL := false
+    ifActL := false
+    ifLoS  := na
+    ifHiS  := na
+    ifSetS := false
+    ifActS := false
+    sbLo   := na
+    sbHi   := na
+
+if barstate.isconfirmed and pmOk and (in_judas or in_sb)
+    minGap = atrVal * minGapMul
+
+    // LONG IFVG source: bearish gap (gap down → will invert to support)
+    if not ifSetL and high < low[2] and (low[2] - high) >= minGap
+        ifLoL  := high
+        ifHiL  := low[2]
+        ifSetL := true
+        if showBox
+            box.new(bar_index-2, ifHiL, bar_index+80, ifLoL, border_color=color.new(color.teal,25), bgcolor=color.new(color.teal,85))
+
+    // SHORT IFVG source: bullish gap (gap up → will invert to resistance)
+    if both and not ifSetS and low > high[2] and (low - high[2]) >= minGap
+        ifLoS  := high[2]
+        ifHiS  := low
+        ifSetS := true
+        if showBox
+            box.new(bar_index-2, ifHiS, bar_index+80, ifLoS, border_color=color.new(color.red,25), bgcolor=color.new(color.red,85))
+
+    // Activate: price has crossed THROUGH the IFVG zone (inversion confirmed)
+    if ifSetL and not ifActL and close > ifHiL
+        ifActL := true
+
+    if both and ifSetS and not ifActS and close < ifLoS
+        ifActS := true
+
+    // Running SB extremes (fallback SL)
+    if in_sb
+        sbLo := na(sbLo) ? low  : math.min(sbLo, low)
+        sbHi := na(sbHi) ? high : math.max(sbHi, high)
+
+// ─── ENTRY ────────────────────────────────────────────────────────────────────
+var bool lfired = false
+var bool sfired = false
+
+if _newDay
+    lfired := false
+    sfired := false
+
+if barstate.isconfirmed and in_sb and pmOk and strategy.position_size == 0
+
+    // ── LONG IFVG ──
+    biasL = not reqH4 or h4B == 1
+    if biasL and not lfired and ifActL and not na(ifLoL) and not na(ifHiL)
+        inZone = low <= ifHiL and close >= ifLoL   // bar entered zone, didn't close below it
+        bullRej = close > open                     // bullish bar = rejection at IFVG support
+        if inZone and bullRej
+            tierL = jL and smtL ? "A+" : jL or smtL ? "A" : "B"
+            gateL = tierL == "A+" or (tierL == "A" and (minTier == "A" or minTier == "B")) or (tierL == "B" and minTier == "B")
+            if gateL
+                ep   = close
+                slP  = ifLoL - atrVal * atrBuffer
+                dist = ep - slP
+                if dist > 0
+                    tp1 = ep + dist * tpMult
+                    lfired := true
+                    strategy.entry("AMD-L", strategy.long, comment="IFVG-L " + tierL + " " + _dn)
+                    strategy.exit("AMD-LX", "AMD-L", limit=tp1, stop=slP)
+                    clr = tierL == "A+" ? color.lime : tierL == "A" ? color.teal : color.new(color.teal,45)
+                    label.new(bar_index, low-atrVal*0.4, "L "+tierL, style=label.style_label_up, color=clr, textcolor=color.white, size=size.small)
+                    line.new(bar_index, ep,  bar_index+30, ep,  color=color.teal)
+                    line.new(bar_index, slP, bar_index+30, slP, color=color.red,  style=line.style_dashed)
+                    line.new(bar_index, tp1, bar_index+30, tp1, color=color.lime, style=line.style_dashed)
+
+    // ── SHORT IFVG ──
+    biasS = both and (not reqH4 or h4B == -1)
+    if biasS and not sfired and ifActS and not na(ifLoS) and not na(ifHiS)
+        inZone = high >= ifLoS and close <= ifHiS   // bar entered zone, didn't close above it
+        bearRej = close < open                      // bearish bar = rejection at IFVG resistance
+        if inZone and bearRej
+            tierS = jS and smtS ? "A+" : jS or smtS ? "A" : "B"
+            gateS = tierS == "A+" or (tierS == "A" and (minTier == "A" or minTier == "B")) or (tierS == "B" and minTier == "B")
+            if gateS
+                ep   = close
+                slP  = ifHiS + atrVal * atrBuffer
+                dist = slP - ep
+                if dist > 0
+                    tp1 = ep - dist * tpMult
+                    sfired := true
+                    strategy.entry("AMD-S", strategy.short, comment="IFVG-S " + tierS + " " + _dn)
+                    strategy.exit("AMD-SX", "AMD-S", limit=tp1, stop=slP)
+                    clr = tierS == "A+" ? color.lime : tierS == "A" ? color.red : color.new(color.red,45)
+                    label.new(bar_index, high+atrVal*0.4, "S "+tierS, style=label.style_label_down, color=clr, textcolor=color.white, size=size.small)
+                    line.new(bar_index, ep,  bar_index+30, ep,  color=color.red)
+                    line.new(bar_index, slP, bar_index+30, slP, color=color.red,  style=line.style_dashed)
+                    line.new(bar_index, tp1, bar_index+30, tp1, color=color.lime, style=line.style_dashed)
+
+// Hard close 12:30 ET
+if barstate.isconfirmed and _mu >= 990 and strategy.position_size != 0
+    strategy.close_all("hard-close")
+
+// ─── BACKGROUNDS ──────────────────────────────────────────────────────────────
+bgcolor(in_pm    ? color.new(color.blue,   92) : na, title="Pre-market")
+bgcolor(in_judas ? color.new(color.orange, 85) : na, title="Judas")
+bgcolor(in_sb    ? color.new(color.lime,   80) : na, title="Silver Bullet")

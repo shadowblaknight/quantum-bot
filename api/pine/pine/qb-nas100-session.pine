@@ -1,0 +1,362 @@
+//@version=6
+strategy("QB NAS100 · Session Intel", "QB·NAS·SI", overlay=true,
+         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=2, pyramiding=0, calc_on_every_tick=false,
+         process_orders_on_close=true, close_entries_rule="ANY")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QB NAS100 SESSION INTELLIGENCE  —  TJR-style narrative framework
+//  Works on 5m or 15m NAS100 / US100 / NQ chart
+//
+//  Each trading day follows a 3-phase narrative:
+//
+//  PHASE 1 · ASIAN (00:00–07:00 UTC)
+//    Overnight range forms. Asian H/L = primary liquidity targets.
+//
+//  PHASE 2 · LONDON (07:00–13:30 UTC)
+//    Manipulation. London sweeps Asian H or L → sets the day bias.
+//    Sweep Asian LO (close back inside) → BULLISH day (bear trap)
+//    Sweep Asian HI (close back inside) → BEARISH day (bull trap)
+//    No sweep → fall back to H4 EMA200 trend direction
+//    SMT: NAS100 swept but SP500 did NOT = institutional confirmation (A+)
+//
+//  PHASE 3 · NY (13:30–19:30 UTC)
+//    Distribution. Narrative is set, wait for:
+//    1) ORB break (BOS/CISD) confirming direction
+//    2) FVG forming in direction of bias
+//    3) Price retraces into FVG → entry
+//    Primary window: Silver Bullet 14:00–15:00 UTC (10-11am ET)
+//    Secondary window: PM 18:00–19:30 UTC (optional)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── INPUTS ───────────────────────────────────────────────────────────
+G0 = "Trade"
+tpMult    = input.float(2.0,  "TP (× R)",           group=G0, minval=0.5,  maxval=5.0,   step=0.5)
+slBuf     = input.float(0.15, "SL buffer (× ATR)",  group=G0, minval=0.05, maxval=0.5,   step=0.05)
+fvgMinPts = input.float(20.0, "Min FVG size (pts)", group=G0, minval=2.0,  maxval=100.0, step=2.0,
+            tooltip="Confirmed best: 20pts + extended SB window → 59.72% WR / PF 2.507 / 72 trades yr. 40pts = 57.14% / PF 2.307 / 35/yr. 10pts = 50.85% / PF 1.902 / 59/yr.")
+atrLen    = input.int(14,     "ATR length",          group=G0, minval=5,    maxval=50)
+
+G1 = "Narrative"
+reqSweep = input.bool(true,  "Require London→Asian sweep for bias", group=G1,
+           tooltip="ON = only enter when London clearly swept Asian H or L and closed back inside. Confirmed best — filters out low-conviction days.")
+useSMT   = input.bool(false, "SMT divergence (NAS vs SP500)",      group=G1,
+           tooltip="Require NAS100 to sweep without SP500 matching it. OFF = confirmed best (SMT reduces count without improving WR on this setup).")
+useH4    = input.bool(false, "H4 EMA200 must agree with narrative", group=G1,
+           tooltip="OFF = confirmed best. H4 filter kills too many valid sweep days — the London sweep itself is the bias signal.")
+reqBOS   = input.bool(true,  "Require ORB break before entry (BOS)", group=G1,
+           tooltip="Waits for a bar to close beyond ORB range in bias direction before enabling FVG entries.")
+
+G2 = "Windows"
+tradeInSB = input.bool(true,  "NY window 14:00–16:00 UTC (extended SB)",   group=G2,
+            tooltip="Confirmed best: 59.72% WR / PF 2.507 / 72 trades yr. Extended from 14-15 to 14-16 catches valid FVG retraces that print just after the Silver Bullet hour.")
+tradeInPM = input.bool(false, "PM window 18:00–19:00 UTC",                 group=G2,
+            tooltip="OFF = confirmed best. PM FVGs tested at 53.93% WR / PF 2.002 / 83 trades yr — the 11 extra trades dragged PF below the SB-only benchmark. Keep OFF.")
+maxTrades = input.int(1, "Max trades per day", group=G2, minval=1, maxval=3,
+            tooltip="1 = one attempt per day in the extended SB window. Matches confirmed best result.")
+
+G3 = "Display"
+showAsian  = input.bool(true,  "Asian range box",   group=G3)
+showLondon = input.bool(true,  "London range box",  group=G3)
+showORB    = input.bool(true,  "ORB box",           group=G3)
+showFVG    = input.bool(true,  "FVG zones",         group=G3)
+showPD     = input.bool(true,  "Prev-day H/L lines",group=G3)
+
+// ── SESSION GATES (UTC minutes) ───────────────────────────────────────
+_mu     = hour(time, "UTC") * 60 + minute(time, "UTC")
+_newDay = ta.change(time("D")) != 0
+
+in_asian  = timeframe.isintraday and _mu >= 0    and _mu < 420
+in_london = timeframe.isintraday and _mu >= 420  and _mu < 810
+in_orb_w  = timeframe.isintraday and _mu >= 810  and _mu < 825
+in_ny_kz  = timeframe.isintraday and _mu >= 825  and _mu < 930
+in_sb     = timeframe.isintraday and _mu >= 840  and _mu < 900   // visual only
+in_sb_ext = timeframe.isintraday and _mu >= 840  and _mu < 960   // extended entry 14:00-16:00
+in_pm     = timeframe.isintraday and _mu >= 1080 and _mu < 1140  // PM entry 18:00-19:00
+in_close  = timeframe.isintraday and _mu >= 1170
+
+// ── ATR + HTF DATA ────────────────────────────────────────────────────
+atrVal = ta.atr(atrLen)
+
+f_ema200(int p) =>
+    e = ta.ema(close, p)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+
+h4B  = request.security(syminfo.tickerid, "240", f_ema200(200), lookahead=barmerge.lookahead_off)
+s5Lo = request.security("CAPITALCOM:US500", timeframe.period, low,  lookahead=barmerge.lookahead_off)
+s5Hi = request.security("CAPITALCOM:US500", timeframe.period, high, lookahead=barmerge.lookahead_off)
+pdH  = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdL  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+
+// ── PERSISTENT STATE ──────────────────────────────────────────────────
+var float asian_hi     = na
+var float asian_lo     = na
+var bool  asian_locked = false
+var float sp5_asian_hi = na
+var float sp5_asian_lo = na
+
+var float ldn_hi       = na
+var float ldn_lo       = na
+var bool  ldn_locked   = false
+var bool  sw_lo        = false
+var bool  sw_hi        = false
+var float sp5_ldn_lo   = na
+var float sp5_ldn_hi   = na
+
+var float orb_hi       = na
+var float orb_lo       = na
+var bool  orb_locked   = false
+var bool  bos_long     = false
+var bool  bos_short    = false
+
+var int   day_bias     = 0
+var bool  smt_ok       = false
+var bool  smt_bull_ok  = false
+var bool  smt_bear_ok  = false
+var bool  narr_set     = false
+
+var float fvg_hi       = na
+var float fvg_lo       = na
+var int   fvg_dir      = 0
+
+var int   trades_today = 0
+
+// ── DAILY RESET ───────────────────────────────────────────────────────
+if _newDay
+    asian_hi     := na
+    asian_lo     := na
+    asian_locked := false
+    sp5_asian_hi := na
+    sp5_asian_lo := na
+    ldn_hi       := na
+    ldn_lo       := na
+    ldn_locked   := false
+    sw_lo        := false
+    sw_hi        := false
+    sp5_ldn_lo   := na
+    sp5_ldn_hi   := na
+    orb_hi       := na
+    orb_lo       := na
+    orb_locked   := false
+    bos_long     := false
+    bos_short    := false
+    day_bias     := 0
+    smt_ok       := false
+    smt_bull_ok  := false
+    smt_bear_ok  := false
+    narr_set     := false
+    fvg_hi       := na
+    fvg_lo       := na
+    fvg_dir      := 0
+    trades_today := 0
+
+// ── PHASE 1: ASIAN RANGE ──────────────────────────────────────────────
+if in_asian
+    asian_hi     := na(asian_hi)     ? high : math.max(asian_hi, high)
+    asian_lo     := na(asian_lo)     ? low  : math.min(asian_lo, low)
+    sp5_asian_hi := na(sp5_asian_hi) ? s5Hi : math.max(sp5_asian_hi, s5Hi)
+    sp5_asian_lo := na(sp5_asian_lo) ? s5Lo : math.min(sp5_asian_lo, s5Lo)
+
+if not in_asian and in_asian[1] and not na(asian_hi)
+    asian_locked := true
+    if showAsian
+        box.new(bar_index, asian_hi, bar_index + 360, asian_lo,
+                border_color=color.new(color.purple, 35), border_width=1,
+                bgcolor=color.new(color.purple, 91))
+
+// ── PHASE 2: LONDON SESSION ───────────────────────────────────────────
+if in_london and asian_locked
+    ldn_hi     := na(ldn_hi)     ? high : math.max(ldn_hi, high)
+    ldn_lo     := na(ldn_lo)     ? low  : math.min(ldn_lo, low)
+    sp5_ldn_lo := na(sp5_ldn_lo) ? s5Lo : math.min(sp5_ldn_lo, s5Lo)
+    sp5_ldn_hi := na(sp5_ldn_hi) ? s5Hi : math.max(sp5_ldn_hi, s5Hi)
+    if barstate.isconfirmed
+        if not sw_lo and low < asian_lo and close > asian_lo
+            sw_lo := true
+        if not sw_hi and high > asian_hi and close < asian_hi
+            sw_hi := true
+
+if not in_london and in_london[1] and not na(ldn_hi)
+    ldn_locked := true
+    if showLondon
+        box.new(bar_index, ldn_hi, bar_index + 260, ldn_lo,
+                border_color=color.new(color.orange, 35), border_width=1,
+                bgcolor=color.new(color.orange, 93))
+
+// ── NARRATIVE (computed once when London closes) ───────────────────────
+// raw bias: sweep lo only → bull, sweep hi only → bear,
+//           both swept → H4 tiebreak, no sweep → H4 (or 0 if reqSweep)
+if ldn_locked and not narr_set
+    narr_set    := true
+    // SMT: NAS100 swept Asian level but SP500 did NOT (direction-specific)
+    smt_bull_ok := sw_lo and not na(sp5_asian_lo) and sp5_ldn_lo >= sp5_asian_lo
+    smt_bear_ok := sw_hi and not na(sp5_asian_hi) and sp5_ldn_hi <= sp5_asian_hi
+    smt_ok      := smt_bull_ok or smt_bear_ok
+    raw          = sw_lo and not sw_hi ? 1 : sw_hi and not sw_lo ? -1 : sw_lo and sw_hi ? h4B : reqSweep ? 0 : h4B
+    day_bias    := (not useH4 or raw == 0 or raw == h4B) ? raw : 0
+
+// ── ORB RANGE (13:30–13:45 UTC) ───────────────────────────────────────
+if in_orb_w
+    orb_hi := na(orb_hi) ? high : math.max(orb_hi, high)
+    orb_lo := na(orb_lo) ? low  : math.min(orb_lo, low)
+
+if not in_orb_w and in_orb_w[1] and not na(orb_hi)
+    orb_locked := true
+    if showORB
+        box.new(bar_index, orb_hi, bar_index + 200, orb_lo,
+                border_color=color.new(color.blue, 40), border_width=1,
+                bgcolor=color.new(color.blue, 92))
+
+// ── BOS: first close beyond ORB in bias direction ─────────────────────
+if orb_locked and barstate.isconfirmed and day_bias != 0 and not in_close
+    if not bos_long  and day_bias ==  1 and close > orb_hi
+        bos_long  := true
+        label.new(bar_index, low - atrVal * 0.2, "BOS",
+                  style=label.style_label_up, color=color.new(color.teal, 30),
+                  textcolor=color.white, size=size.tiny)
+    if not bos_short and day_bias == -1 and close < orb_lo
+        bos_short := true
+        label.new(bar_index, high + atrVal * 0.2, "BOS",
+                  style=label.style_label_down, color=color.new(color.red, 30),
+                  textcolor=color.white, size=size.tiny)
+
+// ── PREV-DAY H/L LINES ────────────────────────────────────────────────
+if _newDay and showPD and not na(pdH) and not na(pdL)
+    line.new(bar_index, pdH, bar_index + 320, pdH,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+    line.new(bar_index, pdL, bar_index + 320, pdL,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+
+// ── FVG DETECTION (from 13:30 UTC, first qualifying gap in bias dir) ──
+in_ny = timeframe.isintraday and _mu >= 810 and _mu < 1170
+
+if barstate.isconfirmed and in_ny and day_bias != 0 and fvg_dir == 0
+    bgap = low > high[2] ? low - high[2] : 0.0
+    sgap = low[2] > high ? low[2] - high : 0.0
+    if day_bias == 1 and bgap >= fvgMinPts
+        fvg_lo  := high[2]
+        fvg_hi  := low
+        fvg_dir := 1
+        if showFVG
+            box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                    border_color=color.new(color.teal, 20), border_width=1,
+                    bgcolor=color.new(color.teal, 83))
+    else if day_bias == -1 and sgap >= fvgMinPts
+        fvg_lo  := high
+        fvg_hi  := low[2]
+        fvg_dir := -1
+        if showFVG
+            box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                    border_color=color.new(color.red, 20), border_width=1,
+                    bgcolor=color.new(color.red, 83))
+
+// ── PM FVG RESET — fresh search at 18:00 for second attempt ──────────
+// When PM window opens and we still have budget, wipe the SB FVG so a
+// new 20pt gap can be found in the PM session using the same day bias.
+if barstate.isconfirmed and in_pm and not in_pm[1] and day_bias != 0 and trades_today < maxTrades and strategy.position_size == 0
+    fvg_dir := 0
+    fvg_hi  := na
+    fvg_lo  := na
+
+// ── ENTRY ─────────────────────────────────────────────────────────────
+_in_entry  = (tradeInSB and in_sb_ext) or (tradeInPM and in_pm)
+_bos_ready = not reqBOS or (day_bias == 1 ? bos_long : bos_short)
+
+if barstate.isconfirmed and _in_entry and trades_today < maxTrades and day_bias != 0 and fvg_dir != 0 and _bos_ready and strategy.position_size == 0 and not in_close
+
+    // LONG
+    _smt_l = not useSMT or smt_bull_ok
+    if day_bias == 1 and fvg_dir == 1 and _smt_l and not na(fvg_lo) and not na(fvg_hi)
+        if low <= fvg_hi and high >= fvg_lo
+            ep   = close
+            sl   = fvg_lo - atrVal * slBuf
+            dist = ep - sl
+            if dist > 0
+                tp           = ep + dist * tpMult
+                trades_today += 1
+                lbl          = smt_ok and sw_lo ? "L  A+" : sw_lo ? "L  A" : "L  B"
+                strategy.entry("NAS-L", strategy.long, comment="session-L")
+                strategy.exit("NAS-L-X", from_entry="NAS-L", stop=sl, limit=tp)
+                label.new(bar_index, low - atrVal * 0.35, lbl,
+                          style=label.style_label_up, color=color.teal, textcolor=color.white, size=size.small)
+                line.new(bar_index, ep, bar_index + 45, ep, color=color.teal, width=1)
+                line.new(bar_index, sl, bar_index + 45, sl, color=color.red,  width=1, style=line.style_dashed)
+                line.new(bar_index, tp, bar_index + 45, tp, color=color.lime, width=1, style=line.style_dashed)
+
+    // SHORT
+    _smt_s = not useSMT or smt_bear_ok
+    if day_bias == -1 and fvg_dir == -1 and _smt_s and not na(fvg_lo) and not na(fvg_hi)
+        if high >= fvg_lo and low <= fvg_hi
+            ep   = close
+            sl   = fvg_hi + atrVal * slBuf
+            dist = sl - ep
+            if dist > 0
+                tp           = ep - dist * tpMult
+                trades_today += 1
+                lbl          = smt_ok and sw_hi ? "S  A+" : sw_hi ? "S  A" : "S  B"
+                strategy.entry("NAS-S", strategy.short, comment="session-S")
+                strategy.exit("NAS-S-X", from_entry="NAS-S", stop=sl, limit=tp)
+                label.new(bar_index, high + atrVal * 0.35, lbl,
+                          style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+                line.new(bar_index, ep, bar_index + 45, ep, color=color.red,  width=1)
+                line.new(bar_index, sl, bar_index + 45, sl, color=color.red,  width=1, style=line.style_dashed)
+                line.new(bar_index, tp, bar_index + 45, tp, color=color.lime, width=1, style=line.style_dashed)
+
+// ── HARD CLOSE 19:30 UTC ──────────────────────────────────────────────
+if barstate.isconfirmed and in_close and strategy.position_size != 0
+    strategy.close_all("hard-close")
+
+// ── SESSION BACKGROUNDS ───────────────────────────────────────────────
+bgcolor(in_asian  ? color.new(color.purple, 93) : na, title="Asian")
+bgcolor(in_london ? color.new(color.orange, 90) : na, title="London")
+bgcolor(in_sb     ? color.new(color.lime,   85) : na, title="Silver Bullet")
+bgcolor(in_pm     ? color.new(color.aqua,   90) : na, title="PM Window")
+
+// ── STATUS TABLE ──────────────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 11,
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 40), frame_width=1)
+
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    biasStr = day_bias ==  1 ? "BULLISH"  : day_bias == -1 ? "BEARISH"  : "NO TRADE"
+    biasCol = day_bias ==  1 ? color.lime : day_bias == -1 ? color.red  : color.gray
+    swpStr  = sw_lo and sw_hi ? "BOTH->H4 TB" : sw_lo ? "Asian LO swept" : sw_hi ? "Asian HI swept" : ldn_locked ? "No sweep" : "Pending"
+    swpCol  = sw_lo and not sw_hi ? color.lime : sw_hi and not sw_lo ? color.red : sw_lo and sw_hi ? color.orange : color.gray
+    smtStr  = smt_bull_ok and smt_bear_ok ? "BULL+BEAR" : smt_bull_ok ? "BULL" : smt_bear_ok ? "BEAR" : ldn_locked ? "NONE" : "--"
+    h4Str   = h4B ==  1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT"
+    h4Col   = h4B ==  1 ? color.lime : h4B == -1 ? color.red : color.gray
+    asiStr  = asian_locked ? str.tostring(math.round(asian_lo)) + " - " + str.tostring(math.round(asian_hi)) : "Building"
+    bosStr  = day_bias ==  1 ? (bos_long  ? "BROKEN UP" : orb_locked ? "Waiting" : "Pending") : day_bias == -1 ? (bos_short ? "BROKEN DN" : orb_locked ? "Waiting" : "Pending") : "--"
+    bosCol  = (day_bias == 1 and bos_long) or (day_bias == -1 and bos_short) ? color.lime : orb_locked ? color.orange : color.gray
+    fvgStr  = fvg_dir ==  1 ? "BULL FVG set" : fvg_dir == -1 ? "BEAR FVG set" : day_bias != 0 ? "Watching" : "--"
+    fvgCol  = fvg_dir ==  1 ? color.teal : fvg_dir == -1 ? color.red : color.gray
+    trdStr  = trades_today >= maxTrades ? str.tostring(trades_today) + "/" + str.tostring(maxTrades) + " DONE" : trades_today > 0 ? str.tostring(trades_today) + "/" + str.tostring(maxTrades) + " FIRED" : day_bias != 0 and _bos_ready and fvg_dir != 0 ? "ARMED" : day_bias != 0 ? "STAGING" : "NO TRADE"
+    trdCol  = trades_today >= maxTrades ? color.gray : trades_today > 0 ? color.aqua : day_bias != 0 and _bos_ready and fvg_dir != 0 ? color.lime : color.orange
+    sessStr = in_close ? "CLOSED" : in_pm ? "PM" : in_sb ? "SILV BULL" : in_ny_kz ? "NY KZ" : in_orb_w ? "ORB BUILD" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF HRS"
+    sessCol = in_sb or in_ny_kz ? color.lime : in_pm ? color.aqua : in_london ? color.orange : in_asian ? color.purple : in_close ? color.red : color.gray
+
+    table.cell(tbl, 0, 0,  "QB NAS SESSION", bgcolor=color.new(color.navy, 10), text_color=color.white,  text_size=size.small, text_halign=text.align_center)
+    table.cell(tbl, 1, 0,  syminfo.ticker,   bgcolor=color.new(color.navy, 10), text_color=color.yellow, text_size=size.small, text_halign=text.align_center)
+    table.cell(tbl, 0, 1,  "Narrative",      bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 1,  biasStr,          text_color=biasCol,  text_size=size.tiny)
+    table.cell(tbl, 0, 2,  "London Sweep",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 2,  swpStr,           text_color=swpCol,   text_size=size.tiny)
+    table.cell(tbl, 0, 3,  "SMT Div",        bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    _smtCol = day_bias == 1 ? (smt_bull_ok ? color.lime : color.red) : day_bias == -1 ? (smt_bear_ok ? color.lime : color.red) : color.gray
+    table.cell(tbl, 1, 3,  smtStr,           text_color=_smtCol, text_size=size.tiny)
+    table.cell(tbl, 0, 4,  "H4 EMA200",      bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 4,  h4Str,            text_color=h4Col,    text_size=size.tiny)
+    table.cell(tbl, 0, 5,  "Asian Range",    bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 5,  asiStr,           text_color=asian_locked ? color.white : color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 6,  "ORB BOS",        bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 6,  bosStr,           text_color=bosCol,   text_size=size.tiny)
+    table.cell(tbl, 0, 7,  "FVG",            bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 7,  fvgStr,           text_color=fvgCol,   text_size=size.tiny)
+    table.cell(tbl, 0, 8,  "Trade",          bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 8,  trdStr,           text_color=trdCol,   text_size=size.tiny)
+    table.cell(tbl, 0, 9,  "ATR",            bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 9,  str.tostring(math.round(atrVal, 1)) + " pts", text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 10, "Session",        bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 10, sessStr,          text_color=sessCol,  text_size=size.tiny)

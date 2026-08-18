@@ -1,0 +1,514 @@
+//@version=6
+indicator("Quantum Bot — NAS100 Specialist", "QB NAS100", overlay=true,
+          max_bars_back=500, max_labels_count=200, max_lines_count=200, max_boxes_count=200)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  QUANTUM BOT — NAS100 SESSION INTELLIGENCE SPECIALIST  (5m / 15m)
+//  ─────────────────────────────────────────────────────────────────────────
+//  TJR 3-phase narrative framework:
+//    PHASE 1 · ASIAN  (00:00–07:00 UTC)  — overnight range, liquidity targets
+//    PHASE 2 · LONDON (07:00–13:30 UTC)  — manipulation; sweep Asian H or L
+//    PHASE 3 · NY     (13:30–16:00 UTC)  — distribution; ORB BOS then FVG entry
+//
+//  Confirmed best (backtested):
+//    London→Asian sweep ON, ORB BOS ON, SMT OFF, H4 OFF
+//    Min FVG 20pts, TP 2R, Window 14:00–16:00 UTC
+//    → 59.72% WR / PF 2.507 / 72 trades/yr
+//
+//  Alert: template="nas100-specialist"  zoneType="AMD-FVG"
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Security constraint — hardcoded: never move to input or alerts will break
+WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
+
+// ─── INPUT GROUPS ────────────────────────────────────────────────────────
+G_CORE = "Core"
+G_FILT = "Filters"
+G_VIS  = "Visuals"
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────
+modBoth    = input.bool(true,  "Trade both LONG + SHORT",              group=G_CORE)
+tpMult     = input.float(2.0,  "TP multiplier (× R)",                  group=G_CORE, minval=0.5,  maxval=5.0,   step=0.5)
+slBuf      = input.float(0.15, "SL buffer (× ATR)",                    group=G_CORE, minval=0.05, maxval=0.5,   step=0.05)
+maxTrades  = input.int(1,      "Max signals per day",                  group=G_CORE, minval=1,    maxval=3)
+
+reqSweep   = input.bool(true,  "Require London→Asian sweep for bias",  group=G_FILT,
+             tooltip="ON = confirmed best. Only enter when London swept Asian H or L and closed back inside.")
+reqBOS     = input.bool(true,  "Require ORB break before entry (BOS)", group=G_FILT,
+             tooltip="ON = confirmed best. Wait for a bar to close beyond ORB in bias direction.")
+useSMT     = input.bool(false, "SMT: require SP500 divergence",        group=G_FILT,
+             tooltip="OFF = confirmed best. NAS sweeps Asian level but SP500 does not.")
+useH4      = input.bool(false, "H4 EMA200 must agree with narrative",  group=G_FILT,
+             tooltip="OFF = confirmed best. London sweep is the bias signal — H4 filter kills too many valid days.")
+fvgMinPts  = input.float(20.0, "Min FVG size (index pts)",             group=G_FILT,
+             minval=2.0, maxval=100.0, step=2.0,
+             tooltip="20pts = 59.72% WR / PF 2.507 / 72 trades/yr (confirmed best).")
+atrLen     = input.int(14,     "ATR period",                           group=G_FILT, minval=5, maxval=50)
+emaLen     = input.int(200,    "HTF EMA period",                       group=G_FILT, minval=20, maxval=500)
+
+showAsnBox = input.bool(true,  "Asian range box",                      group=G_VIS)
+showLdnBox = input.bool(true,  "London range box",                     group=G_VIS)
+showOrbBox = input.bool(true,  "ORB box",                              group=G_VIS)
+showFvgBox = input.bool(true,  "FVG zone box",                         group=G_VIS)
+showPosBox = input.bool(true,  "Position box on fire",                 group=G_VIS)
+posBoxBars = input.int(40,     "Position box width (bars)",            group=G_VIS, minval=5, maxval=200)
+showPD     = input.bool(true,  "Prev-day H/L lines",                  group=G_VIS)
+showTbl    = input.bool(true,  "Corner status table",                  group=G_VIS)
+
+// ─── HTF BIAS (reporting + optional gate) ────────────────────────────────
+f_ema200(int p) =>
+    e = ta.ema(close, p)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+
+h4B    = request.security(syminfo.tickerid, "240", f_ema200(emaLen), lookahead=barmerge.lookahead_off)
+h1B    = request.security(syminfo.tickerid,  "60", f_ema200(emaLen), lookahead=barmerge.lookahead_off)
+hdB    = request.security(syminfo.tickerid,   "D", f_ema200(emaLen), lookahead=barmerge.lookahead_off)
+atrVal = ta.atr(atrLen)
+
+// SP500 for SMT divergence
+s5Hi = request.security("CAPITALCOM:US500", timeframe.period, high, lookahead=barmerge.lookahead_off)
+s5Lo = request.security("CAPITALCOM:US500", timeframe.period, low,  lookahead=barmerge.lookahead_off)
+
+// ─── SESSION GATES (UTC minutes) ─────────────────────────────────────────
+_mu     = hour(time, "UTC") * 60 + minute(time, "UTC")
+_newDay = ta.change(time("D")) != 0
+
+in_asian  = timeframe.isintraday and _mu >= 0   and _mu < 420
+in_london = timeframe.isintraday and _mu >= 420 and _mu < 810
+in_orb_w  = timeframe.isintraday and _mu >= 810 and _mu < 825
+in_ny     = timeframe.isintraday and _mu >= 810 and _mu < 1170   // FVG scan window
+in_sb_ext = timeframe.isintraday and _mu >= 840 and _mu < 960    // entry 14:00–16:00 UTC
+
+// ─── DAY OF WEEK ─────────────────────────────────────────────────────────
+_utcDow  = dayofweek(time, "UTC")
+_dowTier = (_utcDow == 3 or _utcDow == 4 or _utcDow == 5) ? "A" : _utcDow == 2 ? "B" : "C"
+_dowName = _utcDow == 4 ? "WED" : _utcDow == 3 ? "TUE" : _utcDow == 2 ? "MON" : _utcDow == 6 ? "FRI" : "THU"
+
+// ─── DAILY DATA ──────────────────────────────────────────────────────────
+_atr14d     = request.security(syminfo.tickerid, "D", ta.atr(14))
+_priorDayHi = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_off)
+_priorDayLo = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_off)
+_priorClose = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_off)
+_todayOpen  = request.security(syminfo.tickerid, "D", open)
+_todayHigh  = request.security(syminfo.tickerid, "D", high)
+_todayLow   = request.security(syminfo.tickerid, "D", low)
+
+_adrConsumed = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
+_gapSign     = _todayOpen > _priorClose ? 1 : _todayOpen < _priorClose ? -1 : 0
+_adrTierStr  = _adrConsumed >= 2.50 ? "OUTLIER"   :
+               _adrConsumed >= 1.50 ? "NEWS-EXT"  :
+               _adrConsumed >= 0.90 ? "EXHAUST"   :
+               _adrConsumed >= 0.75 ? "HIGH-PROB" : "BUILDING"
+
+// ─── CVD ─────────────────────────────────────────────────────────────────
+_signedVol    = close > open ? volume : close < open ? -volume : 0.0
+var float _cvdRunning = 0.0
+_cvdRunning  := _cvdRunning + _signedVol
+var float _cvdBase = 0.0
+if _newDay
+    _cvdBase := _cvdRunning - _signedVol
+cvd      = _cvdRunning - _cvdBase
+cvdMa    = ta.ema(cvd, 14)
+cvdSlope = cvd > cvd[1] and cvd > cvdMa ? "rising" : cvd < cvd[1] and cvd < cvdMa ? "falling" : "flat"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 1 · ASIAN RANGE  (00:00–07:00 UTC)
+// ═══════════════════════════════════════════════════════════════════════════
+var float asian_hi     = na
+var float asian_lo     = na
+var bool  asian_locked = false
+var float sp5_asian_hi = na
+var float sp5_asian_lo = na
+
+if _newDay
+    asian_hi     := na
+    asian_lo     := na
+    asian_locked := false
+    sp5_asian_hi := na
+    sp5_asian_lo := na
+
+if in_asian
+    asian_hi     := na(asian_hi)     ? high : math.max(asian_hi, high)
+    asian_lo     := na(asian_lo)     ? low  : math.min(asian_lo, low)
+    sp5_asian_hi := na(sp5_asian_hi) ? s5Hi : math.max(sp5_asian_hi, s5Hi)
+    sp5_asian_lo := na(sp5_asian_lo) ? s5Lo : math.min(sp5_asian_lo, s5Lo)
+
+if not in_asian and in_asian[1] and not na(asian_hi)
+    asian_locked := true
+    if showAsnBox
+        box.new(bar_index, asian_hi, bar_index + 360, asian_lo,
+                border_color=color.new(color.purple, 35), border_width=1,
+                bgcolor=color.new(color.purple, 91))
+        line.new(bar_index, asian_hi, bar_index + 360, asian_hi,
+                 color=color.new(color.purple, 40), style=line.style_dashed, width=1)
+        line.new(bar_index, asian_lo, bar_index + 360, asian_lo,
+                 color=color.new(color.purple, 40), style=line.style_dashed, width=1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 2 · LONDON SWEEP  (07:00–13:30 UTC)
+// ═══════════════════════════════════════════════════════════════════════════
+var float ldn_hi      = na
+var float ldn_lo      = na
+var bool  ldn_locked  = false
+var bool  sw_lo       = false   // London swept below Asian lo (bull bias)
+var bool  sw_hi       = false   // London swept above Asian hi (bear bias)
+var float sp5_ldn_lo  = na
+var float sp5_ldn_hi  = na
+
+var int   day_bias    = 0
+var bool  smt_bull_ok = false
+var bool  smt_bear_ok = false
+var bool  narr_set    = false
+
+if _newDay
+    ldn_hi      := na
+    ldn_lo      := na
+    ldn_locked  := false
+    sw_lo       := false
+    sw_hi       := false
+    sp5_ldn_lo  := na
+    sp5_ldn_hi  := na
+    day_bias    := 0
+    smt_bull_ok := false
+    smt_bear_ok := false
+    narr_set    := false
+
+if in_london and asian_locked
+    ldn_hi     := na(ldn_hi)     ? high : math.max(ldn_hi, high)
+    ldn_lo     := na(ldn_lo)     ? low  : math.min(ldn_lo, low)
+    sp5_ldn_lo := na(sp5_ldn_lo) ? s5Lo : math.min(sp5_ldn_lo, s5Lo)
+    sp5_ldn_hi := na(sp5_ldn_hi) ? s5Hi : math.max(sp5_ldn_hi, s5Hi)
+    if barstate.isconfirmed
+        if not sw_lo and low < asian_lo and close > asian_lo
+            sw_lo := true
+            label.new(bar_index, low, "⚡ Sweep L", style=label.style_label_up,
+                      color=color.new(color.purple, 10), textcolor=color.white, size=size.tiny)
+        if not sw_hi and high > asian_hi and close < asian_hi
+            sw_hi := true
+            label.new(bar_index, high, "⚡ Sweep H", style=label.style_label_down,
+                      color=color.new(color.orange, 10), textcolor=color.white, size=size.tiny)
+
+if not in_london and in_london[1] and not na(ldn_hi)
+    ldn_locked := true
+    if showLdnBox
+        box.new(bar_index, ldn_hi, bar_index + 260, ldn_lo,
+                border_color=color.new(color.orange, 35), border_width=1,
+                bgcolor=color.new(color.orange, 93))
+
+// Narrative: computed once when London closes
+if ldn_locked and not narr_set
+    narr_set    := true
+    smt_bull_ok := sw_lo and not na(sp5_asian_lo) and sp5_ldn_lo >= sp5_asian_lo
+    smt_bear_ok := sw_hi and not na(sp5_asian_hi) and sp5_ldn_hi <= sp5_asian_hi
+    raw          = sw_lo and not sw_hi ? 1 : sw_hi and not sw_lo ? -1 : sw_lo and sw_hi ? h4B : reqSweep ? 0 : h4B
+    day_bias    := (not useH4 or raw == 0 or raw == h4B) ? raw : 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 3a · ORB + BOS  (13:30–13:45 UTC)
+// ═══════════════════════════════════════════════════════════════════════════
+var float orb_hi     = na
+var float orb_lo     = na
+var bool  orb_locked = false
+var bool  bos_long   = false
+var bool  bos_short  = false
+
+if _newDay
+    orb_hi     := na
+    orb_lo     := na
+    orb_locked := false
+    bos_long   := false
+    bos_short  := false
+
+if in_orb_w
+    orb_hi := na(orb_hi) ? high : math.max(orb_hi, high)
+    orb_lo := na(orb_lo) ? low  : math.min(orb_lo, low)
+
+if not in_orb_w and in_orb_w[1] and not na(orb_hi)
+    orb_locked := true
+    if showOrbBox
+        box.new(bar_index, orb_hi, bar_index + 200, orb_lo,
+                border_color=color.new(color.blue, 40), border_width=1,
+                bgcolor=color.new(color.blue, 92))
+
+if orb_locked and barstate.isconfirmed and day_bias != 0
+    if not bos_long  and day_bias ==  1 and close > orb_hi
+        bos_long  := true
+        label.new(bar_index, low - atrVal * 0.2, "BOS▲",
+                  style=label.style_label_up, color=color.new(color.teal, 30),
+                  textcolor=color.white, size=size.tiny)
+    if not bos_short and day_bias == -1 and close < orb_lo
+        bos_short := true
+        label.new(bar_index, high + atrVal * 0.2, "BOS▼",
+                  style=label.style_label_down, color=color.new(color.red, 30),
+                  textcolor=color.white, size=size.tiny)
+
+if _newDay and showPD and not na(_priorDayHi) and not na(_priorDayLo)
+    line.new(bar_index, _priorDayHi, bar_index + 320, _priorDayHi,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+    line.new(bar_index, _priorDayLo, bar_index + 320, _priorDayLo,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 3b · FVG DETECTION  (from 13:30 UTC)
+// ═══════════════════════════════════════════════════════════════════════════
+// Bullish FVG: low > high[2]  → gap up; retrace down = long entry
+// Bearish FVG: low[2] > high  → gap down; retrace up  = short entry
+// ═══════════════════════════════════════════════════════════════════════════
+var float fvg_hi      = na
+var float fvg_lo      = na
+var int   fvg_dir     = 0
+var int   trades_today = 0
+var bool  long_fired  = false
+var bool  short_fired = false
+
+if _newDay
+    fvg_hi       := na
+    fvg_lo       := na
+    fvg_dir      := 0
+    trades_today := 0
+    long_fired   := false
+    short_fired  := false
+
+if barstate.isconfirmed and in_ny and day_bias != 0 and fvg_dir == 0
+    bgap = low > high[2] ? low - high[2] : 0.0
+    sgap = low[2] > high ? low[2] - high : 0.0
+    if day_bias == 1 and bgap >= fvgMinPts
+        fvg_lo  := high[2]
+        fvg_hi  := low
+        fvg_dir := 1
+        if showFvgBox
+            box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                    border_color=color.new(color.teal, 20), border_width=1,
+                    bgcolor=color.new(color.teal, 83))
+    else if modBoth and day_bias == -1 and sgap >= fvgMinPts
+        fvg_lo  := high
+        fvg_hi  := low[2]
+        fvg_dir := -1
+        if showFvgBox
+            box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                    border_color=color.new(color.red, 20), border_width=1,
+                    bgcolor=color.new(color.red, 83))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERT BUILDER
+// ═══════════════════════════════════════════════════════════════════════════
+f_buildAlert(string tmpl, string dir, float entry, float slP,
+             float tp1, float tp2, float tp3,
+             float zU, float zL, string zType,
+             string sess, string tier, string conf,
+             string filters, int minsIntoWin) =>
+    slRisk = math.abs(entry - slP)
+    rr1    = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2    = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3    = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    cvdOk  = dir == "LONG" ? cvdSlope == "rising" : cvdSlope == "falling"
+    dEmoji = dir == "LONG" ? "🟢" : "🔴"
+    readable = dEmoji + " " + syminfo.ticker + " · " + (dir == "LONG" ? "BUY" : "SELL") +
+               " · SI-NAS100 · " + timeframe.period + "m · Tier " + tier +
+               "\nZone: " + str.tostring(zL, format.mintick) + " – " + str.tostring(zU, format.mintick) +
+               "\nFilters: " + filters + "\n---\n"
+    head   = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"" + tmpl +
+              "\",\"direction\":\"" + dir +
+              "\",\"symbol\":\"" + syminfo.tickerid +
+              "\",\"timeframe\":\"" + timeframe.period +
+              "\",\"timestamp\":" + str.tostring(time)
+    prices = ",\"entry\":\""  + str.tostring(entry, format.mintick) +
+              "\",\"sl\":\""  + str.tostring(slP,   format.mintick) +
+              "\",\"tp1\":\"" + str.tostring(tp1,   format.mintick) +
+              "\",\"tp2\":\"" + str.tostring(tp2,   format.mintick) +
+              "\",\"tp3\":\"" + str.tostring(tp3,   format.mintick) +
+              "\",\"rr1\":"   + str.tostring(rr1,   "0.00") +
+              ",\"rr2\":"     + str.tostring(rr2,   "0.00") +
+              ",\"rr3\":"     + str.tostring(rr3,   "0.00")
+    zone   = ",\"zoneUpper\":\"" + str.tostring(zU, format.mintick) +
+              "\",\"zoneLower\":\"" + str.tostring(zL, format.mintick) +
+              "\",\"zoneType\":\"" + zType + "\""
+    htf    = ",\"activeSession\":\"" + sess +
+              "\",\"htfTier\":\"" + tier +
+              "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "/" + str.tostring(hdB) +
+              "\",\"htfBiasAlign\":" + str.tostring(tier == "A" ? 1 : 0) +
+              ",\"htfConfluence\":\"" + conf + "\""
+    ctx    = ",\"window\":\"" + sess +
+              "\",\"filters\":\"" + filters + "\"" +
+              ",\"cvdSlope\":\"" + cvdSlope + "\"" +
+              ",\"cvdConfirms\":" + str.tostring(cvdOk) +
+              ",\"barOpen\":\""  + str.tostring(open,  format.mintick) + "\"" +
+              ",\"barHigh\":\""  + str.tostring(high,  format.mintick) + "\"" +
+              ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
+              ",\"barClose\":\"" + str.tostring(close, format.mintick) + "\"" +
+              ",\"adrConsumed\":\"" + str.tostring(_adrConsumed, "#.####") + "\"" +
+              ",\"adrTier\":\""     + _adrTierStr + "\"" +
+              ",\"gapDir\":\""      + str.tostring(_gapSign) + "\"" +
+              ",\"priorDayPos\":\"" + str.tostring(_todayOpen > _priorDayHi ? 1 : _todayOpen < _priorDayLo ? -1 : 0) + "\"" +
+              ",\"dowTier\":\""     + _dowTier + "\"" +
+              ",\"dayOfWeek\":\""   + _dowName + "\"" +
+              ",\"minsIntoWindow\":" + str.tostring(minsIntoWin) +
+              ",\"apiKey\":\"" + WEBHOOK_KEY + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+f_drawPosBox(float e, float slP_, float tp_) =>
+    r = bar_index + posBoxBars
+    box.new(bar_index, math.max(e, tp_),  r, math.min(e, tp_),
+            border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+    box.new(bar_index, math.max(e, slP_), r, math.min(e, slP_),
+            border_color=color.new(color.red,  55), bgcolor=color.new(color.red,  90))
+    line.new(bar_index, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY + ALERT  (price retraces into FVG during 14:00–16:00 UTC)
+// ═══════════════════════════════════════════════════════════════════════════
+_bos_ready = not reqBOS or (day_bias == 1 ? bos_long : bos_short)
+
+if barstate.isconfirmed and in_sb_ext and trades_today < maxTrades and day_bias != 0 and fvg_dir != 0 and _bos_ready
+
+    // ── LONG ────────────────────────────────────────────────────────────────
+    _smt_l = not useSMT or smt_bull_ok
+    if day_bias == 1 and fvg_dir == 1 and _smt_l and not long_fired and not na(fvg_lo) and not na(fvg_hi)
+        if low <= fvg_hi and high >= fvg_lo
+            ep   = close
+            sl   = fvg_lo - atrVal * slBuf
+            dist = ep - sl
+            if dist > 0
+                tp1 = ep + dist * tpMult
+                tp2 = ep + dist * 3.0
+                tp3 = not na(_priorDayHi) and _priorDayHi > tp2 ? _priorDayHi : ep + dist * 4.0
+                if ep > sl and tp1 > ep
+                    swpStr = sw_lo ? "LDN-L✓" : "noSweep"
+                    bosStr = bos_long ? "BOS✓" : "noBOS"
+                    smtStr = smt_bull_ok ? "SMT✓" : "SMT?"
+                    tier   = smt_bull_ok and sw_lo ? "A" : "B"
+                    fStr   = swpStr + " " + bosStr + " " + smtStr +
+                             " H4:" + (h4B == 1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT") +
+                             " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                             " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+                    minsIn = math.max(0, _mu - 840)
+                    long_fired   := true
+                    trades_today += 1
+                    alert(f_buildAlert("nas100-specialist", "LONG", ep, sl,
+                                       tp1, tp2, tp3, asian_hi, asian_lo, "AMD-FVG",
+                                       "NY_AM", tier, "session-intel", fStr, minsIn),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, low - atrVal * 0.35, "⚡ SI LONG",
+                              style=label.style_label_up, color=color.teal,
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+    // ── SHORT ───────────────────────────────────────────────────────────────
+    _smt_s = not useSMT or smt_bear_ok
+    if modBoth and day_bias == -1 and fvg_dir == -1 and _smt_s and not short_fired and not na(fvg_lo) and not na(fvg_hi)
+        if high >= fvg_lo and low <= fvg_hi
+            ep   = close
+            sl   = fvg_hi + atrVal * slBuf
+            dist = sl - ep
+            if dist > 0
+                tp1 = ep - dist * tpMult
+                tp2 = ep - dist * 3.0
+                tp3 = not na(_priorDayLo) and _priorDayLo < tp2 ? _priorDayLo : ep - dist * 4.0
+                if ep < sl and tp1 < ep
+                    swpStr = sw_hi ? "LDN-H✓" : "noSweep"
+                    bosStr = bos_short ? "BOS✓" : "noBOS"
+                    smtStr = smt_bear_ok ? "SMT✓" : "SMT?"
+                    tier   = smt_bear_ok and sw_hi ? "A" : "B"
+                    fStr   = swpStr + " " + bosStr + " " + smtStr +
+                             " H4:" + (h4B == 1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT") +
+                             " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                             " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+                    minsIn = math.max(0, _mu - 840)
+                    short_fired  := true
+                    trades_today += 1
+                    alert(f_buildAlert("nas100-specialist", "SHORT", ep, sl,
+                                       tp1, tp2, tp3, asian_hi, asian_lo, "AMD-FVG",
+                                       "NY_AM", tier, "session-intel", fStr, minsIn),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, high + atrVal * 0.35, "⚡ SI SHORT",
+                              style=label.style_label_down, color=color.red,
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+// ─── STATUS TABLE ──────────────────────────────────────────────────────────
+var table stTbl = na
+
+if showTbl and barstate.islast
+    if na(stTbl)
+        stTbl := table.new(position.top_right, 2, 17,
+                           bgcolor=color.new(color.black, 70),
+                           border_color=color.new(color.gray, 60), border_width=1,
+                           frame_color=color.new(color.gray, 60), frame_width=1)
+
+    sess_label = in_sb_ext ? "ENTRY" : in_orb_w ? "ORB" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
+    sCol = in_sb_ext ? color.lime : in_orb_w ? color.yellow : in_london ? color.orange : in_asian ? color.purple : color.gray
+
+    adrCol   = _adrConsumed >= 2.50 ? color.red : _adrConsumed >= 1.50 ? color.orange :
+               _adrConsumed >= 0.90 ? color.yellow : _adrConsumed >= 0.75 ? color.lime : color.aqua
+    tierCol  = _dowTier == "A" ? color.lime : _dowTier == "B" ? color.yellow : color.gray
+    biasStr  = day_bias == 1 ? "BULL" : day_bias == -1 ? "BEAR" : "WAIT"
+    biasCol  = day_bias == 1 ? color.teal : day_bias == -1 ? color.red : color.gray
+    h4Str    = h4B ==  1 ? "LONG"  : h4B == -1 ? "SHORT" : "NEUT"
+    h4Col    = h4B ==  1 ? color.lime : h4B == -1 ? color.red : color.gray
+    swLStr   = sw_lo ? "SWEEP✓" : (asian_locked and in_london ? "watching" : "—")
+    swHStr   = sw_hi ? "SWEEP✓" : (asian_locked and in_london ? "watching" : "—")
+    swLCol   = sw_lo ? color.teal   : color.gray
+    swHCol   = sw_hi ? color.red    : color.gray
+    smtLStr  = smt_bull_ok ? "SMT✓" : (sw_lo ? "no-div" : "—")
+    smtHStr  = smt_bear_ok ? "SMT✓" : (sw_hi ? "no-div" : "—")
+    smtLHCol = smt_bull_ok or smt_bear_ok ? color.lime : color.gray
+    bosLStr  = bos_long  ? "BOS✓" : (day_bias ==  1 and orb_locked ? "waiting" : "—")
+    bosSStr  = bos_short ? "BOS✓" : (day_bias == -1 and orb_locked ? "waiting" : "—")
+    bosLCol  = bos_long  ? color.lime : color.gray
+    bosSCol  = bos_short ? color.lime : color.gray
+    asnStr   = asian_locked and not na(asian_hi) ?
+               str.tostring(asian_hi, format.mintick) + " / " + str.tostring(asian_lo, format.mintick) : "—"
+    fvgStr   = fvg_dir != 0 and not na(fvg_lo) ?
+               str.tostring(fvg_lo, format.mintick) + "–" + str.tostring(fvg_hi, format.mintick) :
+               (in_ny and day_bias != 0 ? "scanning…" : "—")
+    fvgCol   = fvg_dir == 1 ? color.teal : fvg_dir == -1 ? color.red : color.gray
+    sigLStr  = long_fired  ? "FIRED" : (fvg_dir == 1  and in_sb_ext ? "armed" : day_bias ==  1 ? "waiting" : "—")
+    sigSStr  = short_fired ? "FIRED" : (fvg_dir == -1 and in_sb_ext ? "armed" : day_bias == -1 ? "waiting" : "—")
+    sigLCol  = long_fired  ? color.teal : fvg_dir == 1  and in_sb_ext ? color.lime : color.gray
+    sigSCol  = short_fired ? color.red  : fvg_dir == -1 and in_sb_ext ? color.lime : color.gray
+    cvdCol   = cvdSlope == "rising" ? color.teal : cvdSlope == "falling" ? color.red : color.gray
+
+    table.cell(stTbl, 0,  0, "QB NAS100 · SI",   text_color=color.new(#00BFFF,0),       text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_left)
+    table.cell(stTbl, 1,  0, syminfo.ticker + " · " + timeframe.period + "m",
+                             text_color=color.new(color.white,20),  text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_right)
+    table.cell(stTbl, 0,  1, "Session",           text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  1, sess_label,          text_color=color.new(sCol, 0),         text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  2, "DOW Tier",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  2, _dowName + " · " + _dowTier, text_color=color.new(tierCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  3, "ADR",               text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  3, str.tostring(math.round(_adrConsumed*100)) + "% · " + _adrTierStr, text_color=color.new(adrCol,0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  4, "Asian H/L",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  4, asnStr,              text_color=color.new(color.purple, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  5, "Sweep Low",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  5, swLStr,              text_color=color.new(swLCol, 0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  6, "Sweep High",        text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  6, swHStr,              text_color=color.new(swHCol, 0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  7, "SMT L / H",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  7, smtLStr + " / " + smtHStr, text_color=color.new(smtLHCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  8, "Day Bias",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  8, biasStr,             text_color=color.new(biasCol, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  9, "H4 EMA200",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  9, h4Str,               text_color=color.new(h4Col, 0),         text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 10, "ORB BOS L",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 10, bosLStr,             text_color=color.new(bosLCol, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 11, "ORB BOS S",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 11, bosSStr,             text_color=color.new(bosSCol, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 12, "FVG Zone",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 12, fvgStr,              text_color=color.new(fvgCol, 0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 13, "Signal L",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 13, sigLStr,             text_color=color.new(sigLCol, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 14, "Signal S",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 14, sigSStr,             text_color=color.new(sigSCol, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 15, "Trades",            text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 15, str.tostring(trades_today) + " / " + str.tostring(maxTrades),
+                             text_color=color.new(trades_today >= maxTrades ? color.red : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 16, "CVD",               text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 16, cvdSlope,            text_color=color.new(cvdCol, 0),        text_size=size.tiny, text_halign=text.align_right)
+
+// ─── SESSION BACKGROUNDS ─────────────────────────────────────────────────
+bgcolor(in_asian  ? color.new(color.purple, 93) : na, title="Asian (00:00–07:00 UTC)")
+bgcolor(in_london ? color.new(color.orange, 90) : na, title="London (07:00–13:30 UTC)")
+bgcolor(in_orb_w  ? color.new(color.blue,   87) : na, title="ORB (13:30–13:45 UTC)")
+bgcolor(in_sb_ext ? color.new(color.lime,   83) : na, title="Entry (14:00–16:00 UTC)")

@@ -32,7 +32,7 @@ const V20_SPECIALIST_MODE = true;
 const SPECIALIST_ALLOWED_ZONES = {
   // Signal M (Frankfurt ORB) + Signal H (NY ORB) — both confirmed, H1+H4 bias, 0.75× TP
   'gold-specialist':   ['FRB', 'NYORB'],
-  'nas100-specialist': ['ORB'],            // NYSE ORB LONG — H4 EMA200, 1.0× TP
+  'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
 };
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -486,6 +486,15 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       const _lotRaw = _sr ? await _sr.get('v20:gold:lot').catch(() => null) : null;
       const _lot    = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 0.10;
       decision.finalLot = Math.max(0.10, Math.min(10.00, _lot));
+    } catch (_) {}
+  }
+  // NAS100 V20 win-streak sizing: reads current lot from Redis, ±0.5 per win/loss, 1.00–10.00
+  if (assetId === 'nas100') {
+    try {
+      const _sr = getRedis();
+      const _lotRaw = _sr ? await _sr.get('v20:nas100:lot').catch(() => null) : null;
+      const _lot    = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 1.00;
+      decision.finalLot = Math.max(1.00, Math.min(10.00, _lot));
     } catch (_) {}
   }
   const finalLot = decision.finalLot;

@@ -504,24 +504,41 @@ async function managePosition(position) {
   }
   hitRungs.sort((a, b) => (isLong ? b.price - a.price : a.price - b.price));
 
-  // deepest hit rung that is a valid stop right now AND improves the current SL
+  const isSpecialistTrade = !!(matchedPending?.setup && SPECIALIST_SIGNALS.includes(matchedPending.setup.template));
   let chosen = null;
-  for (const c of hitRungs) {
-    const valid    = isLong ? c.price <= currentPrice - stopBuffer : c.price >= currentPrice + stopBuffer;
-    const improves = curSL == null ? true : (isLong ? c.price > curSL : c.price < curSL);
-    if (valid && improves) { chosen = c; break; }
-  }
 
-  // ─── SCALP: override SL target to entry (break-even) after any TP hit ───────
-  // Day trades lock SL at the TP price and ride to the next target.
-  // Scalp (ORB) trades lock SL at entry — capturing 0R guaranteed — then let
-  // the trade close at TP1 or break-even. Never ride a scalp back to the original SL.
-  if (isScalp && chosen && !chosen.name.endsWith('-retrace')) {
-    const beSL       = isLong ? state.entry : state.entry;
-    const beImproves = curSL == null || (isLong ? beSL > curSL : beSL < curSL);
-    const beValid    = isLong ? beSL <= currentPrice - stopBuffer : beSL >= currentPrice + stopBuffer;
-    if (beImproves && beValid) {
-      chosen = { name: chosen.name + '-be', price: beSL };
+  if (isSpecialistTrade && hitRungs.length > 0) {
+    // ─── SPECIALIST SL CASCADE (gold-specialist / nas100-specialist) ──────────
+    // ICT/SMC risk management: each confirmed TP locks the previous level, not itself.
+    //   TP1 hit → SL moves to breakeven (entry)   — trade becomes risk-free
+    //   TP2 hit → SL moves to TP1 price           — 1R locked in guaranteed
+    //   TP3/final → full close (handled by final backstop above)
+    const deepest  = hitRungs[0]; // already sorted deepest-profit first
+    const deepIdx  = parseInt(deepest.name.slice(2), 10) - 1; // 0=TP1, 1=TP2, …
+    const slTarget = deepIdx === 0 ? state.entry : tpLevels[deepIdx - 1].price;
+    const valid    = isLong ? slTarget <= currentPrice - stopBuffer : slTarget >= currentPrice + stopBuffer;
+    const improves = curSL == null ? true : (isLong ? slTarget > curSL : slTarget < curSL);
+    if (valid && improves) {
+      chosen = { name: deepest.name + (deepIdx === 0 ? '-be' : ''), price: slTarget };
+    }
+  } else {
+    // ─── STANDARD: deepest hit rung that is valid and improves current SL ────
+    for (const c of hitRungs) {
+      const valid    = isLong ? c.price <= currentPrice - stopBuffer : c.price >= currentPrice + stopBuffer;
+      const improves = curSL == null ? true : (isLong ? c.price > curSL : c.price < curSL);
+      if (valid && improves) { chosen = c; break; }
+    }
+    // ─── SCALP: override SL target to entry (break-even) after any TP hit ───
+    // Day trades lock SL at the TP price and ride to the next target.
+    // Scalp (ORB) trades lock SL at entry — capturing 0R guaranteed — then let
+    // the trade close at TP1 or break-even. Never ride a scalp back to the original SL.
+    if (isScalp && chosen && !chosen.name.endsWith('-retrace')) {
+      const beSL       = isLong ? state.entry : state.entry;
+      const beImproves = curSL == null || (isLong ? beSL > curSL : beSL < curSL);
+      const beValid    = isLong ? beSL <= currentPrice - stopBuffer : beSL >= currentPrice + stopBuffer;
+      if (beImproves && beValid) {
+        chosen = { name: chosen.name + '-be', price: beSL };
+      }
     }
   }
 
@@ -1005,6 +1022,17 @@ async function detectAndProcessClosed(currentOpenIds) {
         if (_newLot !== _curLot) await r.set('v20:gold:lot', _newLot.toFixed(2)).catch(() => {});
       } catch (_) {}
     }
+    // NAS100 V20 lot adjustment: +0.5 per win, -0.5 per loss, clamped 1.00–10.00
+    if (state.asset === 'nas100') {
+      try {
+        const _lotRaw  = await r.get('v20:nas100:lot').catch(() => null);
+        const _curLot  = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 1.00;
+        let   _newLot  = _curLot;
+        if      (totalPnL > 0.5)  _newLot = Math.min(10.00, Math.round((_curLot + 0.5) * 100) / 100);
+        else if (totalPnL < -0.5) _newLot = Math.max(1.00,  Math.round((_curLot - 0.5) * 100) / 100);
+        if (_newLot !== _curLot) await r.set('v20:nas100:lot', _newLot.toFixed(2)).catch(() => {});
+      } catch (_) {}
+    }
 
     try {
       const tpsHit    = state.tpsHit || [];
@@ -1012,10 +1040,13 @@ async function detectAndProcessClosed(currentOpenIds) {
       const _isV20    = SPECIALIST_SIGNALS.includes(_tmpl);
 
       if (_isV20) {
-        // V20 specialist close — for gold, read updated lot so message shows next trade size
+        // V20 specialist close — read updated lot so message shows next trade size
         let _nextLot = null;
         if (state.asset === 'gold') {
           const _lotAfterRaw = await r.get('v20:gold:lot').catch(() => null);
+          _nextLot = _lotAfterRaw ? Math.round(parseFloat(_lotAfterRaw) * 100) / 100 : null;
+        } else if (state.asset === 'nas100') {
+          const _lotAfterRaw = await r.get('v20:nas100:lot').catch(() => null);
           _nextLot = _lotAfterRaw ? Math.round(parseFloat(_lotAfterRaw) * 100) / 100 : null;
         }
         const _zoneType    = matchedPending.setup?.zoneType || null;

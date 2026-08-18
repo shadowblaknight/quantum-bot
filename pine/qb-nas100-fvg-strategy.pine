@@ -1,0 +1,185 @@
+//@version=6
+strategy("QB NAS100 AMD-FVG", "AMD-FVG", overlay=true,
+         default_qty_type        = strategy.fixed,
+         default_qty_value       = 1,
+         initial_capital         = 100000,
+         commission_type         = strategy.commission.cash_per_contract,
+         commission_value        = 0,
+         slippage                = 2,
+         process_orders_on_close = true,
+         max_bars_back           = 500)
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+tpMult      = input.float(1.25,  "TP multiplier (x R)",      minval=0.25, maxval=5.0,   step=0.25)
+atrBuffer   = input.float(0.20,  "SL ATR buffer (x ATR)",    minval=0.05, maxval=1.00,  step=0.05)
+emaLen      = input.int(200,     "HTF EMA period",            minval=50,   maxval=500)
+atrLen      = input.int(14,      "ATR period",                minval=5,    maxval=50)
+minSweepMul = input.float(0.10,  "Min Judas sweep (x ATR)",  minval=0.02, maxval=0.50,  step=0.02)
+modBoth     = input.bool(true,   "Trade both LONG + SHORT")
+requireH4   = input.bool(true,   "Require H4 EMA200 bias")
+showFvgBox  = input.bool(true,   "Show FVG zones")
+
+// ─── HTF BIAS ─────────────────────────────────────────────────────────────────
+f_bias(int emaLen_, int atrLen_) =>
+    e = ta.ema(close, emaLen_)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen_)
+    [b, a]
+
+[h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_bias(emaLen, atrLen), lookahead=barmerge.lookahead_off)
+atrVal = ta.atr(atrLen)
+
+// ─── SESSION (UTC) ─────────────────────────────────────────────────────────────
+// Pre-market : UTC 11:00–13:30  (ET 07:00–09:30)
+// Judas      : UTC 13:30–14:00  (ET 09:30–10:00)
+// Silver Blt : UTC 14:00–15:00  (ET 10:00–11:00)
+_minOfDay    = hour(time, "UTC") * 60 + minute(time, "UTC")
+in_premarket = timeframe.isintraday and (_minOfDay >= 660 and _minOfDay < 810)
+in_judas_win = timeframe.isintraday and (_minOfDay >= 810 and _minOfDay < 840)
+in_sb_win    = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 900)
+_newDay      = ta.change(time("D")) != 0
+
+// ─── PRE-MARKET RANGE ─────────────────────────────────────────────────────────
+var float pm_hi     = na
+var float pm_lo     = na
+var bool  pm_locked = false
+
+if _newDay
+    pm_hi     := na
+    pm_lo     := na
+    pm_locked := false
+
+if in_premarket and not pm_locked
+    pm_hi := na(pm_hi) ? high : math.max(pm_hi, high)
+    pm_lo := na(pm_lo) ? low  : math.min(pm_lo, low)
+
+if not in_premarket and in_premarket[1] and not na(pm_hi) and not na(pm_lo)
+    pm_locked := true
+    if showFvgBox
+        box.new(bar_index - 36, pm_hi, bar_index + 250, pm_lo,
+                border_color=color.new(color.blue, 55), border_width=1,
+                bgcolor=color.new(color.blue, 92))
+
+// ─── JUDAS SWEEP ──────────────────────────────────────────────────────────────
+var bool  judas_long_ok  = false
+var bool  judas_short_ok = false
+var float judas_wick_lo  = na
+var float judas_wick_hi  = na
+
+if _newDay
+    judas_long_ok  := false
+    judas_short_ok := false
+    judas_wick_lo  := na
+    judas_wick_hi  := na
+
+if pm_locked and in_judas_win and barstate.isconfirmed and not na(pm_lo) and not na(pm_hi)
+    minSweep = atrVal * minSweepMul
+    if not judas_long_ok and low < pm_lo and close > pm_lo and (pm_lo - low) >= minSweep
+        judas_long_ok := true
+        judas_wick_lo := na(judas_wick_lo) ? low : math.min(judas_wick_lo, low)
+        label.new(bar_index, low, "Judas L", style=label.style_label_up,
+                  color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    if modBoth and not judas_short_ok and high > pm_hi and close < pm_hi and (high - pm_hi) >= minSweep
+        judas_short_ok := true
+        judas_wick_hi  := na(judas_wick_hi) ? high : math.max(judas_wick_hi, high)
+        label.new(bar_index, high, "Judas S", style=label.style_label_down,
+                  color=color.new(color.red, 20), textcolor=color.white, size=size.tiny)
+
+// ─── POST-JUDAS FVG POOL ──────────────────────────────────────────────────────
+// Bullish FVG: high[2] < low   → gap above = LONG zone
+// Bearish FVG: low[2]  > high  → gap below = SHORT zone
+// Detected when bar closes (barstate.isconfirmed) in the SB window.
+// Entry guard: fvg_long_set[1] must be true → FVG formed on a PREVIOUS bar.
+var float fvg_long_lo   = na
+var float fvg_long_hi   = na
+var bool  fvg_long_set  = false
+var float fvg_short_hi  = na
+var float fvg_short_lo  = na
+var bool  fvg_short_set = false
+
+if _newDay
+    fvg_long_lo   := na
+    fvg_long_hi   := na
+    fvg_long_set  := false
+    fvg_short_hi  := na
+    fvg_short_lo  := na
+    fvg_short_set := false
+
+if barstate.isconfirmed and in_sb_win and pm_locked
+    if judas_long_ok and not fvg_long_set and high[2] < low
+        fvg_long_lo  := high[2]
+        fvg_long_hi  := low
+        fvg_long_set := true
+        if showFvgBox
+            box.new(bar_index - 2, fvg_long_hi, bar_index + 40, fvg_long_lo,
+                    border_color=color.new(color.teal, 25), border_width=1,
+                    bgcolor=color.new(color.teal, 83))
+    if modBoth and judas_short_ok and not fvg_short_set and low[2] > high
+        fvg_short_hi  := low[2]
+        fvg_short_lo  := high
+        fvg_short_set := true
+        if showFvgBox
+            box.new(bar_index - 2, fvg_short_hi, bar_index + 40, fvg_short_lo,
+                    border_color=color.new(color.red, 25), border_width=1,
+                    bgcolor=color.new(color.red, 83))
+
+// ─── ENTRY ─────────────────────────────────────────────────────────────────────
+var bool long_fired  = false
+var bool short_fired = false
+
+if _newDay
+    long_fired  := false
+    short_fired := false
+
+if barstate.isconfirmed and in_sb_win and pm_locked and strategy.position_size == 0
+
+    // LONG: price retraces INTO bullish FVG
+    if judas_long_ok and not long_fired and fvg_long_set and fvg_long_set[1]
+        if not na(fvg_long_lo) and not na(fvg_long_hi)
+            biasOk = not requireH4 or h4B == 1
+            inFvg  = low <= fvg_long_hi and high >= fvg_long_lo
+            if biasOk and inFvg
+                ep     = close
+                slP    = fvg_long_lo - atrVal * atrBuffer
+                slDist = ep - slP
+                if slDist > 0
+                    tp1 = ep + slDist * tpMult
+                    long_fired := true
+                    strategy.entry("AMD-L", strategy.long)
+                    strategy.exit("AMD-L-X", "AMD-L", limit=tp1, stop=slP)
+                    label.new(bar_index, low - atrVal * 0.5, "AMD L",
+                              style=label.style_label_up, color=color.teal,
+                              textcolor=color.white, size=size.small)
+                    line.new(bar_index, ep,   bar_index + 30, ep,   color=color.teal,  width=1)
+                    line.new(bar_index, slP,  bar_index + 30, slP,  color=color.red,   width=1, style=line.style_dashed)
+                    line.new(bar_index, tp1,  bar_index + 30, tp1,  color=color.lime,  width=1, style=line.style_dashed)
+
+    // SHORT: price retraces INTO bearish FVG
+    if modBoth and judas_short_ok and not short_fired and fvg_short_set and fvg_short_set[1]
+        if not na(fvg_short_lo) and not na(fvg_short_hi)
+            biasOk = not requireH4 or h4B == -1
+            inFvg  = high >= fvg_short_lo and low <= fvg_short_hi
+            if biasOk and inFvg
+                ep     = close
+                slP    = fvg_short_hi + atrVal * atrBuffer
+                slDist = slP - ep
+                if slDist > 0
+                    tp1 = ep - slDist * tpMult
+                    short_fired := true
+                    strategy.entry("AMD-S", strategy.short)
+                    strategy.exit("AMD-S-X", "AMD-S", limit=tp1, stop=slP)
+                    label.new(bar_index, high + atrVal * 0.5, "AMD S",
+                              style=label.style_label_down, color=color.red,
+                              textcolor=color.white, size=size.small)
+                    line.new(bar_index, ep,   bar_index + 30, ep,   color=color.red,   width=1)
+                    line.new(bar_index, slP,  bar_index + 30, slP,  color=color.red,   width=1, style=line.style_dashed)
+                    line.new(bar_index, tp1,  bar_index + 30, tp1,  color=color.lime,  width=1, style=line.style_dashed)
+
+// Hard close at 12:30 ET (UTC 16:30 = minute 990) — no overnight
+if barstate.isconfirmed and _minOfDay >= 990 and strategy.position_size != 0
+    strategy.close_all("hard-close")
+
+// ─── SESSION BACKGROUNDS ──────────────────────────────────────────────────────
+bgcolor(in_premarket ? color.new(color.blue,   92) : na, title="Pre-market")
+bgcolor(in_judas_win ? color.new(color.orange, 85) : na, title="Judas (9:30 ET)")
+bgcolor(in_sb_win    ? color.new(color.lime,   80) : na, title="Silver Bullet (10:00 ET)")

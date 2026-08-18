@@ -16,9 +16,10 @@ const TEMPLATE_LABELS = templateLabelMap();
 
 // Active specialist sub-signal labels (confirmed signals only)
 const ZONE_TYPE_LABELS = {
-  'FRB':   'Frankfurt ORB',   // Gold — Signal M
-  'NYORB': 'NY ORB',          // Gold — Signal H
-  'ORB':   'NYSE ORB',        // NAS100 — Signal A
+  'FRB':     'Frankfurt ORB',       // Gold — Signal M
+  'NYORB':   'NY ORB',              // Gold — Signal H
+  'ORB':     'NYSE ORB',            // NAS100 — Signal A
+  'AMD-FVG': 'Session Intel FVG',   // NAS100 — TJR session intel (Asian range → London sweep → ORB BOS → NY FVG)
 };
 
 const TG_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN';
