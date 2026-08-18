@@ -30,8 +30,9 @@ const V20_SPECIALIST_MODE = true;
 // If zoneType is NOT in this list the signal is silently dropped.
 // Update here when a new confirmed signal is unlocked in a specialist Pine.
 const SPECIALIST_ALLOWED_ZONES = {
-  // Signal M (Frankfurt ORB) + Signal H (NY ORB) — both confirmed, H1+H4 bias, 0.75× TP
-  'gold-specialist':   ['FRB', 'NYORB'],
+  // All 8 confirmed sub-signals from qb-gold-specialist.pine:
+  //   A=FVG  B=Asian-H/L (Judas)  C=SB-FVG  D=PSYCH  D2=PSYCH-EXT  M=FRB  H=NYORB
+  'gold-specialist':   ['FRB', 'NYORB', 'FVG', 'Asian-H', 'Asian-L', 'SB-FVG', 'PSYCH', 'PSYCH-EXT'],
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
 };
 

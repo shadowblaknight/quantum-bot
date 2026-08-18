@@ -14,12 +14,18 @@ const { templateLabelMap, TEMPLATE_META, SPECIALIST_META_MAP } = require('./_tem
 
 const TEMPLATE_LABELS = templateLabelMap();
 
-// Active specialist sub-signal labels (confirmed signals only)
+// All specialist sub-signal labels
 const ZONE_TYPE_LABELS = {
-  'FRB':     'Frankfurt ORB',       // Gold — Signal M
-  'NYORB':   'NY ORB',              // Gold — Signal H
-  'ORB':     'NYSE ORB',            // NAS100 — Signal A
-  'AMD-FVG': 'Session Intel FVG',   // NAS100 — TJR session intel (Asian range → London sweep → ORB BOS → NY FVG)
+  'FRB':      'Frankfurt ORB',       // Gold — Signal M
+  'NYORB':    'NY ORB',              // Gold — Signal H
+  'FVG':      'Gold FVG Retest',     // Gold — Signal A (London KZ / NY-Lon Overlap)
+  'Asian-H':  'Judas Sweep HIGH',    // Gold — Signal B (short; swept Asian high)
+  'Asian-L':  'Judas Sweep LOW',     // Gold — Signal B (long;  swept Asian low)
+  'SB-FVG':   'Silver Bullet FVG',   // Gold — Signal C (15-16 UTC window)
+  'PSYCH':    'Psych Level Bounce',  // Gold — Signal D (kill-zone round number)
+  'PSYCH-EXT':'Psych Level Extended',// Gold — Signal D2 (outside kill zone)
+  'ORB':      'NYSE ORB',            // NAS100 — Signal A
+  'AMD-FVG':  'Session Intel FVG',   // NAS100 — TJR session intel (Asian range → London sweep → ORB BOS → NY FVG)
 };
 
 const TG_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN';
