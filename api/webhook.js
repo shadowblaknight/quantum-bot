@@ -52,7 +52,8 @@ const _roundTick = (typeof roundToPipSize === 'function')
     };
 
 const PINE_TO_ASSET = {
-  XAUUSD: 'gold', EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy',
+  XAUUSD: 'gold', GOLD: 'gold', XAUUSDPRO: 'gold',  // gold aliases (TVC:GOLD, broker PRO variant)
+  EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy',
   // NAS100 aliases — data feeds label this instrument differently. Your feed
   // sends "NDQ" (visible in the alert), which had no mapping → 400 unknown symbol.
   NAS100: 'nas100', NDQ: 'nas100', US100: 'nas100', USTEC: 'nas100', NDX: 'nas100', USTECH: 'nas100',
@@ -903,7 +904,12 @@ module.exports = async (req, res) => {
   const rawSymbol = (p.symbol || '').toUpperCase();
   const colonIdx = rawSymbol.lastIndexOf(':');
   const pineTicker = (colonIdx >= 0 ? rawSymbol.slice(colonIdx + 1) : rawSymbol).replace(/[^A-Z0-9]/g, '');
-  const assetId = PINE_TO_ASSET[pineTicker];
+  // Broker-suffix fallback: some feeds append .s/.m/.d after the pair name.
+  // The regex above strips the dot but keeps the letter (XAUUSD.s → XAUUSDS).
+  // Try stripping 1 then 2 trailing chars to recover the base symbol.
+  const assetId = PINE_TO_ASSET[pineTicker]
+    || PINE_TO_ASSET[pineTicker.slice(0, -1)]
+    || PINE_TO_ASSET[pineTicker.slice(0, -2)];
   if (!assetId) return res.status(400).json({ ok: false, error: `unknown symbol: ${p.symbol}` });
 
   // 4b. v14 — Pine SKIP alert (tier-C open-space, or ORB width filter). This is
