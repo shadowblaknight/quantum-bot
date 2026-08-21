@@ -34,6 +34,7 @@ const SPECIALIST_ALLOWED_ZONES = {
   //   A=FVG  B=Asian-H/L (Judas)  C=SB-FVG  D=PSYCH  D2=PSYCH-EXT  M=FRB  H=NYORB
   'gold-specialist':   ['FRB', 'NYORB', 'FVG', 'Asian-H', 'Asian-L', 'SB-FVG', 'PSYCH', 'PSYCH-EXT'],
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
+  'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)
 };
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that

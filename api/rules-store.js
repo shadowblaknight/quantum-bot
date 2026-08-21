@@ -115,6 +115,12 @@ const DEFAULT_RULES = {
   },
 
   templateOverrides: {
+    // ── V20 Specialist signals (must be here or applyRulesToSignal returns template-disabled) ──
+    'gold-specialist':   { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥇 Gold Specialist' },
+    'nas100-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '📈 NAS100 Specialist' },
+    'gbpusd-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🇬🇧 GBPUSD Specialist' },
+    'forex-specialist':  { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '💱 Forex Specialist' },
+    // ── Legacy templates ──────────────────────────────────────────────────────────────────────
     'silver-bullet':    { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥈 Silver Bullet' },
     'unicorn':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🦄 Unicorn' },
     'turtle-soup':      { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🐢 Turtle Soup' },

@@ -1,0 +1,300 @@
+//@version=6
+strategy("QB USDCHF Specialist", "QB CHF", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.005,
+         slippage=2, max_bars_back=500, max_labels_count=200,
+         max_lines_count=50, max_boxes_count=50)
+
+// ─── GOLD CORRELATION FILTER ─────────────────────────────────────────
+// USDCHF carries a persistent ~-0.85 inverse correlation with XAUUSD.
+// Both are driven by USD strength + risk-off flows. Gold daily bias is
+// used as the primary macro trend filter instead of USDCHF's own D EMA:
+//   gold D bullish  → USDCHF SHORT bias
+//   gold D bearish  → USDCHF LONG  bias
+// H4 USDCHF EMA is used as a secondary confirmation (Tier A vs Tier B).
+
+// ─── MACRO FILTER ────────────────────────────────────────────────────
+G_MTF     = "Macro Filter (Gold Correlation)"
+emaLen    = input.int(50,       "EMA period (all TFs)",           group=G_MTF, minval=10, maxval=200)
+goldSym   = input.symbol("XAUUSD", "Gold symbol",                 group=G_MTF,
+                         tooltip="Symbol used for correlation bias. Change if your broker uses a different gold ticker (e.g. XAUUSD.pro).")
+requireH4 = input.bool(true,    "H4 USDCHF must confirm (Tier A)", group=G_MTF,
+                         tooltip="ON = Gold D + USDCHF H4 aligned. OFF = Gold D only (more trades, lower WR).")
+slBuf     = input.float(0.20,   "Global SL buffer (× ATR)",        group=G_MTF, minval=0.05, maxval=1.0, step=0.05)
+
+// ─── SETUP A: DAILY RANGE BREAK ──────────────────────────────────────
+G_A      = "A — Daily Range Break"
+useA     = input.bool(true,  "Enable Setup A",               group=G_A,
+                     tooltip="USDCHF close beyond yesterday's high/low during session. Momentum breakout.")
+tpRA     = input.float(1.5,  "TP (R)",                       group=G_A, minval=0.5, maxval=5.0, step=0.5)
+sesOnlyA = input.bool(true,  "Session filter (London+NY)",   group=G_A)
+minBreak = input.float(0.05, "Min clean break (× ATR)",      group=G_A, minval=0.0, maxval=0.30, step=0.01,
+                     tooltip="Close must exceed level by this fraction of ATR to avoid noise touches.")
+
+// ─── SETUP B: FAIR VALUE GAP ─────────────────────────────────────────
+G_B       = "B — Fair Value Gap"
+useB      = input.bool(true,  "Enable Setup B",               group=G_B,
+                      tooltip="3-bar imbalance on USDCHF. Enter when price retraces to fill the gap.")
+tpRB      = input.float(1.5,  "TP (R)",                       group=G_B, minval=0.5, maxval=5.0, step=0.5)
+sesOnlyB  = input.bool(true,  "Session filter (London+NY)",   group=G_B)
+minFvgDep = input.float(0.40, "Min departure body",           group=G_B, minval=0.0, maxval=0.80, step=0.05,
+                      tooltip="Middle bar body ratio when FVG formed. 0.40 = strong institutional move.")
+minFvgSz  = input.float(0.15, "Min FVG size (× ATR)",         group=G_B, minval=0.05, maxval=1.0,  step=0.05,
+                      tooltip="Filters micro-gaps smaller than 15% of ATR.")
+maxFvgAge = input.int(40,     "Max FVG age (bars)",            group=G_B, minval=5, maxval=200,
+                      tooltip="FVG expires after this many bars. H1: 40 bars ≈ 2 trading days.")
+
+// ─── SETUP C: H4 EMA BOUNCE ──────────────────────────────────────────
+G_C      = "C — H4 EMA Bounce"
+useC     = input.bool(true,  "Enable Setup C",               group=G_C,
+                     tooltip="USDCHF wicks into H4 EMA50 and closes back. Trend continuation.")
+tpRC     = input.float(1.5,  "TP (R)",                       group=G_C, minval=0.5, maxval=5.0, step=0.5)
+sesOnlyC = input.bool(true,  "Session filter (London+NY)",   group=G_C)
+minBdC   = input.float(0.30, "Min bounce body",              group=G_C, minval=0.0, maxval=0.80, step=0.05,
+                     tooltip="Candle body / range at EMA bounce. Filters weak wicks with no conviction close.")
+
+// ─── SESSIONS ────────────────────────────────────────────────────────
+G_SES = "Sessions"
+lonS = input.int(8,  "London start UTC", group=G_SES, minval=0, maxval=23)
+lonE = input.int(12, "London end UTC",   group=G_SES, minval=0, maxval=23)
+nyS  = input.int(13, "NY start UTC",     group=G_SES, minval=0, maxval=23)
+nyE  = input.int(18, "NY end UTC",       group=G_SES, minval=0, maxval=23)
+
+// ─── SESSION FLAGS ───────────────────────────────────────────────────
+_utcH  = hour(time, "UTC")
+_dow   = dayofweek(time, "UTC")
+_wday  = _dow >= 2 and _dow <= 6
+_inLon = _utcH >= lonS and _utcH < lonE
+_inNY  = _utcH >= nyS  and _utcH < nyE
+_inSes = _inLon or _inNY
+
+// ─── HTF DATA ────────────────────────────────────────────────────────
+// Gold daily — primary macro bias (inverted for USDCHF)
+f_gold(int el) =>
+    [ta.ema(close, el), close]
+
+[g_ema, g_cls] = request.security(goldSym, "D",
+    f_gold(emaLen), lookahead=barmerge.lookahead_off)
+
+// USDCHF daily — yesterday's high/low for Setup A
+f_d_levels() =>
+    [high[1], low[1]]
+
+[d_yhi, d_ylo] = request.security(syminfo.tickerid, "D",
+    f_d_levels(), lookahead=barmerge.lookahead_off)
+
+// USDCHF H4 — secondary confirmation + Setup C EMA bounce
+f_h4(int el) =>
+    [ta.ema(close, el), close, ta.atr(14)]
+
+[h4_ema, h4_cls, h4_atr] = request.security(syminfo.tickerid, "240",
+    f_h4(emaLen), lookahead=barmerge.lookahead_off)
+
+// ─── BIAS ────────────────────────────────────────────────────────────
+// Gold drives USDCHF direction (inverse correlation)
+gold_bull = not na(g_ema) and g_cls > g_ema   // gold up  → USDCHF SHORT
+gold_bear = not na(g_ema) and g_cls < g_ema   // gold down → USDCHF LONG
+
+h4_bull = not na(h4_ema) and h4_cls > h4_ema
+h4_bear = not na(h4_ema) and h4_cls < h4_ema
+
+trendL = gold_bear and (not requireH4 or h4_bull)   // USDCHF long conditions
+trendS = gold_bull and (not requireH4 or h4_bear)   // USDCHF short conditions
+tier   = (gold_bear and h4_bull) or (gold_bull and h4_bear) ? "A" : "B"
+
+// ─── ATR + CANDLE METRICS ─────────────────────────────────────────────
+_atr     = ta.atr(14)
+_rng     = math.max(high - low, syminfo.mintick)
+_bullBod = close > open ? (close - open) / _rng : 0.0
+_bearBod = close < open ? (open - close) / _rng : 0.0
+_h4Tol   = not na(h4_atr) and h4_atr > 0 ? h4_atr * 0.15 : _atr * 0.50
+
+// ─── SETUP A: DAILY RESET ────────────────────────────────────────────
+var bool a_doneL = false
+var bool a_doneS = false
+
+if ta.change(time("D")) != 0
+    a_doneL := false
+    a_doneS := false
+
+// ─── SETUP B: FVG ARRAYS ─────────────────────────────────────────────
+var float[] bf_lo = array.new<float>(0)
+var float[] bf_hi = array.new<float>(0)
+var int[]   bf_bi = array.new<int>(0)
+var float[] sf_lo = array.new<float>(0)
+var float[] sf_hi = array.new<float>(0)
+var int[]   sf_bi = array.new<int>(0)
+
+if barstate.isconfirmed and _wday
+
+    // Bullish FVG: gap between bar[2] high and current bar low
+    if low > high[2]
+        _mr  = math.max(high[1] - low[1], syminfo.mintick)
+        _dep = (close[1] - open[1]) / _mr
+        _sz  = low - high[2]
+        if _dep >= minFvgDep and gold_bear and _sz >= _atr * minFvgSz
+            array.unshift(bf_lo, high[2])
+            array.unshift(bf_hi, low)
+            array.unshift(bf_bi, bar_index)
+            while array.size(bf_lo) > 6
+                array.pop(bf_lo)
+                array.pop(bf_hi)
+                array.pop(bf_bi)
+
+    // Bearish FVG: gap between current bar high and bar[2] low
+    if high < low[2]
+        _mr  = math.max(high[1] - low[1], syminfo.mintick)
+        _dep = (open[1] - close[1]) / _mr
+        _sz  = low[2] - high
+        if _dep >= minFvgDep and gold_bull and _sz >= _atr * minFvgSz
+            array.unshift(sf_lo, high)
+            array.unshift(sf_hi, low[2])
+            array.unshift(sf_bi, bar_index)
+            while array.size(sf_lo) > 6
+                array.pop(sf_lo)
+                array.pop(sf_hi)
+                array.pop(sf_bi)
+
+    // Expire: too old or price closed through them
+    if array.size(bf_lo) > 0
+        for i = array.size(bf_lo) - 1 to 0
+            if bar_index - array.get(bf_bi, i) > maxFvgAge or close < array.get(bf_lo, i)
+                array.remove(bf_lo, i)
+                array.remove(bf_hi, i)
+                array.remove(bf_bi, i)
+
+    if array.size(sf_lo) > 0
+        for i = array.size(sf_lo) - 1 to 0
+            if bar_index - array.get(sf_bi, i) > maxFvgAge or close > array.get(sf_hi, i)
+                array.remove(sf_lo, i)
+                array.remove(sf_hi, i)
+                array.remove(sf_bi, i)
+
+// ─── ENTRIES ─────────────────────────────────────────────────────────
+var bool _fired = false
+
+if barstate.isconfirmed and _wday and strategy.opentrades == 0
+    _fired := false
+
+    // ── A: DAILY RANGE BREAK (highest priority) ───────────────────────
+    if useA and not _fired and (not sesOnlyA or _inSes)
+
+        if trendL and not a_doneL and not na(d_yhi) and close > d_yhi + _atr * minBreak
+            slP = d_yhi - _atr * slBuf
+            slD = math.abs(close - slP)
+            if slD > 0
+                strategy.entry("L-A", strategy.long, comment="A·" + tier)
+                strategy.exit("L-A·X", "L-A", stop=slP, limit=close + slD * tpRA)
+                a_doneL := true
+                _fired   := true
+
+        if not _fired and trendS and not a_doneS and not na(d_ylo) and close < d_ylo - _atr * minBreak
+            slP = d_ylo + _atr * slBuf
+            slD = math.abs(slP - close)
+            if slD > 0
+                strategy.entry("S-A", strategy.short, comment="A·" + tier)
+                strategy.exit("S-A·X", "S-A", stop=slP, limit=close - slD * tpRA)
+                a_doneS := true
+                _fired   := true
+
+    // ── B: FVG TOUCH ─────────────────────────────────────────────────
+    if useB and not _fired and (not sesOnlyB or _inSes)
+
+        if trendL and _bullBod >= 0.20 and array.size(bf_lo) > 0
+            for i = 0 to array.size(bf_lo) - 1
+                flo = array.get(bf_lo, i)
+                fhi = array.get(bf_hi, i)
+                if low <= fhi and close >= flo
+                    slP = flo - _atr * slBuf
+                    slD = math.abs(close - slP)
+                    if slD > 0
+                        strategy.entry("L-B", strategy.long, comment="B·" + tier)
+                        strategy.exit("L-B·X", "L-B", stop=slP, limit=close + slD * tpRB)
+                        _fired := true
+                        array.remove(bf_lo, i)
+                        array.remove(bf_hi, i)
+                        array.remove(bf_bi, i)
+                    break
+
+        if not _fired and trendS and _bearBod >= 0.20 and array.size(sf_lo) > 0
+            for i = 0 to array.size(sf_lo) - 1
+                flo = array.get(sf_lo, i)
+                fhi = array.get(sf_hi, i)
+                if high >= flo and close <= fhi
+                    slP = fhi + _atr * slBuf
+                    slD = math.abs(slP - close)
+                    if slD > 0
+                        strategy.entry("S-B", strategy.short, comment="B·" + tier)
+                        strategy.exit("S-B·X", "S-B", stop=slP, limit=close - slD * tpRB)
+                        _fired := true
+                        array.remove(sf_lo, i)
+                        array.remove(sf_hi, i)
+                        array.remove(sf_bi, i)
+                    break
+
+    // ── C: H4 EMA BOUNCE ─────────────────────────────────────────────
+    if useC and not _fired and (not sesOnlyC or _inSes) and not na(h4_ema)
+
+        if trendL and low <= h4_ema + _h4Tol and close > h4_ema and _bullBod >= minBdC
+            slP = h4_ema - _atr * slBuf
+            slD = math.abs(close - slP)
+            if slD > 0
+                strategy.entry("L-C", strategy.long, comment="C·" + tier)
+                strategy.exit("L-C·X", "L-C", stop=slP, limit=close + slD * tpRC)
+                _fired := true
+
+        if not _fired and trendS and high >= h4_ema - _h4Tol and close < h4_ema and _bearBod >= minBdC
+            slP = h4_ema + _atr * slBuf
+            slD = math.abs(slP - close)
+            if slD > 0
+                strategy.entry("S-C", strategy.short, comment="C·" + tier)
+                strategy.exit("S-C·X", "S-C", stop=slP, limit=close - slD * tpRC)
+
+// ─── PLOTS ───────────────────────────────────────────────────────────
+plot(d_yhi, "Yest High", color=color.new(color.orange, 45), linewidth=1, style=plot.style_stepline)
+plot(d_ylo, "Yest Low",  color=color.new(color.orange, 45), linewidth=1, style=plot.style_stepline)
+plot(h4_ema, "H4 EMA50", color=color.new(color.purple, 35), linewidth=2)
+
+bgcolor(_inLon ? color.new(color.yellow, 94) : na, title="London")
+bgcolor(_inNY  ? color.new(color.orange, 93) : na, title="New York")
+
+// ─── STATUS TABLE ────────────────────────────────────────────────────
+var table tbl = na
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    if na(tbl)
+        tbl := table.new(position.top_right, 2, 9,
+                         bgcolor=color.new(color.black, 70),
+                         border_color=color.new(color.gray, 60), border_width=1,
+                         frame_color=color.new(color.gray, 60), frame_width=1)
+
+    gBs  = gold_bull ? "BULL ▲" : gold_bear ? "BEAR ▼" : "FLAT"
+    h4Bs = h4_bull   ? "BULL ▲" : h4_bear   ? "BEAR ▼" : "FLAT"
+    uBs  = gold_bear ? "LONG  ▲" : gold_bull ? "SHORT ▼" : "FLAT"
+    gBc  = gold_bull ? color.red  : gold_bear ? color.lime : color.gray
+    h4Bc = h4_bull   ? color.lime : h4_bear   ? color.red  : color.gray
+    uBc  = gold_bear ? color.lime : gold_bull ? color.red  : color.gray
+    sC   = _inSes ? color.lime : color.gray
+    tC   = tier == "A" ? color.lime : color.orange
+
+    table.cell(tbl, 0, 0, "QB CHF",       text_color=color.new(color.aqua,  0),  text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_left)
+    table.cell(tbl, 1, 0, syminfo.ticker, text_color=color.new(color.white,20),  text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_right)
+    table.cell(tbl, 0, 1, "Session",      text_color=color.new(color.gray, 15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 1, _inLon ? "LONDON" : _inNY ? "NEW_YORK" : "OFF",
+                                          text_color=color.new(sC, 0),           text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 2, "Gold (XAU)",   text_color=color.new(color.gray, 15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 2, gBs,            text_color=color.new(gBc, 0),          text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 3, "CHF Bias",     text_color=color.new(color.gray, 15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 3, uBs,            text_color=color.new(uBc, 0),          text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 4, "H4 USDCHF",   text_color=color.new(color.gray, 15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 4, h4Bs,           text_color=color.new(h4Bc, 0),         text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 5, "Tier",         text_color=color.new(color.gray, 15),  text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 1, 5, tier,           text_color=color.new(tC, 0),           text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 6, "Bull FVGs",    text_color=color.new(color.teal, 0),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 6, str.tostring(array.size(bf_lo)),
+                                          text_color=color.new(color.teal, 0),   text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 7, "Bear FVGs",    text_color=color.new(color.red,  0),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 7, str.tostring(array.size(sf_lo)),
+                                          text_color=color.new(color.red,  0),   text_size=size.tiny, text_halign=text.align_right)
+    table.cell(tbl, 0, 8, "Open trades",  text_color=color.new(color.gray, 15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, 8, str.tostring(strategy.opentrades),
+                                          text_color=color.new(color.white,20),  text_size=size.tiny, text_halign=text.align_right)

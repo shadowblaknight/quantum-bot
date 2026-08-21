@@ -1,0 +1,426 @@
+// This source code is subject to the Mozilla Public License 2.0
+// shadowblaknight -- QB Gold H1 Specialist (Setups A/B/C/D)
+//@version=6
+strategy("QB Gold H1 - A/B/C/D",
+         shorttitle         = "QB-Gold-H1",
+         overlay            = true,
+         initial_capital    = 100000,
+         default_qty_type   = strategy.fixed,
+         default_qty_value  = 1,
+         pyramiding         = 4,
+         commission_type    = strategy.commission.percent,
+         commission_value   = 0.01,
+         calc_on_every_tick = false,
+         max_bars_back      = 500)
+
+// =================================================================
+//  INPUTS
+// =================================================================
+GA = "Setup A - FVG + BOS"
+GB = "Setup B - Judas Sweep"
+GC = "Setup C - Silver Bullet (15:00 UTC)"
+GD = "Setup D - Psych Level Bounce"
+GF = "Global Filters"
+
+modA = input.bool(true,  "Enable A", group=GA)
+modB = input.bool(true,  "Enable B", group=GB)
+modC = input.bool(true,  "Enable C", group=GC)
+modD = input.bool(true,  "Enable D", group=GD)
+
+tpA  = input.float(1.0, "TP (xR)", group=GA, minval=0.5, step=0.5)
+tpB  = input.float(1.0, "TP (xR)", group=GB, minval=0.5, step=0.5)
+tpC  = input.float(1.5, "TP (xR)", group=GC, minval=0.5, step=0.5)
+tpD  = input.float(1.0, "TP (xR)", group=GD, minval=0.5, step=0.5)
+
+// "none" = fire regardless of HTF bias  |  "any" = at least 1 aligned
+htfA     = input.string("any",  "HTF bias req.", group=GA, options=["any","2of3","all3"])
+htfC_req = input.string("any",  "HTF bias req.", group=GC, options=["any","2of3","all3"])
+htfD_req = input.string("any",  "HTF bias req.", group=GD, options=["any","2of3","all3"])
+htfB_req = input.string("none", "HTF bias req.", group=GB, options=["none","any","2of3"])
+
+atrLen   = input.int(14,    "ATR period",          group=GF, minval=5)
+emaLen   = input.int(20,    "EMA period",           group=GF, minval=5)
+swg      = input.int(3,     "Pivot SWG",            group=GF, minval=2, maxval=5)
+bosLB    = input.int(30,    "BOS alive (H1 bars)",  group=GF, minval=5, maxval=100)
+slBuf    = input.float(0.20,"SL buffer (xATR)",    group=GF, minval=0.05, step=0.05)
+slMin    = input.float(0.30,"SL min gate (xATR)",  group=GF, minval=0.05, step=0.05)
+slMax    = input.float(3.00,"SL max gate (xATR)",  group=GF, minval=1.0,  step=0.25)
+fvgGap   = input.float(0.10,"FVG min gap (xATR)",  group=GA, minval=0.05, step=0.05)
+fvgAge   = input.int(12,    "FVG max age (bars)",   group=GA, minval=4,   maxval=48)
+fvgFill  = input.float(0.50,"FVG max fill",         group=GA, minval=0.1)
+adrFVG   = input.float(0.85,"FVG/SB ADR max",      group=GF, minval=0.5, maxval=1.5)
+adrJudas = input.float(0.90,"Judas ADR max",       group=GF, minval=0.5, maxval=1.5)
+adrPsych = input.float(1.20,"Psych ADR max",       group=GF, minval=0.5, maxval=2.0)
+
+// =================================================================
+//  TIME  (all session windows in UTC)
+// =================================================================
+_H   = hour(time,      "UTC")
+_DOW = dayofweek(time, "UTC")
+
+isWD   = _DOW >= 2 and _DOW <= 6
+inAs   = _H < 8  and isWD
+inLon  = _H >= 8  and _H <= 10 and isWD
+inNY   = _H >= 13 and _H <= 16 and isWD
+inKZ   = (inLon or inNY)
+inSB   = _H == 15 and isWD
+// Setup A skips the 15:00 bar so Silver Bullet has priority
+inKZ_A = inKZ and not inSB
+
+_newDay = ta.change(dayofmonth(time, "UTC")) != 0
+
+// =================================================================
+//  ATR + HTF BIAS  (chart is already H1, so atr = H1 ATR)
+// =================================================================
+atr  = ta.atr(atrLen)
+h1em = ta.ema(close, emaLen)
+h1B  = close > h1em ? 1 : close < h1em ? -1 : 0
+
+h4cl = request.security(syminfo.tickerid, "240", close,                lookahead=barmerge.lookahead_off)
+h4em = request.security(syminfo.tickerid, "240", ta.ema(close, emaLen),lookahead=barmerge.lookahead_off)
+dcl  = request.security(syminfo.tickerid, "D",   close,                lookahead=barmerge.lookahead_off)
+dem  = request.security(syminfo.tickerid, "D",   ta.ema(close, emaLen),lookahead=barmerge.lookahead_off)
+
+h4B = h4cl > h4em ? 1 : h4cl < h4em ? -1 : 0
+dB  = dcl  > dem  ? 1 : dcl  < dem  ? -1 : 0
+
+f_htfOk(dir, req) =>
+    cnt = (h1B == dir ? 1 : 0) + (h4B == dir ? 1 : 0) + (dB == dir ? 1 : 0)
+    req == "none" or
+     (req == "any"  and cnt >= 1) or
+     (req == "2of3" and cnt >= 2) or
+     cnt >= 3
+
+// =================================================================
+//  ADR  (no lookahead -- running high/low excludes the current bar)
+// =================================================================
+dHi  = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
+dLo  = request.security(syminfo.tickerid, "D", low,  lookahead=barmerge.lookahead_off)
+dATR = ta.ema(dHi - dLo, 14)[1]
+
+var float rHi = na
+var float rLo = na
+if _newDay
+    rHi := high[1]
+    rLo := low[1]
+rHi := math.max(nz(rHi, high[1]), high[1])
+rLo := math.min(nz(rLo, low[1]),  low[1])
+adrC = dATR > 0 ? (rHi - rLo) / dATR : 0.0
+
+// =================================================================
+//  ASIAN RANGE  (built from confirmed Asian bars, locked at 08:00)
+// =================================================================
+var float arHi     = na
+var float arLo     = na
+var bool  arLocked = false
+
+if _newDay
+    arHi     := na
+    arLo     := na
+    arLocked := false
+
+if inAs and barstate.isconfirmed
+    arHi := na(arHi) ? high : math.max(arHi, high)
+    arLo := na(arLo) ? low  : math.min(arLo, low)
+
+// Lock must happen before Judas check below
+if _H == 8 and not arLocked
+    arLocked := true
+
+// =================================================================
+//  BOS DETECTION  (higher high / lower low on confirmed pivots)
+// =================================================================
+ph = ta.pivothigh(high, swg, swg)
+pl = ta.pivotlow (low,  swg, swg)
+
+var float prevPH    = na
+var float prevPL    = na
+var int   bosBullBi = na
+var int   bosBearBi = na
+
+if not na(ph)
+    if not na(prevPH) and ph > prevPH
+        bosBullBi := bar_index
+    prevPH := ph
+
+if not na(pl)
+    if not na(prevPL) and pl < prevPL
+        bosBearBi := bar_index
+    prevPL := pl
+
+bosBull = not na(bosBullBi) and (bar_index - bosBullBi) <= bosLB
+bosBear = not na(bosBearBi) and (bar_index - bosBearBi) <= bosLB
+
+// =================================================================
+//  FVG ARRAYS  (shared by Setup A and C)
+//
+//  BULLISH gap (d=1):
+//    fU = bar[i].low   = TOP of gap   (proximal for retest from above)
+//    fL = bar[i-2].high = BOTTOM of gap (distal)
+//
+//  BEARISH gap (d=-1):
+//    fU = bar[i-2].low  = TOP of gap  (distal)
+//    fL = bar[i].high   = BOTTOM of gap (proximal for retest from below)
+//
+//  PROXIMAL ENTRY FIX vs original Pine:
+//    Long  entry = fU  (top — first level price hits coming down)
+//    Short entry = fL  (bottom — first level price hits coming up)
+//    SL:
+//    Long  SL = fL - buf  (beyond distal edge)
+//    Short SL = fU + buf  (beyond distal edge)
+//    slDist = gap_size + buf >= 0.30 x ATR -> always passes H1 gate
+// =================================================================
+var float[] fU    = array.new_float()
+var float[] fL    = array.new_float()
+var int[]   fDir  = array.new_int()
+var int[]   fBi   = array.new_int()
+var float[] fFill = array.new_float()
+var bool[]  fFire = array.new_bool()
+
+if barstate.isconfirmed and bar_index >= 2 and atr > 0
+    bGap = low - high[2]
+    if bGap >= atr * fvgGap
+        array.push(fU,    low)
+        array.push(fL,    high[2])
+        array.push(fDir,  1)
+        array.push(fBi,   bar_index)
+        array.push(fFill, 0.0)
+        array.push(fFire, false)
+
+    rGap = low[2] - high
+    if rGap >= atr * fvgGap
+        array.push(fU,    low[2])
+        array.push(fL,    high)
+        array.push(fDir,  -1)
+        array.push(fBi,   bar_index)
+        array.push(fFill, 0.0)
+        array.push(fFire, false)
+
+    while array.size(fU) > 25
+        array.shift(fU)
+        array.shift(fL)
+        array.shift(fDir)
+        array.shift(fBi)
+        array.shift(fFill)
+        array.shift(fFire)
+
+if barstate.isconfirmed and array.size(fU) > 0
+    for i = array.size(fU) - 1 to 0
+        u   = array.get(fU,   i)
+        l   = array.get(fL,   i)
+        d   = array.get(fDir, i)
+        gsz = u - l
+        if gsz > 0
+            if d == 1 and low < u
+                array.set(fFill, i,
+                  math.min(1.0, math.max(array.get(fFill, i),
+                  (u - math.max(l, low)) / gsz)))
+            if d == -1 and high > l
+                array.set(fFill, i,
+                  math.min(1.0, math.max(array.get(fFill, i),
+                  (math.min(u, high) - l) / gsz)))
+
+// =================================================================
+//  SETUP A -- FVG RETEST + BOS
+//  Entry at proximal edge; SL beyond the distal edge + buffer.
+//  slDist = gap + buf -> passes the 0.30 x ATR gate on H1.
+// =================================================================
+var bool firedA = false
+if _newDay
+    firedA := false
+
+if modA and barstate.isconfirmed and inKZ_A and not firedA and atr > 0 and adrC < adrFVG
+    if array.size(fU) > 0
+        for i = array.size(fU) - 1 to 0
+            if firedA
+                break
+            if array.get(fFire, i)
+                continue
+            u    = array.get(fU,    i)
+            l    = array.get(fL,    i)
+            d    = array.get(fDir,  i)
+            bi   = array.get(fBi,   i)
+            fill = array.get(fFill, i)
+            age  = bar_index - bi
+
+            if age == 0 or age > fvgAge or fill > fvgFill
+                continue
+            touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+            if not touch
+                continue
+            if not ((d == 1 and bosBull) or (d == -1 and bosBear))
+                continue
+            if not f_htfOk(d, htfA)
+                continue
+
+            eP  = d == 1 ? u : l
+            slP = d == 1 ? l - atr * slBuf : u + atr * slBuf
+            slD = math.abs(eP - slP)
+            if slD <= 0 or slD / atr < slMin or slD / atr > slMax
+                continue
+
+            tp1 = d == 1 ? eP + slD * tpA : eP - slD * tpA
+            array.set(fFire, i, true)
+            firedA := true
+
+            if d == 1
+                strategy.entry("A-L", strategy.long,  qty=1, comment="FVG+BOS")
+                strategy.exit( "A-Lx","A-L", stop=slP, limit=tp1)
+            else
+                strategy.entry("A-S", strategy.short, qty=1, comment="FVG+BOS")
+                strategy.exit( "A-Sx","A-S", stop=slP, limit=tp1)
+
+            label.new(bar_index, d == 1 ? low : high, "A",
+                      style     = d == 1 ? label.style_label_up : label.style_label_down,
+                      color     = color.new(d == 1 ? color.teal : color.maroon, 10),
+                      textcolor = color.white, size=size.small)
+
+// =================================================================
+//  SETUP B -- JUDAS SWEEP
+//  H1 bar wicks through Asian H or L and closes BACK inside range.
+//  Entry at the Asian level; SL beyond the sweep wick + buffer.
+// =================================================================
+var bool bHi = false
+var bool bLo = false
+if _newDay
+    bHi := false
+    bLo := false
+
+if modB and barstate.isconfirmed and inLon and arLocked and atr > 0 and adrC < adrJudas
+    if not na(arHi) and not na(arLo)
+
+        if not bHi and high > arHi and close < arHi
+            if (high - arHi) >= atr * 0.15
+                eP  = arHi
+                slP = high + atr * slBuf
+                slD = math.abs(eP - slP)
+                if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
+                    if f_htfOk(-1, htfB_req)
+                        tp1  = eP - slD * tpB
+                        bHi := true
+                        strategy.entry("B-S", strategy.short, qty=1, comment="Judas")
+                        strategy.exit( "B-Sx","B-S", stop=slP, limit=tp1)
+                        label.new(bar_index, high, "B",
+                                  style=label.style_label_down,
+                                  color=color.new(color.orange, 10),
+                                  textcolor=color.white, size=size.small)
+
+        if not bLo and low < arLo and close > arLo
+            if (arLo - low) >= atr * 0.15
+                eP  = arLo
+                slP = low - atr * slBuf
+                slD = math.abs(eP - slP)
+                if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
+                    if f_htfOk(1, htfB_req)
+                        tp1  = eP + slD * tpB
+                        bLo := true
+                        strategy.entry("B-L", strategy.long,  qty=1, comment="Judas")
+                        strategy.exit( "B-Lx","B-L", stop=slP, limit=tp1)
+                        label.new(bar_index, low, "B",
+                                  style=label.style_label_up,
+                                  color=color.new(color.orange, 10),
+                                  textcolor=color.white, size=size.small)
+
+// =================================================================
+//  SETUP C -- SILVER BULLET  (15:00 UTC H1 bar only)
+//  Same FVG + BOS detection as Setup A; proximal entry fix applied.
+//  The 15:00 bar is excluded from Setup A so this has sole access.
+// =================================================================
+var bool firedC = false
+if _newDay
+    firedC := false
+
+if modC and barstate.isconfirmed and inSB and not firedC and atr > 0 and adrC < adrFVG
+    if array.size(fU) > 0
+        for i = array.size(fU) - 1 to 0
+            if firedC
+                break
+            if array.get(fFire, i)
+                continue
+            u    = array.get(fU,    i)
+            l    = array.get(fL,    i)
+            d    = array.get(fDir,  i)
+            bi   = array.get(fBi,   i)
+            fill = array.get(fFill, i)
+            age  = bar_index - bi
+
+            if age == 0 or age > 48 or fill > fvgFill
+                continue
+            touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+            if not touch
+                continue
+            if not ((d == 1 and bosBull) or (d == -1 and bosBear))
+                continue
+            if not f_htfOk(d, htfC_req)
+                continue
+
+            eP  = d == 1 ? u : l
+            slP = d == 1 ? l - atr * slBuf : u + atr * slBuf
+            slD = math.abs(eP - slP)
+            if slD <= 0 or slD / atr < slMin or slD / atr > slMax
+                continue
+
+            tp1 = d == 1 ? eP + slD * tpC : eP - slD * tpC
+            array.set(fFire, i, true)
+            firedC := true
+
+            if d == 1
+                strategy.entry("C-L", strategy.long,  qty=1, comment="SilverBullet")
+                strategy.exit( "C-Lx","C-L", stop=slP, limit=tp1)
+            else
+                strategy.entry("C-S", strategy.short, qty=1, comment="SilverBullet")
+                strategy.exit( "C-Sx","C-S", stop=slP, limit=tp1)
+
+            label.new(bar_index, d == 1 ? low : high, "C",
+                      style     = d == 1 ? label.style_label_up : label.style_label_down,
+                      color     = color.new(color.blue, 10),
+                      textcolor = color.white, size=size.small)
+
+// =================================================================
+//  SETUP D -- PSYCHOLOGICAL LEVEL BOUNCE
+//  Nearest 50pt or 100pt gold level touched by wick, close opposite.
+//  Entry at the round level; SL beyond the wick.
+// =================================================================
+var bool firedD = false
+if _newDay
+    firedD := false
+
+if modD and barstate.isconfirmed and inKZ and not firedD and atr > 0 and adrC < adrPsych
+    lvl50   = math.round(close / 50.0)  * 50.0
+    lvl100  = math.round(close / 100.0) * 100.0
+    nearLvl = math.abs(close - lvl50) <= math.abs(close - lvl100) ? lvl50 : lvl100
+
+    bLong  = low  <= nearLvl and close > nearLvl
+    bShort = high >= nearLvl and close < nearLvl
+    dir    = bLong and not bShort ? 1 : bShort and not bLong ? -1 : 0
+
+    if dir != 0 and f_htfOk(dir, htfD_req)
+        wick = dir == 1 ? low : high
+        eP   = nearLvl
+        buf2 = math.max(0.30 * atr, syminfo.mintick * 5)
+        slP  = dir == 1 ? wick - buf2 : wick + buf2
+        slD  = math.abs(eP - slP)
+        if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
+            tp1 = dir == 1 ? eP + slD * tpD : eP - slD * tpD
+            firedD := true
+            if dir == 1
+                strategy.entry("D-L", strategy.long,  qty=1, comment="Psych")
+                strategy.exit( "D-Lx","D-L", stop=slP, limit=tp1)
+            else
+                strategy.entry("D-S", strategy.short, qty=1, comment="Psych")
+                strategy.exit( "D-Sx","D-S", stop=slP, limit=tp1)
+            label.new(bar_index, dir == 1 ? low : high,
+                      str.tostring(math.round(nearLvl), "#"),
+                      style     = dir == 1 ? label.style_label_up : label.style_label_down,
+                      color     = color.new(color.purple, 10),
+                      textcolor = color.white, size=size.small)
+
+// =================================================================
+//  VISUAL
+// =================================================================
+plot(arLocked ? arHi : na, "Asian Hi", color.new(color.yellow, 50), 1, plot.style_stepline)
+plot(arLocked ? arLo : na, "Asian Lo", color.new(color.yellow, 50), 1, plot.style_stepline)
+
+bgcolor(inLon ? color.new(color.blue,   96) : na, title="London KZ")
+bgcolor(inNY  ? color.new(color.orange, 96) : na, title="NY KZ")
+bgcolor(inSB  ? color.new(color.purple, 90) : na, title="Silver Bullet")

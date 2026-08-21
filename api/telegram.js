@@ -16,6 +16,7 @@ const TEMPLATE_LABELS = templateLabelMap();
 
 // All specialist sub-signal labels
 const ZONE_TYPE_LABELS = {
+  // Gold specialist
   'FRB':      'Frankfurt ORB',       // Gold — Signal M
   'NYORB':    'NY ORB',              // Gold — Signal H
   'FVG':      'Gold FVG Retest',     // Gold — Signal A (London KZ / NY-Lon Overlap)
@@ -24,8 +25,14 @@ const ZONE_TYPE_LABELS = {
   'SB-FVG':   'Silver Bullet FVG',   // Gold — Signal C (15-16 UTC window)
   'PSYCH':    'Psych Level Bounce',  // Gold — Signal D (kill-zone round number)
   'PSYCH-EXT':'Psych Level Extended',// Gold — Signal D2 (outside kill zone)
+  // NAS100 specialist
   'ORB':      'NYSE ORB',            // NAS100 — Signal A
   'AMD-FVG':  'Session Intel FVG',   // NAS100 — TJR session intel (Asian range → London sweep → ORB BOS → NY FVG)
+  // GBPUSD specialist
+  'SFP-L':    'Asian Sweep Low',     // GBP — Signal A long (wick below Asian lo, body back inside → London KZ)
+  'SFP-H':    'Asian Sweep High',    // GBP — Signal A short (wick above Asian hi, body back inside → London KZ)
+  'AOI-D':    'Daily Zone Approach', // GBP — Signal B (prior-day H/L with H4 rejection + confluence)
+  'AOI-W':    'Weekly Zone Approach',// GBP — Signal C (prior-week H/L swing trade, Alex G methodology)
 };
 
 const TG_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN';

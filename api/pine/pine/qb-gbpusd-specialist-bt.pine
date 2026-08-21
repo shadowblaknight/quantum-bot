@@ -1,0 +1,378 @@
+//@version=6
+strategy("QB GBPUSD Specialist BT v4", "QB GBPUSD BT", overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.003,
+         slippage=1, process_orders_on_close=true,
+         max_bars_back=500, max_labels_count=200, max_lines_count=200, max_boxes_count=200)
+
+// ── inputs ───────────────────────────────────────────────────────────────
+G_BT   = "Backtest"
+G_CORE = "Core"
+G_FILT = "Filters"
+G_VIS  = "Visuals"
+
+tpMode    = input.string("TP1 (full)", "TP exit mode", options=["TP1 (full)", "TP2 (full)", "Split 50/50"], group=G_BT)
+modSFP    = input.bool(true,  "A) SFP — Asian Sweep Failure (London KZ 07-09 UTC)", group=G_BT)
+modAOID   = input.bool(true,  "B) AOI-D — Prior-day H/L rejection",                group=G_BT)
+modAOIW   = input.bool(true,  "C) AOI-W — Prior-week H/L rejection",               group=G_BT)
+closeEOS  = input.bool(true,  "Close all at 15:00 UTC (EOS)",                       group=G_BT)
+modBoth   = input.bool(true,  "Trade LONG + SHORT",           group=G_CORE)
+tpMult    = input.float(2.0,  "TP multiplier (x R)",          group=G_CORE, minval=0.5, maxval=5.0, step=0.5)
+slBuf     = input.float(0.20, "SL buffer (x H1 ATR)",         group=G_CORE, minval=0.05, maxval=1.0, step=0.05)
+maxTrades = input.int(1,      "Max signals per day",           group=G_CORE, minval=1, maxval=3)
+atrLen    = input.int(14,     "ATR period",                    group=G_FILT, minval=5, maxval=50)
+emaLen    = input.int(20,     "Bias EMA period",               group=G_FILT, minval=5, maxval=100)
+atrAOI    = input.float(0.15, "AOI zone proximity (x ATR)",   group=G_FILT, minval=0.05, maxval=0.50, step=0.05)
+sfpAdrMax = input.float(1.20, "SFP max ADR consumed",         group=G_FILT, minval=0.50, maxval=2.00, step=0.05)
+aoiAdrMax = input.float(0.85, "AOI max ADR consumed",         group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
+reqBias   = input.bool(false, "Require D + H4 EMA bias",      group=G_FILT)
+showAsnBox = input.bool(true, "Asian range box",          group=G_VIS)
+showPD     = input.bool(true, "Prev-day H/L lines",      group=G_VIS)
+showPW     = input.bool(true, "Prev-week H/L lines",     group=G_VIS)
+showTbl    = input.bool(true, "Status table",             group=G_VIS)
+
+// ── HTF bias ─────────────────────────────────────────────────────────────
+f_ema(int p) =>
+    e = ta.ema(close, p)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+
+f_emaAtr(int p, int al) =>
+    e = ta.ema(close, p)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(al)
+    [b, a]
+
+wB           = request.security(syminfo.tickerid, "W",   f_ema(emaLen),            lookahead=barmerge.lookahead_off)
+dB           = request.security(syminfo.tickerid, "D",   f_ema(emaLen),            lookahead=barmerge.lookahead_off)
+h4B          = request.security(syminfo.tickerid, "240", f_ema(emaLen),            lookahead=barmerge.lookahead_off)
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_emaAtr(emaLen, atrLen), lookahead=barmerge.lookahead_off)
+dAtr         = request.security(syminfo.tickerid, "D",   ta.atr(atrLen))
+
+// ── session ───────────────────────────────────────────────────────────────
+_mu     = hour(time, "UTC") * 60 + minute(time, "UTC")
+_newDay = ta.change(time("D")) != 0
+
+in_asian   = timeframe.isintraday and _mu >= 0   and _mu < 420
+in_sfp_w   = timeframe.isintraday and _mu >= 420 and _mu < 540
+in_ldn_ext = timeframe.isintraday and _mu >= 540 and _mu < 630
+in_no_tr   = timeframe.isintraday and _mu >= 630 and _mu < 810
+in_ny      = timeframe.isintraday and _mu >= 810 and _mu < 900
+_inLdnNy   = in_sfp_w or in_ldn_ext or in_ny
+_eosBar    = timeframe.isintraday and _mu >= 900 and _mu < 915
+
+// ── day of week ───────────────────────────────────────────────────────────
+_utcDow  = dayofweek(time, "UTC")
+_isMon   = _utcDow == 2
+_isThu   = _utcDow == 5
+_isFri   = _utcDow == 6
+_dowName = _utcDow == 2 ? "MON" : _utcDow == 3 ? "TUE" : _utcDow == 4 ? "WED" :
+           _utcDow == 5 ? "THU" : _utcDow == 6 ? "FRI" : "WKD"
+_dowTier = _utcDow == 3 ? "A" : _isMon ? "OFF" : "B"
+_thuMult = _isThu ? 1.2 : 1.0
+_dayOk   = not _isMon and not (_isFri and _mu >= 900)
+
+// ── levels ────────────────────────────────────────────────────────────────
+_priorDayHi  = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_off)
+_priorDayLo  = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_off)
+_todayHigh   = request.security(syminfo.tickerid, "D", high)
+_todayLow    = request.security(syminfo.tickerid, "D", low)
+_priorWeekHi = request.security(syminfo.tickerid, "W", high[1],  lookahead=barmerge.lookahead_off)
+_priorWeekLo = request.security(syminfo.tickerid, "W", low[1],   lookahead=barmerge.lookahead_off)
+
+_adrConsumed = dAtr > 0 ? (_todayHigh - _todayLow) / dAtr : 0.0
+_adrStr      = _adrConsumed >= 2.50 ? "OUTLIER"   :
+               _adrConsumed >= 1.50 ? "NEWS-EXT"  :
+               _adrConsumed >= 0.90 ? "EXHAUST"   :
+               _adrConsumed >= 0.75 ? "HIGH-PROB" : "BUILDING"
+
+// ── 50-pip round number confluence ────────────────────────────────────────
+f_nearRound(float p) =>
+    nearest = math.round(p / 0.0050) * 0.0050
+    math.abs(p - nearest) <= 0.0005
+
+_ema50 = ta.ema(close, 50)
+
+// ── state ─────────────────────────────────────────────────────────────────
+var float asian_hi  = na
+var float asian_lo  = na
+var bool  asian_lck = false
+var int   trades_td = 0
+var bool  sfpLF     = false
+var bool  sfpSF     = false
+var bool  aoidLF    = false
+var bool  aoidSF    = false
+var bool  aoiwLF    = false
+var bool  aoiwSF    = false
+
+if _newDay
+    asian_hi  := na
+    asian_lo  := na
+    asian_lck := false
+    trades_td := 0
+    sfpLF     := false
+    sfpSF     := false
+    aoidLF    := false
+    aoidSF    := false
+    aoiwLF    := false
+    aoiwSF    := false
+
+// ── build Asian range ─────────────────────────────────────────────────────
+if in_asian
+    asian_hi := na(asian_hi) ? high : math.max(asian_hi, high)
+    asian_lo := na(asian_lo) ? low  : math.min(asian_lo, low)
+
+if not in_asian and in_asian[1] and not na(asian_hi)
+    asian_lck := true
+    if showAsnBox
+        box.new(bar_index, asian_hi, bar_index + 380, asian_lo, border_color=color.new(color.purple, 35), border_width=1, bgcolor=color.new(color.purple, 91))
+        line.new(bar_index, asian_hi, bar_index + 380, asian_hi, color=color.new(color.purple, 40), style=line.style_dashed, width=1)
+        line.new(bar_index, asian_lo, bar_index + 380, asian_lo, color=color.new(color.purple, 40), style=line.style_dashed, width=1)
+
+if _newDay and showPD and not na(_priorDayHi)
+    line.new(bar_index, _priorDayHi, bar_index + 320, _priorDayHi, color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+    line.new(bar_index, _priorDayLo, bar_index + 320, _priorDayLo, color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+
+if ta.change(time("W")) != 0 and showPW and not na(_priorWeekHi)
+    line.new(bar_index, _priorWeekHi, bar_index + 499, _priorWeekHi, color=color.new(color.orange, 20), style=line.style_solid, width=2)
+    line.new(bar_index, _priorWeekLo, bar_index + 499, _priorWeekLo, color=color.new(color.orange, 20), style=line.style_solid, width=2)
+
+if closeEOS and barstate.isconfirmed and _eosBar
+    strategy.close_all(comment="EOS")
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL A · SFP  (London KZ 07:00–09:00 UTC)
+//  SAME BAR: wick sweeps Asian H/L, body closes back inside range.
+//  This mirrors exactly what the live indicator fires on.
+// ═══════════════════════════════════════════════════════════════════════════
+if modSFP and barstate.isconfirmed and in_sfp_w and asian_lck and _dayOk and trades_td < maxTrades
+    _biasL = not reqBias or (dB == 1  and h4B == 1)
+    _biasS = not reqBias or (dB == -1 and h4B == -1)
+    _adrOk = _adrConsumed <= sfpAdrMax
+
+    if _biasL and _adrOk and not sfpLF and not na(asian_lo)
+        if low < asian_lo and close > asian_lo
+            _ep   = close
+            _sl   = low - h1ATR * slBuf * _thuMult
+            _dist = _ep - _sl
+            if _dist > 0
+                _tp1 = _ep + _dist * tpMult
+                _tp2 = _ep + _dist * (tpMult + 1.0)
+                sfpLF     := true
+                trades_td += 1
+                strategy.entry("SFP-L", strategy.long, comment="SFP-L " + _dowName)
+                if tpMode == "TP1 (full)"
+                    strategy.exit("SFP-LX",  from_entry="SFP-L", limit=_tp1, stop=_sl)
+                else if tpMode == "TP2 (full)"
+                    strategy.exit("SFP-LX",  from_entry="SFP-L", limit=_tp2, stop=_sl)
+                else
+                    strategy.exit("SFP-LT1", from_entry="SFP-L", qty_percent=50, limit=_tp1, stop=_sl)
+                    strategy.exit("SFP-LT2", from_entry="SFP-L", limit=_tp2, stop=_ep)
+                label.new(bar_index, low - h1ATR * 0.4, "SFP L", style=label.style_label_up, color=color.teal, textcolor=color.white, size=size.small)
+
+    if modBoth and _biasS and _adrOk and not sfpSF and not na(asian_hi)
+        if high > asian_hi and close < asian_hi
+            _ep   = close
+            _sl   = high + h1ATR * slBuf * _thuMult
+            _dist = _sl - _ep
+            if _dist > 0
+                _tp1 = _ep - _dist * tpMult
+                _tp2 = _ep - _dist * (tpMult + 1.0)
+                sfpSF     := true
+                trades_td += 1
+                strategy.entry("SFP-S", strategy.short, comment="SFP-S " + _dowName)
+                if tpMode == "TP1 (full)"
+                    strategy.exit("SFP-SX",  from_entry="SFP-S", limit=_tp1, stop=_sl)
+                else if tpMode == "TP2 (full)"
+                    strategy.exit("SFP-SX",  from_entry="SFP-S", limit=_tp2, stop=_sl)
+                else
+                    strategy.exit("SFP-ST1", from_entry="SFP-S", qty_percent=50, limit=_tp1, stop=_sl)
+                    strategy.exit("SFP-ST2", from_entry="SFP-S", limit=_tp2, stop=_ep)
+                label.new(bar_index, high + h1ATR * 0.4, "SFP S", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL B · AOI-D  (Prior-day H/L — London or NY session)
+//  Wick touches prior-day level, body closes back outside.
+//  Requires ≥1 confluence: EMA50 proximity | 50-pip round number | weekly level.
+// ═══════════════════════════════════════════════════════════════════════════
+if modAOID and barstate.isconfirmed and _inLdnNy and _dayOk and trades_td < maxTrades
+    _biasL = not reqBias or (dB == 1  and h4B == 1)
+    _biasS = not reqBias or (dB == -1 and h4B == -1)
+    _adrOk = _adrConsumed <= aoiAdrMax
+
+    if _biasL and _adrOk and not aoidLF and not na(_priorDayLo)
+        _touch = low <= _priorDayLo and close > _priorDayLo
+        _emaC  = math.abs(_ema50 - _priorDayLo) <= atrAOI * dAtr
+        _rnC   = f_nearRound(_priorDayLo)
+        _wkC   = not na(_priorWeekLo) and math.abs(_priorWeekLo - _priorDayLo) <= atrAOI * dAtr
+        if _touch and (_emaC or _rnC or _wkC)
+            _ep   = close
+            _sl   = low - h1ATR * slBuf * _thuMult
+            _dist = _ep - _sl
+            if _dist > 0
+                _tp1 = _ep + _dist * tpMult
+                _tp2 = not na(_priorDayHi) and _priorDayHi > _ep ? _priorDayHi : _ep + _dist * (tpMult + 1.0)
+                aoidLF    := true
+                trades_td += 1
+                strategy.entry("AOI-DL", strategy.long, comment="AOI-D L " + _dowName)
+                if tpMode == "TP1 (full)"
+                    strategy.exit("AOI-DLX",  from_entry="AOI-DL", limit=_tp1, stop=_sl)
+                else if tpMode == "TP2 (full)"
+                    strategy.exit("AOI-DLX",  from_entry="AOI-DL", limit=_tp2, stop=_sl)
+                else
+                    strategy.exit("AOI-DLT1", from_entry="AOI-DL", qty_percent=50, limit=_tp1, stop=_sl)
+                    strategy.exit("AOI-DLT2", from_entry="AOI-DL", limit=_tp2, stop=_ep)
+                label.new(bar_index, low - h1ATR * 0.4, "AOI-D L", style=label.style_label_up, color=color.new(color.teal, 20), textcolor=color.white, size=size.small)
+
+    if modBoth and _biasS and _adrOk and not aoidSF and not na(_priorDayHi)
+        _touch = high >= _priorDayHi and close < _priorDayHi
+        _emaC  = math.abs(_ema50 - _priorDayHi) <= atrAOI * dAtr
+        _rnC   = f_nearRound(_priorDayHi)
+        _wkC   = not na(_priorWeekHi) and math.abs(_priorWeekHi - _priorDayHi) <= atrAOI * dAtr
+        if _touch and (_emaC or _rnC or _wkC)
+            _ep   = close
+            _sl   = high + h1ATR * slBuf * _thuMult
+            _dist = _sl - _ep
+            if _dist > 0
+                _tp1 = _ep - _dist * tpMult
+                _tp2 = not na(_priorDayLo) and _priorDayLo < _ep ? _priorDayLo : _ep - _dist * (tpMult + 1.0)
+                aoidSF    := true
+                trades_td += 1
+                strategy.entry("AOI-DS", strategy.short, comment="AOI-D S " + _dowName)
+                if tpMode == "TP1 (full)"
+                    strategy.exit("AOI-DSX",  from_entry="AOI-DS", limit=_tp1, stop=_sl)
+                else if tpMode == "TP2 (full)"
+                    strategy.exit("AOI-DSX",  from_entry="AOI-DS", limit=_tp2, stop=_sl)
+                else
+                    strategy.exit("AOI-DST1", from_entry="AOI-DS", qty_percent=50, limit=_tp1, stop=_sl)
+                    strategy.exit("AOI-DST2", from_entry="AOI-DS", limit=_tp2, stop=_ep)
+                label.new(bar_index, high + h1ATR * 0.4, "AOI-D S", style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL C · AOI-W  (Prior-week H/L — London or NY session)
+//  Weekly EMA direction required. 1 confluence: round number or daily bias.
+// ═══════════════════════════════════════════════════════════════════════════
+if modAOIW and barstate.isconfirmed and _inLdnNy and _dayOk and trades_td < maxTrades
+    _adrOk = _adrConsumed <= aoiAdrMax
+
+    if wB == 1 and _adrOk and not aoiwLF and not na(_priorWeekLo)
+        _touch = low <= _priorWeekLo and close > _priorWeekLo
+        _rnC   = f_nearRound(_priorWeekLo)
+        _dAg   = dB == 1
+        if _touch and (_rnC or _dAg)
+            _ep   = close
+            _sl   = low - h1ATR * slBuf * 1.5 * _thuMult
+            _dist = _ep - _sl
+            if _dist > 0
+                _tp1 = _ep + _dist * tpMult
+                _tp2 = _ep + _dist * (tpMult + 1.5)
+                aoiwLF    := true
+                trades_td += 1
+                strategy.entry("AOI-WL", strategy.long, comment="AOI-W L " + _dowName)
+                if tpMode == "TP1 (full)"
+                    strategy.exit("AOI-WLX",  from_entry="AOI-WL", limit=_tp1, stop=_sl)
+                else if tpMode == "TP2 (full)"
+                    strategy.exit("AOI-WLX",  from_entry="AOI-WL", limit=_tp2, stop=_sl)
+                else
+                    strategy.exit("AOI-WLT1", from_entry="AOI-WL", qty_percent=50, limit=_tp1, stop=_sl)
+                    strategy.exit("AOI-WLT2", from_entry="AOI-WL", limit=_tp2, stop=_ep)
+                label.new(bar_index, low - h1ATR * 0.55, "AOI-W L", style=label.style_label_up, color=color.new(color.blue, 10), textcolor=color.white, size=size.normal)
+
+    if modBoth and wB == -1 and _adrOk and not aoiwSF and not na(_priorWeekHi)
+        _touch = high >= _priorWeekHi and close < _priorWeekHi
+        _rnC   = f_nearRound(_priorWeekHi)
+        _dAg   = dB == -1
+        if _touch and (_rnC or _dAg)
+            _ep   = close
+            _sl   = high + h1ATR * slBuf * 1.5 * _thuMult
+            _dist = _sl - _ep
+            if _dist > 0
+                _tp1 = _ep - _dist * tpMult
+                _tp2 = _ep - _dist * (tpMult + 1.5)
+                aoiwSF    := true
+                trades_td += 1
+                strategy.entry("AOI-WS", strategy.short, comment="AOI-W S " + _dowName)
+                if tpMode == "TP1 (full)"
+                    strategy.exit("AOI-WSX",  from_entry="AOI-WS", limit=_tp1, stop=_sl)
+                else if tpMode == "TP2 (full)"
+                    strategy.exit("AOI-WSX",  from_entry="AOI-WS", limit=_tp2, stop=_sl)
+                else
+                    strategy.exit("AOI-WST1", from_entry="AOI-WS", qty_percent=50, limit=_tp1, stop=_sl)
+                    strategy.exit("AOI-WST2", from_entry="AOI-WS", limit=_tp2, stop=_ep)
+                label.new(bar_index, high + h1ATR * 0.55, "AOI-W S", style=label.style_label_down, color=color.new(color.blue, 10), textcolor=color.white, size=size.normal)
+
+// ── status table ──────────────────────────────────────────────────────────
+var table stTbl = na
+
+if showTbl and barstate.islast
+    if na(stTbl)
+        stTbl := table.new(position.top_right, 2, 16, bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 60), frame_width=1)
+
+    _sessLbl = in_ny ? "NY" : in_ldn_ext ? "LDN-MAIN" : in_sfp_w ? "LDN-KZ" :
+               in_asian ? "ASIAN" : in_no_tr ? "NO-TRADE" : "OFF"
+    _sessCol = in_ny ? color.lime : in_ldn_ext ? color.orange : in_sfp_w ? color.yellow :
+               in_asian ? color.purple : color.gray
+    _biasStr = dB == 1  and h4B == 1  ? "BULL" :
+               dB == -1 and h4B == -1 ? "BEAR" :
+               dB != h4B              ? "CONFLICT" : "NEUT"
+    _biasCol = dB == 1 and h4B == 1 ? color.teal : dB == -1 and h4B == -1 ? color.red : color.gray
+    _wStr    = wB == 1  ? "BULL" : wB == -1 ? "BEAR" : "NEUT"
+    _wCol    = wB == 1  ? color.teal : wB == -1 ? color.red : color.gray
+    _adrCol  = _adrConsumed >= 2.50 ? color.red : _adrConsumed >= 1.50 ? color.orange :
+               _adrConsumed >= 0.90 ? color.yellow : _adrConsumed >= 0.75 ? color.lime : color.aqua
+    _tierCol = _dowTier == "A" ? color.lime : _dowTier == "OFF" ? color.red : color.yellow
+    _dayOkC  = _dayOk ? color.lime : color.red
+    _dayOkS  = _dayOk ? "ACTIVE" : (_isMon ? "MON-OFF" : "FRI-CUT")
+    _asnStr  = asian_lck and not na(asian_hi) ?
+               str.tostring(asian_hi, format.mintick) + " / " + str.tostring(asian_lo, format.mintick) : "building..."
+    _asnCol  = asian_lck ? color.purple : color.gray
+    _pdStr   = not na(_priorDayHi)  ? str.tostring(_priorDayHi,  format.mintick) + " / " + str.tostring(_priorDayLo,  format.mintick) : "--"
+    _pwStr   = not na(_priorWeekHi) ? str.tostring(_priorWeekHi, format.mintick) + " / " + str.tostring(_priorWeekLo, format.mintick) : "--"
+    _sfpLS   = sfpLF  ? "FIRED" : (in_sfp_w and asian_lck ? "armed" : "--")
+    _sfpSS   = sfpSF  ? "FIRED" : (in_sfp_w and asian_lck ? "armed" : "--")
+    _sfpLC   = sfpLF  ? color.teal : in_sfp_w and asian_lck ? color.lime : color.gray
+    _sfpSC   = sfpSF  ? color.red  : in_sfp_w and asian_lck ? color.lime : color.gray
+    _aoidS   = aoidLF ? "FIRED L" : aoidSF ? "FIRED S" : trades_td > 0 ? "done" : "scanning"
+    _aoidC   = aoidLF ? color.teal : aoidSF ? color.red : color.gray
+    _aoiwS   = aoiwLF ? "FIRED L" : aoiwSF ? "FIRED S" : trades_td > 0 ? "done" : "scanning"
+    _aoiwC   = aoiwLF ? color.teal : aoiwSF ? color.red : color.gray
+
+    table.cell(stTbl, 0,  0, "QB GBPUSD BT v4",  text_color=color.new(#00BFFF, 0), text_size=size.tiny, bgcolor=color.new(color.black, 55), text_halign=text.align_left)
+    table.cell(stTbl, 1,  0, _dowName + " · " + _dowTier, text_color=color.new(_tierCol, 0), text_size=size.tiny, bgcolor=color.new(color.black, 55), text_halign=text.align_right)
+    table.cell(stTbl, 0,  1, "Session",    text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  1, _sessLbl,    text_color=color.new(_sessCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  2, "Day Gate",   text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  2, _dayOkS,     text_color=color.new(_dayOkC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  3, "ADR",        text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  3, str.tostring(math.round(_adrConsumed * 100)) + "% · " + _adrStr, text_color=color.new(_adrCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  4, "Asian H/L",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  4, _asnStr,      text_color=color.new(_asnCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  5, "Prev Day",   text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  5, _pdStr,       text_color=color.new(color.yellow, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  6, "Prev Week",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  6, _pwStr,       text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  7, "W Bias",     text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  7, _wStr,        text_color=color.new(_wCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  8, "D+H4 Bias",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  8, _biasStr,     text_color=color.new(_biasCol, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  9, "SFP Long",   text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  9, _sfpLS,       text_color=color.new(_sfpLC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 10, "SFP Short",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 10, _sfpSS,       text_color=color.new(_sfpSC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 11, "AOI-D",      text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 11, _aoidS,       text_color=color.new(_aoidC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 12, "AOI-W",      text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 12, _aoiwS,       text_color=color.new(_aoiwC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 13, "Trades",     text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 13, str.tostring(trades_td) + " / " + str.tostring(maxTrades), text_color=color.new(trades_td >= maxTrades ? color.red : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 14, "H1 ATR",     text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 14, str.tostring(h1ATR, "#.00000"), text_color=color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 15, "EMA50",      text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 15, str.tostring(_ema50, format.mintick), text_color=color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+
+// ── session backgrounds ───────────────────────────────────────────────────
+bgcolor(in_asian   ? color.new(color.purple, 93) : na, title="Asian 00-07 UTC")
+bgcolor(in_sfp_w   ? color.new(color.yellow, 87) : na, title="London KZ 07-09 UTC")
+bgcolor(in_ldn_ext ? color.new(color.orange, 90) : na, title="London 09-10:30 UTC")
+bgcolor(in_no_tr   ? color.new(color.red,    96) : na, title="No Trade 10:30-13:30 UTC")
+bgcolor(in_ny      ? color.new(color.lime,   86) : na, title="NY 13:30-15 UTC")

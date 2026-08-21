@@ -42,8 +42,8 @@ const CFG = {
   atrPeriod:       14,
   zoneMaxWidthAtr: 0.80,  // AOI total width cap, in Daily ATRs (~"60 pips" on fx)
   zoneMinWidthAtr: 0.10,  // floor so a zone is a band, not a line
-  minTouches:      3,     // PDF: a valid AOI needs >=3 touches (TUNABLE)
-  gateAtr:         0.15,  // price within this many ATRs of a zone edge = "at AOI"
+  minTouches:      2,     // PDF: a valid AOI needs >=2 body touches (TUNABLE; was 3 — too strict, produced 0 signals in months of live running)
+  gateAtr:         0.30,  // price within this many ATRs of a zone edge = "at AOI" (was 0.15 — matched Python miner setting that produces 0-1 signals/year/pair)
   conflictAtr:     0.50,  // opposing Weekly zone within this distance = conflict
   emaPeriod:       50,    // the 50 EMA confluence
 };

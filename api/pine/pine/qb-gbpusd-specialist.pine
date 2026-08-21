@@ -1,0 +1,599 @@
+//@version=6
+indicator("Quantum Bot — GBPUSD Specialist", "QB GBPUSD", overlay=true,
+          max_bars_back=500, max_labels_count=200, max_lines_count=200, max_boxes_count=200)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  QUANTUM BOT — GBPUSD SPECIALIST  (5m / 15m recommended)
+//  ─────────────────────────────────────────────────────────────────────────
+//  Alex G "Set & Forget" methodology + GBP-specific session research.
+//  GBP is a mean-reverting pair: Judas and Silver Bullet do NOT work here.
+//  Primary edge is the Asian Range Sweep Failure at London Kill Zone.
+//
+//  Signal A · SFP-H / SFP-L  — Asian Sweep Failure Pattern (London KZ)
+//    Window: 07:00–09:00 UTC.  Wick penetrates Asian H or L, body closes
+//    back inside range.  Strongest GBP setup — 70-80% occurrence.
+//    Direction bias required: D EMA20 + H4 EMA20 must agree.
+//
+//  Signal B · AOI-D  — Daily AOI Zone (prior-day H/L)
+//    Window: 07:00–10:30 or 13:30–15:00 UTC.
+//    Price touches prior-day H or L with rejection wick + body outside.
+//    Confluences: 50-pip round number, 50 EMA, weekly level proximity.
+//
+//  Signal C · AOI-W  — Weekly Swing Zone (prior-week H/L)
+//    Same session windows as AOI-D.  Weekly EMA20 direction required.
+//    Wider SL (1.5× buffer), TP3 at 4R for swing trades.
+//
+//  Day-of-week rules:
+//    Monday    = NO SIGNALS — GBP range-builds; no reliable directional move
+//    Tuesday   = Tier A — most reliable; highest probability
+//    Wednesday = Tier B
+//    Thursday  = Tier B, SL × 1.2 — BOE risk, elevated volatility
+//    Friday    = Tier B, entries blocked after 15:00 UTC
+//
+//  Alert: template="gbpusd-specialist"
+//         zoneType = "SFP-L" | "SFP-H" | "AOI-D" | "AOI-W"
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Security constraint — hardcoded: never move to input or alerts will break
+WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
+
+// ─── INPUT GROUPS ────────────────────────────────────────────────────────
+G_CORE = "Core"
+G_FILT = "Filters"
+G_VIS  = "Visuals"
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────
+modSFP     = input.bool(true,  "A) SFP — Asian Sweep Failure (London KZ 07-09 UTC)",  group=G_CORE)
+modAOID    = input.bool(true,  "B) AOI-D — Daily zone approach (prior-day H/L)",      group=G_CORE)
+modAOIW    = input.bool(true,  "C) AOI-W — Weekly swing zone (prior-week H/L)",       group=G_CORE)
+modBoth    = input.bool(true,  "Trade both LONG + SHORT",                              group=G_CORE)
+tpMult     = input.float(2.0,  "TP multiplier (× R)",                                 group=G_CORE, minval=0.5, maxval=5.0, step=0.5)
+slBuf      = input.float(0.20, "SL buffer (× H1 ATR)",                                group=G_CORE, minval=0.05, maxval=1.0, step=0.05)
+maxTrades  = input.int(1,      "Max signals per day",                                  group=G_CORE, minval=1, maxval=3)
+
+atrLen     = input.int(14,     "ATR period",                                           group=G_FILT, minval=5, maxval=50)
+emaLen     = input.int(20,     "Bias EMA period (D + H4)",                             group=G_FILT, minval=5, maxval=100)
+atrAOI     = input.float(0.15, "AOI zone proximity (× daily ATR)",                    group=G_FILT, minval=0.05, maxval=0.50, step=0.05,
+             tooltip="Price within this fraction of daily ATR from zone = 'at zone'. 0.15 = 15% of ATR.")
+sfpAdrMax  = input.float(1.20, "SFP max ADR consumed",                                group=G_FILT, minval=0.50, maxval=2.00, step=0.05,
+             tooltip="SFP fires best during range-build phase. Block only extreme extensions.")
+aoiAdrMax  = input.float(0.85, "AOI max ADR consumed",                                group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
+reqBias    = input.bool(true,  "Require D + H4 EMA bias agreement",                   group=G_FILT,
+             tooltip="ON = D EMA20 and H4 EMA20 must both agree with trade direction.")
+useEURDiv  = input.bool(true,  "Flag EURUSD divergence in alert (informational)",     group=G_FILT,
+             tooltip="Flags GBP/EUR divergence in the filter string. Context only — not a hard block.")
+
+showAsnBox = input.bool(true,  "Asian range box",                                      group=G_VIS)
+showPosBox = input.bool(true,  "Position box on fire",                                 group=G_VIS)
+posBoxBars = input.int(40,     "Position box width (bars)",                            group=G_VIS, minval=5, maxval=200)
+showPD     = input.bool(true,  "Prev-day H/L lines",                                  group=G_VIS)
+showPW     = input.bool(true,  "Prev-week H/L lines",                                 group=G_VIS)
+showTbl    = input.bool(true,  "Corner status table",                                  group=G_VIS)
+
+// ─── HTF BIAS ────────────────────────────────────────────────────────────
+f_ema(int p) =>
+    e = ta.ema(close, p)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+
+f_emaAtr(int p, int al) =>
+    e = ta.ema(close, p)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(al)
+    [b, a]
+
+wB          = request.security(syminfo.tickerid, "W",   f_ema(emaLen),            lookahead=barmerge.lookahead_off)
+dB          = request.security(syminfo.tickerid, "D",   f_ema(emaLen),            lookahead=barmerge.lookahead_off)
+h4B         = request.security(syminfo.tickerid, "240", f_ema(emaLen),            lookahead=barmerge.lookahead_off)
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60", f_emaAtr(emaLen, atrLen), lookahead=barmerge.lookahead_off)
+dAtr        = request.security(syminfo.tickerid, "D",   ta.atr(atrLen))
+
+// EURUSD direction for divergence flag (informational)
+eurC        = request.security("EURUSD", timeframe.period, close, lookahead=barmerge.lookahead_off)
+
+// ─── SESSION GATES (UTC minutes) ─────────────────────────────────────────
+_mu     = hour(time, "UTC") * 60 + minute(time, "UTC")
+_newDay = ta.change(time("D")) != 0
+
+in_asian   = timeframe.isintraday and _mu >= 0   and _mu < 420   // 00:00–07:00 Asian
+in_sfp_w   = timeframe.isintraday and _mu >= 420 and _mu < 540   // 07:00–09:00 London KZ (SFP)
+in_ldn_ext = timeframe.isintraday and _mu >= 540 and _mu < 630   // 09:00–10:30 London main
+in_no_tr   = timeframe.isintraday and _mu >= 630 and _mu < 810   // 10:30–13:30 no-trade
+in_ny      = timeframe.isintraday and _mu >= 810 and _mu < 900   // 13:30–15:00 NY
+_inLdnNy   = in_sfp_w or in_ldn_ext or in_ny                    // active AOI windows
+
+// ─── DAY OF WEEK ─────────────────────────────────────────────────────────
+_utcDow    = dayofweek(time, "UTC")
+// Pine: Sunday=1 Monday=2 Tuesday=3 Wednesday=4 Thursday=5 Friday=6
+_isMon     = _utcDow == 2
+_isThu     = _utcDow == 5
+_isFri     = _utcDow == 6
+_dowName   = _utcDow == 2 ? "MON" : _utcDow == 3 ? "TUE" : _utcDow == 4 ? "WED" :
+             _utcDow == 5 ? "THU" : _utcDow == 6 ? "FRI" : "WKD"
+_dowTier   = _utcDow == 3 ? "A" : _isMon ? "OFF" : "B"   // Tue=A, Mon=OFF, else B
+_thuMult   = _isThu ? 1.2 : 1.0                           // Thursday BOE risk: wider SL
+_fridayCut = _isFri and _mu >= 900                        // Friday after 15:00 UTC: no entries
+_dayOk     = not _isMon and not _fridayCut                // Monday off; Friday 15:00 cutoff
+
+// ─── DAILY / WEEKLY LEVELS ────────────────────────────────────────────────
+_priorDayHi  = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_off)
+_priorDayLo  = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_off)
+_priorClose  = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_off)
+_todayOpen   = request.security(syminfo.tickerid, "D", open)
+_todayHigh   = request.security(syminfo.tickerid, "D", high)
+_todayLow    = request.security(syminfo.tickerid, "D", low)
+_priorWeekHi = request.security(syminfo.tickerid, "W", high[1],  lookahead=barmerge.lookahead_off)
+_priorWeekLo = request.security(syminfo.tickerid, "W", low[1],   lookahead=barmerge.lookahead_off)
+
+_adrConsumed = dAtr > 0 ? (_todayHigh - _todayLow) / dAtr : 0.0
+_adrTierStr  = _adrConsumed >= 2.50 ? "OUTLIER"   :
+               _adrConsumed >= 1.50 ? "NEWS-EXT"  :
+               _adrConsumed >= 0.90 ? "EXHAUST"   :
+               _adrConsumed >= 0.75 ? "HIGH-PROB" : "BUILDING"
+
+// ─── 50-PIP ROUND NUMBER CHECK ───────────────────────────────────────────
+// GBPUSD 4-decimal: 0.0050 = 50 pips. "At" = within 5 pips.
+f_nearRound(float p) =>
+    step    = 0.0050
+    nearest = math.round(p / step) * step
+    math.abs(p - nearest) <= 0.0005
+
+// 50-period EMA for AOI confluence
+_ema50 = ta.ema(close, 50)
+
+// ─── EURUSD DIVERGENCE FLAG ───────────────────────────────────────────────
+_gbpDir = close > open ? 1 : close < open ? -1 : 0
+_eurDir = eurC > eurC[1] ? 1 : eurC < eurC[1] ? -1 : 0
+_eurDiv = useEURDiv and _gbpDir != 0 and _eurDir != 0 and _gbpDir != _eurDir
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ASIAN RANGE  (00:00–07:00 UTC)
+// ═══════════════════════════════════════════════════════════════════════════
+var float asian_hi      = na
+var float asian_lo      = na
+var bool  asian_locked  = false
+var int   trades_today  = 0
+var bool  sfp_long_f    = false
+var bool  sfp_short_f   = false
+var bool  aoid_long_f   = false
+var bool  aoid_short_f  = false
+var bool  aoiw_long_f   = false
+var bool  aoiw_short_f  = false
+
+if _newDay
+    asian_hi     := na
+    asian_lo     := na
+    asian_locked := false
+    trades_today := 0
+    sfp_long_f   := false
+    sfp_short_f  := false
+    aoid_long_f  := false
+    aoid_short_f := false
+    aoiw_long_f  := false
+    aoiw_short_f := false
+
+if in_asian
+    asian_hi := na(asian_hi) ? high : math.max(asian_hi, high)
+    asian_lo := na(asian_lo) ? low  : math.min(asian_lo, low)
+
+if not in_asian and in_asian[1] and not na(asian_hi)
+    asian_locked := true
+    if showAsnBox
+        box.new(bar_index, asian_hi, bar_index + 380, asian_lo,
+                border_color=color.new(color.purple, 35), border_width=1,
+                bgcolor=color.new(color.purple, 91))
+        line.new(bar_index, asian_hi, bar_index + 380, asian_hi,
+                 color=color.new(color.purple, 40), style=line.style_dashed, width=1)
+        line.new(bar_index, asian_lo, bar_index + 380, asian_lo,
+                 color=color.new(color.purple, 40), style=line.style_dashed, width=1)
+
+// ─── PREV-DAY / PREV-WEEK LEVELS ─────────────────────────────────────────
+if _newDay and showPD and not na(_priorDayHi) and not na(_priorDayLo)
+    line.new(bar_index, _priorDayHi, bar_index + 320, _priorDayHi,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+    line.new(bar_index, _priorDayLo, bar_index + 320, _priorDayLo,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+
+if ta.change(time("W")) != 0 and showPW and not na(_priorWeekHi) and not na(_priorWeekLo)
+    line.new(bar_index, _priorWeekHi, bar_index + 499, _priorWeekHi,
+             color=color.new(color.orange, 20), style=line.style_solid, width=2)
+    line.new(bar_index, _priorWeekLo, bar_index + 499, _priorWeekLo,
+             color=color.new(color.orange, 20), style=line.style_solid, width=2)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ALERT BUILDER
+// ═══════════════════════════════════════════════════════════════════════════
+f_buildAlert(string tmpl, string dir, float entry, float slP,
+             float tp1, float tp2, float tp3,
+             float zU, float zL, string zType,
+             string sess, string tier, string conf,
+             string filters) =>
+    slRisk   = math.abs(entry - slP)
+    rr1      = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2      = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3      = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    dEmoji   = dir == "LONG" ? "🟢" : "🔴"
+    readable = dEmoji + " " + syminfo.ticker + " · " + (dir == "LONG" ? "BUY" : "SELL") +
+               " · GBP-SPEC · " + timeframe.period + "m · Tier " + tier +
+               "\nZone: " + str.tostring(zL, format.mintick) + " – " + str.tostring(zU, format.mintick) +
+               "\nFilters: " + filters + "\n---\n"
+    head     = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"" + tmpl +
+               "\",\"direction\":\"" + dir +
+               "\",\"symbol\":\"" + syminfo.tickerid +
+               "\",\"timeframe\":\"" + timeframe.period +
+               "\",\"timestamp\":" + str.tostring(time)
+    prices   = ",\"entry\":\""  + str.tostring(entry, format.mintick) +
+               "\",\"sl\":\""   + str.tostring(slP,   format.mintick) +
+               "\",\"tp1\":\"" + str.tostring(tp1,   format.mintick) +
+               "\",\"tp2\":\"" + str.tostring(tp2,   format.mintick) +
+               "\",\"tp3\":\"" + str.tostring(tp3,   format.mintick) +
+               "\",\"rr1\":"   + str.tostring(rr1,   "0.00") +
+               ",\"rr2\":"     + str.tostring(rr2,   "0.00") +
+               ",\"rr3\":"     + str.tostring(rr3,   "0.00")
+    zone     = ",\"zoneUpper\":\"" + str.tostring(zU, format.mintick) +
+               "\",\"zoneLower\":\"" + str.tostring(zL, format.mintick) +
+               "\",\"zoneType\":\"" + zType + "\""
+    htf      = ",\"activeSession\":\"" + sess +
+               "\",\"htfTier\":\"" + tier +
+               "\",\"htfBias\":\"" + str.tostring(wB) + "/" + str.tostring(dB) + "/" + str.tostring(h4B) + "/" + str.tostring(h1B) +
+               "\",\"htfBiasAlign\":" + str.tostring(tier == "A" ? 1 : 0) +
+               ",\"htfConfluence\":\"" + conf + "\""
+    ctx      = ",\"window\":\"" + sess +
+               "\",\"filters\":\"" + filters + "\"" +
+               ",\"barOpen\":\""  + str.tostring(open,  format.mintick) + "\"" +
+               ",\"barHigh\":\""  + str.tostring(high,  format.mintick) + "\"" +
+               ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
+               ",\"barClose\":\"" + str.tostring(close, format.mintick) + "\"" +
+               ",\"adrConsumed\":\"" + str.tostring(_adrConsumed, "#.####") + "\"" +
+               ",\"adrTier\":\""     + _adrTierStr + "\"" +
+               ",\"dowTier\":\""     + _dowTier + "\"" +
+               ",\"dayOfWeek\":\""   + _dowName + "\"" +
+               ",\"apiKey\":\""    + WEBHOOK_KEY + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+f_drawPosBox(float e, float slP_, float tp_) =>
+    r = bar_index + posBoxBars
+    box.new(bar_index, math.max(e, tp_),  r, math.min(e, tp_),
+            border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 88))
+    box.new(bar_index, math.max(e, slP_), r, math.min(e, slP_),
+            border_color=color.new(color.red,  55), bgcolor=color.new(color.red,  90))
+    line.new(bar_index, e, r, e,
+             color=color.new(color.gray, 10), style=line.style_dashed, width=1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL A · SFP-L / SFP-H  (London Kill Zone 07:00–09:00 UTC)
+// ─────────────────────────────────────────────────────────────────────────
+//  SFP-L: wick swept BELOW Asian low,  body closed ABOVE → LONG
+//  SFP-H: wick swept ABOVE Asian high, body closed BELOW → SHORT
+//  D + H4 EMA20 must agree with trade direction.
+// ═══════════════════════════════════════════════════════════════════════════
+if modSFP and barstate.isconfirmed and in_sfp_w and asian_locked and _dayOk and trades_today < maxTrades
+    _biasL = not reqBias or (dB == 1 and h4B == 1)
+    _biasS = not reqBias or (dB == -1 and h4B == -1)
+    _adrOk = _adrConsumed <= sfpAdrMax
+
+    // SFP LONG ────────────────────────────────────────────────────────────
+    if _biasL and _adrOk and not sfp_long_f and not na(asian_lo)
+        if low < asian_lo and close > asian_lo
+            ep   = close
+            sl   = low - h1ATR * slBuf * _thuMult
+            dist = ep - sl
+            if dist > 0
+                tp1 = ep + dist * tpMult
+                tp2 = ep + dist * (tpMult + 1.0)
+                tp3 = not na(_priorDayHi) and _priorDayHi > ep ? _priorDayHi : ep + dist * (tpMult + 2.0)
+                if ep > sl and tp1 > ep
+                    _c = "D:" + (dB == 1 ? "BULL" : "BEAR") +
+                         " H4:" + (h4B == 1 ? "BULL" : "BEAR") +
+                         " W:" + (wB == 1 ? "BULL" : wB == -1 ? "BEAR" : "NEUT") +
+                         " SFP-LOW"
+                    _f = "SFP-L✓ AsianLo=" + str.tostring(asian_lo, format.mintick) +
+                         " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                         " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                         (_eurDiv ? " EUR-DIV" : "") + (_isThu ? " THU-WIDE" : "")
+                    sfp_long_f   := true
+                    trades_today += 1
+                    alert(f_buildAlert("gbpusd-specialist", "LONG", ep, sl,
+                                       tp1, tp2, tp3, asian_hi, asian_lo, "SFP-L",
+                                       "LDN_KZ", _dowTier, _c, _f),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, low - h1ATR * 0.4, "⚡ SFP LONG",
+                              style=label.style_label_up, color=color.teal,
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+    // SFP SHORT ───────────────────────────────────────────────────────────
+    if modBoth and _biasS and _adrOk and not sfp_short_f and not na(asian_hi)
+        if high > asian_hi and close < asian_hi
+            ep   = close
+            sl   = high + h1ATR * slBuf * _thuMult
+            dist = sl - ep
+            if dist > 0
+                tp1 = ep - dist * tpMult
+                tp2 = ep - dist * (tpMult + 1.0)
+                tp3 = not na(_priorDayLo) and _priorDayLo < ep ? _priorDayLo : ep - dist * (tpMult + 2.0)
+                if ep < sl and tp1 < ep
+                    _c = "D:" + (dB == -1 ? "BEAR" : "BULL") +
+                         " H4:" + (h4B == -1 ? "BEAR" : "BULL") +
+                         " W:" + (wB == 1 ? "BULL" : wB == -1 ? "BEAR" : "NEUT") +
+                         " SFP-HIGH"
+                    _f = "SFP-H✓ AsianHi=" + str.tostring(asian_hi, format.mintick) +
+                         " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                         " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                         (_eurDiv ? " EUR-DIV" : "") + (_isThu ? " THU-WIDE" : "")
+                    sfp_short_f  := true
+                    trades_today += 1
+                    alert(f_buildAlert("gbpusd-specialist", "SHORT", ep, sl,
+                                       tp1, tp2, tp3, asian_hi, asian_lo, "SFP-H",
+                                       "LDN_KZ", _dowTier, _c, _f),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, high + h1ATR * 0.4, "⚡ SFP SHORT",
+                              style=label.style_label_down, color=color.red,
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL B · AOI-D  (Daily zone — London 07-10:30 or NY 13:30-15:00)
+// ─────────────────────────────────────────────────────────────────────────
+//  Entry: bar's wick touches prior-day H or L, body closes back outside.
+//  Confluence required: 50-pip round number OR 50 EMA proximity.
+//  Bias: D EMA20 + H4 EMA20 must agree.
+// ═══════════════════════════════════════════════════════════════════════════
+if modAOID and barstate.isconfirmed and _inLdnNy and _dayOk and trades_today < maxTrades
+    _biasL = not reqBias or (dB == 1 and h4B == 1)
+    _biasS = not reqBias or (dB == -1 and h4B == -1)
+    _adrOk = _adrConsumed <= aoiAdrMax
+
+    // AOI-D LONG: prior-day low is a demand zone ──────────────────────────
+    if _biasL and _adrOk and not aoid_long_f and not na(_priorDayLo)
+        _touch  = low <= _priorDayLo and close > _priorDayLo   // wick into zone, body above
+        _emaC   = math.abs(_ema50 - _priorDayLo) <= atrAOI * dAtr
+        _rnC    = f_nearRound(_priorDayLo)
+        _wkC    = not na(_priorWeekLo) and math.abs(_priorWeekLo - _priorDayLo) <= atrAOI * dAtr
+        _conf   = (_emaC ? 1 : 0) + (_rnC ? 1 : 0) + (_wkC ? 1 : 0) >= 1
+        if _touch and _conf
+            ep   = close
+            sl   = low - h1ATR * slBuf * _thuMult
+            dist = ep - sl
+            if dist > 0
+                tp1 = ep + dist * tpMult
+                tp2 = not na(_priorDayHi) and _priorDayHi > ep ? _priorDayHi : ep + dist * (tpMult + 1.0)
+                tp3 = not na(_priorWeekHi) and _priorWeekHi > tp2 ? _priorWeekHi : ep + dist * (tpMult + 2.0)
+                if ep > sl and tp1 > ep
+                    _sess = in_ny ? "NY" : "LDN"
+                    _c = "D:BULL H4:BULL W:" + (wB == 1 ? "BULL" : wB == -1 ? "BEAR" : "NEUT") + " AOI-D"
+                    _f = "AOI-D-L✓ PDlo=" + str.tostring(_priorDayLo, format.mintick) +
+                         " EMA50:" + str.tostring(_emaC) + " RN:" + str.tostring(_rnC) + " WK:" + str.tostring(_wkC) +
+                         " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                         " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                         (_eurDiv ? " EUR-DIV" : "") + (_isThu ? " THU-WIDE" : "")
+                    aoid_long_f  := true
+                    trades_today += 1
+                    alert(f_buildAlert("gbpusd-specialist", "LONG", ep, sl,
+                                       tp1, tp2, tp3, _priorDayHi, _priorDayLo, "AOI-D",
+                                       _sess, _dowTier, _c, _f),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, low - h1ATR * 0.4, "⚡ AOI-D L",
+                              style=label.style_label_up, color=color.new(color.teal, 20),
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+    // AOI-D SHORT: prior-day high is a supply zone ────────────────────────
+    if modBoth and _biasS and _adrOk and not aoid_short_f and not na(_priorDayHi)
+        _touch  = high >= _priorDayHi and close < _priorDayHi  // wick into zone, body below
+        _emaC   = math.abs(_ema50 - _priorDayHi) <= atrAOI * dAtr
+        _rnC    = f_nearRound(_priorDayHi)
+        _wkC    = not na(_priorWeekHi) and math.abs(_priorWeekHi - _priorDayHi) <= atrAOI * dAtr
+        _conf   = (_emaC ? 1 : 0) + (_rnC ? 1 : 0) + (_wkC ? 1 : 0) >= 1
+        if _touch and _conf
+            ep   = close
+            sl   = high + h1ATR * slBuf * _thuMult
+            dist = sl - ep
+            if dist > 0
+                tp1 = ep - dist * tpMult
+                tp2 = not na(_priorDayLo) and _priorDayLo < ep ? _priorDayLo : ep - dist * (tpMult + 1.0)
+                tp3 = not na(_priorWeekLo) and _priorWeekLo < tp2 ? _priorWeekLo : ep - dist * (tpMult + 2.0)
+                if ep < sl and tp1 < ep
+                    _sess = in_ny ? "NY" : "LDN"
+                    _c = "D:BEAR H4:BEAR W:" + (wB == 1 ? "BULL" : wB == -1 ? "BEAR" : "NEUT") + " AOI-D"
+                    _f = "AOI-D-S✓ PDhi=" + str.tostring(_priorDayHi, format.mintick) +
+                         " EMA50:" + str.tostring(_emaC) + " RN:" + str.tostring(_rnC) + " WK:" + str.tostring(_wkC) +
+                         " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                         " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                         (_eurDiv ? " EUR-DIV" : "") + (_isThu ? " THU-WIDE" : "")
+                    aoid_short_f := true
+                    trades_today += 1
+                    alert(f_buildAlert("gbpusd-specialist", "SHORT", ep, sl,
+                                       tp1, tp2, tp3, _priorDayHi, _priorDayLo, "AOI-D",
+                                       _sess, _dowTier, _c, _f),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, high + h1ATR * 0.4, "⚡ AOI-D S",
+                              style=label.style_label_down, color=color.new(color.red, 20),
+                              textcolor=color.white, size=size.small)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL C · AOI-W  (Weekly swing zone — same session windows as AOI-D)
+// ─────────────────────────────────────────────────────────────────────────
+//  Entry: bar's wick touches prior-week H or L, body closes back outside.
+//  Weekly EMA20 direction required. Wider SL (1.5×), TP3 at 4R (swing).
+// ═══════════════════════════════════════════════════════════════════════════
+if modAOIW and barstate.isconfirmed and _inLdnNy and _dayOk and trades_today < maxTrades
+    _adrOk = _adrConsumed <= aoiAdrMax
+
+    // AOI-W LONG: prior-week low as weekly demand zone ────────────────────
+    if wB == 1 and _adrOk and not aoiw_long_f and not na(_priorWeekLo)
+        _touch = low <= _priorWeekLo and close > _priorWeekLo
+        _rnC   = f_nearRound(_priorWeekLo)
+        _dAg   = dB == 1
+        _conf  = (_rnC ? 1 : 0) + (_dAg ? 1 : 0) >= 1
+        if _touch and _conf
+            ep   = close
+            sl   = low - h1ATR * slBuf * 1.5 * _thuMult
+            dist = ep - sl
+            if dist > 0
+                tp1 = ep + dist * tpMult
+                tp2 = ep + dist * (tpMult + 1.5)
+                tp3 = ep + dist * 4.0
+                if ep > sl and tp1 > ep
+                    _sess = in_ny ? "NY" : "LDN"
+                    _c = "W:BULL D:" + (dB == 1 ? "BULL" : dB == -1 ? "BEAR" : "NEUT") +
+                         " H4:" + (h4B == 1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT") + " AOI-W"
+                    _f = "AOI-W-L✓ PWlo=" + str.tostring(_priorWeekLo, format.mintick) +
+                         " RN:" + str.tostring(_rnC) + " D-agree:" + str.tostring(_dAg) +
+                         " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                         " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                         (_eurDiv ? " EUR-DIV" : "")
+                    aoiw_long_f  := true
+                    trades_today += 1
+                    alert(f_buildAlert("gbpusd-specialist", "LONG", ep, sl,
+                                       tp1, tp2, tp3, _priorWeekHi, _priorWeekLo, "AOI-W",
+                                       _sess, _dowTier, _c, _f),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, low - h1ATR * 0.55, "⚡ AOI-W L",
+                              style=label.style_label_up, color=color.new(color.blue, 10),
+                              textcolor=color.white, size=size.normal)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+    // AOI-W SHORT: prior-week high as weekly supply zone ──────────────────
+    if modBoth and wB == -1 and _adrOk and not aoiw_short_f and not na(_priorWeekHi)
+        _touch = high >= _priorWeekHi and close < _priorWeekHi
+        _rnC   = f_nearRound(_priorWeekHi)
+        _dAg   = dB == -1
+        _conf  = (_rnC ? 1 : 0) + (_dAg ? 1 : 0) >= 1
+        if _touch and _conf
+            ep   = close
+            sl   = high + h1ATR * slBuf * 1.5 * _thuMult
+            dist = sl - ep
+            if dist > 0
+                tp1 = ep - dist * tpMult
+                tp2 = ep - dist * (tpMult + 1.5)
+                tp3 = ep - dist * 4.0
+                if ep < sl and tp1 < ep
+                    _sess = in_ny ? "NY" : "LDN"
+                    _c = "W:BEAR D:" + (dB == 1 ? "BULL" : dB == -1 ? "BEAR" : "NEUT") +
+                         " H4:" + (h4B == 1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT") + " AOI-W"
+                    _f = "AOI-W-S✓ PWhi=" + str.tostring(_priorWeekHi, format.mintick) +
+                         " RN:" + str.tostring(_rnC) + " D-agree:" + str.tostring(_dAg) +
+                         " DOW:" + _dowName + "(Tier" + _dowTier + ")" +
+                         " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%" +
+                         (_eurDiv ? " EUR-DIV" : "")
+                    aoiw_short_f := true
+                    trades_today += 1
+                    alert(f_buildAlert("gbpusd-specialist", "SHORT", ep, sl,
+                                       tp1, tp2, tp3, _priorWeekHi, _priorWeekLo, "AOI-W",
+                                       _sess, _dowTier, _c, _f),
+                          alert.freq_once_per_bar)
+                    label.new(bar_index, high + h1ATR * 0.55, "⚡ AOI-W S",
+                              style=label.style_label_down, color=color.new(color.blue, 10),
+                              textcolor=color.white, size=size.normal)
+                    if showPosBox
+                        f_drawPosBox(ep, sl, tp1)
+
+// ─── STATUS TABLE ──────────────────────────────────────────────────────────
+var table stTbl = na
+
+if showTbl and barstate.islast
+    if na(stTbl)
+        stTbl := table.new(position.top_right, 2, 21,
+                           bgcolor=color.new(color.black, 70),
+                           border_color=color.new(color.gray, 60), border_width=1,
+                           frame_color=color.new(color.gray, 60), frame_width=1)
+
+    _sessLbl = in_ny ? "NY" : in_ldn_ext ? "LDN-MAIN" : in_sfp_w ? "LDN-KZ" :
+               in_asian ? "ASIAN" : in_no_tr ? "NO-TRADE" : "OFF"
+    _sessCol = in_ny ? color.lime : in_ldn_ext ? color.orange : in_sfp_w ? color.yellow :
+               in_asian ? color.purple : color.gray
+
+    _biasStr = dB == 1  and h4B == 1  ? "BULL" :
+               dB == -1 and h4B == -1 ? "BEAR" :
+               dB != h4B              ? "CONFLICT" : "NEUT"
+    _biasCol = dB == 1  and h4B == 1  ? color.teal : dB == -1 and h4B == -1 ? color.red : color.gray
+    _wStr    = wB == 1  ? "BULL" : wB == -1 ? "BEAR" : "NEUT"
+    _wCol    = wB == 1  ? color.teal : wB == -1 ? color.red : color.gray
+    _dStr    = dB == 1  ? "BULL" : dB == -1 ? "BEAR" : "NEUT"
+    _dCol    = dB == 1  ? color.lime : dB == -1 ? color.red : color.gray
+    _h4Str   = h4B == 1 ? "BULL" : h4B == -1 ? "BEAR" : "NEUT"
+    _h4Col   = h4B == 1 ? color.lime : h4B == -1 ? color.red : color.gray
+    _adrCol  = _adrConsumed >= 2.50 ? color.red : _adrConsumed >= 1.50 ? color.orange :
+               _adrConsumed >= 0.90 ? color.yellow : _adrConsumed >= 0.75 ? color.lime : color.aqua
+    _tierCol = _dowTier == "A" ? color.lime : _dowTier == "OFF" ? color.red : color.yellow
+    _dayOkC  = _dayOk ? color.lime : color.red
+    _dayOkS  = _dayOk ? "ACTIVE" : (_isMon ? "MON-OFF" : "FRI-CUT")
+    _asnStr  = asian_locked and not na(asian_hi) ?
+               str.tostring(asian_hi, format.mintick) + " / " + str.tostring(asian_lo, format.mintick) : "building…"
+    _asnCol  = asian_locked ? color.purple : color.gray
+    _pdStr   = not na(_priorDayHi)  ? str.tostring(_priorDayHi,  format.mintick) + " / " + str.tostring(_priorDayLo,  format.mintick) : "—"
+    _pwStr   = not na(_priorWeekHi) ? str.tostring(_priorWeekHi, format.mintick) + " / " + str.tostring(_priorWeekLo, format.mintick) : "—"
+
+    _sfpLS = sfp_long_f  ? "FIRED" : (in_sfp_w and asian_locked and dB == 1  ? "armed" : "—")
+    _sfpSS = sfp_short_f ? "FIRED" : (in_sfp_w and asian_locked and dB == -1 ? "armed" : "—")
+    _sfpLC = sfp_long_f  ? color.teal : in_sfp_w and asian_locked and dB == 1  ? color.lime : color.gray
+    _sfpSC = sfp_short_f ? color.red  : in_sfp_w and asian_locked and dB == -1 ? color.lime : color.gray
+
+    _aoidS = aoid_long_f ? "FIRED L" : aoid_short_f ? "FIRED S" : (trades_today > 0 ? "done" : "scanning")
+    _aoidC = aoid_long_f ? color.teal : aoid_short_f ? color.red : color.gray
+    _aoiwS = aoiw_long_f ? "FIRED L" : aoiw_short_f ? "FIRED S" : (trades_today > 0 ? "done" : "scanning")
+    _aoiwC = aoiw_long_f ? color.teal : aoiw_short_f ? color.red : color.gray
+    _eurS  = _eurDiv ? "DIVERGE" : "normal"
+    _eurC  = _eurDiv ? color.orange : color.gray
+
+    table.cell(stTbl, 0,  0, "QB GBPUSD · SPEC",  text_color=color.new(#00BFFF,0),        text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_left)
+    table.cell(stTbl, 1,  0, syminfo.ticker + " · " + timeframe.period + "m",
+                              text_color=color.new(color.white,20),   text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_right)
+    table.cell(stTbl, 0,  1, "Session",            text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  1, _sessLbl,             text_color=color.new(_sessCol, 0),     text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  2, "Day / Tier",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  2, _dowName + " · " + _dowTier, text_color=color.new(_tierCol,0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  3, "Day Gate",           text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  3, _dayOkS,              text_color=color.new(_dayOkC, 0),      text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  4, "ADR",                text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  4, str.tostring(math.round(_adrConsumed*100)) + "% · " + _adrTierStr, text_color=color.new(_adrCol,0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  5, "Asian H/L",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  5, _asnStr,              text_color=color.new(_asnCol, 0),      text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  6, "Prev Day H/L",       text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  6, _pdStr,               text_color=color.new(color.yellow, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  7, "Prev Week H/L",      text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  7, _pwStr,               text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  8, "W Bias (EMA20)",     text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  8, _wStr,                text_color=color.new(_wCol, 0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0,  9, "D Bias (EMA20)",     text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1,  9, _dStr,                text_color=color.new(_dCol, 0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 10, "H4 Bias (EMA20)",    text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 10, _h4Str,               text_color=color.new(_h4Col, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 11, "D + H4 Align",       text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 11, _biasStr,             text_color=color.new(_biasCol, 0),     text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 12, "EURUSD Div",         text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 12, _eurS,                text_color=color.new(_eurC, 0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 13, "SFP Long",           text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 13, _sfpLS,               text_color=color.new(_sfpLC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 14, "SFP Short",          text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 14, _sfpSS,               text_color=color.new(_sfpSC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 15, "AOI-D",              text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 15, _aoidS,               text_color=color.new(_aoidC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 16, "AOI-W",              text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 16, _aoiwS,               text_color=color.new(_aoiwC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 17, "Trades",             text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 17, str.tostring(trades_today) + " / " + str.tostring(maxTrades),
+                              text_color=color.new(trades_today >= maxTrades ? color.red : color.gray, 0),
+                              text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 18, "Thu SL mult",        text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 18, _isThu ? "1.2× (BOE)" : "1.0×",
+                              text_color=color.new(_isThu ? color.orange : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 19, "50 EMA",             text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 19, str.tostring(_ema50, format.mintick),
+                              text_color=color.new(color.gray, 30),   text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 20, "H1 ATR",             text_color=color.new(color.gray,15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 20, str.tostring(h1ATR, "#.00000"),
+                              text_color=color.new(color.gray, 30),   text_size=size.tiny, text_halign=text.align_right)
+
+// ─── SESSION BACKGROUNDS ─────────────────────────────────────────────────
+bgcolor(in_asian   ? color.new(color.purple, 93) : na, title="Asian (00:00–07:00 UTC)")
+bgcolor(in_sfp_w   ? color.new(color.yellow, 87) : na, title="London KZ — SFP (07:00–09:00 UTC)")
+bgcolor(in_ldn_ext ? color.new(color.orange, 90) : na, title="London Main (09:00–10:30 UTC)")
+bgcolor(in_no_tr   ? color.new(color.red,    96) : na, title="No Trade (10:30–13:30 UTC)")
+bgcolor(in_ny      ? color.new(color.lime,   86) : na, title="NY Session (13:30–15:00 UTC)")
