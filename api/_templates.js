@@ -18,6 +18,7 @@
 // carries the sub-signal name (FVG / Judas / SB / ORB / PSYCH / FRB).
 const SPECIALIST_META_MAP = {
   'gold-specialist':    { glyph: '🥇', label: 'Gold Specialist' },
+  'gold-specialist-2':  { glyph: '🥇', label: 'Gold Specialist 2' },
   'nas100-specialist':  { glyph: '📈', label: 'NAS100 Specialist' },
   'gbpusd-specialist':  { glyph: '🇬🇧', label: 'GBPUSD Specialist' },
   'forex-specialist':   { glyph: '💱', label: 'Forex Specialist' },
@@ -69,7 +70,7 @@ const LEGACY_TEMPLATES = Object.keys(LEGACY_TEMPLATE_META);
 
 // Display order (heatmaps, cards) — specialists first, legacy after
 const TEMPLATE_ORDER = [
-  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist',
+  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',

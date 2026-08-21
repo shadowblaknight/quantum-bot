@@ -33,6 +33,8 @@ const SPECIALIST_ALLOWED_ZONES = {
   // All 8 confirmed sub-signals from qb-gold-specialist.pine:
   //   A=FVG  B=Asian-H/L (Judas)  C=SB-FVG  D=PSYCH  D2=PSYCH-EXT  M=FRB  H=NYORB
   'gold-specialist':   ['FRB', 'NYORB', 'FVG', 'Asian-H', 'Asian-L', 'SB-FVG', 'PSYCH', 'PSYCH-EXT'],
+  // Gold Specialist 2 — H1 chart, 3 confirmed setups (A/B/D backtest: WR 55.4%, PF 1.27, 6yr)
+  'gold-specialist-2': ['gold-s2-a', 'gold-s2-b', 'gold-s2-d'],
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
   'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)
 };
@@ -329,7 +331,8 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const _known = Object.keys(TEMPLATE_LABELS).sort((a, b) => b.length - a.length);
   const _tmplFromComment = (c) => {
     if (!c) return null;
-    if (/^QB-V20-/.test(c)) return 'specialist'; // V20: any specialist comment
+    if (/^QB-V20-GS2-/.test(c)) return 'specialist-2'; // gold-specialist-2 positions (H1)
+    if (/^QB-V20-/.test(c)) return 'specialist';        // all other V20 specialist positions (15m)
     const m = c.match(/^QB-V1[23]-(.+)$/);
     if (!m) return null;
     const rest = m[1];
@@ -340,7 +343,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     const sameInstrument = (pos.assetId === assetId) ||
       (pos.symbol && pineTicker && pos.symbol.toUpperCase().includes(pineTicker));
     if (!sameInstrument) return false;
-    if (isSpecialist) return _tmplFromComment(pos.comment) === 'specialist'; // 1 specialist per asset
+    if (isSpecialist) {
+      const posKind = _tmplFromComment(pos.comment);
+      // gold-specialist-2 has its own slot — only blocked by another S2 position.
+      // gold-specialist (15m) and gold-specialist-2 (H1) can coexist.
+      if (p.template === 'gold-specialist-2') return posKind === 'specialist-2';
+      return posKind === 'specialist';
+    }
     return _tmplFromComment(pos.comment) === p.template;
   });
   if (existing) {
@@ -509,8 +518,12 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   const _bTP3 = decision.finalTP3 != null ? decision.finalTP3 : tp3;
   const brokerTP = _bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1);
   // V20 specialists use QB-V20-{asset}-{signalType}; legacy stays QB-V13-{template}-{window}
+  // gold-specialist-2 uses QB-V20-GS2-* prefix so its positions don't block gold-specialist
+  // (15m) trades — each specialist has its own 1-per-asset slot.
   const comment = isSpecialist
-    ? `QB-V20-${assetId.slice(0, 5)}-${(p.zoneType || p.window || 'sig').slice(0, 10)}`.slice(0, 64)
+    ? p.template === 'gold-specialist-2'
+      ? `QB-V20-GS2-${assetId.slice(0, 4)}-${(p.zoneType || 'sig').slice(0, 8)}`.slice(0, 64)
+      : `QB-V20-${assetId.slice(0, 5)}-${(p.zoneType || p.window || 'sig').slice(0, 10)}`.slice(0, 64)
     : `QB-V13-${p.template}-${(p.window || p.swept || '').slice(0, 12)}`.slice(0, 64);
 
   // v14: round to the broker's tick increment. Raw Pine prices can carry more

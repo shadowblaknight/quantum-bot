@@ -1,0 +1,436 @@
+// This source code is subject to the Mozilla Public License 2.0
+// shadowblaknight -- QB Gold Specialist 2 (Setups A/B/D)
+//@version=6
+indicator("QB Gold Specialist 2 - A/B/D",
+          shorttitle    = "QB-Gold-S2",
+          overlay       = true,
+          max_bars_back = 500)
+
+// =================================================================
+//  INPUTS
+// =================================================================
+GA = "Setup A - FVG + BOS"
+GB = "Setup B - Judas Sweep"
+GD = "Setup D - Psych Level Bounce"
+GF = "Global Filters"
+
+modA = input.bool(true, "Enable A", group=GA)
+modB = input.bool(true, "Enable B", group=GB)
+modD = input.bool(true, "Enable D", group=GD)
+
+tpA = input.float(1.0, "TP (xR)", group=GA, minval=0.5, step=0.5)
+tpB = input.float(1.5, "TP (xR)", group=GB, minval=0.5, step=0.5)
+tpD = input.float(1.5, "TP (xR)", group=GD, minval=0.5, step=0.5)
+
+htfA     = input.string("all3", "HTF bias req.", group=GA, options=["any","2of3","all3"])
+htfB_req = input.string("2of3", "HTF bias req.", group=GB, options=["none","any","2of3","all3"])
+htfD_req = input.string("all3", "HTF bias req.", group=GD, options=["any","2of3","all3"])
+
+atrLen   = input.int(14,    "ATR period",         group=GF, minval=5)
+emaLen   = input.int(20,    "EMA period",          group=GF, minval=5)
+swg      = input.int(3,     "Pivot SWG",           group=GF, minval=2, maxval=5)
+bosLB    = input.int(30,    "BOS alive (H1 bars)", group=GF, minval=5, maxval=100)
+slBuf    = input.float(0.20,"SL buffer (xATR)",   group=GF, minval=0.05, step=0.05)
+slMin    = input.float(0.30,"SL min gate (xATR)", group=GF, minval=0.05, step=0.05)
+slMax    = input.float(3.00,"SL max gate (xATR)", group=GF, minval=1.0,  step=0.25)
+fvgGap   = input.float(0.20,"FVG min gap (xATR)", group=GA, minval=0.05, step=0.05)
+fvgAge   = input.int(12,    "FVG max age (bars)",  group=GA, minval=4,   maxval=48)
+fvgFill  = input.float(0.20,"FVG max fill",        group=GA, minval=0.05, step=0.05)
+adrFVG   = input.float(0.85,"ADR max (FVG)",      group=GF, minval=0.5, maxval=1.5)
+adrJudas = input.float(0.90,"ADR max (Judas)",    group=GF, minval=0.5, maxval=1.5)
+adrPsych = input.float(1.20,"ADR max (Psych)",    group=GF, minval=0.5, maxval=2.0)
+
+// Webhook — paste your WEBHOOK_API_KEY value here (same key as other gold alerts)
+WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
+
+// =================================================================
+//  TIME  (all session windows in UTC)
+// =================================================================
+_H   = hour(time,      "UTC")
+_DOW = dayofweek(time, "UTC")
+
+isWD  = _DOW >= 2 and _DOW <= 6
+inAs  = _H < 8  and isWD
+inLon = _H >= 8  and _H <= 10 and isWD
+inNY  = _H >= 13 and _H <= 16 and isWD
+inKZ  = inLon or inNY
+
+_newDay = ta.change(dayofmonth(time, "UTC")) != 0
+
+// =================================================================
+//  ATR + HTF BIAS
+// =================================================================
+atr  = ta.atr(atrLen)
+h1em = ta.ema(close, emaLen)
+h1B  = close > h1em ? 1 : close < h1em ? -1 : 0
+
+h4cl = request.security(syminfo.tickerid, "240", close,                 lookahead=barmerge.lookahead_off)
+h4em = request.security(syminfo.tickerid, "240", ta.ema(close, emaLen), lookahead=barmerge.lookahead_off)
+dcl  = request.security(syminfo.tickerid, "D",   close,                 lookahead=barmerge.lookahead_off)
+dem  = request.security(syminfo.tickerid, "D",   ta.ema(close, emaLen), lookahead=barmerge.lookahead_off)
+
+h4B = h4cl > h4em ? 1 : h4cl < h4em ? -1 : 0
+dB  = dcl  > dem  ? 1 : dcl  < dem  ? -1 : 0
+
+f_htfOk(dir, req) =>
+    cnt = (h1B == dir ? 1 : 0) + (h4B == dir ? 1 : 0) + (dB == dir ? 1 : 0)
+    req == "none" or
+     (req == "any"  and cnt >= 1) or
+     (req == "2of3" and cnt >= 2) or
+     cnt >= 3
+
+f_htfTier(dir) =>
+    cnt = (h1B == dir ? 1 : 0) + (h4B == dir ? 1 : 0) + (dB == dir ? 1 : 0)
+    cnt >= 3 ? "A" : "B"
+
+// =================================================================
+//  ADR
+// =================================================================
+dHi  = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
+dLo  = request.security(syminfo.tickerid, "D", low,  lookahead=barmerge.lookahead_off)
+dATR = ta.ema(dHi - dLo, 14)[1]
+
+var float rHi = na
+var float rLo = na
+if _newDay
+    rHi := high[1]
+    rLo := low[1]
+rHi := math.max(nz(rHi, high[1]), high[1])
+rLo := math.min(nz(rLo, low[1]),  low[1])
+adrC = dATR > 0 ? (rHi - rLo) / dATR : 0.0
+
+// =================================================================
+//  ASIAN RANGE
+// =================================================================
+var float arHi     = na
+var float arLo     = na
+var bool  arLocked = false
+
+if _newDay
+    arHi     := na
+    arLo     := na
+    arLocked := false
+
+if inAs and barstate.isconfirmed
+    arHi := na(arHi) ? high : math.max(arHi, high)
+    arLo := na(arLo) ? low  : math.min(arLo, low)
+
+if _H == 8 and not arLocked
+    arLocked := true
+
+// =================================================================
+//  BOS DETECTION
+// =================================================================
+ph = ta.pivothigh(high, swg, swg)
+pl = ta.pivotlow (low,  swg, swg)
+
+var float prevPH    = na
+var float prevPL    = na
+var int   bosBullBi = na
+var int   bosBearBi = na
+
+if not na(ph)
+    if not na(prevPH) and ph > prevPH
+        bosBullBi := bar_index
+    prevPH := ph
+
+if not na(pl)
+    if not na(prevPL) and pl < prevPL
+        bosBearBi := bar_index
+    prevPL := pl
+
+bosBull = not na(bosBullBi) and (bar_index - bosBullBi) <= bosLB
+bosBear = not na(bosBearBi) and (bar_index - bosBearBi) <= bosLB
+
+// =================================================================
+//  FVG ARRAYS  (used by Setup A)
+// =================================================================
+var float[] fU    = array.new_float()
+var float[] fL    = array.new_float()
+var int[]   fDir  = array.new_int()
+var int[]   fBi   = array.new_int()
+var float[] fFill = array.new_float()
+var bool[]  fFire = array.new_bool()
+
+if barstate.isconfirmed and bar_index >= 2 and atr > 0
+    bGap = low - high[2]
+    if bGap >= atr * fvgGap
+        array.push(fU,    low)
+        array.push(fL,    high[2])
+        array.push(fDir,  1)
+        array.push(fBi,   bar_index)
+        array.push(fFill, 0.0)
+        array.push(fFire, false)
+
+    rGap = low[2] - high
+    if rGap >= atr * fvgGap
+        array.push(fU,    low[2])
+        array.push(fL,    high)
+        array.push(fDir,  -1)
+        array.push(fBi,   bar_index)
+        array.push(fFill, 0.0)
+        array.push(fFire, false)
+
+    while array.size(fU) > 25
+        array.shift(fU)
+        array.shift(fL)
+        array.shift(fDir)
+        array.shift(fBi)
+        array.shift(fFill)
+        array.shift(fFire)
+
+if barstate.isconfirmed and array.size(fU) > 0
+    for i = array.size(fU) - 1 to 0
+        u   = array.get(fU,   i)
+        l   = array.get(fL,   i)
+        d   = array.get(fDir, i)
+        gsz = u - l
+        if gsz > 0
+            if d == 1 and low < u
+                array.set(fFill, i,
+                  math.min(1.0, math.max(array.get(fFill, i),
+                  (u - math.max(l, low)) / gsz)))
+            if d == -1 and high > l
+                array.set(fFill, i,
+                  math.min(1.0, math.max(array.get(fFill, i),
+                  (math.min(u, high) - l) / gsz)))
+
+// =================================================================
+//  ALERT BUILDER
+//  tp1 = intended close price. tp2/tp3 omitted so broker closes
+//  the full position at tp1 (no partial exit ratchet).
+//  zoneType MUST match SPECIALIST_ALLOWED_ZONES in webhook.js exactly.
+// =================================================================
+f_buildAlert(string dir, float entryP, float slP, float tp1,
+             string zType, string sess, string tier) =>
+    slD    = math.abs(entryP - slP)
+    rr1    = slD > 0 ? math.abs(tp1 - entryP) / slD : 0.0
+    dEmoji = dir == "LONG" ? "buy" : "sell"
+    readable = syminfo.ticker + " " + dEmoji + " | gold-specialist-2 | " + zType + " | H1\n---\n"
+    head   = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"gold-specialist-2" +
+              "\",\"direction\":\"" + dir +
+              "\",\"symbol\":\"" + syminfo.tickerid +
+              "\",\"timeframe\":\"" + timeframe.period +
+              "\",\"timestamp\":" + str.tostring(time)
+    prices = ",\"entry\":\""  + str.tostring(entryP, format.mintick) +
+              "\",\"sl\":\""  + str.tostring(slP,    format.mintick) +
+              "\",\"tp1\":\"" + str.tostring(tp1,    format.mintick) +
+              "\",\"rr1\":"   + str.tostring(rr1,    "0.00")
+    zone   = ",\"zoneUpper\":\"" + str.tostring(entryP, format.mintick) +
+              "\",\"zoneLower\":\"" + str.tostring(slP,    format.mintick) +
+              "\",\"zoneType\":\"" + zType + "\""
+    htf    = ",\"activeSession\":\"" + sess +
+              "\",\"htfTier\":\"" + tier +
+              "\",\"htfBias\":\"" + str.tostring(h1B) + "/" + str.tostring(h4B) + "/" + str.tostring(dB) +
+              "\",\"htfBiasAlign\":" + (tier == "A" ? "1" : "0")
+    ctx    = ",\"window\":\"" + sess +
+              "\",\"swept\":\"\",\"impulseATR\":\"0.00\"" +
+              ",\"adrConsumed\":\"" + str.tostring(adrC, "#.####") + "\"" +
+              ",\"barOpen\":\""  + str.tostring(open,  format.mintick) + "\"" +
+              ",\"barHigh\":\""  + str.tostring(high,  format.mintick) + "\"" +
+              ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
+              ",\"barClose\":\"" + str.tostring(close, format.mintick) + "\"" +
+              ",\"apiKey\":\"" + WEBHOOK_KEY + "\"}"
+    readable + head + prices + zone + htf + ctx
+
+// =================================================================
+//  SETUP A -- FVG RETEST + BOS
+//  zoneType = "gold-s2-a" | HTF all3 = Tier A always
+// =================================================================
+var bool firedA = false
+sigAL = false
+sigAS = false
+
+if _newDay
+    firedA := false
+
+if modA and barstate.isconfirmed and inKZ and not firedA and atr > 0 and adrC < adrFVG
+    if array.size(fU) > 0
+        for i = array.size(fU) - 1 to 0
+            if firedA
+                break
+            if array.get(fFire, i)
+                continue
+            u    = array.get(fU,    i)
+            l    = array.get(fL,    i)
+            d    = array.get(fDir,  i)
+            bi   = array.get(fBi,   i)
+            fill = array.get(fFill, i)
+            age  = bar_index - bi
+
+            if age == 0 or age > fvgAge or fill > fvgFill
+                continue
+            touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+            if not touch
+                continue
+            if not ((d == 1 and bosBull) or (d == -1 and bosBear))
+                continue
+            if not f_htfOk(d, htfA)
+                continue
+
+            eP  = d == 1 ? u : l
+            slP = d == 1 ? l - atr * slBuf : u + atr * slBuf
+            slD = math.abs(eP - slP)
+            if slD <= 0 or slD / atr < slMin or slD / atr > slMax
+                continue
+
+            tp1 = d == 1 ? eP + slD * tpA : eP - slD * tpA
+            array.set(fFire, i, true)
+            firedA := true
+            _sess = inLon ? "LONDON" : "NY_AM"
+
+            if d == 1
+                sigAL := true
+                alert(f_buildAlert("LONG", eP, slP, tp1, "gold-s2-a", _sess, "A"),
+                      alert.freq_once_per_bar_close)
+                label.new(bar_index, low, "A",
+                          style=label.style_label_up,
+                          color=color.new(color.teal, 10),
+                          textcolor=color.white, size=size.small,
+                          tooltip="Entry: " + str.tostring(eP, "#.##") +
+                                  "  SL: "  + str.tostring(slP, "#.##") +
+                                  "  TP: "  + str.tostring(tp1, "#.##"))
+            else
+                sigAS := true
+                alert(f_buildAlert("SHORT", eP, slP, tp1, "gold-s2-a", _sess, "A"),
+                      alert.freq_once_per_bar_close)
+                label.new(bar_index, high, "A",
+                          style=label.style_label_down,
+                          color=color.new(color.maroon, 10),
+                          textcolor=color.white, size=size.small,
+                          tooltip="Entry: " + str.tostring(eP, "#.##") +
+                                  "  SL: "  + str.tostring(slP, "#.##") +
+                                  "  TP: "  + str.tostring(tp1, "#.##"))
+
+// =================================================================
+//  SETUP B -- JUDAS SWEEP
+//  zoneType = "gold-s2-b" | Tier depends on actual HTF count (2 or 3)
+// =================================================================
+var bool bHi = false
+var bool bLo = false
+sigBL = false
+sigBS = false
+
+if _newDay
+    bHi := false
+    bLo := false
+
+if modB and barstate.isconfirmed and inLon and arLocked and atr > 0 and adrC < adrJudas
+    if not na(arHi) and not na(arLo)
+
+        if not bHi and high > arHi and close < arHi
+            if (high - arHi) >= atr * 0.15
+                eP  = arHi
+                slP = high + atr * slBuf
+                slD = math.abs(eP - slP)
+                if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
+                    if f_htfOk(-1, htfB_req)
+                        tp1   = eP - slD * tpB
+                        _tier = f_htfTier(-1)
+                        bHi  := true
+                        sigBS := true
+                        alert(f_buildAlert("SHORT", eP, slP, tp1, "gold-s2-b", "LONDON", _tier),
+                              alert.freq_once_per_bar_close)
+                        label.new(bar_index, high, "B",
+                                  style=label.style_label_down,
+                                  color=color.new(color.orange, 10),
+                                  textcolor=color.white, size=size.small,
+                                  tooltip="Entry: " + str.tostring(eP, "#.##") +
+                                          "  SL: "  + str.tostring(slP, "#.##") +
+                                          "  TP: "  + str.tostring(tp1, "#.##"))
+
+        if not bLo and low < arLo and close > arLo
+            if (arLo - low) >= atr * 0.15
+                eP  = arLo
+                slP = low - atr * slBuf
+                slD = math.abs(eP - slP)
+                if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
+                    if f_htfOk(1, htfB_req)
+                        tp1   = eP + slD * tpB
+                        _tier = f_htfTier(1)
+                        bLo  := true
+                        sigBL := true
+                        alert(f_buildAlert("LONG", eP, slP, tp1, "gold-s2-b", "LONDON", _tier),
+                              alert.freq_once_per_bar_close)
+                        label.new(bar_index, low, "B",
+                                  style=label.style_label_up,
+                                  color=color.new(color.orange, 10),
+                                  textcolor=color.white, size=size.small,
+                                  tooltip="Entry: " + str.tostring(eP, "#.##") +
+                                          "  SL: "  + str.tostring(slP, "#.##") +
+                                          "  TP: "  + str.tostring(tp1, "#.##"))
+
+// =================================================================
+//  SETUP D -- PSYCHOLOGICAL LEVEL BOUNCE
+//  zoneType = "gold-s2-d" | HTF all3 = Tier A always
+// =================================================================
+var bool firedD = false
+sigDL = false
+sigDS = false
+
+if _newDay
+    firedD := false
+
+if modD and barstate.isconfirmed and inKZ and not firedD and atr > 0 and adrC < adrPsych
+    lvl50   = math.round(close / 50.0)  * 50.0
+    lvl100  = math.round(close / 100.0) * 100.0
+    nearLvl = math.abs(close - lvl50) <= math.abs(close - lvl100) ? lvl50 : lvl100
+
+    bLong  = low  <= nearLvl and close > nearLvl
+    bShort = high >= nearLvl and close < nearLvl
+    dir    = bLong and not bShort ? 1 : bShort and not bLong ? -1 : 0
+
+    if dir != 0 and f_htfOk(dir, htfD_req)
+        wick = dir == 1 ? low : high
+        eP   = nearLvl
+        buf2 = math.max(0.30 * atr, syminfo.mintick * 5)
+        slP  = dir == 1 ? wick - buf2 : wick + buf2
+        slD  = math.abs(eP - slP)
+        if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
+            tp1  = dir == 1 ? eP + slD * tpD : eP - slD * tpD
+            _sess = inLon ? "LONDON" : "NY_AM"
+            firedD := true
+            if dir == 1
+                sigDL := true
+                alert(f_buildAlert("LONG", eP, slP, tp1, "gold-s2-d", _sess, "A"),
+                      alert.freq_once_per_bar_close)
+                label.new(bar_index, low,
+                          str.tostring(math.round(nearLvl), "#"),
+                          style=label.style_label_up,
+                          color=color.new(color.purple, 10),
+                          textcolor=color.white, size=size.small,
+                          tooltip="Entry: " + str.tostring(eP, "#.##") +
+                                  "  SL: "  + str.tostring(slP, "#.##") +
+                                  "  TP: "  + str.tostring(tp1, "#.##"))
+            else
+                sigDS := true
+                alert(f_buildAlert("SHORT", eP, slP, tp1, "gold-s2-d", _sess, "A"),
+                      alert.freq_once_per_bar_close)
+                label.new(bar_index, high,
+                          str.tostring(math.round(nearLvl), "#"),
+                          style=label.style_label_down,
+                          color=color.new(color.purple, 10),
+                          textcolor=color.white, size=size.small,
+                          tooltip="Entry: " + str.tostring(eP, "#.##") +
+                                  "  SL: "  + str.tostring(slP, "#.##") +
+                                  "  TP: "  + str.tostring(tp1, "#.##"))
+
+// =================================================================
+//  VISUAL
+// =================================================================
+plot(arLocked ? arHi : na, "Asian Hi", color.new(color.yellow, 50), 1, plot.style_stepline)
+plot(arLocked ? arLo : na, "Asian Lo", color.new(color.yellow, 50), 1, plot.style_stepline)
+
+bgcolor(inLon ? color.new(color.blue,   96) : na, title="London KZ")
+bgcolor(inNY  ? color.new(color.orange, 96) : na, title="NY KZ")
+
+// =================================================================
+//  ALERT CONDITIONS (secondary — for manual TradingView alerts)
+// =================================================================
+alertcondition(sigAL, "A Long  — FVG+BOS",     "QB Gold S2 | A LONG  | FVG+BOS")
+alertcondition(sigAS, "A Short — FVG+BOS",     "QB Gold S2 | A SHORT | FVG+BOS")
+alertcondition(sigBL, "B Long  — Judas Sweep", "QB Gold S2 | B LONG  | Judas Sweep")
+alertcondition(sigBS, "B Short — Judas Sweep", "QB Gold S2 | B SHORT | Judas Sweep")
+alertcondition(sigDL, "D Long  — Psych Level", "QB Gold S2 | D LONG  | Psych Level")
+alertcondition(sigDS, "D Short — Psych Level", "QB Gold S2 | D SHORT | Psych Level")
+alertcondition(sigAL or sigBL or sigDL or sigAS or sigBS or sigDS, "Any Signal", "QB Gold S2 | Signal fired")

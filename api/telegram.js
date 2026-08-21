@@ -28,6 +28,10 @@ const ZONE_TYPE_LABELS = {
   // NAS100 specialist
   'ORB':      'NYSE ORB',            // NAS100 — Signal A
   'AMD-FVG':  'Session Intel FVG',   // NAS100 — TJR session intel (Asian range → London sweep → ORB BOS → NY FVG)
+  // Gold Specialist 2 (H1)
+  'gold-s2-a': 'FVG+BOS (H1)',           // Gold S2 — Setup A (FVG retest + BOS)
+  'gold-s2-b': 'Judas Sweep (H1)',        // Gold S2 — Setup B (Asian high/low sweep)
+  'gold-s2-d': 'Psych Level (H1)',        // Gold S2 — Setup D (round number bounce)
   // GBPUSD specialist
   'SFP-L':    'Asian Sweep Low',     // GBP — Signal A long (wick below Asian lo, body back inside → London KZ)
   'SFP-H':    'Asian Sweep High',    // GBP — Signal A short (wick above Asian hi, body back inside → London KZ)

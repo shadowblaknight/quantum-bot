@@ -508,7 +508,7 @@ async function managePosition(position) {
   let chosen = null;
 
   if (isSpecialistTrade && hitRungs.length > 0) {
-    // ─── SPECIALIST SL CASCADE (gold-specialist / nas100-specialist) ──────────
+    // ─── SPECIALIST SL CASCADE (gold-specialist / gold-specialist-2 / nas100-specialist) ──────────
     // ICT/SMC risk management: each confirmed TP locks the previous level, not itself.
     //   TP1 hit → SL moves to breakeven (entry)   — trade becomes risk-free
     //   TP2 hit → SL moves to TP1 price           — 1R locked in guaranteed
