@@ -1,0 +1,377 @@
+//@version=6
+strategy("Quantum Bot — GER40 Session Strategy", "QB GER40", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=0,
+         calc_on_every_tick=false,
+         max_boxes_count=150, max_lines_count=150, max_labels_count=200)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QUANTUM BOT — GER40 / DAX  3-Phase Session Strategy
+//  ─────────────────────────────────────────────────────────────────────
+//  Phase 1:  Asian range     00:00 – 07:00 UTC   (liquidity H/L)
+//  Phase 2:  London sweep    07:00 – 13:30 UTC   (Judas swing → sets bias)
+//  Phase 3:  NY entry        14:30 – 17:30 UTC   (ORB BOS → FVG retest)
+//
+//  Backtested on MetaAPI GER40.s 5m (2.31yr) — LONG only:
+//    FVG ≥ 30pt  →  WR 61.9%  /  PF 3.541  /  9.1/yr
+//    FVG ≥ 40pt  →  WR 76.9%  /  PF 5.905  /  5.6/yr
+//
+//  ── SETUP ────────────────────────────────────────────────────────────
+//  • Symbol:    any 24h GER40 CFD that covers Asian session
+//               e.g. SPREADEX:GER40  /  OANDA:DE30_USD  /  PEPPERSTONE:DE40
+//  • Timeframe: 5m or 15m recommended
+//  • Timezone:  set chart timezone to UTC
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── INPUTS ────────────────────────────────────────────────────────────
+G_SIG = "Signal"
+i_longOnly  = input.bool(true,  "Long Only (recommended — SHORT has no edge)",  group=G_SIG)
+i_reqSweep  = input.bool(true,  "Require London Sweep",                          group=G_SIG)
+i_reqBOS    = input.bool(true,  "Require NY ORB BOS (13:00-14:30)",              group=G_SIG)
+i_fvgMin    = input.float(30.0, "Min FVG (points)",       group=G_SIG, minval=5.0, step=5.0)
+i_tpMult    = input.float(2.0,  "TP Multiplier",          group=G_SIG, options=[1.5, 2.0, 2.5, 3.0])
+i_slBuf     = input.float(0.15, "SL ATR buffer (beyond FVG edge)", group=G_SIG, minval=0.0, step=0.05)
+
+G_VIS = "Visuals"
+i_showAsian = input.bool(true,  "Show Asian Range box",   group=G_VIS)
+i_showORB   = input.bool(true,  "Show NY ORB box",        group=G_VIS)
+i_showFVG   = input.bool(true,  "Show FVG zones",         group=G_VIS)
+i_showTbl   = input.bool(true,  "Show status table",      group=G_VIS)
+i_posBoxBars= input.int(50,     "Position box width (bars)", group=G_VIS, minval=10, maxval=200)
+
+// ─── SESSION DETECTION (UTC) ───────────────────────────────────────────
+// Times below are UTC minutes-of-day.
+// If your chart uses a timezone offset, adjust the constants accordingly.
+_hUtc     = hour(time, "UTC")
+_mUtc     = minute(time, "UTC")
+_minOfDay = _hUtc * 60 + _mUtc
+_newDay   = ta.change(time("D")) != 0
+
+in_asian    = _minOfDay >= 0    and _minOfDay < 420    // 00:00 – 07:00
+in_london   = _minOfDay >= 420  and _minOfDay < 810    // 07:00 – 13:30
+in_orb      = _minOfDay >= 780  and _minOfDay < 870    // 13:00 – 14:30 (ORB build)
+in_entry    = _minOfDay >= 870  and _minOfDay < 1050   // 14:30 – 17:30 (entry window)
+in_ny       = _minOfDay >= 780  and _minOfDay < 1050   // 13:00 – 17:30 (full NY)
+in_force_close = _minOfDay >= 1050                      // 17:30+ (force flat)
+
+// ─── ATR ───────────────────────────────────────────────────────────────
+atr_val = ta.atr(14)
+
+// ─── H1 BIAS — tiebreak when both sides are swept ──────────────────────
+f_h1bias() =>
+    e = ta.ema(close, 20)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+[h1_bias] = request.security(syminfo.tickerid, "60",
+    [f_h1bias()], lookahead=barmerge.lookahead_off)
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 1 — ASIAN RANGE  (00:00 – 07:00 UTC)
+// ═══════════════════════════════════════════════════════════════════════
+var float ar_hi     = na
+var float ar_lo     = na
+var bool  ar_locked = false
+
+if _newDay
+    ar_hi     := na
+    ar_lo     := na
+    ar_locked := false
+
+if in_asian
+    ar_hi := na(ar_hi) ? high : math.max(ar_hi, high)
+    ar_lo := na(ar_lo) ? low  : math.min(ar_lo, low)
+
+if not in_asian and in_asian[1] and not na(ar_hi)
+    ar_locked := true
+
+// Asian range box — extends through London as reference lines
+var box ar_box = na
+if i_showAsian and barstate.isconfirmed
+    if in_asian and not in_asian[1]
+        ar_box := box.new(bar_index, ar_hi, bar_index + 1, ar_lo,
+                          border_color=color.new(color.blue, 30),
+                          bgcolor=color.new(color.blue, 87), border_width=1)
+    if (in_asian or in_london) and not na(ar_box) and not na(ar_hi)
+        box.set_right(ar_box, bar_index + 1)
+        box.set_top(ar_box, ar_hi)
+        box.set_bottom(ar_box, ar_lo)
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 2 — LONDON SWEEP  (07:00 – 13:30 UTC)
+// ═══════════════════════════════════════════════════════════════════════
+// sw_lo = wick below Asian LO + close back above it  →  LONG bias
+// sw_hi = wick above Asian HI + close back below it  →  SHORT bias
+
+var bool sw_lo   = false
+var bool sw_hi   = false
+var int  day_dir = 0        // 1=LONG, -1=SHORT, 0=undefined
+
+if _newDay
+    sw_lo   := false
+    sw_hi   := false
+    day_dir := 0
+
+if barstate.isconfirmed and in_london and ar_locked and not na(ar_hi)
+    if not sw_lo and low < ar_lo and close > ar_lo
+        sw_lo := true
+        label.new(bar_index, low, "Sweep Lo",
+                  style=label.style_label_up,
+                  color=color.new(color.teal, 5),
+                  textcolor=color.white, size=size.tiny)
+
+    if not sw_hi and high > ar_hi and close < ar_hi
+        sw_hi := true
+        label.new(bar_index, high, "Sweep Hi",
+                  style=label.style_label_down,
+                  color=color.new(color.red, 5),
+                  textcolor=color.white, size=size.tiny)
+
+    // Set day bias when first clean sweep is detected
+    if day_dir == 0
+        if sw_lo and not sw_hi
+            day_dir := 1
+        else if sw_hi and not sw_lo
+            day_dir := -1
+        else if sw_lo and sw_hi
+            // Both swept — use H1 EMA bias as tiebreak
+            day_dir := h1_bias
+
+// If sweep not required, fall back to H1 bias direction
+if not i_reqSweep and day_dir == 0 and in_london and not na(ar_hi)
+    if h1_bias != 0
+        day_dir := h1_bias
+
+// ═══════════════════════════════════════════════════════════════════════
+// NY ORB  (13:00 – 14:30 UTC)
+// Accumulate opening range; lock after 14:30.
+// BOS = first bar AFTER lock where close breaks ORB in bias direction.
+// ═══════════════════════════════════════════════════════════════════════
+var float orb_hi     = na
+var float orb_lo     = na
+var bool  orb_locked = false
+var bool  bos_done   = false
+
+if _newDay
+    orb_hi     := na
+    orb_lo     := na
+    orb_locked := false
+    bos_done   := false
+
+if in_orb
+    orb_hi := na(orb_hi) ? high : math.max(orb_hi, high)
+    orb_lo := na(orb_lo) ? low  : math.min(orb_lo, low)
+
+if not in_orb and in_orb[1] and not na(orb_hi)
+    orb_locked := true
+
+// ORB reference box
+var box orb_box = na
+if i_showORB and barstate.isconfirmed
+    if in_orb and not in_orb[1]
+        orb_box := box.new(bar_index, na(orb_hi) ? high : orb_hi,
+                           bar_index + 1, na(orb_lo) ? low : orb_lo,
+                           border_color=color.new(color.orange, 20),
+                           bgcolor=color.new(color.orange, 87), border_width=1)
+    if in_ny and not na(orb_box) and not na(orb_hi)
+        box.set_right(orb_box, bar_index + 1)
+        box.set_top(orb_box, orb_hi)
+        box.set_bottom(orb_box, orb_lo)
+
+// BOS detection — only after ORB is locked
+if barstate.isconfirmed and in_entry and orb_locked and not bos_done and day_dir != 0
+    if day_dir == 1 and close > orb_hi
+        bos_done := true
+        label.new(bar_index, low, "BOS",
+                  style=label.style_label_up,
+                  color=color.new(color.lime, 25),
+                  textcolor=color.white, size=size.tiny)
+    if day_dir == -1 and close < orb_lo
+        bos_done := true
+        label.new(bar_index, high, "BOS",
+                  style=label.style_label_down,
+                  color=color.new(color.orange, 25),
+                  textcolor=color.white, size=size.tiny)
+
+// If BOS not required — mark done as soon as entry window opens
+if not i_reqBOS and in_entry and orb_locked and day_dir != 0 and not bos_done
+    bos_done := true
+
+// ═══════════════════════════════════════════════════════════════════════
+// FVG DETECTION  (entire NY session, 13:00 – 17:30 UTC)
+// First qualifying gap in bias direction is stored.
+// Entry fires when price retests the stored FVG after BOS.
+// ═══════════════════════════════════════════════════════════════════════
+var float fvg_hi    = na
+var float fvg_lo    = na
+var bool  fvg_valid = false
+var int   fvg_bar   = na
+
+if _newDay
+    fvg_hi    := na
+    fvg_lo    := na
+    fvg_valid := false
+    fvg_bar   := na
+
+if barstate.isconfirmed and in_ny and day_dir != 0 and not fvg_valid and bar_index >= 2
+    is_long_fvg  = day_dir == 1 and low > high[2] and (low - high[2]) >= i_fvgMin
+    is_short_fvg = day_dir == -1 and low[2] > high and (low[2] - high) >= i_fvgMin
+
+    if is_long_fvg
+        fvg_lo    := high[2]
+        fvg_hi    := low
+        fvg_valid := true
+        fvg_bar   := bar_index
+        if i_showFVG
+            box.new(bar_index - 2, fvg_hi, bar_index + i_posBoxBars, fvg_lo,
+                    border_color=color.new(color.teal, 20),
+                    bgcolor=color.new(color.teal, 82), border_width=1)
+
+    if is_short_fvg
+        fvg_lo    := high
+        fvg_hi    := low[2]
+        fvg_valid := true
+        fvg_bar   := bar_index
+        if i_showFVG
+            box.new(bar_index - 2, fvg_hi, bar_index + i_posBoxBars, fvg_lo,
+                    border_color=color.new(color.red, 20),
+                    bgcolor=color.new(color.red, 82), border_width=1)
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENTRY  (price retests FVG in entry window, after BOS)
+// ═══════════════════════════════════════════════════════════════════════
+_can_enter = barstate.isconfirmed and in_entry and day_dir != 0 and
+             bos_done and fvg_valid and
+             bar_index > nz(fvg_bar) and
+             strategy.position_size == 0
+
+// Long entry
+if _can_enter and day_dir == 1
+    if low <= fvg_hi and high >= fvg_lo
+        _e  = close
+        _sl = fvg_lo - atr_val * i_slBuf
+        _tp = _e + (_e - _sl) * i_tpMult
+        if _e > _sl and _tp > _e
+            strategy.entry("Long", strategy.long)
+            strategy.exit("Long Exit", "Long", stop=_sl, limit=_tp)
+            fvg_valid := false
+            label.new(bar_index, low, "GER40 LONG",
+                      style=label.style_label_up,
+                      color=color.new(color.teal, 5),
+                      textcolor=color.white, size=size.small)
+            box.new(bar_index, _tp, bar_index + i_posBoxBars, _e,
+                    border_color=color.new(color.teal, 45),
+                    bgcolor=color.new(color.teal, 88))
+            box.new(bar_index, _e, bar_index + i_posBoxBars, _sl,
+                    border_color=color.new(color.red,  50),
+                    bgcolor=color.new(color.red,  90))
+            line.new(bar_index, _e, bar_index + i_posBoxBars, _e,
+                     color=color.new(color.white, 30), style=line.style_dashed, width=1)
+
+// Short entry (only when Long Only is OFF)
+if _can_enter and day_dir == -1 and not i_longOnly
+    if high >= fvg_lo and low <= fvg_hi
+        _e  = close
+        _sl = fvg_hi + atr_val * i_slBuf
+        _tp = _e - (_sl - _e) * i_tpMult
+        if _e < _sl and _tp < _e
+            strategy.entry("Short", strategy.short)
+            strategy.exit("Short Exit", "Short", stop=_sl, limit=_tp)
+            fvg_valid := false
+            label.new(bar_index, high, "GER40 SHORT",
+                      style=label.style_label_down,
+                      color=color.new(color.red, 5),
+                      textcolor=color.white, size=size.small)
+            box.new(bar_index, _e, bar_index + i_posBoxBars, _tp,
+                    border_color=color.new(color.teal, 45),
+                    bgcolor=color.new(color.teal, 88))
+            box.new(bar_index, _sl, bar_index + i_posBoxBars, _e,
+                    border_color=color.new(color.red,  50),
+                    bgcolor=color.new(color.red,  90))
+            line.new(bar_index, _e, bar_index + i_posBoxBars, _e,
+                     color=color.new(color.white, 30), style=line.style_dashed, width=1)
+
+// Force flat at session close (17:30 UTC)
+if in_force_close and strategy.position_size != 0
+    strategy.close_all("Session Close")
+
+// ═══════════════════════════════════════════════════════════════════════
+// SESSION BACKGROUNDS
+// ═══════════════════════════════════════════════════════════════════════
+bgcolor(in_asian  ? color.new(color.blue,   90) : na, title="Asian")
+bgcolor(in_london ? color.new(color.yellow, 93) : na, title="London")
+bgcolor(in_orb    ? color.new(color.orange, 88) : na, title="ORB")
+bgcolor(in_entry  ? color.new(color.lime,   90) : na, title="Entry Window")
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATUS TABLE
+// ═══════════════════════════════════════════════════════════════════════
+var table _tbl = na
+if i_showTbl and barstate.islast
+    if na(_tbl)
+        _tbl := table.new(position.top_right, 2, 10,
+                          bgcolor=color.new(color.black, 70),
+                          border_color=color.new(color.gray, 60), border_width=1,
+                          frame_color=color.new(color.gray, 60), frame_width=1)
+
+    _sess  = in_entry ? "ENTRY" : in_orb ? "ORB" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
+    _sessC = in_entry ? color.lime : in_orb ? color.orange : in_london ? color.yellow : in_asian ? color.blue : color.gray
+
+    _arStr = ar_locked and not na(ar_hi) ?
+             str.tostring(ar_hi, format.mintick) + " / " + str.tostring(ar_lo, format.mintick) : "—"
+
+    _swStr = sw_lo and sw_hi ? "BOTH (H1 tiebreak)" :
+             sw_lo ? "Lo swept -> LONG" : sw_hi ? "Hi swept -> SHORT" : "none"
+    _swC   = sw_lo and not sw_hi ? color.teal : sw_hi and not sw_lo ? color.red :
+             sw_lo and sw_hi ? color.orange : color.gray
+
+    _biasStr = day_dir == 1 ? "LONG" : day_dir == -1 ? "SHORT" : "—"
+    _biasC   = day_dir == 1 ? color.teal : day_dir == -1 ? color.red : color.gray
+
+    _orbStr = orb_locked and not na(orb_hi) ?
+              str.tostring(orb_hi, format.mintick) + " / " + str.tostring(orb_lo, format.mintick) : "building..."
+
+    _bosStr = bos_done ? "confirmed" : orb_locked ? "waiting" : "ORB not ready"
+    _bosC   = bos_done ? color.lime : orb_locked ? color.yellow : color.gray
+
+    _fvgStr = fvg_valid ?
+              str.tostring(fvg_hi, format.mintick) + " / " + str.tostring(fvg_lo, format.mintick) :
+              (not na(fvg_bar) ? "fired" : "—")
+    _fvgC   = fvg_valid ? (day_dir == 1 ? color.teal : color.red) :
+              not na(fvg_bar) ? color.gray : color.gray
+
+    _h1Str = h1_bias == 1 ? "LONG" : h1_bias == -1 ? "SHORT" : "NEUT"
+    _h1C   = h1_bias == 1 ? color.lime : h1_bias == -1 ? color.red : color.gray
+
+    _posStr = strategy.position_size > 0 ? "LONG" :
+              strategy.position_size < 0 ? "SHORT" : "flat"
+    _posC   = strategy.position_size > 0 ? color.teal :
+              strategy.position_size < 0 ? color.red : color.gray
+
+    table.cell(_tbl, 0, 0, "QB GER40",  text_color=color.new(color.aqua, 0),    text_size=size.tiny, bgcolor=color.new(color.black, 55), text_halign=text.align_left)
+    table.cell(_tbl, 1, 0, timeframe.period + "m", text_color=color.new(color.white, 20), text_size=size.tiny, bgcolor=color.new(color.black, 55), text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 1, "Session",   text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 1, _sess,       text_color=color.new(_sessC, 0),         text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 2, "Asian R",   text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 2, _arStr,      text_color=color.new(color.aqua, 0),    text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 3, "Sweep",     text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 3, _swStr,      text_color=color.new(_swC, 0),           text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 4, "Bias",      text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 4, _biasStr,    text_color=color.new(_biasC, 0),         text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 5, "NY ORB",    text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 5, _orbStr,     text_color=color.new(color.orange, 0),  text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 6, "BOS",       text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 6, _bosStr,     text_color=color.new(_bosC, 0),          text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 7, "FVG",       text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 7, _fvgStr,     text_color=color.new(_fvgC, 0),          text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 8, "H1 bias",   text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 8, _h1Str,      text_color=color.new(_h1C, 0),           text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 9, "Position",  text_color=color.new(color.gray, 15),   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 9, _posStr,     text_color=color.new(_posC, 0),          text_size=size.tiny, text_halign=text.align_right)

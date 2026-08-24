@@ -93,6 +93,12 @@ orbNYFRBCtxS   = input.bool(false, "H SHORT) Require Frankfurt SHORT today + H1 
 orbNYFRBCtxL   = input.bool(false, "H LONG) Require Frankfurt SHORT today + H1 bull (WR 73.6%)",
                  tooltip="H LONG only fires when Frankfurt ORB broke SHORT earlier today AND H1 has since flipped bullish. Python: WR 73.6%, PF 1.542 (N=91, ~17/yr). Reversal setup: Frankfurt exhausted sellers, NY sees fresh buyers.",
                  group=G_STRAT)
+i_hm_useDow  = input.bool(true,  "H/M) Day of Week filter",  group=G_STRAT)
+i_hm_dow_mon = input.bool(false, "H/M   Mon",                group=G_STRAT)
+i_hm_dow_tue = input.bool(true,  "H/M   Tue",                group=G_STRAT)
+i_hm_dow_wed = input.bool(false, "H/M   Wed",                group=G_STRAT)
+i_hm_dow_thu = input.bool(false, "H/M   Thu",                group=G_STRAT)
+i_hm_dow_fri = input.bool(false, "H/M   Fri",                group=G_STRAT)
 
 G_FILT = "Filters"
 adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
@@ -155,6 +161,8 @@ _mnth       = month(time)
 _orbSeasonL = not orbSeasonFilt or _mnth != 9   // Sep blocks longs (90% bearish)
 _orbSeasonS = not orbSeasonFilt or _mnth != 1   // Jan blocks shorts (80% bullish)
 _orbGateOk  = (not orbADRGuard or _adrConsumed[1] < 0.90) and (not orbNFPFilter or not _isNFP)
+_hm_dow     = dayofweek(time, "UTC")
+_hm_dow_ok  = not i_hm_useDow or (_hm_dow == dayofweek.monday and i_hm_dow_mon) or (_hm_dow == dayofweek.tuesday and i_hm_dow_tue) or (_hm_dow == dayofweek.wednesday and i_hm_dow_wed) or (_hm_dow == dayofweek.thursday and i_hm_dow_thu) or (_hm_dow == dayofweek.friday and i_hm_dow_fri)
 
 // ─── CVD ──────────────────────────────────────────────────────────────
 _signedVol = close > open ? volume : close < open ? -volume : 0.0
@@ -761,7 +769,7 @@ _mtp_prev := _mtp_cur
 // logic as G and H but fires 1 hour before London, in a completely
 // separate time window so it never conflicts with G or H.
 // ═══════════════════════════════════════════════════════════════════════
-if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and _orbGateOk and strategy.position_size == 0
+if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     orb_range = frb_hi - frb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range > 0.50
@@ -915,7 +923,7 @@ if modPreNY and barstate.isconfirmed and in_preny_trade and preny_locked and not
 // SIGNAL H — NY ORB (Opening Range Breakout 14:00-14:30 UTC)
 // Same concept for the NY open — second major institutional opportunity.
 // ═══════════════════════════════════════════════════════════════════════
-if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateOk and strategy.position_size == 0
+if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     orb_range = nyorb_hi - nyorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range > 0.50

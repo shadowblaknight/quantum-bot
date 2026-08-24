@@ -101,7 +101,7 @@ const INST_NAMES = {
   GER40:'Dax 40', UK100:'FTSE 100', GBPUSD:'Cable', EURUSD:'Euro Dollar', USDJPY:'Dollar Yen',
   BTC:'Bitcoin', ETH:'Ethereum', OIL:'crude oil', XAGUSD:'Silver',
   gold:'Gold', nas100:'Nasdaq 100', us500:'S and P 500', gbpusd:'Cable',
-  eurusd:'Euro Dollar', usdjpy:'Dollar Yen', btc:'Bitcoin',
+  eurusd:'Euro Dollar', usdjpy:'Dollar Yen', btc:'Bitcoin', ger40:'Dax 40',
 };
 function instName(sym) {
   if (!sym) return 'the instrument';

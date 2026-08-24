@@ -384,7 +384,7 @@ const ASSETS = [
     typicalH1ATR: 30,
     preferredSessions: ['LONDON', 'OVERLAP'],
     aliases: [
-      'GER40', 'DE40', 'DAX', 'DAX40', 'DE40.cash', 'GER40.cash',
+      'GER40', 'GER40.s', 'DE40', 'DAX', 'DAX40', 'DE40.cash', 'GER40.cash',
       'GER40m', 'GER30', 'DE30',
     ],
   },

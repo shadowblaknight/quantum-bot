@@ -1,0 +1,335 @@
+//@version=6
+indicator("QB GER40 — Frankfurt B+G Specialist", "QB GER40 B+G", overlay=true,
+         max_boxes_count=300, max_lines_count=300, max_labels_count=300)
+
+// Locked config: B+G Tue+Thu (PF 1.731/3yr · PF 1.711/1yr)
+// B: ORB 15min · vol 1.0× · F filter ON · TP 1.5 · both directions
+// G: ORB 15min · FVG 30pts · SL +5pts beyond wick · TP 2.0 · both directions
+// DoW: Tuesday + Thursday only (Europe/Berlin tz)
+
+WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
+
+// ─── SIGNAL TOGGLES ───────────────────────────────────────────────────────
+GS = "── Signals ──"
+USE_B = input.bool(true, "B  Frankfurt ORB breakout",              group=GS)
+USE_G = input.bool(true, "G  London 3-Phase (Sweep → BOS → FVG)", group=GS)
+
+GV = "── Visuals ──"
+SHOW_BG  = input.bool(true, "Session backgrounds", group=GV)
+SHOW_BOX = input.bool(true, "Boxes (ORB / FVG)",  group=GV)
+SHOW_LBL = input.bool(true, "Signal labels",      group=GV)
+SHOW_TBL = input.bool(true, "Status table",       group=GV)
+
+// ─── SESSION DETECTION (Europe/Berlin handles CET/CEST DST) ──────────────
+_cet    = hour(time, "Europe/Berlin") * 60 + minute(time, "Europe/Berlin")
+_dow    = dayofweek(time, "Europe/Berlin")
+_newDay = ta.change(time("D")) != 0
+_dow_ok = _dow == dayofweek.tuesday or _dow == dayofweek.thursday
+
+in_g_range = _cet >= 0   and _cet < 420    // 00:00–07:00 CET  G overnight ref
+in_g_kz    = _cet >= 420 and _cet < 540    // 07:00–09:00 CET  G London sweep
+in_orb     = _cet >= 540 and _cet < 555    // 09:00–09:15 CET  B+G ORB build
+in_entry   = _cet >= 555 and _cet < 660    // 09:15–11:00 CET  B+G entry window
+in_session = _cet >= 540 and _cet < 1050   // 09:00–17:30 CET
+
+// ─── SHARED INDICATORS ────────────────────────────────────────────────────
+vol_avg = ta.sma(volume, 20)
+atr_val = ta.atr(14)
+
+// ─── PREV DAY RANGE (B signal F filter) ───────────────────────────────────
+var float _sess_hi = na
+var float _sess_lo = na
+var float pdh      = na
+var float pdl      = na
+
+if _newDay
+    pdh      := _sess_hi
+    pdl      := _sess_lo
+    _sess_hi := na
+    _sess_lo := na
+
+if in_session
+    _sess_hi := na(_sess_hi) ? high : math.max(_sess_hi, high)
+    _sess_lo := na(_sess_lo) ? low  : math.min(_sess_lo, low)
+
+// ─── SHARED ORB — 09:00–09:15 CET ────────────────────────────────────────
+var float orb_hi     = na
+var float orb_lo     = na
+var bool  orb_locked = false
+
+if _newDay
+    orb_hi     := na
+    orb_lo     := na
+    orb_locked := false
+
+if in_orb
+    orb_hi := na(orb_hi) ? high : math.max(orb_hi, high)
+    orb_lo := na(orb_lo) ? low  : math.min(orb_lo, low)
+
+if not in_orb and in_orb[1] and not na(orb_hi)
+    orb_locked := true
+
+var box _orb_box = na
+if barstate.isconfirmed and SHOW_BOX
+    if in_orb and not in_orb[1]
+        _orb_box := box.new(bar_index, na(orb_hi) ? high : orb_hi,
+                            bar_index + 1, na(orb_lo) ? low : orb_lo,
+                            border_color=color.new(color.orange, 20),
+                            bgcolor=color.new(color.orange, 88), border_width=1)
+    if (in_orb or in_entry) and not na(_orb_box) and not na(orb_hi)
+        box.set_right(_orb_box, bar_index + 1)
+        box.set_top(_orb_box, orb_hi)
+        box.set_bottom(_orb_box, orb_lo)
+
+// ─── SIGNAL B — FRANKFURT ORB BREAKOUT ────────────────────────────────────
+var bool b_long_done  = false
+var bool b_short_done = false
+
+if _newDay
+    b_long_done  := false
+    b_short_done := false
+
+_orh     = orb_locked and not na(orb_hi) ? orb_hi - orb_lo : 0.0
+_vol_ok  = volume > vol_avg * 1.0
+_f_long  = not na(pdl) and orb_lo >= pdl
+_f_short = not na(pdh) and orb_hi <= pdh
+
+b_long  = USE_B and barstate.isconfirmed and in_entry and orb_locked and _dow_ok and not b_long_done and not b_short_done and _vol_ok and _f_long  and close > orb_hi
+b_short = USE_B and barstate.isconfirmed and in_entry and orb_locked and _dow_ok and not b_long_done and not b_short_done and _vol_ok and _f_short and close < orb_lo
+
+if b_long
+    b_long_done := true
+if b_short
+    b_short_done := true
+
+// ─── SIGNAL G — LONDON 3-PHASE ────────────────────────────────────────────
+var float g_rng_hi    = na
+var float g_rng_lo    = na
+var int   g_dir       = 0
+var float g_sw_wick   = na
+var bool  g_bos_done  = false
+var float g_fvg_hi    = na
+var float g_fvg_lo    = na
+var bool  g_fvg_valid = false
+var int   g_fvg_bar   = na
+var bool  g_fired     = false
+
+if _newDay
+    g_rng_hi    := na
+    g_rng_lo    := na
+    g_dir       := 0
+    g_sw_wick   := na
+    g_bos_done  := false
+    g_fvg_hi    := na
+    g_fvg_lo    := na
+    g_fvg_valid := false
+    g_fvg_bar   := na
+    g_fired     := false
+
+// Phase 1: overnight reference range
+if in_g_range
+    g_rng_hi := na(g_rng_hi) ? high : math.max(g_rng_hi, high)
+    g_rng_lo := na(g_rng_lo) ? low  : math.min(g_rng_lo, low)
+
+var box g_rng_box = na
+if barstate.isconfirmed and SHOW_BOX
+    if in_g_range and not in_g_range[1]
+        g_rng_box := box.new(bar_index, na(g_rng_hi) ? high : g_rng_hi,
+                             bar_index + 1, na(g_rng_lo) ? low : g_rng_lo,
+                             border_color=color.new(color.aqua, 35),
+                             bgcolor=color.new(color.aqua, 93), border_width=1,
+                             border_style=line.style_dashed)
+    if (in_g_range or in_g_kz) and not na(g_rng_box) and not na(g_rng_hi)
+        box.set_right(g_rng_box, bar_index + 1)
+        box.set_top(g_rng_box, g_rng_hi)
+        box.set_bottom(g_rng_box, g_rng_lo)
+
+// Phase 2: London sweep 07:00–09:00 CET
+if barstate.isconfirmed and in_g_kz and not na(g_rng_hi) and g_dir == 0
+    if low < g_rng_lo and close > g_rng_lo
+        g_dir     := 1
+        g_sw_wick := low
+        if SHOW_LBL
+            label.new(bar_index, low, "G↓Sw",
+                      style=label.style_label_up, color=color.new(color.aqua, 10),
+                      textcolor=color.white, size=size.tiny)
+    else if high > g_rng_hi and close < g_rng_hi
+        g_dir     := -1
+        g_sw_wick := high
+        if SHOW_LBL
+            label.new(bar_index, high, "G↑Sw",
+                      style=label.style_label_down, color=color.new(color.aqua, 10),
+                      textcolor=color.white, size=size.tiny)
+
+// Phase 3a: BOS — ORB closes in sweep direction
+if barstate.isconfirmed and in_entry and orb_locked and not g_bos_done and not na(orb_hi) and g_dir != 0
+    if g_dir == 1 and close > orb_hi
+        g_bos_done := true
+    else if g_dir == -1 and close < orb_lo
+        g_bos_done := true
+
+// Phase 3b: FVG ≥ 30 pts after BOS
+if barstate.isconfirmed and in_entry and g_bos_done and not g_fvg_valid and bar_index >= 2
+    _glf = g_dir == 1  and low > high[2] and (low - high[2])  >= 30.0
+    _gsf = g_dir == -1 and low[2] > high  and (low[2] - high) >= 30.0
+    if _glf
+        g_fvg_lo    := high[2]
+        g_fvg_hi    := low
+        g_fvg_valid := true
+        g_fvg_bar   := bar_index
+        if SHOW_BOX
+            box.new(bar_index - 2, g_fvg_hi, bar_index + 30, g_fvg_lo,
+                    border_color=color.new(color.aqua, 25),
+                    bgcolor=color.new(color.aqua, 82), border_width=1)
+    if _gsf
+        g_fvg_lo    := high
+        g_fvg_hi    := low[2]
+        g_fvg_valid := true
+        g_fvg_bar   := bar_index
+        if SHOW_BOX
+            box.new(bar_index - 2, g_fvg_hi, bar_index + 30, g_fvg_lo,
+                    border_color=color.new(color.aqua, 25),
+                    bgcolor=color.new(color.aqua, 82), border_width=1)
+
+// Phase 3c: FVG retest entry
+g_long  = USE_G and barstate.isconfirmed and in_entry and g_dir == 1  and g_fvg_valid and bar_index > nz(g_fvg_bar) and not g_fired and _dow_ok and not na(g_sw_wick) and low <= g_fvg_hi and high >= g_fvg_lo
+g_short = USE_G and barstate.isconfirmed and in_entry and g_dir == -1 and g_fvg_valid and bar_index > nz(g_fvg_bar) and not g_fired and _dow_ok and not na(g_sw_wick) and high >= g_fvg_lo and low <= g_fvg_hi
+
+if g_long or g_short
+    g_fvg_valid := false
+    g_fired     := true
+
+// ─── ALERTCONDITIONS (TradingView alerts panel) ───────────────────────────
+alertcondition(b_long,  "GER40 B LONG",  "QB GER40 Frankfurt ORB — LONG")
+alertcondition(b_short, "GER40 B SHORT", "QB GER40 Frankfurt ORB — SHORT")
+alertcondition(g_long,  "GER40 G LONG",  "QB GER40 London 3-Phase — LONG")
+alertcondition(g_short, "GER40 G SHORT", "QB GER40 London 3-Phase — SHORT")
+
+// ─── WEBHOOK JSON ─────────────────────────────────────────────────────────
+f_json(sig, dir, ep, sl_p, tp_p) =>
+    rr = math.abs(tp_p - ep) / math.abs(ep - sl_p)
+    j  = '{"version":"2.3","action":"trade"' +
+         ',"template":"ger40-bg-specialist"' +
+         ',"zoneType":"'  + sig + '"' +
+         ',"direction":"' + dir + '"' +
+         ',"symbol":"'    + syminfo.tickerid + '"' +
+         ',"timeframe":"' + timeframe.period + '"' +
+         ',"timestamp":'  + str.tostring(time) +
+         ',"entry":"'     + str.tostring(ep,   format.mintick) + '"' +
+         ',"sl":"'        + str.tostring(sl_p, format.mintick) + '"' +
+         ',"tp1":"'       + str.tostring(tp_p, format.mintick) + '"' +
+         ',"rr1":'        + str.tostring(rr, "#.##") +
+         ',"orbHi":"'     + str.tostring(orb_hi, format.mintick) + '"' +
+         ',"orbLo":"'     + str.tostring(orb_lo, format.mintick) + '"' +
+         ',"gDir":'       + str.tostring(g_dir) +
+         ',"gSwWick":"'   + str.tostring(nz(g_sw_wick), format.mintick) + '"' +
+         ',"dayOfWeek":'  + str.tostring(_dow - 1) +
+         ',"hourUtc":'    + str.tostring(hour(time, "UTC")) +
+         ',"apiKey":"'    + WEBHOOK_KEY + '"}'
+    j
+
+// ─── SIGNAL FIRE ──────────────────────────────────────────────────────────
+if b_long
+    _sl = orb_lo
+    _tp = orb_hi + _orh * 1.5
+    alert(f_json("B", "LONG", close, _sl, _tp), alert.freq_once_per_bar_close)
+    if SHOW_LBL
+        label.new(bar_index, low - atr_val * 0.4,
+                  "B ↑  " + str.tostring(close, format.mintick) +
+                  "\nSL " + str.tostring(_sl, format.mintick) +
+                  "\nTP " + str.tostring(_tp, format.mintick),
+                  style=label.style_label_up, color=color.new(color.orange, 5),
+                  textcolor=color.white, size=size.small)
+
+if b_short
+    _sl = orb_hi
+    _tp = orb_lo - _orh * 1.5
+    alert(f_json("B", "SHORT", close, _sl, _tp), alert.freq_once_per_bar_close)
+    if SHOW_LBL
+        label.new(bar_index, high + atr_val * 0.4,
+                  "B ↓  " + str.tostring(close, format.mintick) +
+                  "\nSL " + str.tostring(_sl, format.mintick) +
+                  "\nTP " + str.tostring(_tp, format.mintick),
+                  style=label.style_label_down, color=color.new(color.orange, 5),
+                  textcolor=color.white, size=size.small)
+
+if g_long
+    _sl = g_sw_wick - 5.0
+    _rk = close - _sl
+    _tp = close + _rk * 2.0
+    alert(f_json("G", "LONG", close, _sl, _tp), alert.freq_once_per_bar_close)
+    if SHOW_LBL
+        label.new(bar_index, low - atr_val * 0.4,
+                  "G ↑  " + str.tostring(close, format.mintick) +
+                  "\nSL " + str.tostring(_sl, format.mintick) +
+                  "\nTP " + str.tostring(_tp, format.mintick),
+                  style=label.style_label_up, color=color.new(color.aqua, 5),
+                  textcolor=color.white, size=size.small)
+
+if g_short
+    _sl = g_sw_wick + 5.0
+    _rk = _sl - close
+    _tp = close - _rk * 2.0
+    alert(f_json("G", "SHORT", close, _sl, _tp), alert.freq_once_per_bar_close)
+    if SHOW_LBL
+        label.new(bar_index, high + atr_val * 0.4,
+                  "G ↓  " + str.tostring(close, format.mintick) +
+                  "\nSL " + str.tostring(_sl, format.mintick) +
+                  "\nTP " + str.tostring(_tp, format.mintick),
+                  style=label.style_label_down, color=color.new(color.aqua, 5),
+                  textcolor=color.white, size=size.small)
+
+// ─── SESSION BACKGROUNDS ──────────────────────────────────────────────────
+bgcolor(SHOW_BG and in_g_range ? color.new(color.aqua,   95) : na, title="Overnight")
+bgcolor(SHOW_BG and in_g_kz   ? color.new(color.aqua,   88) : na, title="London Sweep")
+bgcolor(SHOW_BG and in_orb    ? color.new(color.orange,  88) : na, title="ORB")
+bgcolor(SHOW_BG and in_entry  ? color.new(color.lime,    93) : na, title="Entry Window")
+
+// ─── STATUS TABLE ─────────────────────────────────────────────────────────
+if SHOW_TBL and barstate.islast
+    _t = table.new(position.top_right, 2, 12,
+                   bgcolor=color.new(color.black, 70),
+                   border_color=color.new(color.gray, 60), border_width=1,
+                   frame_color=color.new(color.gray, 60), frame_width=1)
+
+    _dowStr = _dow == dayofweek.tuesday ? "Tue ✓" : _dow == dayofweek.thursday ? "Thu ✓" : "filtered"
+    _dowC   = _dow_ok ? color.lime : color.gray
+    _orbStr = orb_locked and not na(orb_hi) ? str.tostring(orb_hi, format.mintick) + " / " + str.tostring(orb_lo, format.mintick) : in_orb ? "building" : "—"
+    _orbC   = orb_locked ? color.orange : color.gray
+    _volStr = str.tostring(math.round(volume)) + " / " + str.tostring(math.round(vol_avg))
+    _volC   = _vol_ok ? color.lime : color.gray
+    _pdStr  = not na(pdh) ? str.tostring(pdl, format.mintick) + " – " + str.tostring(pdh, format.mintick) : "—"
+    _bStr   = b_long_done ? "fired ↑" : b_short_done ? "fired ↓" : USE_B ? "waiting" : "off"
+    _bC     = b_long_done or b_short_done ? color.gray : USE_B ? color.orange : color.new(color.gray, 40)
+    _gSwStr = g_dir == 1 ? "Lo swept ✓" : g_dir == -1 ? "Hi swept ✓" : "no sweep"
+    _gSwC   = g_dir != 0 ? color.aqua : color.gray
+    _gPhStr = g_fired ? "fired" : g_fvg_valid ? "FVG — wait retest" : g_bos_done ? "BOS ✓ — wait FVG" : g_dir != 0 ? "sweep ✓ — wait BOS" : "—"
+    _gPhC   = g_fired ? color.gray : g_fvg_valid or g_bos_done ? color.lime : g_dir != 0 ? color.yellow : color.gray
+
+    table.cell(_t, 0,  0, "QB GER40 B+G",    text_color=color.new(color.aqua, 0),    text_size=size.tiny, bgcolor=color.new(color.black, 50), text_halign=text.align_left)
+    table.cell(_t, 1,  0, timeframe.period + "m", text_color=color.new(color.white, 25), text_size=size.tiny, bgcolor=color.new(color.black, 50), text_halign=text.align_right)
+    table.cell(_t, 0,  1, "Day",        text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  1, _dowStr,      text_color=color.new(_dowC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  2, "ORB",        text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  2, _orbStr,      text_color=color.new(_orbC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  3, "── B ──",    text_color=color.new(color.orange, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  3, _bStr,        text_color=color.new(_bC, 0),          text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  4, "Vol",        text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  4, _volStr,      text_color=color.new(_volC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  5, "F filter",   text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  5, _pdStr,       text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  6, "── G ──",    text_color=color.new(color.aqua, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  6, USE_G ? "ON" : "off", text_color=USE_G ? color.new(color.lime, 0) : color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  7, "Ovn Range",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  7, not na(g_rng_hi) ? str.tostring(g_rng_hi, format.mintick) + " / " + str.tostring(g_rng_lo, format.mintick) : "building",
+               text_color=color.new(color.aqua, 15), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  8, "Sweep",      text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  8, _gSwStr,      text_color=color.new(_gSwC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0,  9, "Phase",      text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1,  9, _gPhStr,      text_color=color.new(_gPhC, 0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0, 10, "Wick",       text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1, 10, not na(g_sw_wick) ? str.tostring(g_sw_wick, format.mintick) : "—",
+               text_color=color.new(g_dir != 0 ? color.aqua : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_t, 0, 11, "FVG",        text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_t, 1, 11, g_fvg_valid ? str.tostring(g_fvg_hi, format.mintick) + " / " + str.tostring(g_fvg_lo, format.mintick) : (g_fired ? "fired" : "—"),
+               text_color=color.new(g_fvg_valid ? color.aqua : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)

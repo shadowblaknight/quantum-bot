@@ -1,0 +1,757 @@
+//@version=6
+strategy("QB GER40 — Multi-Strategy", "QB GER40 Multi", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=0,
+         calc_on_every_tick=false,
+         max_boxes_count=300, max_lines_count=300, max_labels_count=400)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QB GER40 — 4-Strategy Backtest Framework
+//  ─────────────────────────────────────────────────────────────────────
+//  Toggle one ON at a time to isolate each signal, then combine.
+//
+//  A  PDH/PDL + ADX Breakout        (Unger Academy — PF 3.74 documented)
+//  B  Frankfurt ORB  09:00 CET       (multi-source consensus, primary edge)
+//  C  ICT Overnight Sweep Reversal   (08:00-10:30 CET kill zone)
+//  D  TraderTom Pre-Market Bracket   (08:00-09:00 CET observe, TP+6 SL-9)
+//
+//  ── REQUIREMENTS ────────────────────────────────────────────────────
+//  • 24h GER40 CFD: SPREADEX:GER40 / PEPPERSTONE:DE40 / OANDA:DE30_USD
+//  • Timeframe: 5m or 15m
+//  • Chart timezone: UTC (script reads Europe/Berlin internally)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── STRATEGY SELECTION ──────────────────────────────────────────────
+G_S = "── Strategies (toggle one at a time to isolate) ──"
+i_useA = input.bool(false, "A  PDH/PDL + ADX Breakout",       group=G_S)
+i_useB = input.bool(false, "B  Frankfurt ORB (09:00 CET)",     group=G_S)
+i_useC = input.bool(false, "C  ICT Overnight Sweep Reversal",  group=G_S)
+i_useD = input.bool(false, "D  TraderTom Pre-Market Bracket",  group=G_S)
+i_useG = input.bool(false, "G  London 3-Phase (Sweep → ORB BOS → FVG)", group=G_S)
+
+// ─── STRATEGY A ──────────────────────────────────────────────────────
+G_A = "── A: PDH/PDL + ADX ──"
+i_a_adxLen   = input.int(14,     "ADX Length",          group=G_A, minval=5)
+i_a_adxMin   = input.float(20.0, "Min ADX",             group=G_A, step=5.0)
+i_a_tpMult   = input.float(2.0,  "TP Multiplier",       group=G_A, options=[1.5, 2.0, 2.5, 3.0])
+i_a_longOnly = input.bool(false,  "Long Only",           group=G_A)
+
+// ─── STRATEGY B ──────────────────────────────────────────────────────
+G_B = "── B: Frankfurt ORB ──"
+i_b_orbMins  = input.int(15,    "ORB window (min after 09:00 CET)", group=G_B, options=[15, 30, 45, 60])
+i_b_tpMult   = input.float(1.5, "TP (× OR height)",                 group=G_B, options=[1.0, 1.5, 2.0, 2.5])
+i_b_useVwap  = input.bool(false, "Require VWAP alignment",           group=G_B)
+i_b_useVol   = input.bool(true,  "Require volume spike",              group=G_B)
+i_b_volMult  = input.float(1.0,  "Volume spike (× avg)",              group=G_B, step=0.25)
+i_b_longOnly  = input.bool(false,  "Long Only",                              group=G_B)
+i_b_shortOnly = input.bool(false,  "Short Only",                             group=G_B)
+i_b_maxCet    = input.int(660,     "Max entry (CET min)",                    group=G_B, options=[570, 600, 630, 660], tooltip="570=09:30  600=10:00  630=10:30  660=11:00")
+i_b_useAdx    = input.bool(false,  "ADX filter",                             group=G_B)
+i_b_adxMin    = input.float(20.0,  "Min ADX (B)",                            group=G_B, step=5.0)
+i_b_retest    = input.bool(false,  "Retest entry (wait for pullback to ORB)", group=G_B)
+i_b_useE      = input.bool(false,  "E  Overnight context (ORB vs overnight range)", group=G_B)
+i_b_useF      = input.bool(true,   "F  PDH/PDL position (ORB contained within prev day)", group=G_B)
+i_b_htfBias   = input.string("None", "HTF Bias filter",  group=G_B, options=["None", "H1", "H4", "H1+H4"])
+i_b_htfLen    = input.int(50,        "HTF EMA length",   group=G_B, minval=10, maxval=200, step=10)
+i_b_useOrbQ   = input.bool(false,  "H  ORB Range Quality (ATR filter)",     group=G_B)
+i_b_orbAtrMin = input.float(0.3,   "Min ORB (× ATR14)",                     group=G_B, step=0.1)
+i_b_orbAtrMax = input.float(1.5,   "Max ORB (× ATR14)",                     group=G_B, step=0.1)
+i_b_useDow    = input.bool(true,   "I  Day of Week filter",                  group=G_B)
+i_b_dow_mon   = input.bool(false,  "   Mon",                                 group=G_B)
+i_b_dow_tue   = input.bool(true,   "   Tue",                                 group=G_B)
+i_b_dow_wed   = input.bool(false,  "   Wed",                                 group=G_B)
+i_b_dow_thu   = input.bool(true,   "   Thu",                                 group=G_B)
+i_b_dow_fri   = input.bool(false,  "   Fri",                                 group=G_B)
+i_b_usePDdir  = input.bool(false,  "J  Prev Day Direction bias",             group=G_B)
+
+// ─── STRATEGY C ──────────────────────────────────────────────────────
+G_C = "── C: ICT Overnight Sweep ──"
+i_c_fvgMin   = input.float(10.0, "Min FVG (pts)",            group=G_C, step=5.0)
+i_c_slPts    = input.float(7.0,  "SL beyond wick (pts)",     group=G_C, step=1.0)
+i_c_tpMult   = input.float(2.0,  "TP Multiplier",            group=G_C, options=[1.5, 2.0, 3.0, 4.0])
+i_c_longOnly = input.bool(false,  "Long Only",                group=G_C)
+
+// ─── STRATEGY D ──────────────────────────────────────────────────────
+G_D = "── D: TraderTom Bracket ──"
+i_d_tp = input.float(6.0, "TP (index points)", group=G_D, step=1.0)
+i_d_sl = input.float(9.0, "SL (index points)", group=G_D, step=1.0)
+
+// ─── STRATEGY G ──────────────────────────────────────────────────────
+G_G = "── G: London 3-Phase ──"
+i_g_orbMins  = input.int(15,   "ORB window (min)",              group=G_G, options=[15, 30])
+i_g_fvgMin   = input.float(30.0, "Min FVG (pts)",               group=G_G, step=2.5)
+i_g_slBuf    = input.float(5.0, "SL buffer beyond wick (pts)",  group=G_G, step=1.0)
+i_g_tpMult   = input.float(2.0, "TP multiplier",                group=G_G, options=[1.5, 2.0, 2.5, 3.0])
+i_g_longOnly = input.bool(false, "Long Only",                   group=G_G)
+
+// ─── VISUALS ─────────────────────────────────────────────────────────
+G_V = "── Visuals ──"
+i_showBg  = input.bool(true, "Session backgrounds", group=G_V)
+i_showTbl = input.bool(true, "Status table",        group=G_V)
+i_boxW    = input.int(60,    "Box extend (bars)",   group=G_V, minval=20)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SESSION DETECTION  (CET/CEST — Europe/Berlin tz handles DST)
+// ═══════════════════════════════════════════════════════════════════════
+_hCET    = hour(time,   "Europe/Berlin")
+_mCET    = minute(time, "Europe/Berlin")
+_cet     = _hCET * 60 + _mCET
+_newDay  = ta.change(time("D")) != 0
+
+in_overnight  = _cet >= 0   and _cet < 540              // 00:00–09:00 CET
+in_td_obs     = _cet >= 480 and _cet < 540              // 08:00–09:00 CET  (D: observe)
+in_orb_b      = _cet >= 540 and _cet < 540 + i_b_orbMins // B: ORB build
+in_b_entry    = _cet >= 540 + i_b_orbMins and _cet < i_b_maxCet // B: post-ORB to max time
+in_c_kz       = _cet >= 480 and _cet < 570              // 08:00–09:30 CET  (C: kill zone)
+in_c_entry    = _cet >= 480 and _cet < 630              // 08:00–10:30 CET  (C: entry)
+in_session    = _cet >= 540 and _cet < 1050             // 09:00–17:30 CET
+in_lunch      = _cet >= 720 and _cet < 780              // 12:00–13:00 CET
+in_close      = _cet >= 1050                             // 17:30+ CET
+in_g_range    = _cet >= 0   and _cet < 420              // 00:00–07:00 CET  (G: overnight ref)
+in_g_kz       = _cet >= 420 and _cet < 540              // 07:00–09:00 CET  (G: London sweep)
+in_g_orb      = _cet >= 540 and _cet < 540 + i_g_orbMins // G: Frankfurt ORB
+in_g_entry    = _cet >= 540 + i_g_orbMins and _cet < 660 // G: post-ORB to 11:00 CET
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SHARED INDICATORS
+// ═══════════════════════════════════════════════════════════════════════
+[_, _, adx_val] = ta.dmi(i_a_adxLen, i_a_adxLen)
+vol_avg  = ta.sma(volume, 20)
+vwap_val = ta.vwap(hlc3)
+atr_val  = ta.atr(14)
+_h1_ema  = request.security(syminfo.tickerid, "60",  ta.ema(close, i_b_htfLen))
+_h4_ema  = request.security(syminfo.tickerid, "240", ta.ema(close, i_b_htfLen))
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STRATEGY A — PDH/PDL BREAKOUT + ADX FILTER
+//  Unger Academy — backtested PF 3.74 / WR 45% / 10–20 trades per month
+//  Entry: 5m/15m close above PDH (ADX > threshold) → Long
+//         5m/15m close below PDL (ADX > threshold) → Short
+//  SL:    low/high of the breakout candle
+//  TP:    entry ± risk × multiplier
+//  Exit:  TP, SL, or 17:30 CET session close
+// ═══════════════════════════════════════════════════════════════════════
+var float a_sess_hi     = na
+var float a_sess_lo     = na
+var float a_pdh         = na
+var float a_pdl         = na
+var bool  a_long_done   = false
+var bool  a_short_done  = false
+
+if _newDay
+    a_pdh        := a_sess_hi
+    a_pdl        := a_sess_lo
+    a_sess_hi    := na
+    a_sess_lo    := na
+    a_long_done  := false
+    a_short_done := false
+
+if in_session
+    a_sess_hi := na(a_sess_hi) ? high : math.max(a_sess_hi, high)
+    a_sess_lo := na(a_sess_lo) ? low  : math.min(a_sess_lo, low)
+
+// PDH/PDL reference lines
+var line a_pdh_line = na
+var line a_pdl_line = na
+if barstate.isconfirmed and _newDay and not na(a_pdh)
+    line.delete(a_pdh_line)
+    line.delete(a_pdl_line)
+    a_pdh_line := line.new(bar_index, a_pdh, bar_index + 500, a_pdh,
+                            color=color.new(color.blue, 30), style=line.style_dashed, width=1)
+    a_pdl_line := line.new(bar_index, a_pdl, bar_index + 500, a_pdl,
+                            color=color.new(color.blue, 30), style=line.style_dashed, width=1)
+
+// A signals
+if i_useA and barstate.isconfirmed and in_session and not in_lunch and not na(a_pdh) and adx_val > i_a_adxMin and strategy.position_size == 0
+    if not a_long_done and close > a_pdh
+        _sl = low
+        _rk = close - _sl
+        if _rk > 0
+            strategy.entry("A Long", strategy.long)
+            strategy.exit("A Long Exit", "A Long", stop=_sl, limit=close + _rk * i_a_tpMult)
+            a_long_done := true
+            label.new(bar_index, low, "A ↑",
+                      style=label.style_label_up, color=color.new(color.blue, 5),
+                      textcolor=color.white, size=size.tiny)
+
+    if not i_a_longOnly and not a_short_done and close < a_pdl
+        _sl = high
+        _rk = _sl - close
+        if _rk > 0
+            strategy.entry("A Short", strategy.short)
+            strategy.exit("A Short Exit", "A Short", stop=_sl, limit=close - _rk * i_a_tpMult)
+            a_short_done := true
+            label.new(bar_index, high, "A ↓",
+                      style=label.style_label_down, color=color.new(color.blue, 5),
+                      textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STRATEGY B — FRANKFURT ORB  (09:00 CET)
+//  Primary GER40 intraday edge — 10–15 filtered setups per month
+//  ORB window: configurable 15/30/45/60 min after Frankfurt open
+//  Filters: VWAP alignment + volume spike (both configurable)
+//  SL: opposite end of OR  |  TP: OR height × multiplier
+//  Hard exit: 11:00 CET to avoid lunchtime chop
+// ═══════════════════════════════════════════════════════════════════════
+var float b_orb_hi     = na
+var float b_orb_lo     = na
+var bool  b_orb_locked = false
+var bool  b_long_done  = false
+var bool  b_short_done = false
+var bool  b_broke_hi   = false   // retest mode: breakout above ORB hi detected
+var bool  b_broke_lo   = false   // retest mode: breakout below ORB lo detected
+var float b_sess_open  = na
+var float b_sess_close = na
+var float b_pd_open    = na
+var float b_pd_close   = na
+
+if _newDay
+    b_orb_hi     := na
+    b_orb_lo     := na
+    b_orb_locked := false
+    b_long_done  := false
+    b_short_done := false
+    b_broke_hi   := false
+    b_broke_lo   := false
+    b_pd_open    := b_sess_open
+    b_pd_close   := b_sess_close
+    b_sess_open  := na
+    b_sess_close := na
+
+if in_orb_b
+    b_orb_hi := na(b_orb_hi) ? high : math.max(b_orb_hi, high)
+    b_orb_lo := na(b_orb_lo) ? low  : math.min(b_orb_lo, low)
+
+if not in_orb_b and in_orb_b[1] and not na(b_orb_hi)
+    b_orb_locked := true
+
+// Track session open (09:00 CET first bar) and close (last bar in session) for J filter
+if in_session and not in_session[1]
+    b_sess_open := open
+if in_session
+    b_sess_close := close
+
+// ORB box
+var box b_box = na
+if barstate.isconfirmed
+    if in_orb_b and not in_orb_b[1]
+        b_box := box.new(bar_index, na(b_orb_hi) ? high : b_orb_hi,
+                         bar_index + 1, na(b_orb_lo) ? low : b_orb_lo,
+                         border_color=color.new(color.orange, 20),
+                         bgcolor=color.new(color.orange, 87), border_width=1)
+    if (in_orb_b or in_b_entry) and not na(b_box) and not na(b_orb_hi)
+        box.set_right(b_box, bar_index + 1)
+        box.set_top(b_box, b_orb_hi)
+        box.set_bottom(b_box, b_orb_lo)
+
+// Overnight range for E filter (declared here so it's available before C section)
+var float b_ov_hi = na
+var float b_ov_lo = na
+if _newDay
+    b_ov_hi := na
+    b_ov_lo := na
+if in_overnight
+    b_ov_hi := na(b_ov_hi) ? high : math.max(b_ov_hi, high)
+    b_ov_lo := na(b_ov_lo) ? low  : math.min(b_ov_lo, low)
+
+// B signals
+_b_vol_ok  = not i_b_useVol or volume > vol_avg * i_b_volMult
+_b_adx_ok  = not i_b_useAdx or adx_val > i_b_adxMin
+// E: overnight context — ORB mid vs overnight mid
+_ov_mid    = (b_ov_hi + b_ov_lo) / 2.0
+_borb_mid  = (b_orb_hi + b_orb_lo) / 2.0
+_e_long    = not i_b_useE or (not na(b_ov_hi) and not na(b_orb_hi) and _borb_mid > _ov_mid)
+_e_short   = not i_b_useE or (not na(b_ov_hi) and not na(b_orb_hi) and _borb_mid < _ov_mid)
+// F: ORB contained within previous day range (PDH overhead for shorts, PDL below for longs)
+_f_long    = not i_b_useF or (not na(a_pdl) and b_orb_lo >= a_pdl)
+_f_short   = not i_b_useF or (not na(a_pdh) and b_orb_hi <= a_pdh)
+// HTF Bias: H1 and/or H4 EMA directional filter
+_htf_long  = i_b_htfBias == "None" or (i_b_htfBias == "H1" and close > _h1_ema) or (i_b_htfBias == "H4" and close > _h4_ema) or (i_b_htfBias == "H1+H4" and close > _h1_ema and close > _h4_ema)
+_htf_short = i_b_htfBias == "None" or (i_b_htfBias == "H1" and close < _h1_ema) or (i_b_htfBias == "H4" and close < _h4_ema) or (i_b_htfBias == "H1+H4" and close < _h1_ema and close < _h4_ema)
+// H: ORB Range Quality — ORB height must be within [min, max] × ATR14
+_orb_height = b_orb_locked and not na(b_orb_hi) ? b_orb_hi - b_orb_lo : 0.0
+_orbq_ok    = not i_b_useOrbQ or (b_orb_locked and _orb_height >= atr_val * i_b_orbAtrMin and _orb_height <= atr_val * i_b_orbAtrMax)
+// I: Day of Week — allowed days (Berlin timezone)
+_dow        = dayofweek(time, "Europe/Berlin")
+_dow_ok     = not i_b_useDow or (_dow == dayofweek.monday and i_b_dow_mon) or (_dow == dayofweek.tuesday and i_b_dow_tue) or (_dow == dayofweek.wednesday and i_b_dow_wed) or (_dow == dayofweek.thursday and i_b_dow_thu) or (_dow == dayofweek.friday and i_b_dow_fri)
+// J: Prev Day Direction — prev session close vs open determines bias
+_pddir_long  = not i_b_usePDdir or (not na(b_pd_close) and not na(b_pd_open) and b_pd_close >= b_pd_open)
+_pddir_short = not i_b_usePDdir or (not na(b_pd_close) and not na(b_pd_open) and b_pd_close < b_pd_open)
+
+// Retest mode: mark when price first closes through the ORB boundary (flag survives until trade fires)
+if i_useB and barstate.isconfirmed and in_b_entry and b_orb_locked and not na(b_orb_hi)
+    if not b_long_done and not b_broke_hi and close > b_orb_hi
+        b_broke_hi := true
+    if not b_short_done and not b_broke_lo and close < b_orb_lo
+        b_broke_lo := true
+
+if i_useB and barstate.isconfirmed and in_b_entry and b_orb_locked and not na(b_orb_hi) and strategy.position_size == 0
+    _orh = b_orb_hi - b_orb_lo
+
+    // ── Long ──
+    if not i_b_shortOnly and not b_long_done and _b_vol_ok and _b_adx_ok and _e_long and _f_long and _htf_long and _orbq_ok and _dow_ok and _pddir_long and (not i_b_useVwap or close > vwap_val)
+        if not i_b_retest and close > b_orb_hi
+            strategy.entry("B Long", strategy.long)
+            strategy.exit("B Long Exit", "B Long", stop=b_orb_lo, limit=b_orb_hi + _orh * i_b_tpMult)
+            b_long_done := true
+            label.new(bar_index, low, "B ↑", style=label.style_label_up, color=color.new(color.orange, 5), textcolor=color.white, size=size.tiny)
+        if i_b_retest and b_broke_hi and low <= b_orb_hi and close > b_orb_hi
+            strategy.entry("B Long", strategy.long)
+            strategy.exit("B Long Exit", "B Long", stop=b_orb_lo, limit=b_orb_hi + _orh * i_b_tpMult)
+            b_long_done := true
+            label.new(bar_index, low, "B ↑R", style=label.style_label_up, color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny)
+
+    // ── Short ──
+    if not i_b_longOnly and not b_short_done and _b_vol_ok and _b_adx_ok and _e_short and _f_short and _htf_short and _orbq_ok and _dow_ok and _pddir_short and (not i_b_useVwap or close < vwap_val)
+        if not i_b_retest and close < b_orb_lo
+            strategy.entry("B Short", strategy.short)
+            strategy.exit("B Short Exit", "B Short", stop=b_orb_hi, limit=b_orb_lo - _orh * i_b_tpMult)
+            b_short_done := true
+            label.new(bar_index, high, "B ↓", style=label.style_label_down, color=color.new(color.orange, 5), textcolor=color.white, size=size.tiny)
+        if i_b_retest and b_broke_lo and high >= b_orb_lo and close < b_orb_lo
+            strategy.entry("B Short", strategy.short)
+            strategy.exit("B Short Exit", "B Short", stop=b_orb_hi, limit=b_orb_lo - _orh * i_b_tpMult)
+            b_short_done := true
+            label.new(bar_index, high, "B ↓R", style=label.style_label_down, color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STRATEGY C — ICT OVERNIGHT SWEEP REVERSAL
+//  Kill zone: 08:00–09:30 CET  |  Entry window: until 10:30 CET
+//  1) Build overnight range (00:00–09:00 CET)
+//  2) Sweep: wick through overnight H or L + close back inside → bias
+//  3) Entry on first FVG retest in bias direction after sweep
+//  SL: wick extreme ± buffer  |  TP: risk × multiplier
+// ═══════════════════════════════════════════════════════════════════════
+var float c_ov_hi     = na
+var float c_ov_lo     = na
+var bool  c_ov_locked = false
+var bool  c_sw_lo     = false
+var bool  c_sw_hi     = false
+var float c_wick      = na        // wick extreme of sweep candle
+var int   c_dir       = 0         // 1=LONG  -1=SHORT  0=none
+var float c_fvg_hi    = na
+var float c_fvg_lo    = na
+var bool  c_fvg_valid = false
+var int   c_fvg_bar   = na
+var bool  c_fired     = false
+
+if _newDay
+    c_ov_hi     := na
+    c_ov_lo     := na
+    c_ov_locked := false
+    c_sw_lo     := false
+    c_sw_hi     := false
+    c_wick      := na
+    c_dir       := 0
+    c_fvg_hi    := na
+    c_fvg_lo    := na
+    c_fvg_valid := false
+    c_fvg_bar   := na
+    c_fired     := false
+
+// Build overnight range
+if in_overnight
+    c_ov_hi := na(c_ov_hi) ? high : math.max(c_ov_hi, high)
+    c_ov_lo := na(c_ov_lo) ? low  : math.min(c_ov_lo, low)
+
+if not in_overnight and in_overnight[1] and not na(c_ov_hi)
+    c_ov_locked := true
+
+// Overnight range box
+var box c_ov_box = na
+if barstate.isconfirmed
+    if in_overnight and not in_overnight[1]
+        c_ov_box := box.new(bar_index, na(c_ov_hi) ? high : c_ov_hi,
+                            bar_index + 1, na(c_ov_lo) ? low : c_ov_lo,
+                            border_color=color.new(color.purple, 25),
+                            bgcolor=color.new(color.purple, 89), border_width=1)
+    if (in_overnight or in_c_entry) and not na(c_ov_box) and not na(c_ov_hi)
+        box.set_right(c_ov_box, bar_index + 1)
+        box.set_top(c_ov_box, c_ov_hi)
+        box.set_bottom(c_ov_box, c_ov_lo)
+
+// Sweep detection (08:00–09:30 CET kill zone)
+if barstate.isconfirmed and in_c_kz and c_ov_locked and not na(c_ov_hi)
+    if not c_sw_lo and low < c_ov_lo and close > c_ov_lo
+        c_sw_lo := true
+        if c_dir == 0
+            c_dir  := 1
+            c_wick := low
+        label.new(bar_index, low, "Sweep Lo",
+                  style=label.style_label_up, color=color.new(color.teal, 5),
+                  textcolor=color.white, size=size.tiny)
+
+    if not c_sw_hi and high > c_ov_hi and close < c_ov_hi
+        c_sw_hi := true
+        if c_dir == 0
+            c_dir  := -1
+            c_wick := high
+        label.new(bar_index, high, "Sweep Hi",
+                  style=label.style_label_down, color=color.new(color.red, 5),
+                  textcolor=color.white, size=size.tiny)
+
+// FVG detection after sweep (in entry window)
+if barstate.isconfirmed and in_c_entry and c_dir != 0 and not c_fvg_valid and bar_index >= 2
+    _lf = c_dir == 1  and low > high[2] and (low - high[2])   >= i_c_fvgMin
+    _sf = c_dir == -1 and low[2] > high  and (low[2] - high)  >= i_c_fvgMin
+
+    if _lf
+        c_fvg_lo    := high[2]
+        c_fvg_hi    := low
+        c_fvg_valid := true
+        c_fvg_bar   := bar_index
+        box.new(bar_index - 2, c_fvg_hi, bar_index + i_boxW, c_fvg_lo,
+                border_color=color.new(color.teal, 20),
+                bgcolor=color.new(color.teal, 83), border_width=1)
+
+    if _sf
+        c_fvg_lo    := high
+        c_fvg_hi    := low[2]
+        c_fvg_valid := true
+        c_fvg_bar   := bar_index
+        box.new(bar_index - 2, c_fvg_hi, bar_index + i_boxW, c_fvg_lo,
+                border_color=color.new(color.red, 20),
+                bgcolor=color.new(color.red, 83), border_width=1)
+
+// C entry: FVG retest after sweep
+_c_ok = i_useC and barstate.isconfirmed and in_c_entry and c_dir != 0 and c_fvg_valid and bar_index > nz(c_fvg_bar) and not c_fired and strategy.position_size == 0
+
+if _c_ok and c_dir == 1 and not na(c_wick)
+    if low <= c_fvg_hi and high >= c_fvg_lo
+        _sl = c_wick - i_c_slPts
+        _rk = close - _sl
+        if _rk > 0
+            strategy.entry("C Long", strategy.long)
+            strategy.exit("C Long Exit", "C Long", stop=_sl, limit=close + _rk * i_c_tpMult)
+            c_fvg_valid := false
+            c_fired     := true
+            label.new(bar_index, low, "C ↑",
+                      style=label.style_label_up, color=color.new(color.teal, 5),
+                      textcolor=color.white, size=size.tiny)
+
+if _c_ok and c_dir == -1 and not i_c_longOnly and not na(c_wick)
+    if high >= c_fvg_lo and low <= c_fvg_hi
+        _sl = c_wick + i_c_slPts
+        _rk = _sl - close
+        if _rk > 0
+            strategy.entry("C Short", strategy.short)
+            strategy.exit("C Short Exit", "C Short", stop=_sl, limit=close - _rk * i_c_tpMult)
+            c_fvg_valid := false
+            c_fired     := true
+            label.new(bar_index, high, "C ↓",
+                      style=label.style_label_down, color=color.new(color.red, 5),
+                      textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STRATEGY D — TRADERTOM PRE-MARKET BRACKET
+//  Source: tradertom.com — tested specifically on DAX/GER40
+//  Observe 08:00–09:00 CET, mark range hi/lo
+//  At 09:00 CET: first break above hi → Long | first break below lo → Short
+//  TP: +6 pts  |  SL: −9 pts  (asymmetric — edge comes entirely from WR)
+//  Only one trade per day: whichever side breaks first, other is cancelled
+// ═══════════════════════════════════════════════════════════════════════
+var float d_hi      = na
+var float d_lo      = na
+var bool  d_locked  = false
+var bool  d_fired   = false   // only one side fires per day
+
+if _newDay
+    d_hi     := na
+    d_lo     := na
+    d_locked := false
+    d_fired  := false
+
+if in_td_obs
+    d_hi := na(d_hi) ? high : math.max(d_hi, high)
+    d_lo := na(d_lo) ? low  : math.min(d_lo, low)
+
+if not in_td_obs and in_td_obs[1] and not na(d_hi)
+    d_locked := true
+
+// Observe-window reference box
+var box d_box = na
+if barstate.isconfirmed
+    if in_td_obs and not in_td_obs[1]
+        d_box := box.new(bar_index, na(d_hi) ? high : d_hi,
+                         bar_index + 1, na(d_lo) ? low : d_lo,
+                         border_color=color.new(color.fuchsia, 25),
+                         bgcolor=color.new(color.fuchsia, 91), border_width=1,
+                         border_style=line.style_dotted)
+    if (in_td_obs or (d_locked and in_session)) and not na(d_box) and not na(d_hi)
+        box.set_right(d_box, bar_index + 1)
+        box.set_top(d_box, d_hi)
+        box.set_bottom(d_box, d_lo)
+
+// D signals: stop-order simulation — bar's high/low crosses bracket level
+// TP/SL anchored to the bracket price (d_hi / d_lo), not to bar close
+if i_useD and barstate.isconfirmed and d_locked and in_session and not d_fired and not na(d_hi) and strategy.position_size == 0
+    _d_hi_x = high >= d_hi
+    _d_lo_x = low  <= d_lo
+
+    if _d_hi_x and not _d_lo_x
+        strategy.entry("D Long", strategy.long)
+        strategy.exit("D Long Exit", "D Long", limit=d_hi + i_d_tp, stop=d_hi - i_d_sl)
+        d_fired := true
+        label.new(bar_index, low, "D ↑", style=label.style_label_up, color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.tiny)
+
+    else if _d_lo_x and not _d_hi_x
+        strategy.entry("D Short", strategy.short)
+        strategy.exit("D Short Exit", "D Short", limit=d_lo - i_d_tp, stop=d_lo + i_d_sl)
+        d_fired := true
+        label.new(bar_index, high, "D ↓", style=label.style_label_down, color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.tiny)
+
+    else if _d_hi_x and _d_lo_x
+        // Both bracket levels crossed on same bar — use close vs midpoint as tiebreak
+        _dmid = (d_hi + d_lo) / 2.0
+        if close >= _dmid
+            strategy.entry("D Long", strategy.long)
+            strategy.exit("D Long Exit", "D Long", limit=d_hi + i_d_tp, stop=d_hi - i_d_sl)
+        else
+            strategy.entry("D Short", strategy.short)
+            strategy.exit("D Short Exit", "D Short", limit=d_lo - i_d_tp, stop=d_lo + i_d_sl)
+        d_fired := true
+        label.new(bar_index, math.avg(high, low), "D ?", style=label.style_label_center, color=color.new(color.fuchsia, 35), textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STRATEGY G — LONDON 3-PHASE  (NAS100 structure → GER40 London timing)
+//  Phase 1: Overnight range  00:00–07:00 CET  (Asian range equivalent)
+//  Phase 2: London sweep     07:00–09:00 CET  (sweeps ovn H or L, closes back inside)
+//  Phase 3: Frankfurt ORB BOS + FVG retest    (entry after sweep direction confirmed)
+//  SL: beyond sweep wick ± buffer  |  TP: risk × multiplier
+// ═══════════════════════════════════════════════════════════════════════
+var float g_rng_hi    = na
+var float g_rng_lo    = na
+var int   g_dir       = 0      // 1=LONG (lo swept)  -1=SHORT (hi swept)
+var float g_sw_wick   = na     // extreme of the sweep candle
+var float g_orb_hi    = na
+var float g_orb_lo    = na
+var bool  g_orb_lkd   = false
+var bool  g_bos_done  = false
+var float g_fvg_hi    = na
+var float g_fvg_lo    = na
+var bool  g_fvg_valid = false
+var int   g_fvg_bar   = na
+var bool  g_fired     = false
+
+if _newDay
+    g_rng_hi    := na
+    g_rng_lo    := na
+    g_dir       := 0
+    g_sw_wick   := na
+    g_orb_hi    := na
+    g_orb_lo    := na
+    g_orb_lkd   := false
+    g_bos_done  := false
+    g_fvg_hi    := na
+    g_fvg_lo    := na
+    g_fvg_valid := false
+    g_fvg_bar   := na
+    g_fired     := false
+
+// Phase 1: build overnight reference range
+if in_g_range
+    g_rng_hi := na(g_rng_hi) ? high : math.max(g_rng_hi, high)
+    g_rng_lo := na(g_rng_lo) ? low  : math.min(g_rng_lo, low)
+
+// Overnight range box
+var box g_rng_box = na
+if barstate.isconfirmed
+    if in_g_range and not in_g_range[1]
+        g_rng_box := box.new(bar_index, na(g_rng_hi) ? high : g_rng_hi,
+                             bar_index + 1, na(g_rng_lo) ? low : g_rng_lo,
+                             border_color=color.new(color.aqua, 30),
+                             bgcolor=color.new(color.aqua, 92), border_width=1,
+                             border_style=line.style_dashed)
+    if (in_g_range or in_g_kz) and not na(g_rng_box) and not na(g_rng_hi)
+        box.set_right(g_rng_box, bar_index + 1)
+        box.set_top(g_rng_box, g_rng_hi)
+        box.set_bottom(g_rng_box, g_rng_lo)
+
+// Phase 2: London sweep detection (07:00–09:00 CET)
+if barstate.isconfirmed and in_g_kz and not na(g_rng_hi) and g_dir == 0
+    if low < g_rng_lo and close > g_rng_lo
+        g_dir     := 1
+        g_sw_wick := low
+        label.new(bar_index, low, "G↓Sw", style=label.style_label_up, color=color.new(color.aqua, 10), textcolor=color.white, size=size.tiny)
+    else if high > g_rng_hi and close < g_rng_hi
+        g_dir     := -1
+        g_sw_wick := high
+        label.new(bar_index, high, "G↑Sw", style=label.style_label_down, color=color.new(color.aqua, 10), textcolor=color.white, size=size.tiny)
+
+// Phase 3a: Frankfurt ORB (only tracked when sweep is confirmed)
+if in_g_orb and g_dir != 0
+    g_orb_hi := na(g_orb_hi) ? high : math.max(g_orb_hi, high)
+    g_orb_lo := na(g_orb_lo) ? low  : math.min(g_orb_lo, low)
+
+if not in_g_orb and in_g_orb[1] and not na(g_orb_hi)
+    g_orb_lkd := true
+
+// Phase 3b: BOS — ORB breaks in sweep direction (confirms the move)
+if barstate.isconfirmed and in_g_entry and g_orb_lkd and not g_bos_done and not na(g_orb_hi)
+    if g_dir == 1 and close > g_orb_hi
+        g_bos_done := true
+    else if g_dir == -1 and close < g_orb_lo
+        g_bos_done := true
+
+// Phase 3c: FVG detection after BOS
+if barstate.isconfirmed and in_g_entry and g_bos_done and not g_fvg_valid and bar_index >= 2
+    _glf = g_dir == 1  and low > high[2] and (low - high[2])  >= i_g_fvgMin
+    _gsf = g_dir == -1 and low[2] > high  and (low[2] - high) >= i_g_fvgMin
+    if _glf
+        g_fvg_lo    := high[2]
+        g_fvg_hi    := low
+        g_fvg_valid := true
+        g_fvg_bar   := bar_index
+        box.new(bar_index - 2, g_fvg_hi, bar_index + i_boxW, g_fvg_lo, border_color=color.new(color.aqua, 20), bgcolor=color.new(color.aqua, 80), border_width=1)
+    if _gsf
+        g_fvg_lo    := high
+        g_fvg_hi    := low[2]
+        g_fvg_valid := true
+        g_fvg_bar   := bar_index
+        box.new(bar_index - 2, g_fvg_hi, bar_index + i_boxW, g_fvg_lo, border_color=color.new(color.aqua, 20), bgcolor=color.new(color.aqua, 80), border_width=1)
+
+// Phase 3d: Entry on FVG retest
+_g_ok = i_useG and barstate.isconfirmed and in_g_entry and g_dir != 0 and g_fvg_valid and bar_index > nz(g_fvg_bar) and not g_fired and strategy.position_size == 0
+
+if _g_ok and g_dir == 1 and not na(g_sw_wick)
+    if low <= g_fvg_hi and high >= g_fvg_lo
+        _sl = g_sw_wick - i_g_slBuf
+        _rk = close - _sl
+        if _rk > 0
+            strategy.entry("G Long", strategy.long)
+            strategy.exit("G Long Exit", "G Long", stop=_sl, limit=close + _rk * i_g_tpMult)
+            g_fvg_valid := false
+            g_fired     := true
+            label.new(bar_index, low, "G ↑", style=label.style_label_up, color=color.new(color.aqua, 5), textcolor=color.white, size=size.tiny)
+
+if _g_ok and g_dir == -1 and not i_g_longOnly and not na(g_sw_wick)
+    if high >= g_fvg_lo and low <= g_fvg_hi
+        _sl = g_sw_wick + i_g_slBuf
+        _rk = _sl - close
+        if _rk > 0
+            strategy.entry("G Short", strategy.short)
+            strategy.exit("G Short Exit", "G Short", stop=_sl, limit=close - _rk * i_g_tpMult)
+            g_fvg_valid := false
+            g_fired     := true
+            label.new(bar_index, high, "G ↓", style=label.style_label_down, color=color.new(color.aqua, 5), textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  GLOBAL SESSION CLOSE — force flat all at 17:30 CET
+// ═══════════════════════════════════════════════════════════════════════
+if in_close and strategy.position_size != 0
+    strategy.close_all("Session Close 17:30")
+
+// HTF EMA overlay lines (visible when bias filter is active)
+plot(i_b_htfBias != "None" ? _h1_ema : na, "H1 EMA", color=color.new(color.yellow, 20), linewidth=1)
+plot(i_b_htfBias == "H4" or i_b_htfBias == "H1+H4" ? _h4_ema : na, "H4 EMA", color=color.new(color.orange, 10), linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SESSION BACKGROUNDS
+// ═══════════════════════════════════════════════════════════════════════
+bgcolor(i_showBg and in_g_range                     ? color.new(color.aqua,   95) : na, title="G: Ovn Range")
+bgcolor(i_showBg and in_g_kz                        ? color.new(color.aqua,   88) : na, title="G: London KZ")
+bgcolor(i_showBg and in_td_obs                      ? color.new(color.fuchsia, 91) : na, title="D: Observe")
+bgcolor(i_showBg and in_orb_b                       ? color.new(color.orange,  88) : na, title="B: ORB")
+bgcolor(i_showBg and in_b_entry and not in_g_kz     ? color.new(color.lime,    91) : na, title="B: Entry")
+bgcolor(i_showBg and in_lunch                       ? color.new(color.gray,    91) : na, title="Lunch")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATUS TABLE
+// ═══════════════════════════════════════════════════════════════════════
+var table _tbl = na
+if i_showTbl and barstate.islast
+    if na(_tbl)
+        _tbl := table.new(position.top_right, 2, 19,
+                          bgcolor=color.new(color.black, 70),
+                          border_color=color.new(color.gray, 60), border_width=1,
+                          frame_color=color.new(color.gray, 60), frame_width=1)
+
+    _sess  = in_close ? "CLOSED" : in_b_entry ? "ENTRY" : in_orb_b ? "ORB" :
+             in_td_obs ? "PRE-MKT" : in_overnight ? "OVERNIGHT" : "SESSION"
+    _sessC = in_close ? color.gray : in_b_entry ? color.lime : in_orb_b ? color.orange :
+             in_td_obs ? color.fuchsia : in_overnight ? color.gray : color.yellow
+    _posC  = strategy.position_size > 0 ? color.teal : strategy.position_size < 0 ? color.red : color.gray
+    _posS  = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat"
+
+    // header
+    table.cell(_tbl, 0, 0, "QB GER40 Multi",
+               text_color=color.new(color.aqua, 0), text_size=size.tiny,
+               bgcolor=color.new(color.black, 55), text_halign=text.align_left)
+    table.cell(_tbl, 1, 0, timeframe.period + "m",
+               text_color=color.new(color.white, 20), text_size=size.tiny,
+               bgcolor=color.new(color.black, 55), text_halign=text.align_right)
+
+    // session + position
+    table.cell(_tbl, 0, 1, "Session",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 1, _sess,      text_color=color.new(_sessC,    0),   text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_tbl, 0, 2, "Position", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 2, _posS,      text_color=color.new(_posC,     0),   text_size=size.tiny, text_halign=text.align_right)
+
+    // separator
+    table.cell(_tbl, 0, 3, "── A: PDH/PDL ──", text_color=color.new(color.blue, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 3, i_useA ? "ON" : "off", text_color=i_useA ? color.new(color.lime, 0) : color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+
+    _adxC = adx_val > i_a_adxMin ? color.lime : color.gray
+    table.cell(_tbl, 0, 4, "ADX",  text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 4, str.tostring(adx_val, "#.1") + " (min " + str.tostring(i_a_adxMin, "#") + ")",
+               text_color=color.new(_adxC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_tbl, 0, 5, "PDH / PDL", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 5, not na(a_pdh) ? str.tostring(a_pdh, format.mintick) + " / " + str.tostring(a_pdl, format.mintick) : "—",
+               text_color=color.new(color.blue, 0), text_size=size.tiny, text_halign=text.align_right)
+
+    // B
+    table.cell(_tbl, 0, 6, "── B: Frankfurt ORB ──", text_color=color.new(color.orange, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 6, i_useB ? "ON" : "off", text_color=i_useB ? color.new(color.lime, 0) : color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 7, "ORB hi / lo", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 7, b_orb_locked and not na(b_orb_hi) ?
+               str.tostring(b_orb_hi, format.mintick) + " / " + str.tostring(b_orb_lo, format.mintick) : "building",
+               text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+    _b_filt = (i_b_shortOnly ? "S-only " : "") + (i_b_longOnly ? "L-only " : "") + (i_b_useAdx ? "ADX " : "") + (i_b_retest ? "Retest " : "") + (i_b_useE ? "E " : "") + (i_b_useF ? "F " : "") + (i_b_htfBias != "None" ? "HTF:" + i_b_htfBias + " " : "") + (i_b_useOrbQ ? "OrbQ " : "") + (i_b_useDow ? "DoW " : "") + (i_b_usePDdir ? "PDdir" : "")
+    table.cell(_tbl, 0, 8, "B filters", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 8, str.length(_b_filt) > 0 ? _b_filt : "none", text_color=color.new(color.orange, 10), text_size=size.tiny, text_halign=text.align_right)
+    _vwapC = close > vwap_val ? color.teal : color.red
+    table.cell(_tbl, 0, 9, "VWAP", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 9, str.tostring(vwap_val, format.mintick) + (close > vwap_val ? " ↑" : " ↓"),
+               text_color=color.new(_vwapC, 0), text_size=size.tiny, text_halign=text.align_right)
+
+    // C
+    table.cell(_tbl, 0, 10, "── C: ICT Sweep ──", text_color=color.new(color.teal, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 10, i_useC ? "ON" : "off", text_color=i_useC ? color.new(color.lime, 0) : color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 11, "Ovn Hi / Lo", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 11, c_ov_locked and not na(c_ov_hi) ?
+               str.tostring(c_ov_hi, format.mintick) + " / " + str.tostring(c_ov_lo, format.mintick) : "building",
+               text_color=color.new(color.purple, 0), text_size=size.tiny, text_halign=text.align_right)
+    _cswC = c_dir == 1 ? color.teal : c_dir == -1 ? color.red : color.gray
+    _cswS = c_dir == 1 ? "Lo swept → LONG" : c_dir == -1 ? "Hi swept → SHORT" : "no sweep"
+    table.cell(_tbl, 0, 12, "Sweep", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 12, _cswS, text_color=color.new(_cswC, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_tbl, 0, 13, "FVG", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 13, c_fvg_valid ?
+               str.tostring(c_fvg_hi, format.mintick) + "/" + str.tostring(c_fvg_lo, format.mintick) :
+               (c_fired ? "fired" : "—"),
+               text_color=color.new(c_fvg_valid ? _cswC : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+
+    // D
+    table.cell(_tbl, 0, 14, "── D: TT Bracket ──", text_color=color.new(color.fuchsia, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 14, i_useD ? "ON" : "off", text_color=i_useD ? color.new(color.lime, 0) : color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(_tbl, 0, 15, "Bracket", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 15, d_locked and not na(d_hi) ?
+               str.tostring(d_hi, format.mintick) + " / " + str.tostring(d_lo, format.mintick) : "building",
+               text_color=color.new(color.fuchsia, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_tbl, 0, 16, "State", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 16, d_fired ? "fired" : d_locked ? "waiting" : "building",
+               text_color=d_fired ? color.new(color.gray, 20) : d_locked ? color.new(color.yellow, 0) : color.new(color.gray, 30),
+               text_size=size.tiny, text_halign=text.align_right)
+
+    // G
+    _gSwS = g_dir == 1 ? "Lo swept → LONG" : g_dir == -1 ? "Hi swept → SHORT" : "no sweep"
+    _gSwC = g_dir == 1 ? color.teal : g_dir == -1 ? color.red : color.gray
+    _gSt  = g_fired ? "fired" : g_fvg_valid ? "FVG wait" : g_bos_done ? "BOS ✓ wait FVG" : g_dir != 0 ? "sweep ✓ wait BOS" : "building"
+    _gStC = g_fired ? color.gray : g_bos_done ? color.lime : g_dir != 0 ? color.yellow : color.gray
+    table.cell(_tbl, 0, 17, "── G: London 3-Phase ──", text_color=color.new(color.aqua, 10), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 17, i_useG ? "ON" : "off", text_color=i_useG ? color.new(color.lime, 0) : color.new(color.gray, 30), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(_tbl, 0, 18, "Phase", text_color=color.new(color.gray, 15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_tbl, 1, 18, _gSt + "  " + _gSwS, text_color=color.new(_gStC, 0), text_size=size.tiny, text_halign=text.align_right)

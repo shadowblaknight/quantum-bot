@@ -37,6 +37,7 @@ const SPECIALIST_ALLOWED_ZONES = {
   'gold-specialist-2': ['gold-s2-a', 'gold-s2-b', 'gold-s2-d'],
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
   'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)
+  'ger40-bg-specialist': ['B', 'G'], // Frankfurt ORB (B) + London 3-Phase FVG (G), Tue+Thu only
 };
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -63,6 +64,8 @@ const PINE_TO_ASSET = {
   // SP500 aliases
   SP500: 'us500', US500: 'us500', SPX500: 'us500', SPX: 'us500',
   BTCUSD: 'btc', BTCUSDT: 'btc', BTCUSDC: 'btc',
+  // GER40 aliases — GER40.s (Spreadex) strips to GER40S; others map directly
+  GER40: 'ger40', GER40S: 'ger40', DE40: 'ger40', DAX: 'ger40', DAX40: 'ger40', GER40M: 'ger40',
 };
 
 const DEDUPE_PREFIX = 'v13:webhook:dedupe:';

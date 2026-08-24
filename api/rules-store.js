@@ -112,6 +112,7 @@ const DEFAULT_RULES = {
     usdcad: makeInstrumentDefault('usdcad', { fixedLot: 0.50, maxLot: 1.50, fixedSLPips: 15 }),
     eurjpy: makeInstrumentDefault('eurjpy', { fixedLot: 0.30, maxLot: 1.00, fixedSLPips: 25 }),
     gbpjpy: makeInstrumentDefault('gbpjpy', { fixedLot: 0.20, maxLot: 0.80, fixedSLPips: 35 }),
+    ger40:  makeInstrumentDefault('ger40',  { fixedLot: 0.10, maxLot: 1.00, fixedSLPips: 50 }),
   },
 
   templateOverrides: {
@@ -121,6 +122,7 @@ const DEFAULT_RULES = {
     'nas100-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '📈 NAS100 Specialist' },
     'gbpusd-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🇬🇧 GBPUSD Specialist' },
     'forex-specialist':  { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '💱 Forex Specialist' },
+    'ger40-bg-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🇩🇪 GER40 B+G Specialist' },
     // ── Legacy templates ──────────────────────────────────────────────────────────────────────
     'silver-bullet':    { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥈 Silver Bullet' },
     'unicorn':          { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🦄 Unicorn' },

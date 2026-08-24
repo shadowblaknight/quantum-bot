@@ -32,6 +32,9 @@ const ZONE_TYPE_LABELS = {
   'gold-s2-a': 'FVG+BOS (H1)',           // Gold S2 — Setup A (FVG retest + BOS)
   'gold-s2-b': 'Judas Sweep (H1)',        // Gold S2 — Setup B (Asian high/low sweep)
   'gold-s2-d': 'Psych Level (H1)',        // Gold S2 — Setup D (round number bounce)
+  // GER40 specialist
+  'B':        'Frankfurt ORB',          // GER40 — Signal B (09:00 CET 15-min ORB breakout, Tue/Thu)
+  'G':        'London 3-Phase FVG',     // GER40 — Signal G (sweep → BOS → FVG retest, Tue/Thu)
   // GBPUSD specialist
   'SFP-L':    'Asian Sweep Low',     // GBP — Signal A long (wick below Asian lo, body back inside → London KZ)
   'SFP-H':    'Asian Sweep High',    // GBP — Signal A short (wick above Asian hi, body back inside → London KZ)

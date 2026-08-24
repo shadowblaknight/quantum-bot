@@ -22,6 +22,7 @@ const SPECIALIST_META_MAP = {
   'nas100-specialist':  { glyph: '📈', label: 'NAS100 Specialist' },
   'gbpusd-specialist':  { glyph: '🇬🇧', label: 'GBPUSD Specialist' },
   'forex-specialist':   { glyph: '💱', label: 'Forex Specialist' },
+  'ger40-bg-specialist': { glyph: '🇩🇪', label: 'GER40 B+G Specialist' },
 };
 
 // ── Legacy templates (history — disabled in V20 mode) ─────────────────────────
@@ -70,7 +71,7 @@ const LEGACY_TEMPLATES = Object.keys(LEGACY_TEMPLATE_META);
 
 // Display order (heatmaps, cards) — specialists first, legacy after
 const TEMPLATE_ORDER = [
-  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist',
+  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',
@@ -82,13 +83,13 @@ const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg', 'reacti
 
 // Accepted — V20: specialists only. Pre-V20 retained for reference.
 const ACCEPTED_ACTIVE = [
-  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist',
+  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',
 ];
 const ACCEPTED_DEFENSIVE = [
-  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist',
+  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb',

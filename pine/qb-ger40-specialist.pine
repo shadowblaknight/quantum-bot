@@ -1,0 +1,333 @@
+//@version=6
+indicator("QB GER40 Specialist — Judas Swing + Silver Bullet",
+          shorttitle="QB-GER40", overlay=true,
+          max_lines_count=500, max_boxes_count=300, max_labels_count=300)
+
+// ─── WEBHOOK KEY (hardcoded — never move to input) ────────────────────────
+WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
+
+// ─── GROUPS ───────────────────────────────────────────────────────────────
+GI = "=== SETUP TOGGLES ==="
+GS = "=== SESSION & FILTERS ==="
+GV = "=== VISUALS ==="
+
+// ─── SETUP TOGGLES ────────────────────────────────────────────────────────
+USE_JUDAS = input.bool(true,  "Setup A — Frankfurt Judas Swing (07:00–08:30 UTC)", group=GI,
+    tooltip="Overnight Asian range (00:00–07:00 UTC) swept at Frankfurt open → BOS → FVG entry. " +
+            "Confirmed best DAX edge. Requires 24h futures data (GER40.s).")
+USE_SB    = input.bool(true,  "Setup B — London Silver Bullet (08:00–09:00 UTC)",  group=GI,
+    tooltip="ICT Silver Bullet kill zone at DAX London open. Uses Judas bias if set, else H1 EMA200. " +
+            "Best combined with Setup A — fires on same session when Judas swing was early.")
+USE_NY    = input.bool(false, "Setup C — NY Open FVG (13:30–15:30 UTC)",           group=GI,
+    tooltip="Second volatility window driven by US open. Uses Frankfurt session bias. " +
+            "OFF = confirmed best — most DAX moves complete before NY open.")
+
+// ─── SESSION & FILTER PARAMS ──────────────────────────────────────────────
+FVG_MIN   = input.float(15.0, "FVG Min (pts)",          group=GS, minval=3,   step=1,
+    tooltip="Minimum Fair Value Gap size in GER40 points. Confirmed best: 15–20pts on M15. " +
+            "10pts = more signals, noisier. 25pts = fewer, cleaner.")
+TP_MULT   = input.float(2.0,  "TP Multiplier",           group=GS, minval=0.5, step=0.5,
+    tooltip="R:R target. 2.0× documented in research. 3.0× fewer hits but higher PF if edge is real.")
+SL_BUF    = input.float(0.15, "SL ATR Buffer (×ATR)",   group=GS, minval=0,   step=0.05)
+ATR_LEN   = input.int(14,     "ATR Length",              group=GS, minval=5)
+A_RNG_MIN = input.float(15.0, "Asian Range Min (pts)",  group=GS, minval=5,
+    tooltip="Skip days with Asian range below this. Too narrow = no real liquidity to sweep. " +
+            "Confirmed best: ≥15pts.")
+A_RNG_MAX = input.float(80.0, "Asian Range Max (pts)",  group=GS, maxval=500,
+    tooltip="Skip days with Asian range above this. >80pts = overnight news event, setup unreliable.")
+REQ_CB    = input.bool(true,  "Require close-back after sweep", group=GS,
+    tooltip="ON = sweep bar must close back inside Asian range to confirm reversal intent. " +
+            "Filters straight breakouts. Confirmed best in ICT framework.")
+REQ_BOS   = input.bool(true,  "Require ORB/BOS before FVG entry", group=GS,
+    tooltip="ON = wait for bar to close beyond Asian range in bias direction before enabling FVG entries. " +
+            "Confirmed best — aligns with established liquidity structure.")
+EMA_LEN   = input.int(200,    "H1 EMA for SB bias",     group=GS, minval=10,
+    tooltip="H1 EMA length used for Silver Bullet bias when no Judas sweep happened that day.")
+MAX_TRD   = input.int(1,      "Max trades / day",       group=GS, minval=1, maxval=3)
+
+// ─── VISUALS ──────────────────────────────────────────────────────────────
+SHOW_ASIAN  = input.bool(true,  "Show Asian range lines", group=GV)
+SHOW_FVG    = input.bool(true,  "Show FVG zones",         group=GV)
+SHOW_LABELS = input.bool(true,  "Show signal labels",     group=GV)
+SHOW_BG     = input.bool(true,  "Show session backgrounds", group=GV)
+
+C_BULL      = input.color(color.new(color.lime,   85), "Bull FVG fill",   group=GV)
+C_BEAR      = input.color(color.new(color.red,    85), "Bear FVG fill",   group=GV)
+C_ASIAN     = input.color(color.new(color.gray,   60), "Asian range",     group=GV)
+C_FRANK_BG  = input.color(color.new(color.yellow, 93), "Frankfurt bg",    group=GV)
+C_SB_BG     = input.color(color.new(color.blue,   90), "Silver Bullet bg",group=GV)
+
+// ─── SESSION DETECTION (UTC minute-of-day) ────────────────────────────────
+_hu     = hour(time,   "UTC")
+_mu     = minute(time, "UTC")
+_tMin   = _hu * 60 + _mu                  // 0–1439
+_dow    = dayofweek(time, "UTC")           // 1=Sun … 7=Sat
+_newDay = ta.change(time("D")) != 0
+
+in_asian = timeframe.isintraday and _tMin >= 0    and _tMin < 420   // 00:00–07:00 UTC
+in_frank = timeframe.isintraday and _tMin >= 420  and _tMin < 510   // 07:00–08:30 UTC
+in_sb    = timeframe.isintraday and _tMin >= 480  and _tMin < 540   // 08:00–09:00 UTC
+in_entry = timeframe.isintraday and _tMin >= 420  and _tMin < 660   // 07:00–11:00 UTC main
+in_ny    = timeframe.isintraday and _tMin >= 810  and _tMin < 930   // 13:30–15:30 UTC
+skip_day = _dow == 1 or _dow == 7                                    // no Sunday/Saturday
+
+frank_open = in_frank and not in_frank[1]  // first bar of Frankfurt window
+
+// ─── ASIAN RANGE ──────────────────────────────────────────────────────────
+var float a_hi  = na
+var float a_lo  = na
+var float ah    = na   // locked at Frankfurt open
+var float al    = na
+var float a_rng = na
+var bool  a_ok  = false
+
+if _newDay
+    a_hi  := na
+    a_lo  := na
+    a_ok  := false
+
+if in_asian
+    a_hi := na(a_hi) ? high : math.max(a_hi, high)
+    a_lo := na(a_lo) ? low  : math.min(a_lo, low)
+
+if frank_open and not na(a_hi) and not na(a_lo)
+    ah    := a_hi
+    al    := a_lo
+    a_rng := a_hi - a_lo
+    a_ok  := a_rng >= A_RNG_MIN and a_rng <= A_RNG_MAX
+
+// ─── ASIAN RANGE VISUALS ──────────────────────────────────────────────────
+var line l_hi = na
+var line l_lo = na
+var box  b_fr = na
+var box  b_sb = na
+var box  b_ny = na
+
+if frank_open and a_ok and SHOW_ASIAN
+    line.delete(l_hi)
+    line.delete(l_lo)
+    l_hi := line.new(bar_index, ah, bar_index + 80, ah,
+                     color=C_ASIAN, style=line.style_dashed, width=1)
+    l_lo := line.new(bar_index, al, bar_index + 80, al,
+                     color=C_ASIAN, style=line.style_dashed, width=1)
+
+// Session background boxes
+if frank_open and SHOW_BG
+    box.delete(b_fr)
+    b_fr := box.new(bar_index, high + ta.atr(14) * 2, bar_index + 6, low - ta.atr(14) * 2,
+                    border_color=color.new(color.yellow, 80),
+                    bgcolor=C_FRANK_BG)
+if in_sb and not in_sb[1] and SHOW_BG
+    box.delete(b_sb)
+    b_sb := box.new(bar_index, high + ta.atr(14) * 2, bar_index + 4, low - ta.atr(14) * 2,
+                    border_color=color.new(color.blue, 80),
+                    bgcolor=C_SB_BG)
+
+// ─── SWEEP & BIAS ─────────────────────────────────────────────────────────
+var int  day_bias   = 0      // 1=BULL, -1=BEAR
+var bool sweep_done = false
+var bool bos_done   = false
+var int  day_trades = 0
+var bool sw_lo_hit  = false
+var bool sw_hi_hit  = false
+
+if _newDay
+    day_bias   := 0
+    sweep_done := false
+    bos_done   := false
+    day_trades := 0
+    sw_lo_hit  := false
+    sw_hi_hit  := false
+
+// Detect sweep in Frankfurt window
+if in_frank and a_ok and not sweep_done and not skip_day
+    if not sw_lo_hit and low  < al
+        sw_lo_hit := true
+    if not sw_hi_hit and high > ah
+        sw_hi_hit := true
+
+    // Confirm with close-back
+    if sw_lo_hit and not sw_hi_hit
+        if not REQ_CB or close >= al
+            day_bias   := 1
+            sweep_done := true
+    else if sw_hi_hit and not sw_lo_hit
+        if not REQ_CB or close <= ah
+            day_bias   := -1
+            sweep_done := true
+    else if sw_lo_hit and sw_hi_hit and not sweep_done
+        // Both swept — bearish candle = bull trap was first → bull bias; vice versa
+        day_bias   := close < open ? 1 : -1
+        sweep_done := true
+
+// BOS: first bar to close beyond Asian range in bias direction
+if sweep_done and not bos_done and (in_entry or in_ny)
+    if day_bias ==  1 and close > ah
+        bos_done := true
+    if day_bias == -1 and close < al
+        bos_done := true
+
+// ─── ATR & FVG ────────────────────────────────────────────────────────────
+atrVal = ta.atr(ATR_LEN)
+
+bull_gap  = low - high[2]
+bear_gap  = low[2] - high
+bull_fvg  = bull_gap >= FVG_MIN    // low[0] > high[2]  (gap above bar[-2])
+bear_fvg  = bear_gap >= FVG_MIN    // high[0] < low[2]  (gap below bar[-2])
+
+fvg_lo_b  = bull_fvg ? high[2] : na    // FVG lower edge (bull)
+fvg_hi_b  = bull_fvg ? low     : na    // FVG upper edge (bull)
+fvg_hi_s  = bear_fvg ? low[2]  : na    // FVG upper edge (bear)
+fvg_lo_s  = bear_fvg ? high    : na    // FVG lower edge (bear)
+
+// Draw FVG zones
+if bull_fvg and SHOW_FVG and in_entry
+    box.new(bar_index - 2, fvg_hi_b, bar_index + 10, fvg_lo_b,
+            border_color=color.new(color.lime, 40), bgcolor=C_BULL)
+if bear_fvg and SHOW_FVG and in_entry
+    box.new(bar_index - 2, fvg_hi_s, bar_index + 10, fvg_lo_s,
+            border_color=color.new(color.red, 40), bgcolor=C_BEAR)
+
+// ─── H1 EMA (Silver Bullet bias when no Judas sweep) ──────────────────────
+h1_ema  = request.security(syminfo.tickerid, "60", ta.ema(close, EMA_LEN),
+                            lookahead=barmerge.lookahead_off)
+sb_bias = day_bias != 0 ? day_bias : (close > h1_ema ? 1 : -1)
+
+bos_gate = not REQ_BOS or bos_done
+
+// ─── SIGNAL CONDITIONS ────────────────────────────────────────────────────
+// Setup A: Judas Swing FVG — in entry window, after BOS, in sweep direction
+a_long  = USE_JUDAS and bos_gate and in_entry   and day_bias ==  1 and bull_fvg and not skip_day
+a_short = USE_JUDAS and bos_gate and in_entry   and day_bias == -1 and bear_fvg and not skip_day
+
+// Setup B: Silver Bullet — 08:00–09:00 UTC kill zone, bias-aligned FVG
+b_long  = USE_SB and in_sb and sb_bias ==  1 and bull_fvg and not skip_day and not a_long
+b_short = USE_SB and in_sb and sb_bias == -1 and bear_fvg and not skip_day and not a_short
+
+// Setup C: NY Open — 13:30–15:30 UTC, Frankfurt bias required
+c_long  = USE_NY and in_ny and day_bias ==  1 and bull_fvg and not skip_day
+c_short = USE_NY and in_ny and day_bias == -1 and bear_fvg and not skip_day
+
+// ─── ALERT JSON BUILDER ───────────────────────────────────────────────────
+f_json(zType, dir, ep, sl_p, tp1) =>
+    tp2  = dir == "LONG" ? ep + (ep - sl_p) * 3.0 : ep - (sl_p - ep) * 3.0
+    rr1  = math.abs(tp1 - ep) / math.abs(ep - sl_p)
+    sweepTag = day_bias == 1 ? "Asian-L" : (day_bias == -1 ? "Asian-H" : "none")
+    pfx  = (dir == "LONG" ? "🟢 " : "🔴 ") + syminfo.ticker + " · " +
+           (dir == "LONG" ? "BUY"  : "SELL") + " · " + zType + " · " +
+           timeframe.period + "m\n---\n"
+    j    = '{"version":"2.3","action":"trade"' +
+           ',"template":"ger40-specialist"' +
+           ',"direction":"' + dir + '"' +
+           ',"symbol":"'    + syminfo.tickerid + '"' +
+           ',"timeframe":"' + timeframe.period + '"' +
+           ',"timestamp":'  + str.tostring(time) +
+           ',"entry":"'     + str.tostring(ep,   format.mintick) + '"' +
+           ',"sl":"'        + str.tostring(sl_p, format.mintick) + '"' +
+           ',"tp1":"'       + str.tostring(tp1,  format.mintick) + '"' +
+           ',"tp2":"'       + str.tostring(tp2,  format.mintick) + '"' +
+           ',"tp3":"'       + str.tostring(tp2,  format.mintick) + '"' +
+           ',"rr1":'        + str.tostring(rr1, "#.##") +
+           ',"rr2":3.0,"rr3":3.0' +
+           ',"zoneUpper":"' + str.tostring(na(fvg_hi_b) ? fvg_hi_s : fvg_hi_b, format.mintick) + '"' +
+           ',"zoneLower":"' + str.tostring(na(fvg_lo_b) ? fvg_lo_s : fvg_lo_b, format.mintick) + '"' +
+           ',"zoneType":"'  + zType + '"' +
+           ',"activeSession":"frankfurt"' +
+           ',"htfTier":"A"' +
+           ',"htfBias":"'   + str.tostring(day_bias) + '/0/0"' +
+           ',"htfBiasAlign":1' +
+           ',"htfConfluence":"sweep+bos+fvg"' +
+           ',"window":"frankfurt"' +
+           ',"swept":"'     + sweepTag + '"' +
+           ',"impulseATR":"' + str.tostring(atrVal, "#.##") + '"' +
+           ',"filters":"FVG_OK' + (sweep_done ? " SWEEP_OK" : "") + (bos_done ? " BOS_OK" : "") + '"' +
+           ',"cvdSlope":"0","cvdConfirms":false' +
+           ',"cvdDivergence":"none","cvdLowTrust":false' +
+           ',"barOpen":"'  + str.tostring(open,  format.mintick) + '"' +
+           ',"barHigh":"'  + str.tostring(high,  format.mintick) + '"' +
+           ',"barLow":"'   + str.tostring(low,   format.mintick) + '"' +
+           ',"barClose":"' + str.tostring(close, format.mintick) + '"' +
+           ',"adrConsumed":"0.0000","adrTier":"A"' +
+           ',"gapAtr":"'   + str.tostring(bull_fvg ? bull_gap : bear_gap, "#.##") + '"' +
+           ',"gapDir":'    + str.tostring(day_bias) +
+           ',"priorDayPos":0' +
+           ',"hourUtc":'   + str.tostring(_hu) +
+           ',"dayOfWeek":' + str.tostring(_dow - 1) +
+           ',"nearKeyTime":0' +
+           ',"ibSide":"null","ibPosition":"-1","first15mDir":"0","minsIntoWindow":0' +
+           ',"asianHi":"'  + str.tostring(ah, format.mintick) + '"' +
+           ',"asianLo":"'  + str.tostring(al, format.mintick) + '"' +
+           ',"asianRng":"' + str.tostring(a_rng, "#.##") + '"' +
+           ',"apiKey":"'   + WEBHOOK_KEY + '"}'
+    pfx + j
+
+// ─── SIGNAL FIRE ──────────────────────────────────────────────────────────
+if (a_long or b_long or c_long) and day_trades < MAX_TRD
+    flo  = a_long ? fvg_lo_b : fvg_lo_b
+    fhi  = a_long ? fvg_hi_b : fvg_hi_b
+    sl_p = flo - atrVal * SL_BUF
+    ep   = close
+    dist = ep - sl_p
+    tp1  = ep + dist * TP_MULT
+    zT   = a_long ? "ger40-judas" : (b_long ? "ger40-sb" : "ger40-ny")
+    if dist > 0
+        day_trades += 1
+        alert(f_json(zT, "LONG", ep, sl_p, tp1), alert.freq_once_per_bar_close)
+        if SHOW_LABELS
+            lbl = a_long ? "⬆ JUDAS LONG" : (b_long ? "⬆ SB LONG" : "⬆ NY LONG")
+            label.new(bar_index, low - atrVal * 0.5, lbl + "\n" +
+                      str.tostring(ep, format.mintick) + " / SL " +
+                      str.tostring(sl_p, format.mintick) + " / TP " +
+                      str.tostring(tp1, format.mintick),
+                      style=label.style_label_up,
+                      color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+
+if (a_short or b_short or c_short) and day_trades < MAX_TRD
+    fhi  = a_short ? fvg_hi_s : fvg_hi_s
+    flo  = a_short ? fvg_lo_s : fvg_lo_s
+    sl_p = fhi + atrVal * SL_BUF
+    ep   = close
+    dist = sl_p - ep
+    tp1  = ep - dist * TP_MULT
+    zT   = a_short ? "ger40-judas" : (b_short ? "ger40-sb" : "ger40-ny")
+    if dist > 0
+        day_trades += 1
+        alert(f_json(zT, "SHORT", ep, sl_p, tp1), alert.freq_once_per_bar_close)
+        if SHOW_LABELS
+            lbl = a_short ? "⬇ JUDAS SHORT" : (b_short ? "⬇ SB SHORT" : "⬇ NY SHORT")
+            label.new(bar_index, high + atrVal * 0.5, lbl + "\n" +
+                      str.tostring(ep, format.mintick) + " / SL " +
+                      str.tostring(sl_p, format.mintick) + " / TP " +
+                      str.tostring(tp1, format.mintick),
+                      style=label.style_label_down,
+                      color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+// ─── ALERTCONDITION (TradingView alerts panel) ────────────────────────────
+alertcondition(a_long  and day_trades < MAX_TRD, "GER40 Judas LONG",   "QB GER40 Judas LONG")
+alertcondition(a_short and day_trades < MAX_TRD, "GER40 Judas SHORT",  "QB GER40 Judas SHORT")
+alertcondition(b_long  and day_trades < MAX_TRD, "GER40 SB LONG",      "QB GER40 Silver Bullet LONG")
+alertcondition(b_short and day_trades < MAX_TRD, "GER40 SB SHORT",     "QB GER40 Silver Bullet SHORT")
+alertcondition(c_long  and day_trades < MAX_TRD, "GER40 NY LONG",      "QB GER40 NY Open LONG")
+alertcondition(c_short and day_trades < MAX_TRD, "GER40 NY SHORT",     "QB GER40 NY Open SHORT")
+
+// ─── STATUS LABELS ────────────────────────────────────────────────────────
+if barstate.islast
+    bias_str = day_bias == 1 ? "🟢 BULL" : (day_bias == -1 ? "🔴 BEAR" : "⚪ NONE")
+    sweep_str = sweep_done ? (day_bias == 1 ? "Asian LO swept ✓" : "Asian HI swept ✓") : "no sweep"
+    bos_str   = bos_done ? "BOS ✓" : "awaiting BOS"
+    rng_str   = not na(a_rng) ? str.tostring(a_rng, "#.#") + "pt range" : "no Asian range yet"
+    table t = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+    table.cell(t, 0, 0, "QB GER40",   text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 40))
+    table.cell(t, 1, 0, "Specialist", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 40))
+    table.cell(t, 0, 1, "Asian Rng",  text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 1, rng_str,      text_color=a_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 2, "Bias",       text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 2, bias_str,     text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 3, "Sweep",      text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 3, sweep_str,    text_color=sweep_done ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 4, "BOS",        text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 4, bos_str,      text_color=bos_done ? color.lime : color.orange, text_size=size.tiny)
+
+// ─── PLOT SWEEP MARKERS ───────────────────────────────────────────────────
+plot(sweep_done and day_bias == 1  ? al : na, "Asian LO swept", color.new(color.lime, 20), 2, plot.style_circles)
+plot(sweep_done and day_bias == -1 ? ah : na, "Asian HI swept", color.new(color.red,  20), 2, plot.style_circles)

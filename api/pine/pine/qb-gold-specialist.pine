@@ -86,6 +86,7 @@ atrVal = ta.atr(atrLength)
 _hourUtc    = hour(time, "UTC")
 _minOfDay   = _hourUtc * 60 + minute(time, "UTC")
 _dayOfWeek  = dayofweek(time, "UTC") - 1
+_hm_tuesday = dayofweek(time, "UTC") == dayofweek.tuesday   // H/M locked: Tuesday only (WR 78%, PF 6.68)
 
 _atr14d     = request.security(syminfo.tickerid, "D", ta.atr(14))
 _todayOpen  = request.security(syminfo.tickerid, "D", open)
@@ -744,7 +745,7 @@ if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_h
 // One signal per day.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok
+if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and _hm_tuesday
     orb_range_frb = frb_hi - frb_lo
     buf_frb       = math.max(atrVal * 0.10, 0.50)
     if orb_range_frb > 0.50
@@ -776,7 +777,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
 // One signal per day.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok
+if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok and _hm_tuesday
     orb_range_ny = nyorb_hi - nyorb_lo
     buf_ny       = math.max(atrVal * 0.10, 0.50)
     if orb_range_ny > 0.50
