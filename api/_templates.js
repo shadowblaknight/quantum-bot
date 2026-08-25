@@ -83,13 +83,13 @@ const REACTION_TEMPLATES = ['reaction', 'reaction-fvg', 'reaction-ifvg', 'reacti
 
 // Accepted — V20: specialists only. Pre-V20 retained for reference.
 const ACCEPTED_ACTIVE = [
-  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
+  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',
 ];
 const ACCEPTED_DEFENSIVE = [
-  'gold-specialist', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
+  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
   'silver-bullet', 'unicorn', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb',

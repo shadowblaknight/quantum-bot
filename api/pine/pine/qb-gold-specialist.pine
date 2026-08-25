@@ -785,9 +785,9 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             entryP = close
             slP    = nyorb_lo - buf_ny
             slDist = entryP - slP
-            tp1    = nyorb_hi + orb_range_ny * 0.75
-            tp2    = nyorb_hi + orb_range_ny * 1.50
-            tp3    = nyorb_hi + orb_range_ny * 2.25
+            tp1    = entryP + slDist * 0.75
+            tp2    = entryP + slDist * 1.50
+            tp3    = entryP + slDist * 2.25
             nyorb_done := true
             fStr   = "NYORB✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
@@ -805,9 +805,9 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             entryP = close
             slP    = nyorb_hi + buf_ny
             slDist = slP - entryP
-            tp1    = nyorb_lo - orb_range_ny * 0.75
-            tp2    = nyorb_lo - orb_range_ny * 1.50
-            tp3    = nyorb_lo - orb_range_ny * 2.25
+            tp1    = entryP - slDist * 0.75
+            tp2    = entryP - slDist * 1.50
+            tp3    = entryP - slDist * 2.25
             nyorb_done := true
             fStr   = "NYORB✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,

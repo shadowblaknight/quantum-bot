@@ -58,9 +58,9 @@ const _roundTick = (typeof roundToPipSize === 'function')
 const PINE_TO_ASSET = {
   XAUUSD: 'gold', GOLD: 'gold', XAUUSDPRO: 'gold',  // gold aliases (TVC:GOLD, broker PRO variant)
   EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy',
-  // NAS100 aliases — data feeds label this instrument differently. Your feed
-  // sends "NDQ" (visible in the alert), which had no mapping → 400 unknown symbol.
-  NAS100: 'nas100', NDQ: 'nas100', US100: 'nas100', USTEC: 'nas100', NDX: 'nas100', USTECH: 'nas100',
+  // NAS100 aliases — NAS100.s (Spreadex) strips to NAS100S; NDQ was previously the feed symbol.
+  NAS100: 'nas100', NAS100S: 'nas100', NDQ: 'nas100', US100: 'nas100', USTEC: 'nas100',
+  NDX: 'nas100', USTECH: 'nas100', NASDAQ: 'nas100', NAS100M: 'nas100', USTECCASH: 'nas100',
   // SP500 aliases
   SP500: 'us500', US500: 'us500', SPX500: 'us500', SPX: 'us500',
   BTCUSD: 'btc', BTCUSDT: 'btc', BTCUSDC: 'btc',
@@ -1019,14 +1019,30 @@ module.exports = async (req, res) => {
   const _tp3r = parseFloat(p.tp3);
   const tp2   = isFinite(_tp2r) ? _tp2r : null;
   const tp3   = isFinite(_tp3r) ? _tp3r : null;
+
+  // Helper: notify Telegram and return 400. Used below so payload rejections
+  // are always visible — previously these were silent 400s with no trace.
+  const _reject400 = async (reason) => {
+    const _tag = `${assetId}:${p.template}:${p.direction}:${p.timestamp || Date.now()}`;
+    try {
+      await sendOnce(`wh-reject:${_tag}`,
+        `❌ <b>Signal REJECTED — ${pineTicker || assetId}</b>\n` +
+        `Template: ${_escHtml(p.template || '?')}\n` +
+        `Direction: ${_escHtml(p.direction || '?')}\n` +
+        `Reason: <code>${_escHtml(reason)}</code>\n` +
+        `E: ${p.entry}  SL: ${p.sl}  TP1: ${p.tp1}`);
+    } catch (_) {}
+    return res.status(400).json({ ok: false, error: reason });
+  };
+
   if (!isFinite(entry) || !isFinite(sl) || !isFinite(tp1)) {
-    return res.status(400).json({ ok: false, error: 'invalid entry/sl/tp1 in payload' });
+    return _reject400('invalid entry/sl/tp1 in payload');
   }
   if (Math.abs(entry - sl) === 0) {
-    return res.status(400).json({ ok: false, error: 'zero-risk payload: sl equals entry' });
+    return _reject400('zero-risk payload: sl equals entry');
   }
   if (p.direction !== 'LONG' && p.direction !== 'SHORT') {
-    return res.status(400).json({ ok: false, error: 'invalid direction' });
+    return _reject400('invalid direction');
   }
   const _isLong = p.direction === 'LONG';
   // v15.8: validate TP/SL sides against the ROUTING entry — the price the order
@@ -1041,13 +1057,13 @@ module.exports = async (req, res) => {
                    : p.actualStyle === 'retest'    && isFinite(_guardRetE) ? _guardRetE
                    : entry;
   if (_isLong ? (sl >= guardEntry || tp1 <= guardEntry) : (sl <= guardEntry || tp1 >= guardEntry)) {
-    return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
+    return _reject400(`TP/SL wrong side: E=${entry} SL=${sl} TP1=${tp1} dir=${p.direction}`);
   }
   if (tp2 !== null && (_isLong ? tp2 <= guardEntry : tp2 >= guardEntry)) {
-    return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
+    return _reject400(`TP2 wrong side: E=${entry} TP2=${tp2} dir=${p.direction}`);
   }
   if (tp3 !== null && (_isLong ? tp3 <= guardEntry : tp3 >= guardEntry)) {
-    return res.status(400).json({ ok: false, error: 'TP/SL on wrong side of entry for direction' });
+    return _reject400(`TP3 wrong side: E=${entry} TP3=${tp3} dir=${p.direction}`);
   }
 
   // 5. Dedupe (fast Redis read)

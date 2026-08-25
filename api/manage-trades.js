@@ -1102,9 +1102,40 @@ async function detectAndProcessClosed(currentOpenIds) {
 // MAIN ENTRY POINT
 // =================================================================
 
+// Cheap Redis-only pre-check — returns false only when certain there is nothing
+// to manage or record, avoiding a MetaAPI call on idle ticks.
+async function hasAnyWork(r) {
+  // If we have recently-seen position IDs we must verify they're still open.
+  const knownRaw = await r.get('v12:positions:known').catch(() => null);
+  const known = safeParse(knownRaw) || [];
+  if (known.length > 0) return true;
+
+  // No known positions — check if any asset has a placed/filled pending setup.
+  const wlRaw = await r.get('v12:watchlist').catch(() => null);
+  const watchlist = safeParse(wlRaw) || [];
+  if (watchlist.length === 0) return false;
+
+  const raws = await Promise.all(
+    watchlist.map((asset) => r.get(`v12:watcher:${asset}:pending`).catch(() => null))
+  );
+  return raws.some((raw) => {
+    const setups = safeParse(raw) || [];
+    return setups.some((s) => s.status === 'placed' || s.status === 'filled');
+  });
+}
+
 async function runManageTick() {
   if (!isTradingEnabled()) {
     return { ts: Date.now(), tradingEnabled: false };
+  }
+
+  // Skip MetaAPI entirely when Redis confirms nothing is open or pending.
+  const r = getRedis();
+  if (r) {
+    const hasWork = await hasAnyWork(r);
+    if (!hasWork) {
+      return { ts: Date.now(), tradingEnabled: true, skipped: 'no-active-positions' };
+    }
   }
 
   const positions = await fetchPositions();
