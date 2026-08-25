@@ -98,14 +98,6 @@
     {
       "path": "/api/manage-trades",
       "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/alexg-run",
-      "schedule": "*/15 * * * *"
-    },
-    {
-      "path": "/api/alexg-watchdog",
-      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [
