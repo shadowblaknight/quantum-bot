@@ -265,7 +265,7 @@ f_json(zType, dir, ep, sl_p, tp1) =>
 if (a_long or b_long or c_long) and day_trades < MAX_TRD
     flo  = a_long ? fvg_lo_b : fvg_lo_b
     fhi  = a_long ? fvg_hi_b : fvg_hi_b
-    sl_p = flo - atrVal * SL_BUF
+    sl_p = math.min(flo, na(al) ? flo : al) - atrVal * SL_BUF
     ep   = close
     dist = ep - sl_p
     tp1  = ep + dist * TP_MULT
@@ -285,7 +285,7 @@ if (a_long or b_long or c_long) and day_trades < MAX_TRD
 if (a_short or b_short or c_short) and day_trades < MAX_TRD
     fhi  = a_short ? fvg_hi_s : fvg_hi_s
     flo  = a_short ? fvg_lo_s : fvg_lo_s
-    sl_p = fhi + atrVal * SL_BUF
+    sl_p = math.max(fhi, na(ah) ? fhi : ah) + atrVal * SL_BUF
     ep   = close
     dist = sl_p - ep
     tp1  = ep - dist * TP_MULT

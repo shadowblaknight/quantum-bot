@@ -351,6 +351,12 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       // gold-specialist-2 has its own slot — only blocked by another S2 position.
       // gold-specialist (15m) and gold-specialist-2 (H1) can coexist.
       if (p.template === 'gold-specialist-2') return posKind === 'specialist-2';
+      // ger40-bg-specialist: B and G are independent setups — allow both to coexist.
+      // Comment format: QB-V20-ger40-B or QB-V20-ger40-G. Block only same zone.
+      if (p.template === 'ger40-bg-specialist' && posKind === 'specialist') {
+        const existingZone = (pos.comment || '').match(/QB-V20-\w+-(\w+)$/)?.[1];
+        if (existingZone && existingZone !== p.zoneType) return false;
+      }
       return posKind === 'specialist';
     }
     return _tmplFromComment(pos.comment) === p.template;
