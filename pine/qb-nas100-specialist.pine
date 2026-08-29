@@ -339,6 +339,7 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
               ",\"dowTier\":\""     + _dowTier + "\"" +
               ",\"dayOfWeek\":\""   + _dowName + "\"" +
               ",\"minsIntoWindow\":" + str.tostring(minsIntoWin) +
+              ",\"actualStyle\":\"immediate\"" +
               ",\"apiKey\":\"" + WEBHOOK_KEY + "\"}"
     readable + head + prices + zone + htf + ctx
 

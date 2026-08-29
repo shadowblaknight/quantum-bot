@@ -225,6 +225,7 @@ f_json(sig, dir, ep, sl_p, tp_p) =>
          ',"gSwWick":"'   + str.tostring(nz(g_sw_wick), format.mintick) + '"' +
          ',"dayOfWeek":'  + str.tostring(_dow - 1) +
          ',"hourUtc":'    + str.tostring(hour(time, "UTC")) +
+         ',"actualStyle":"immediate"' +
          ',"apiKey":"'    + WEBHOOK_KEY + '"}'
     j
 

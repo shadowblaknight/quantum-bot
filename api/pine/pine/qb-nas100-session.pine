@@ -36,7 +36,7 @@ G0 = "Trade"
 tpMult    = input.float(2.0,  "TP (× R)",           group=G0, minval=0.5,  maxval=5.0,   step=0.5)
 slBuf     = input.float(0.15, "SL buffer (× ATR)",  group=G0, minval=0.05, maxval=0.5,   step=0.05)
 fvgMinPts = input.float(20.0, "Min FVG size (pts)", group=G0, minval=2.0,  maxval=100.0, step=2.0,
-            tooltip="Confirmed best: 20pts + extended SB window → 59.72% WR / PF 2.507 / 72 trades yr. 40pts = 57.14% / PF 2.307 / 35/yr. 10pts = 50.85% / PF 1.902 / 59/yr.")
+            tooltip="Confirmed best: 20pts + extended SB window → 56.67% WR / PF 2.167 / 60 trades yr (Aug 2026 run). 40pts = 57.14% / PF 2.307 / 35/yr. 10pts = 50.85% / PF 1.902 / 59/yr.")
 atrLen    = input.int(14,     "ATR length",          group=G0, minval=5,    maxval=50)
 
 G1 = "Narrative"
@@ -51,7 +51,7 @@ reqBOS   = input.bool(true,  "Require ORB break before entry (BOS)", group=G1,
 
 G2 = "Windows"
 tradeInSB = input.bool(true,  "NY window 14:00–16:00 UTC (extended SB)",   group=G2,
-            tooltip="Confirmed best: 59.72% WR / PF 2.507 / 72 trades yr. Extended from 14-15 to 14-16 catches valid FVG retraces that print just after the Silver Bullet hour.")
+            tooltip="Confirmed best: 56.67% WR / PF 2.167 / 60 trades yr (Aug 2026 run). Extended from 14-15 to 14-16 catches valid FVG retraces that print just after the Silver Bullet hour.")
 tradeInPM = input.bool(false, "PM window 18:00–19:00 UTC",                 group=G2,
             tooltip="OFF = confirmed best. PM FVGs tested at 53.93% WR / PF 2.002 / 83 trades yr — the 11 extra trades dragged PF below the SB-only benchmark. Keep OFF.")
 maxTrades = input.int(1, "Max trades per day", group=G2, minval=1, maxval=3,
@@ -63,6 +63,36 @@ showLondon = input.bool(true,  "London range box",  group=G3)
 showORB    = input.bool(true,  "ORB box",           group=G3)
 showFVG    = input.bool(true,  "FVG zones",         group=G3)
 showPD     = input.bool(true,  "Prev-day H/L lines",group=G3)
+
+G4 = "── VIX Regime Gate ──"
+useVIX = input.bool(false,  "Enable VIX gate",                        group=G4,
+         tooltip="OFF = baseline run (your confirmed 56.67% WR / PF 2.167, Aug 2026). ON = skip entry when prev-day VIX ≥ threshold. Run both over the same date range to compare.")
+vixMax = input.float(20.0,  "Block if prev-day VIX ≥",                group=G4,
+         minval=10.0, maxval=50.0, step=1.0,
+         tooltip="20 = blocks ~25% of trading days (elevated vol). Test 18 and 22 to bracket the optimal cutoff.")
+
+G5 = "── Day of Week Filter ──"
+i_useDow = input.bool(false, "Enable DOW filter", group=G5,
+           tooltip="OFF = confirmed best (all days, 5yr: 54.78% WR / PF 2.099 / 31/yr with Mon+Tue+Thu vs 56.67% / PF 2.167 / 60/yr all days). DOW filter hurts NAS100 — the London sweep narrative is the real day filter.")
+i_mon    = input.bool(true,  "Mon", group=G5)
+i_tue    = input.bool(true,  "Tue", group=G5)
+i_wed    = input.bool(true,  "Wed", group=G5)
+i_thu    = input.bool(true,  "Thu", group=G5)
+i_fri    = input.bool(true,  "Fri", group=G5)
+
+G6 = "── News Filter (HIGH Impact) ──"
+i_useNews    = input.bool(false, "Enable news filter", group=G6,
+               tooltip="Blocks entries on known high-impact USD events that distort ORB/FVG. Toggle ON to isolate clean strategy edge from news-driven moves.")
+i_blockThurs = input.bool(true,  "Block Thursdays — Jobless Claims (13:30 UTC weekly)", group=G6,
+               tooltip="Jobless Claims fires every single Thursday at 13:30 UTC — always within ±1h of the 14:00 SB entry window.")
+i_blockNFP   = input.bool(true,  "Block 1st Friday — NFP (13:30 UTC monthly)", group=G6,
+               tooltip="Non-Farm Payroll fires first Friday of every month at 13:30 UTC.")
+i_orbGate    = input.float(2.5,  "ORB news gate (× ATR) — skip if ORB itself is oversized", group=G6,
+               minval=1.0, maxval=6.0, step=0.5,
+               tooltip="Catches events firing AT 13:30 UTC (CPI, PPI, PCE, GDP, Retail Sales) that make the ORB window itself anomalously large.")
+i_barGate    = input.float(2.0,  "Entry bar gate (× ATR) — skip if entry bar is a news spike", group=G6,
+               minval=1.0, maxval=5.0, step=0.5,
+               tooltip="Catches events firing DURING 14:00-16:00 UTC (Jackson Hole, ISM at 15:00, surprise events). If the bar trying to enter has range > N × ATR, block it. This is what catches Jackson Hole-style spikes.")
 
 // ── SESSION GATES (UTC minutes) ───────────────────────────────────────
 _mu     = hour(time, "UTC") * 60 + minute(time, "UTC")
@@ -89,6 +119,12 @@ s5Lo = request.security("CAPITALCOM:US500", timeframe.period, low,  lookahead=ba
 s5Hi = request.security("CAPITALCOM:US500", timeframe.period, high, lookahead=barmerge.lookahead_off)
 pdH  = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
 pdL  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+
+// VIX: with lookahead_off on a daily TF, `close` returns the last
+// *completed* daily bar during intraday — that is yesterday's VIX close.
+// No [1] needed; [1] would give 2 days ago and cause a series error.
+vixPrev = request.security("TVC:VIX", "D", close, lookahead=barmerge.lookahead_off)
+vixOK   = not useVIX or (not na(vixPrev) and vixPrev < vixMax)
 
 // ── PERSISTENT STATE ──────────────────────────────────────────────────
 var float asian_hi     = na
@@ -263,8 +299,16 @@ if barstate.isconfirmed and in_pm and not in_pm[1] and day_bias != 0 and trades_
 // ── ENTRY ─────────────────────────────────────────────────────────────
 _in_entry  = (tradeInSB and in_sb_ext) or (tradeInPM and in_pm)
 _bos_ready = not reqBOS or (day_bias == 1 ? bos_long : bos_short)
+_dow       = dayofweek(time, "UTC")
+_dowOk     = not i_useDow or (_dow == dayofweek.monday and i_mon) or (_dow == dayofweek.tuesday and i_tue) or (_dow == dayofweek.wednesday and i_wed) or (_dow == dayofweek.thursday and i_thu) or (_dow == dayofweek.friday and i_fri)
+_dom       = dayofmonth(time, "UTC")
+_is_claims = _dow == dayofweek.thursday
+_is_nfp    = _dow == dayofweek.friday and _dom <= 7
+_orb_news  = orb_locked and (orb_hi - orb_lo) > atrVal * i_orbGate
+_bar_news  = (high - low) > atrVal * i_barGate
+_newsOk    = not i_useNews or (not (i_blockThurs and _is_claims) and not (i_blockNFP and _is_nfp) and not _orb_news and not _bar_news)
 
-if barstate.isconfirmed and _in_entry and trades_today < maxTrades and day_bias != 0 and fvg_dir != 0 and _bos_ready and strategy.position_size == 0 and not in_close
+if barstate.isconfirmed and _in_entry and trades_today < maxTrades and day_bias != 0 and fvg_dir != 0 and _bos_ready and strategy.position_size == 0 and not in_close and vixOK and _dowOk and _newsOk
 
     // LONG
     _smt_l = not useSMT or smt_bull_ok
@@ -315,7 +359,7 @@ bgcolor(in_sb     ? color.new(color.lime,   85) : na, title="Silver Bullet")
 bgcolor(in_pm     ? color.new(color.aqua,   90) : na, title="PM Window")
 
 // ── STATUS TABLE ──────────────────────────────────────────────────────
-var table tbl = table.new(position.top_right, 2, 11,
+var table tbl = table.new(position.top_right, 2, 14,
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 40), frame_width=1)
 
@@ -360,3 +404,16 @@ if barstate.islastconfirmedhistory or barstate.isrealtime
     table.cell(tbl, 1, 9,  str.tostring(math.round(atrVal, 1)) + " pts", text_color=color.white, text_size=size.tiny)
     table.cell(tbl, 0, 10, "Session",        bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
     table.cell(tbl, 1, 10, sessStr,          text_color=sessCol,  text_size=size.tiny)
+    vixStr  = not useVIX ? "OFF" : na(vixPrev) ? "—" : str.tostring(vixPrev, "0.0") + (vixOK ? " ✓" : " ✗ BLOCKED")
+    vixCol  = not useVIX ? color.gray : vixOK ? color.lime : color.red
+    table.cell(tbl, 0, 11, "VIX gate",       bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 11, vixStr,           text_color=vixCol,   text_size=size.tiny)
+    _dowDayStr = _dow == dayofweek.monday ? "Mon" : _dow == dayofweek.tuesday ? "Tue" : _dow == dayofweek.wednesday ? "Wed" : _dow == dayofweek.thursday ? "Thu" : _dow == dayofweek.friday ? "Fri" : "Wknd"
+    dowStr  = not i_useDow ? "OFF" : _dowOk ? _dowDayStr + " ✓" : _dowDayStr + " ✗ BLOCKED"
+    dowCol  = not i_useDow ? color.gray : _dowOk ? color.lime : color.red
+    table.cell(tbl, 0, 12, "DOW filter",     bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 12, dowStr,           text_color=dowCol,   text_size=size.tiny)
+    _newsReason = not i_useNews ? "OFF" : _is_claims and i_blockThurs ? "CLAIMS ✗" : _is_nfp and i_blockNFP ? "NFP ✗" : _orb_news ? "ORB-SPIKE ✗" : _bar_news ? "BAR-SPIKE ✗" : "CLEAR ✓"
+    _newsCol    = not i_useNews ? color.gray : _newsOk ? color.lime : color.red
+    table.cell(tbl, 0, 13, "News filter",    bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 13, _newsReason,      text_color=_newsCol, text_size=size.tiny)

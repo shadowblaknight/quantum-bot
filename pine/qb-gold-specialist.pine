@@ -313,6 +313,9 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
     rr1     = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
     rr2     = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
     rr3     = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    // FVG and SB-FVG entries wait for price to return to the zone (LIMIT).
+    // All other signals fire at bar close = fill now (MARKET).
+    _aStyle = (zType == "FVG" or zType == "SB-FVG") ? "retest" : "immediate"
     scGapDir = dir == "LONG" ? _gapDirLong : _gapDirShort
     cvdOk    = dir == "LONG" ? cvdSlope == "rising" : cvdSlope == "falling"
     dEmoji   = dir == "LONG" ? "🟢" : "🔴"
@@ -361,6 +364,7 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
               ",\"nearKeyTime\":\"" + str.tostring(_nearKeyTime)             + "\"" +
               ",\"ibSide\":\"null\",\"ibPosition\":\"-1\",\"first15mDir\":\"0\"" +
               ",\"minsIntoWindow\":" + str.tostring(minsIntoWin) +
+              ",\"actualStyle\":\"" + _aStyle + "\"" +
               ",\"apiKey\":\"" + WEBHOOK_KEY + "\"}"
     readable + head + prices + zone + htf + ctx
 

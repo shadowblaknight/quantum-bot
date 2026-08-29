@@ -50,6 +50,8 @@ _H   = hour(time,      "UTC")
 _DOW = dayofweek(time, "UTC")
 
 isWD  = _DOW >= 2 and _DOW <= 6
+// DOW filter: Mon + Tue + Thu only (backtest confirmed best days)
+_dowOk = _DOW == dayofweek.monday or _DOW == dayofweek.tuesday or _DOW == dayofweek.thursday
 inAs  = _H < 8  and isWD
 inLon = _H >= 8  and _H <= 10 and isWD
 inNY  = _H >= 13 and _H <= 16 and isWD
@@ -206,6 +208,8 @@ f_buildAlert(string dir, float entryP, float slP, float tp1,
     slD    = math.abs(entryP - slP)
     rr1    = slD > 0 ? math.abs(tp1 - entryP) / slD : 0.0
     dEmoji = dir == "LONG" ? "buy" : "sell"
+    // gold-s2-a is an FVG retest (LIMIT). B and D fire at bar close (MARKET).
+    _aStyle = zType == "gold-s2-a" ? "retest" : "immediate"
     readable = syminfo.ticker + " " + dEmoji + " | gold-specialist-2 | " + zType + " | H1\n---\n"
     head   = "{\"version\":\"2.3\",\"action\":\"trade\",\"template\":\"gold-specialist-2" +
               "\",\"direction\":\"" + dir +
@@ -230,6 +234,7 @@ f_buildAlert(string dir, float entryP, float slP, float tp1,
               ",\"barHigh\":\""  + str.tostring(high,  format.mintick) + "\"" +
               ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
               ",\"barClose\":\"" + str.tostring(close, format.mintick) + "\"" +
+              ",\"actualStyle\":\"" + _aStyle + "\"" +
               ",\"apiKey\":\"" + WEBHOOK_KEY + "\"}"
     readable + head + prices + zone + htf + ctx
 
@@ -244,7 +249,7 @@ sigAS = false
 if _newDay
     firedA := false
 
-if modA and barstate.isconfirmed and inKZ and not firedA and atr > 0 and adrC < adrFVG
+if modA and barstate.isconfirmed and inKZ and not firedA and _dowOk and atr > 0 and adrC < adrFVG
     if array.size(fU) > 0
         for i = array.size(fU) - 1 to 0
             if firedA
@@ -315,7 +320,7 @@ if _newDay
     bHi := false
     bLo := false
 
-if modB and barstate.isconfirmed and inLon and arLocked and atr > 0 and adrC < adrJudas
+if modB and barstate.isconfirmed and inLon and _dowOk and arLocked and atr > 0 and adrC < adrJudas
     if not na(arHi) and not na(arLo)
 
         if not bHi and high > arHi and close < arHi
@@ -371,7 +376,7 @@ sigDS = false
 if _newDay
     firedD := false
 
-if modD and barstate.isconfirmed and inKZ and not firedD and atr > 0 and adrC < adrPsych
+if modD and barstate.isconfirmed and inKZ and not firedD and _dowOk and atr > 0 and adrC < adrPsych
     lvl50   = math.round(close / 50.0)  * 50.0
     lvl100  = math.round(close / 100.0) * 100.0
     nearLvl = math.abs(close - lvl50) <= math.abs(close - lvl100) ? lvl50 : lvl100

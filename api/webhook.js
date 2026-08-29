@@ -500,22 +500,76 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
   }
 
-  // Gold V20 win-streak sizing: reads current lot from Redis, ±0.1 per win/loss, 0.10–10.00
-  if (assetId === 'gold') {
+  // ── FTMO 2-Step guard: block if daily DD ≥ 4% or total DD ≥ 8.5% ─────────
+  // Fails open on broker timeout — never silently drops a signal.
+  if (isSpecialist) {
     try {
-      const _sr = getRedis();
-      const _lotRaw = _sr ? await _sr.get('v20:gold:lot').catch(() => null) : null;
-      const _lot    = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 0.10;
-      decision.finalLot = Math.max(0.10, Math.min(10.00, _lot));
-    } catch (_) {}
+      const { checkFTMOLimits } = require('./ftmo-guard');
+      const _ftmo = await checkFTMOLimits().catch(() => ({ canTrade: true }));
+      if (!_ftmo.canTrade) {
+        return bgSkip({
+          dedupeKey, pineTicker, template: p.template,
+          reason: _ftmo.reason || 'ftmo-limit',
+          extras: { assetId, direction: p.direction,
+                    dailyLossPct: _ftmo.dailyLossPct, totalDDPct: _ftmo.totalDDPct },
+          notify: true,
+        });
+      }
+    } catch (_ftmoErr) {}
   }
-  // NAS100 V20 win-streak sizing: reads current lot from Redis, ±0.5 per win/loss, 1.00–10.00
-  if (assetId === 'nas100') {
+
+  // ── News filter: block ±1h around high-impact events (impact=3) ────────────
+  if (isSpecialist) {
     try {
-      const _sr = getRedis();
-      const _lotRaw = _sr ? await _sr.get('v20:nas100:lot').catch(() => null) : null;
-      const _lot    = _lotRaw ? Math.round(parseFloat(_lotRaw) * 100) / 100 : 1.00;
-      decision.finalLot = Math.max(1.00, Math.min(10.00, _lot));
+      const { checkNewsBlock } = require('./news-filter');
+      const _news = await checkNewsBlock(p.template).catch(() => ({ canTrade: true }));
+      if (!_news.canTrade) {
+        try {
+          const _dirEmoji = p.direction === 'LONG' ? '🟢' : '🔴';
+          const _evTimeStr = _news.evTime
+            ? new Date(_news.evTime).toUTCString().replace(/:\d\d GMT$/, ' UTC')
+            : '—';
+          await sendOnce(`news-block:${dedupeKey}`,
+            `📰 <b>NEWS BLOCK — ${pineTicker}</b>\n\n` +
+            `${_dirEmoji} ${p.direction}  ·  ${p.template}\n` +
+            `Event: <b>${_escHtml(_news.event || 'high-impact event')}</b>\n` +
+            `Currency: ${_news.currency || '—'}\n` +
+            `Event time: <code>${_evTimeStr}</code>\n\n` +
+            `<i>Trade blocked — within ±1h of HIGH impact news window.</i>`);
+        } catch (_) {}
+        return bgSkip({
+          dedupeKey, pineTicker, template: p.template,
+          reason: 'news-block',
+          extras: { assetId, direction: p.direction,
+                    event: _news.event, currency: _news.currency, evTime: _news.evTime },
+          notify: false,
+        });
+      }
+    } catch (_newsErr) {}
+  }
+
+  // ── V20 Specialist: FTMO 1% risk-based lot sizing ────────────────────────
+  // Lot = (capital × 1%) ÷ (SL_distance_in_pips × dollar_per_pip_per_lot)
+  // Replaces the momentum ±0.1/±0.5 Redis system.
+  if (isSpecialist) {
+    try {
+      const _RISK_PCT = 0.01;
+      const _LOT_CFG = {
+        gold:   { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
+        nas100: { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
+        ger40:  { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
+      };
+      const _slDist = Math.abs(entry - sl);
+      if (_slDist > 0 && assetMeta.pipSize > 0 && assetMeta.dollarPerPipPerLot > 0) {
+        const _riskDollars   = (capital || 0) * _RISK_PCT;
+        const _dollarPerLot  = (_slDist / assetMeta.pipSize) * assetMeta.dollarPerPipPerLot;
+        const _cfg = _LOT_CFG[assetId] || { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 };
+        if (_riskDollars > 0 && _dollarPerLot > 0) {
+          const _raw = _riskDollars / _dollarPerLot;
+          decision.finalLot = Math.max(_cfg.minLot, Math.min(_cfg.maxLot,
+            Math.floor(_raw / _cfg.lotStep) * _cfg.lotStep));
+        }
+      }
     } catch (_) {}
   }
   const finalLot = decision.finalLot;
