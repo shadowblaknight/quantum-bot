@@ -27,8 +27,8 @@ const { checkKillZone, killZoneDisplayName } = require('./kill-zones');
 const { detectBias, detectSweep, detectChoch } = require('./reaction-filter');
 const { loadRules: loadGatingRules } = require('./gating-store');
 
-// The 7 assets Pine can send signals on (from webhook.js PINE_TO_ASSET map)
-const WATCHED_ASSETS = ['gold', 'nas100', 'us500', 'gbpusd', 'eurusd', 'usdjpy', 'btc'];
+// The 8 assets Pine can send signals on (from webhook.js PINE_TO_ASSET map)
+const WATCHED_ASSETS = ['gold', 'nas100', 'ger40', 'us500', 'gbpusd', 'eurusd', 'usdjpy', 'btc'];
 
 // Redis key builders (mirrored from each source file — not imported to avoid circular deps)
 const K = {
@@ -222,10 +222,15 @@ async function recentTradeSummaries(r, n = 10) {
 // of which templates are currently active and why some are blocked.
 function buildTemplateStatus(gatingRulesArr) {
   const allTemplates = [
+    // V20 specialists
+    'gold-specialist','gold-specialist-2','nas100-specialist','ger40-bg-specialist',
+    // Legacy ICT/reaction templates
     'silver-bullet','unicorn','turtle-soup','judas-swing',
     'ote-continuation','am-ifvg',
     'reaction','reaction-fvg','reaction-ifvg','reaction-impulse',
     'orb','orb-pro','alexg',
+    // Gold-specific sub-templates
+    'gold-fvg','gold-sb',
   ];
 
   const hardDisabled = CIRCUIT_BREAKERS.DISABLED_TEMPLATES;
@@ -347,7 +352,13 @@ module.exports = async function handler(req, res) {
       templateStatus,
       recentTrades,
       chartBias,
-      watchedAssets: WATCHED_ASSETS,
+      watchedAssets:  WATCHED_ASSETS,
+    specialists: {
+      GS1:  { template: 'gold-specialist',    instrument: 'gold',   wr: 0.613, pf: 1.19, tradesPerYear: 346, sessions: ['London','NY'] },
+      GS2:  { template: 'gold-specialist-2',  instrument: 'gold',   wr: 0.550, pf: 1.89, tradesPerYear:  72, sessions: ['London','NY'] },
+      NAS:  { template: 'nas100-specialist',  instrument: 'nas100', wr: 0.597, pf: 2.51, tradesPerYear:  60, sessions: ['NY'] },
+      GER:  { template: 'ger40-bg-specialist',instrument: 'ger40',  wr: 0.641, pf: 1.73, tradesPerYear:  52, sessions: ['Frankfurt'], activeDays: ['Tuesday','Thursday'] },
+    },
     });
 
   } catch (err) {

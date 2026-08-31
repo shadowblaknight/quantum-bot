@@ -1,15 +1,8 @@
 /* eslint-disable */
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { useState, useEffect, useCallback } from 'react';
 import './index.css';
 
-import FTMOBar        from './components/FTMOBar';
-import NavBar         from './components/NavBar';
-import LiveTab        from './components/tabs/LiveTab';
-import SpecialistsTab from './components/tabs/SpecialistsTab';
-import StatsTab       from './components/tabs/StatsTab';
-import LogTab         from './components/tabs/LogTab';
-import ControlsTab    from './components/tabs/ControlsTab';
+import TerminalLayout from './components/TerminalLayout';
 
 // Normalise a ledger entry to consistent field names across API versions
 function normTrade(t) {
@@ -39,9 +32,6 @@ function normPerf(byTemplate) {
 }
 
 export default function App() {
-  // ── Tab routing ───────────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState('live');
-
   // ── API data ──────────────────────────────────────────────────────────────────
   const [quotes,      setQuotes]      = useState({});
   const [positions,   setPositions]   = useState([]);
@@ -51,37 +41,6 @@ export default function App() {
   const [perf,        setPerf]        = useState({});
   const [ftmoStatus,  setFtmoStatus]  = useState(null);
   const [gatingRules, setGatingRules] = useState({});
-
-  // ── Aurora background refs ────────────────────────────────────────────────────
-  const bgRef  = useRef(null);
-  const bgtRef = useRef(0);
-
-  // ── Aurora animation (preserved from V17) ────────────────────────────────────
-  useEffect(() => {
-    const c = bgRef.current; if (!c) return;
-    const ctx = c.getContext('2d');
-    const resize = () => { c.width = window.innerWidth; c.height = window.innerHeight; };
-    resize(); window.addEventListener('resize', resize);
-    let raf;
-    const draw = () => {
-      const W = c.width, H = c.height; ctx.clearRect(0, 0, W, H);
-      const t = bgtRef.current * .0022;
-      [
-        [W*.2  + Math.sin(t)     * W*.07, H*.35 + Math.cos(t*.7) * H*.06, [212,160,23]],
-        [W*.82 + Math.cos(t*.6)  * W*.06, H*.6  + Math.sin(t*.8) * H*.05, [139,92,246]],
-        [W*.5  + Math.sin(t*.5)  * W*.05, H*.12 + Math.cos(t)    * H*.04, [14,165,233]],
-      ].forEach(([x, y, rgb]) => {
-        const g = ctx.createRadialGradient(x, y, 0, x, y, W*.26);
-        g.addColorStop(0, `rgba(${rgb},.04)`);
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-      });
-      bgtRef.current++;
-      raf = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => { window.removeEventListener('resize', resize); cancelAnimationFrame(raf); };
-  }, []);
 
   // ── Data fetchers ─────────────────────────────────────────────────────────────
   const fetchQuotes = useCallback(async () => {
@@ -177,42 +136,17 @@ export default function App() {
     } catch {}
   }, [fetchPositionsAndCapital]);
 
-  // ── Tab pages ─────────────────────────────────────────────────────────────────
-  const PAGES = {
-    live:        <LiveTab        positions={positions} quotes={quotes} jarvis={jarvis} onPositionAction={handlePositionAction} />,
-    specialists: <SpecialistsTab positions={positions} ledger={ledger} perf={perf} ftmoStatus={ftmoStatus} />,
-    stats:       <StatsTab       ledger={ledger} capital={capital} />,
-    log:         <LogTab         ledger={ledger} />,
-    controls:    <ControlsTab    gatingRules={gatingRules} onGatingUpdate={setGatingRules} ftmoStatus={ftmoStatus} />,
-  };
-
   return (
-    <div className="v20-shell">
-      {/* Ambient aurora background (full-screen fixed canvas) */}
-      <canvas ref={bgRef} id="bgC" />
-
-      {/* FTMO guard bar — always visible, drives colour theme of the session */}
-      <FTMOBar status={ftmoStatus} />
-
-      {/* Main body: sidebar nav (desktop) + scrollable tab viewport */}
-      <div className="v20-body pg">
-        <NavBar active={activeTab} onChange={setActiveTab} />
-
-        <div className="v20-viewport">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeTab}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0  }}
-              exit={{    opacity: 0, y: -6 }}
-              transition={{ duration: 0.16, ease: 'easeOut' }}
-              style={{ minHeight: '100%' }}
-            >
-              {PAGES[activeTab]}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-      </div>
-    </div>
+    <TerminalLayout
+      positions={positions}
+      quotes={quotes}
+      capital={capital}
+      jarvis={jarvis}
+      ledger={ledger}
+      perf={perf}
+      ftmoStatus={ftmoStatus}
+      gatingRules={gatingRules}
+      onPositionAction={handlePositionAction}
+    />
   );
 }

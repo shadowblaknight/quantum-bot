@@ -62,7 +62,7 @@ async function fetchCtx(base) {
 
   // jarvis-state is the primary quantum bot snapshot (Redis + chart bias)
   // All other endpoints provide live broker/session data
-  const [qState, analyst, account, positions, session, news, sigQual] = await Promise.all([
+  const [qState, analyst, account, positions, session, news, sigQual, ftmo] = await Promise.all([
     get('/api/jarvis-state'),
     get('/api/analyst'),
     get('/api/broker?action=account'),
@@ -70,10 +70,11 @@ async function fetchCtx(base) {
     get('/api/session-context-summary'),
     getNews(),
     get('/api/signal-quality-summary'),
+    get('/api/ftmo-guard'),
   ]);
 
   if (timer) clearTimeout(timer);
-  return { qState, analyst, account, positions, session, news, sigQual };
+  return { qState, analyst, account, positions, session, news, sigQual, ftmo };
 }
 
 async function getGoals(r) {
@@ -230,10 +231,18 @@ function parseIntent(msg) {
     return 'FILTER';
   if (/switch.*mode|set.*mode|mode.*to|vacation\s*mode|sleep\s*mode|defensive\s*mode|active\s*mode/i.test(v))
     return 'MODE';
-  // 'confirm' removed — already caught above by CONFIRM; leaving it here steals "please confirm" etc.
-  if (/judas|lbma|comex|gold.?fvg|gold.?sb|gold.*specialist|specialist.*gold/i.test(v) ||
-      (/gold|xau/i.test(v) && /signal|setup|sweep|range|psych|round|key.?time|asian|silver.?bullet|specialist|fvg/i.test(v)))
+  // Specialist-specific intents — check before generic GOLD/NAS to avoid wrong routing
+  if (/gs2|gold.?s2|gold.*specialist.*2|specialist.*2|\bh1.*a.b|pattern\s+[abd]\b|a\/b\/d/i.test(v))
+    return 'GS2';
+  if (/gs1|gold.*specialist.*1|specialist.*1|judas|lbma|comex|frankfurt.*orb|ny.*orb.*gold/i.test(v) ||
+      (/gold|xau/i.test(v) && /signal|setup|sweep|range|psych|round|key.?time|asian|silver.?bullet|fvg|sb\b/i.test(v)))
     return 'GOLD';
+  if (/ger40|ger.*specialist|dax.*specialist|\bb\+g\b|b\s+and\s+g|ger.*strategy|frankfurt.*session/i.test(v))
+    return 'GER';
+  if (/nas.*specialist|nas100.*specialist|amd.*session|london.*sweep.*nas|nas.*fvg|ger.*session|nas.*orb|tjr/i.test(v))
+    return 'NAS';
+  if (/ftmo|prop.?firm|challenge.*limit|daily.?loss|daily.?limit|drawdown.?limit|challenge.*block|phase\s+[12]/i.test(v))
+    return 'FTMO';
   if (/signal|entry|setup|fire|armed|reaction|orb|silver.?bullet|fvg/i.test(v))
     return 'SIGNAL';
   if (/gate|filter|check|ready|block|pass|fail/i.test(v))
@@ -552,7 +561,7 @@ function reasonPositions(ctx) {
 }
 
 function reasonPerformance(ctx, goals) {
-  const { account, positions } = ctx;
+  const { account, positions, ftmo } = ctx;
   const eq  = account?.balance || account?.equity || 0;
   const pnl = account?.todayPnl || account?.profit || 0;
   const pct  = eq > 0 ? (pnl / eq * 100) : 0;
@@ -565,10 +574,18 @@ function reasonPerformance(ctx, goals) {
     goalLine = ` Daily goal: ${dpct}%. ${rem > 0 ? `${fmtEU(rem)} remaining.` : 'Daily target reached.'}`;
   }
 
+  let ftmoLine = '';
+  if (ftmo) {
+    const col = !ftmo.canTrade ? 'BLOCKED' : ftmo.dailyLossPct >= 3 || ftmo.totalDDPct >= 7 ? 'WARN' : 'OK';
+    ftmoLine = ` FTMO ${col}: daily ${ftmo.dailyLossPct?.toFixed(2) || 0}% / total ${ftmo.totalDDPct?.toFixed(2) || 0}%.`;
+  }
+
+  const urgency = (!ftmo?.canTrade) ? 'critical' : pnl < -500 ? 'elevated' : 'normal';
+
   return {
-    speech: `Equity at ${fmt$(eq)}, ${signStr(pnl)} ${fmt$(pnl)} today — ${fmtPct(Math.abs(pct))} on the session. ${pos > 0 ? `${pos} position${pos > 1 ? 's' : ''} running.` : 'All flat.'}${goalLine}`,
+    speech: `Equity at ${fmt$(eq)}, ${signStr(pnl)} ${fmt$(pnl)} today — ${fmtPct(Math.abs(pct))} on the session. ${pos > 0 ? `${pos} position${pos > 1 ? 's' : ''} running.` : 'All flat.'}${goalLine}${ftmoLine}`,
     focusPanel: 'performance',
-    urgency: pnl < -500 ? 'elevated' : 'normal',
+    urgency,
   };
 }
 
@@ -1038,7 +1055,7 @@ function reasonAdvise(ctx, goals) {
 }
 
 function reasonRisk(ctx, goals) {
-  const { account, positions, news, analyst } = ctx;
+  const { account, positions, news, analyst, ftmo } = ctx;
   const pos    = Array.isArray(positions) ? positions : [];
   const eq     = account?.balance || account?.equity || 0;
   const pnl    = account?.todayPnl || 0;
@@ -1048,22 +1065,35 @@ function reasonRisk(ctx, goals) {
     : [];
 
   let risks = [];
-  if (ddPct < -1.5) risks.push(`drawdown at ${fmtPct(Math.abs(ddPct))} — approaching limit`);
+
+  // FTMO hard block — highest priority risk
+  if (ftmo && !ftmo.canTrade) {
+    risks.push(`FTMO BLOCK active — ${ftmo.reason || 'drawdown limit reached'}`);
+  } else if (ftmo) {
+    if (ftmo.dailyLossPct >= 3.0) risks.push(`daily loss at ${ftmo.dailyLossPct.toFixed(2)}% — warn threshold crossed (block at 4%)`);
+    if (ftmo.totalDDPct  >= 7.0) risks.push(`total drawdown at ${ftmo.totalDDPct.toFixed(2)}% — warn threshold crossed (block at 8.5%)`);
+  } else if (ddPct < -1.5) {
+    // Fallback if ftmo-guard is down
+    risks.push(`drawdown at ${fmtPct(Math.abs(ddPct))} — approaching limit`);
+  }
+
   if (imminent.length > 0) risks.push(`${imminent.map(n => n.event).join(', ')} within 30 minutes`);
   if (pos.length > 2) risks.push(`${pos.length} concurrent positions open`);
 
   if (risks.length === 0) {
+    const ftmoLine = ftmo ? ` FTMO: daily ${ftmo.dailyLossPct?.toFixed(2) || 0}% / total ${ftmo.totalDDPct?.toFixed(2) || 0}% — clear.` : '';
     return {
-      speech: `Risk parameters within normal bounds, Sir. ${eq ? `Equity: ${fmt$(eq)}.` : ''} ${pos.length > 0 ? `${pos.length} position${pos.length > 1 ? 's' : ''} monitored.` : 'No open positions.'}`,
+      speech: `Risk parameters within normal bounds, Sir. ${eq ? `Equity: ${fmt$(eq)}.` : ''} ${pos.length > 0 ? `${pos.length} position${pos.length > 1 ? 's' : ''} monitored.` : 'No open positions.'}${ftmoLine}`,
       focusPanel: 'performance',
       urgency: 'normal',
     };
   }
 
+  const urgency = (ftmo && !ftmo.canTrade) ? 'critical' : 'elevated';
   return {
     speech: `Flagging ${risks.length} risk factor${risks.length > 1 ? 's' : ''}, Sir: ${risks.join('; ')}. Review exposure and reduce size until conditions normalise.`,
     focusPanel: 'performance',
-    urgency: 'elevated',
+    urgency,
   };
 }
 
@@ -1264,7 +1294,17 @@ async function reasonOpen(ctx, goals) {
   const kz        = qState?.killZone;
   const pending   = findPendingSetups(watchers);
 
-  // Priority 1: Imminent news + open positions
+  // Priority 1: FTMO hard block
+  const { ftmo } = ctx;
+  if (ftmo && !ftmo.canTrade) {
+    return {
+      speech: `Sir — FTMO block is active. ${ftmo.reason || 'Drawdown limit reached'}. Daily loss: ${ftmo.dailyLossPct?.toFixed(2) || 0}%, total drawdown: ${ftmo.totalDDPct?.toFixed(2) || 0}%. No new trades. All 4 specialists are suspended until the block clears.`,
+      focusPanel: 'performance',
+      urgency: 'critical',
+    };
+  }
+
+  // Priority 1b: Imminent news + open positions
   const imminent = Array.isArray(news?.upcoming)
     ? news.upcoming.find(n => n.impact === 'high' && (n.minutesAway || 999) < 10)
     : null;
@@ -1350,13 +1390,35 @@ function scanForAnomalies(ctx) {
     };
   }
 
-  // New: detect gating inconsistency (gating-store has rules for non-existent templates)
+  // FTMO warn threshold approaching — flag before it becomes a block
+  if (ctx?.ftmo) {
+    const { canTrade, dailyLossPct = 0, totalDDPct = 0 } = ctx.ftmo;
+    if (!canTrade) {
+      return {
+        type: 'risk',
+        title: 'FTMO drawdown block is active — all specialists suspended',
+        description: `Daily loss: ${dailyLossPct.toFixed(2)}%, total DD: ${totalDDPct.toFixed(2)}%. FTMO guard has blocked new trades. No action is possible until the next UTC day or until the initial balance is manually reset via /api/ftmo-guard?action=reset-day.`,
+        priority: 'critical',
+      };
+    }
+    if (dailyLossPct >= 3.5 || totalDDPct >= 7.5) {
+      return {
+        type: 'risk',
+        title: `FTMO approaching hard block — daily ${dailyLossPct.toFixed(2)}% / total ${totalDDPct.toFixed(2)}%`,
+        description: `Block triggers at 4% daily or 8.5% total. Current margins: ${(4 - dailyLossPct).toFixed(2)}% daily, ${(8.5 - totalDDPct).toFixed(2)}% total. Recommend reducing size or going defensive immediately.`,
+        priority: 'high',
+      };
+    }
+  }
+
+  // Detect gating inconsistency (gating-store has rules for non-existent templates)
   if (qState?.gatingRules) {
     const knownTemplates = [
       'silver-bullet','unicorn','turtle-soup','judas-swing',
       'ote-continuation','am-ifvg','reaction','reaction-fvg',
       'reaction-ifvg','reaction-impulse','orb','orb-pro','alexg',
-      'gold-fvg','gold-sb',
+      'gold-fvg','gold-sb','gold-specialist','gold-specialist-2',
+      'nas100-specialist','ger40-bg-specialist',
     ];
     const stale = qState.gatingRules.filter(g =>
       g.template !== '*' && !knownTemplates.includes(g.template)
@@ -1372,6 +1434,235 @@ function scanForAnomalies(ctx) {
   }
 
   return null;
+}
+
+// ─── FTMO: Prop firm challenge guard status ───────────────────────────────────
+function reasonFTMO(ctx) {
+  const { ftmo, account } = ctx;
+  const eq = account?.balance || account?.equity || 0;
+
+  if (!ftmo) {
+    return {
+      speech: `FTMO guard endpoint is not responding, Sir. The guard is fail-open — trading continues, but I cannot confirm your drawdown margins. Check the broker connection.`,
+      focusPanel: 'performance', urgency: 'elevated',
+    };
+  }
+
+  const { canTrade, dailyLossPct = 0, totalDDPct = 0, warnings = [], reason } = ftmo;
+
+  // Hard block
+  if (!canTrade) {
+    return {
+      speech: `FTMO block active, Sir. ${reason || 'Drawdown limit reached'}. Daily loss: ${dailyLossPct.toFixed(2)}% (block at 4%). Total drawdown: ${totalDDPct.toFixed(2)}% (block at 8.5%). No new trades until the next UTC day or until the initial balance is reset. Emergency stop is the only action available.`,
+      focusPanel: 'performance', urgency: 'critical',
+    };
+  }
+
+  // Build warning picture
+  const dailyRemaining  = Math.max(0, 4.0 - dailyLossPct);
+  const totalRemaining  = Math.max(0, 8.5 - totalDDPct);
+  const dailyWarnFlag   = dailyLossPct >= 3.0;
+  const totalWarnFlag   = totalDDPct  >= 7.0;
+  const dailyStr = `Daily: ${dailyLossPct.toFixed(2)}% used — ${dailyRemaining.toFixed(2)}% margin to block.`;
+  const totalStr = `Total: ${totalDDPct.toFixed(2)}% used — ${totalRemaining.toFixed(2)}% margin to block.`;
+  const warnStr  = warnings.length > 0 ? ` Warning flags: ${warnings.join('; ')}.` : '';
+
+  const urgency = (dailyWarnFlag || totalWarnFlag) ? 'elevated' : 'normal';
+  const prefix  = (dailyWarnFlag || totalWarnFlag)
+    ? `Warning — approaching FTMO limits, Sir.`
+    : `FTMO limits clear, Sir.`;
+
+  return {
+    speech: `${prefix} ${dailyStr} ${totalStr}${warnStr} Phase 1 target: 8% profit (${eq > 0 ? ((eq - 10000) / 10000 * 100).toFixed(2) : '—'}% achieved). Thresholds: warn at 3%/7%, block at 4%/8.5%.`,
+    focusPanel: 'performance', urgency,
+  };
+}
+
+// ─── GS2: Gold Specialist 2 — H1 A/B/D pattern logic ────────────────────────
+function reasonGS2(ctx, message) {
+  const { qState } = ctx;
+  const v          = message.toLowerCase();
+  const watchers   = qState?.watchers  || {};
+  const chartBias  = qState?.chartBias || {};
+  const goldW      = watchers.gold     || {};
+  const goldBias   = chartBias.gold    || {};
+  const pending    = (goldW.activePending || []).filter(p =>
+    /gold.specialist.2|gs2/i.test(p.templateName || '')
+  );
+  const conf = goldBias.confluence;
+
+  // Session windows (UTC minutes)
+  const nowUtc   = new Date();
+  const minOfDay = nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes();
+  const inLondon = minOfDay >= 420  && minOfDay < 960;
+  const inNY     = minOfDay >= 780  && minOfDay < 1320;
+  const inWindow = inLondon || inNY;
+
+  // Pattern-specific queries
+  if (/pattern.?a\b|setup.?a\b/i.test(v)) {
+    return { speech: `GS2 Pattern A, Sir. Classic H1 FVG retest with momentum continuation. Entry: price returns to the H1 fair-value gap left by the previous impulse move and closes back out of it. Bias must be aligned on H1 and H4. Stop below the FVG distal edge. Targets 1R, 1.5R, 2.5R.`, focusPanel: 'signal', urgency: 'normal' };
+  }
+  if (/pattern.?b\b|setup.?b\b/i.test(v)) {
+    return { speech: `GS2 Pattern B, Sir. Displacement break followed by institutional rebalance. Entry after a strong H1 displacement candle closes, on the retest of the created imbalance. Tighter stop — only the imbalance body, not the full wick. Targets 1.5R, 2R, 3R.`, focusPanel: 'signal', urgency: 'normal' };
+  }
+  if (/pattern.?d\b|setup.?d\b/i.test(v)) {
+    return { speech: `GS2 Pattern D, Sir. Breaker block entry — structure that was support becomes resistance or vice versa after a CHoCH. Entry on the return to the breaker. Highest-conviction setup: requires CHoCH confirmation AND aligned H4 bias. Targets 2R, 3R, 4R — wider but less frequent.`, focusPanel: 'signal', urgency: 'normal' };
+  }
+
+  // General GS2 overview
+  let speech = `Gold Specialist 2 overview, Sir. Three H1 entry patterns: A (FVG retest), B (displacement rebalance), D (breaker block — highest tier). All fire only during London (07-16 UTC) and New York (13-22 UTC) sessions.`;
+
+  if (!inWindow) {
+    const nextOpen = minOfDay < 420 ? 420 - minOfDay : 24 * 60 - minOfDay + 420;
+    speech += ` Outside session window. Next entry window opens in ${Math.round(nextOpen / 60)}h ${nextOpen % 60}m.`;
+  } else {
+    speech += inLondon ? ` London window active — GS2 is scanning.` : ` New York window active — GS2 is scanning.`;
+  }
+
+  if (conf?.aligned) {
+    const dir = conf.htfDirection === 'LONG' ? 'bullish' : 'bearish';
+    speech += ` Gold HTF bias: ${dir} (${Math.max(conf.longTFs?.length || 0, conf.shortTFs?.length || 0)} of ${conf.totalTFs} TFs) — Tier A conditions.`;
+  } else if (conf?.countertrend) {
+    speech += ` Gold is countertrend — Pattern D breaker setups preferred over A/B in this condition.`;
+  }
+
+  if (pending.length > 0) {
+    speech += ` Active GS2 setup: ${pending[0].templateName} — ${pending[0].narrative || 'armed for entry'}.`;
+  }
+
+  return { speech, focusPanel: 'signal', urgency: (inWindow && (pending.length > 0 || conf?.aligned)) ? 'elevated' : 'normal' };
+}
+
+// ─── NAS: NAS100 Specialist — AMD session, London sweep, FVG ────────────────
+function reasonNAS(ctx, message) {
+  const { qState } = ctx;
+  const v          = message.toLowerCase();
+  const watchers   = qState?.watchers  || {};
+  const chartBias  = qState?.chartBias || {};
+  const nasW       = watchers.nas100   || {};
+  const nasBias    = chartBias.nas100  || {};
+  const pending    = (nasW.activePending || []).filter(p =>
+    /nas100.specialist|nas.specialist/i.test(p.templateName || '')
+  );
+  const conf = nasBias.confluence;
+
+  // UTC minute windows for NAS100 strategy (TJR narrative)
+  const nowUtc   = new Date();
+  const minOfDay = nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes();
+  const dow      = nowUtc.getUTCDay(); // 0=Sun, 6=Sat
+  const isWeekend = dow === 0 || dow === 6;
+
+  // AMD phases (UTC): Accumulation 00-07h, Manipulation 07-13:30h, Distribution 13:30-21h
+  const inAcc  = minOfDay < 420;
+  const inManip = minOfDay >= 420 && minOfDay < 810;
+  const inDist  = minOfDay >= 810 && minOfDay < 1260;
+  const inPrime = minOfDay >= 810 && minOfDay < 960; // NY open → 16h overlap
+
+  if (/amd|accumulation|manipulation|distribution/i.test(v)) {
+    let s = `NAS100 trades the AMD (Accumulation–Manipulation–Distribution) model, Sir.`;
+    s += ` Accumulation: 00-07h UTC — market builds a range (potential sweep target).`;
+    s += ` Manipulation: 07-13:30h UTC — London sweeps the Asian range high or low (the false move).`;
+    s += ` Distribution: 13:30h+ UTC — NY session drives the real directional move (the trade).`;
+    s += inAcc ? ` Currently in Accumulation — monitoring range formation.`
+       : inManip ? ` Currently in Manipulation phase — watching for London sweep to set up the trade.`
+       : inDist  ? ` Distribution phase active — NAS100 should be making its directional move.`
+       : ` Outside primary AMD session.`;
+    return { speech: s, focusPanel: 'signal', urgency: inPrime ? 'elevated' : 'normal' };
+  }
+
+  if (/london.*sweep|sweep.*london|false.*move/i.test(v)) {
+    return { speech: `NAS100 London sweep setup, Sir. Between 07-09h UTC, London typically sweeps the Asian high or low — a false breakout. When price sweeps the Asian extreme and closes back inside the range, we arm for the NY open continuation in the opposite direction. This is the Manipulation phase. Once NY opens (13:30h) and breaks the ORB in the swept direction's opposite, the FVG entry triggers.`, focusPanel: 'signal', urgency: inManip ? 'elevated' : 'normal' };
+  }
+
+  // General NAS overview
+  let speech = `NAS100 Specialist overview, Sir. Strategy: TJR narrative — London sweep the Asian range, ORB break of structure at NY open, then FVG retest entry.`;
+  speech += ` All trades on 15m timeframe. 59.72% win rate, 2.507 profit factor, 60 trades per year — highest PF of all 4 specialists.`;
+
+  if (isWeekend) {
+    speech += ` Weekend — no NAS sessions until Sunday 22:00 UTC.`;
+  } else if (inAcc) {
+    speech += ` Accumulation phase — Asian range building. No entry signal yet.`;
+  } else if (inManip) {
+    speech += ` Manipulation phase — watching for London sweep of Asian range high or low.`;
+  } else if (inPrime) {
+    speech += ` Prime window active — NY open distribution phase. This is the execution window.`;
+  } else if (inDist) {
+    speech += ` Late distribution phase — valid setups still possible but prime window has passed.`;
+  }
+
+  if (conf?.aligned) {
+    const dir = conf.htfDirection === 'LONG' ? 'bullish' : 'bearish';
+    speech += ` NAS100 HTF: ${dir} (${Math.max(conf.longTFs?.length || 0, conf.shortTFs?.length || 0)} of ${conf.totalTFs} TFs aligned).`;
+  }
+  if (pending.length > 0) {
+    speech += ` Active setup: ${pending[0].narrative || 'armed'}.`;
+  }
+
+  return { speech, focusPanel: 'signal', urgency: (inPrime && pending.length > 0) ? 'elevated' : 'normal' };
+}
+
+// ─── GER: GER40 Specialist — B+G strategy, Tue+Thu, Frankfurt session ────────
+function reasonGER(ctx, message) {
+  const { qState } = ctx;
+  const v          = message.toLowerCase();
+  const watchers   = qState?.watchers  || {};
+  const chartBias  = qState?.chartBias || {};
+  const gerW       = watchers.ger40    || {};
+  const gerBias    = chartBias.ger40   || {};
+  const pending    = (gerW.activePending || []).filter(p =>
+    /ger40.bg.specialist|ger.*specialist/i.test(p.templateName || '')
+  );
+  const conf = gerBias.confluence;
+
+  const nowUtc   = new Date();
+  const minOfDay = nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes();
+  const dow      = nowUtc.getUTCDay(); // 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
+  const isTueThu = dow === 2 || dow === 4;
+
+  // Frankfurt/XETRA session: 07:00-15:30 UTC
+  const inFrankfurt = minOfDay >= 420 && minOfDay < 930;
+  const inPrimeGer  = minOfDay >= 420 && minOfDay < 660; // Frankfurt open morning
+
+  if (/b\+g|b and g|strategy.type|both.*direction/i.test(v)) {
+    return { speech: `GER40 uses the B+G strategy, Sir. B stands for Bearish setup (sells into rally), G stands for Bullish setup (buys the dip). The strategy runs BOTH directions — it's not biased toward long or short. A 30-point FVG is the entry trigger on the 15m chart. Take profit is 2× the initial risk (2R minimum). Backtested over 3 years: PF 1.731, 1-year PF 1.711.`, focusPanel: 'signal', urgency: 'normal' };
+  }
+
+  if (/tue|thu|day.*filter|which.*day|trading.?day/i.test(v)) {
+    return { speech: `GER40 Specialist only trades Tuesdays and Thursdays, Sir. This is a hard filter based on backtesting — Monday, Wednesday, and Friday showed insufficient edge to justify the FTMO risk. ${isTueThu ? `Today is a valid trading day.` : `Today (${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][dow]}) is a non-trading day for GER40 — specialist is inactive.`}`, focusPanel: 'signal', urgency: 'normal' };
+  }
+
+  if (/fvg|fair.?value|30.?point|entry/i.test(v)) {
+    return { speech: `GER40 FVG entry, Sir. The strategy requires a minimum 30-point fair-value gap on the 15m chart to qualify as a signal. Smaller FVGs are rejected. Entry is at the FVG proximal edge. Stop is set at the distal edge plus a buffer. TP is fixed at 2R — no partial close scheme, full exit at target.`, focusPanel: 'signal', urgency: 'normal' };
+  }
+
+  // General GER40 overview
+  let speech = `GER40 Specialist overview, Sir. B+G strategy — both long and short, 15m FVG entries, 2× TP. Trades Tuesdays and Thursdays only inside Frankfurt session (07:00-15:30 UTC). 64.1% win rate, 1.73 profit factor, 52 trades per year.`;
+
+  if (!isTueThu) {
+    const nextTue = ((2 - dow + 7) % 7) || 7;
+    const nextThu = ((4 - dow + 7) % 7) || 7;
+    const daysUntil = Math.min(nextTue, nextThu);
+    speech += ` Today is not a GER40 trading day — specialist inactive. Next valid session in ${daysUntil} day${daysUntil > 1 ? 's' : ''}.`;
+  } else if (!inFrankfurt) {
+    const minsToOpen = minOfDay < 420 ? 420 - minOfDay : 0;
+    speech += isTueThu && minsToOpen > 0
+      ? ` Valid trading day — Frankfurt opens in ${minsToOpen} minutes.`
+      : ` Frankfurt session has closed for today.`;
+  } else {
+    speech += inPrimeGer
+      ? ` Frankfurt prime window active — GER40 specialist is scanning for 30pt FVG setups.`
+      : ` Frankfurt session active (afternoon phase).`;
+  }
+
+  if (conf?.aligned) {
+    const dir = conf.htfDirection === 'LONG' ? 'bullish' : 'bearish';
+    speech += ` GER40 HTF bias: ${dir} — ${dir === 'bullish' ? 'G (long) setups' : 'B (short) setups'} are higher tier today.`;
+  }
+  if (pending.length > 0) {
+    speech += ` Active GER40 setup: ${pending[0].narrative || 'armed'}.`;
+  }
+
+  return { speech, focusPanel: 'signal', urgency: (isTueThu && inFrankfurt && pending.length > 0) ? 'elevated' : 'normal' };
 }
 
 // ─── MAIN HANDLER ─────────────────────────────────────────────────────────────
@@ -1394,19 +1685,23 @@ module.exports = async function handler(req, res) {
 
     let result;
     switch (intent) {
-      case 'GOLD':        result = reasonGold(ctx, message);           break;
-      case 'WATCHER':     result = reasonWatcher(ctx, message);        break;
-      case 'FILTER':      result = reasonFilter(ctx, message);         break;
-      case 'SIGNAL':      result = reasonSignal(ctx);                  break;
-      case 'GATES':       result = reasonGates(ctx);                   break;
-      case 'POSITIONS':   result = reasonPositions(ctx);               break;
-      case 'PERFORMANCE': result = reasonPerformance(ctx, goals);      break;
-      case 'GOAL':        result = await reasonGoal(goals, ctx, message, r);       break;
-      case 'SESSION':     result = reasonSession(ctx);                 break;
-      case 'MACRO':       result = reasonMacro(ctx, message);          break;
-      case 'PINE':        result = reasonPine(ctx, message);           break;
-      case 'COMPASS':     result = reasonCompass(ctx);                 break;
-      case 'KNN':         result = reasonKNN(ctx);                     break;
+      case 'GOLD':        result = reasonGold(ctx, message);                        break;
+      case 'GS2':         result = reasonGS2(ctx, message);                         break;
+      case 'NAS':         result = reasonNAS(ctx, message);                         break;
+      case 'GER':         result = reasonGER(ctx, message);                         break;
+      case 'FTMO':        result = reasonFTMO(ctx);                                 break;
+      case 'WATCHER':     result = reasonWatcher(ctx, message);                     break;
+      case 'FILTER':      result = reasonFilter(ctx, message);                      break;
+      case 'SIGNAL':      result = reasonSignal(ctx);                               break;
+      case 'GATES':       result = reasonGates(ctx);                                break;
+      case 'POSITIONS':   result = reasonPositions(ctx);                            break;
+      case 'PERFORMANCE': result = reasonPerformance(ctx, goals);                   break;
+      case 'GOAL':        result = await reasonGoal(goals, ctx, message, r);        break;
+      case 'SESSION':     result = reasonSession(ctx);                              break;
+      case 'MACRO':       result = reasonMacro(ctx, message);                       break;
+      case 'PINE':        result = reasonPine(ctx, message);                        break;
+      case 'COMPASS':     result = reasonCompass(ctx);                              break;
+      case 'KNN':         result = reasonKNN(ctx);                                  break;
       case 'ADVISE':      result = reasonAdvise(ctx, goals);                        break;
       case 'RISK':        result = reasonRisk(ctx, goals);                          break;
       case 'TRADE_ACTION':result = await reasonTradeAction(ctx, message, r);        break;
