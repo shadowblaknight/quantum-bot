@@ -132,18 +132,18 @@
 .qc-pt-btn.danger:hover { border-color: #E04050; color: #E04050; }
 
 /* PERFORMANCE */
-.qc-perf { display: grid; grid-template-columns: 1fr 200px; grid-template-rows: 1fr auto; height: 100%; padding: 8px; gap: 8px; overflow: hidden; }
-.qc-cal-wrap { background: #060C12; border: 1px solid #152030; overflow: hidden; }
+.qc-perf { display: grid; grid-template-columns: 1fr 200px; grid-template-rows: 1fr 72px; height: 100%; padding: 8px; gap: 8px; overflow: hidden; }
+.qc-cal-wrap { background: #060C12; border: 1px solid #152030; overflow: hidden; min-height: 0; }
 .qc-cal-wrap canvas { display: block; width: 100%; height: 100%; }
-.qc-eq-quality { background: #060C12; border: 1px solid #152030; padding: 8px; overflow-y: auto; }
+.qc-eq-quality { background: #060C12; border: 1px solid #152030; padding: 8px; overflow-y: auto; min-height: 0; }
 .qc-eq-t { font-size: 8px; color: #3A5570; letter-spacing: 1px; margin-bottom: 8px; border-bottom: 1px solid #152030; padding-bottom: 4px; }
 .qc-eq-m { margin-bottom: 8px; }
 .qc-eq-lbl { font-size: 8px; color: #7A9AB5; margin-bottom: 2px; }
 .qc-eq-bw { height: 4px; background: #152030; }
 .qc-eq-bf { height: 100%; transition: width .8s; }
 .qc-eq-nums { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 8px; color: #3A5570; margin-top: 2px; }
-.qc-mini-c { background: #060C12; border: 1px solid #152030; grid-column: 1/3; overflow: hidden; }
-.qc-mini-c canvas { display: block; width: 100%; height: 100%; }
+.qc-mini-c { background: #060C12; border: 1px solid #152030; grid-column: 1/3; overflow: hidden; height: 72px; }
+.qc-mini-c canvas { display: block; width: 100%; height: 72px; }
 
 /* JARVIS VIEW */
 .qc-jv { display: grid; grid-template-columns: 1fr 270px; height: 100%; padding: 8px; gap: 8px; }

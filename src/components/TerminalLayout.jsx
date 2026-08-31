@@ -650,7 +650,7 @@ export default function TerminalLayout({
                   <div style={{fontSize:8,color:C.t2,marginTop:2}}>≈ 3 trades @ 1.5R avg</div>
                 </div>
               </div>
-              <div className="qc-mini-c" ref={miniPWrap}><canvas ref={miniPRef}/></div>
+              <div className="qc-mini-c" ref={miniPWrap}><canvas ref={miniPRef} height={72}/></div>
             </div>
           </div>
 
