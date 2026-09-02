@@ -24,7 +24,6 @@ const C = {
 // ── Specialists config ────────────────────────────────────────────────────────
 const SPECS = [
   { key:'gold-specialist',     label:'GS1', sym:'XAUUSD', tf:'H+M · Frankfurt+NY ORB',  color:C.gold,  seed:101, wr:61.3, pf:1.19, trades:346, sessions:['FRANKFURT 07:00','NY 13:30'], day:true },
-  { key:'gold-specialist-2',   label:'GS2', sym:'XAUUSD', tf:'H1 · A/B/D patterns',      color:C.gold2, seed:202, wr:55.0, pf:1.89, trades:72,  sessions:['LONDON 08:00','NY 14:00'],      day:true },
   { key:'nas100-specialist',   label:'NAS', sym:'NAS100', tf:'AMD · TJR BOS FVG',         color:C.blue3, seed:303, wr:59.7, pf:2.51, trades:72,  sessions:['ASIAN 02:00','LONDON 07:00','NY 13:30'], day:false },
   { key:'ger40-bg-specialist', label:'GER', sym:'GER40',  tf:'15m FVG · Tue+Thu only',   color:C.teal2, seed:404, wr:64.1, pf:1.73, trades:52,  sessions:['FRANKFURT 08:00'],              day:false, dayOnly:true },
 ];
@@ -108,50 +107,72 @@ function drawFTMO(canvas, daily, total) {
 
 function drawEquityCurve(canvas, wrap, ledger) {
   const [ctx, W, H] = sizeCv(canvas, wrap);
-  ctx.fillStyle = C.s1; ctx.fillRect(0,0,W,H);
-  const n = 50;
-  const curves = [
-    {seed:11,  drift:.12, vol:.40, color:C.gold,  name:'GS1'},
-    {seed:22,  drift:.08, vol:.30, color:C.gold2, name:'GS2'},
-    {seed:33,  drift:.10, vol:.50, color:C.blue3, name:'NAS'},
-    {seed:44,  drift:.09, vol:.35, color:C.teal2, name:'GER'},
-  ].map(sp => {
-    const r = rng32(sp.seed); let v = 100; const pts = [];
-    for (let i=0; i<n; i++) { v += sp.drift + (r()-.44)*sp.vol; pts.push(v); }
-    return {...sp, pts};
-  });
+  ctx.fillStyle=C.s1; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=C.t3; ctx.font='7px Inter'; ctx.textAlign='center';
+  ctx.fillText('CUMULATIVE P&L', W/2, 10);
 
-  // If real ledger data exists, overlay cumulative P&L on top of simulated
-  const combined = Array.from({length:n}, (_,i) => curves.reduce((s,c2)=>s+c2.pts[i],0)/curves.length);
-  const allV = [...curves.flatMap(c2=>c2.pts), ...combined];
-  const mn = Math.min(...allV)-1, mx = Math.max(...allV)+1;
-  const PAD = {l:42,r:12,t:16,b:18};
-  const toX = i => PAD.l + i*(W-PAD.l-PAD.r)/(n-1);
-  const toY = v => H-PAD.b - (v-mn)/(mx-mn)*(H-PAD.t-PAD.b);
+  const SPEC_COL={'gold-specialist':C.gold,'nas100-specialist':C.blue3,'ger40-bg-specialist':C.teal2};
+  const closed=(ledger||[]).filter(t=>t.closedAt&&t.finalPnL!=null).sort((a,b)=>(a.closedAt||0)-(b.closedAt||0));
 
-  for (let g=0; g<=4; g++) {
-    const y = H-PAD.b - (g/4)*(H-PAD.t-PAD.b);
-    ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y);
-    ctx.strokeStyle = C.b; ctx.lineWidth = .5; ctx.stroke();
-    ctx.fillStyle = C.t3; ctx.font = '7px JetBrains Mono'; ctx.textAlign = 'right';
-    ctx.fillText((mn+(mx-mn)*g/4).toFixed(1), PAD.l-4, y+3);
+  if(closed.length===0){
+    ctx.fillStyle=C.t2; ctx.font='9px JetBrains Mono'; ctx.textAlign='center';
+    ctx.fillText('NO TRADES YET', W/2, H/2);
+    return;
   }
-  curves.forEach(cv => {
-    ctx.beginPath(); cv.pts.forEach((v,i) => i===0?ctx.moveTo(toX(i),toY(v)):ctx.lineTo(toX(i),toY(v)));
-    ctx.strokeStyle = cv.color; ctx.lineWidth = 1; ctx.globalAlpha = .55; ctx.stroke(); ctx.globalAlpha = 1;
+
+  const PAD={l:48,r:12,t:20,b:18};
+  let cum=0;
+  const pts=closed.map(t=>{cum+=t.finalPnL;return{v:cum,color:SPEC_COL[t.template]||C.t2};});
+  const allVals=[0,...pts.map(p=>p.v)];
+  const rawMn=Math.min(...allVals),rawMx=Math.max(...allVals);
+  const pad=(rawMx-rawMn)*0.08+5;
+  const mn=rawMn-pad,mx=rawMx+pad;
+  const n=pts.length;
+  const toX=i=>PAD.l+i*(W-PAD.l-PAD.r)/(n||1);
+  const toY=v=>H-PAD.b-(v-mn)/(mx-mn||1)*(H-PAD.t-PAD.b);
+
+  for(let g=0;g<=4;g++){
+    const v=mn+(mx-mn)*g/4,y=toY(v);
+    ctx.beginPath();ctx.moveTo(PAD.l,y);ctx.lineTo(W-PAD.r,y);
+    ctx.strokeStyle=C.b;ctx.lineWidth=.5;ctx.stroke();
+    ctx.fillStyle=C.t3;ctx.font='7px JetBrains Mono';ctx.textAlign='right';
+    ctx.fillText((v>=0?'+':'')+v.toFixed(0),PAD.l-4,y+3);
+  }
+
+  const zeroY=toY(0);
+  if(zeroY>PAD.t&&zeroY<H-PAD.b){
+    ctx.beginPath();ctx.moveTo(PAD.l,zeroY);ctx.lineTo(W-PAD.r,zeroY);
+    ctx.strokeStyle=C.t3;ctx.lineWidth=.5;ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+  }
+
+  let px=toX(0),py=toY(0);
+  pts.forEach((pt,i)=>{
+    const x=toX(i+1),y=toY(pt.v);
+    ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);
+    ctx.strokeStyle=pt.color;ctx.lineWidth=1.8;ctx.stroke();
+    px=x;py=y;
   });
-  ctx.beginPath(); combined.forEach((v,i) => i===0?ctx.moveTo(toX(i),toY(v)):ctx.lineTo(toX(i),toY(v)));
-  ctx.strokeStyle = C.t; ctx.lineWidth = 1.8; ctx.stroke();
-  ctx.beginPath(); combined.forEach((v,i) => i===0?ctx.moveTo(toX(i),toY(v)):ctx.lineTo(toX(i),toY(v)));
-  ctx.lineTo(toX(n-1), H-PAD.b); ctx.lineTo(toX(0), H-PAD.b); ctx.closePath();
-  const g = ctx.createLinearGradient(0,PAD.t,0,H-PAD.b);
-  g.addColorStop(0,'rgba(122,154,181,.18)'); g.addColorStop(1,'rgba(122,154,181,0)');
-  ctx.fillStyle = g; ctx.fill();
-  [...curves.map(c2=>({color:c2.color,name:c2.name})),{color:C.t,name:'TOTAL'}].forEach((l,i) => {
-    ctx.fillStyle = l.color; ctx.fillRect(PAD.l+8+i*34,PAD.t,16,2);
-    ctx.fillStyle = C.t3; ctx.font='7px Inter'; ctx.textAlign='left'; ctx.fillText(l.name,PAD.l+8+i*34,PAD.t+10);
+
+  ctx.beginPath();
+  ctx.moveTo(toX(0),toY(0));
+  pts.forEach((pt,i)=>ctx.lineTo(toX(i+1),toY(pt.v)));
+  ctx.lineTo(px,H-PAD.b);ctx.lineTo(toX(0),H-PAD.b);ctx.closePath();
+  const lastV=pts[pts.length-1]?.v||0;
+  const gr=ctx.createLinearGradient(0,PAD.t,0,H-PAD.b);
+  gr.addColorStop(0,lastV>=0?'rgba(34,160,96,.14)':'rgba(192,48,64,.14)');
+  gr.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=gr;ctx.fill();
+
+  ctx.fillStyle=C.t3;ctx.font='7px Inter';ctx.textAlign='right';
+  ctx.fillText(`${n} trades`,W-PAD.r,PAD.t+8);
+
+  ctx.beginPath();ctx.arc(px,py,3,0,Math.PI*2);
+  ctx.fillStyle=lastV>=0?C.green2:C.red2;
+  ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=6;ctx.fill();ctx.shadowBlur=0;
+
+  [{color:C.gold,name:'GS1'},{color:C.blue3,name:'NAS'},{color:C.teal2,name:'GER'}].forEach((l,i)=>{
+    ctx.fillStyle=l.color;ctx.fillRect(PAD.l+8+i*32,PAD.t,14,2);
+    ctx.fillStyle=C.t3;ctx.font='7px Inter';ctx.textAlign='left';ctx.fillText(l.name,PAD.l+8+i*32,PAD.t+10);
   });
-  ctx.fillStyle=C.t3; ctx.font='7px Inter'; ctx.textAlign='center'; ctx.fillText('30-DAY EQUITY CURVE',W/2,10);
 }
 
 function drawAtomFrame(canvas, wrap, angle) {
@@ -194,13 +215,12 @@ function drawRadar(canvas, wrap, perf) {
   const axes=['WIN RATE','PROF FACTOR','VOLUME','R-MULTIPLE','CONSISTENCY'];
   const specs=[
     {name:'GS1',col:C.gold,  vals:[.613,.595,1.0,.71,.72]},
-    {name:'GS2',col:C.gold2, vals:[.55, .945,.21,.85,.65]},
     {name:'NAS',col:C.blue3, vals:[.597,1.0, .21,.95,.80]},
     {name:'GER',col:C.teal2, vals:[.641,.865,.15,.75,.88]},
   ];
   // If real perf data available, update WR
   specs.forEach(sp => {
-    const k = sp.name==='GS1'?'gold-specialist':sp.name==='GS2'?'gold-specialist-2':sp.name==='NAS'?'nas100-specialist':'ger40-bg-specialist';
+    const k = sp.name==='GS1'?'gold-specialist':sp.name==='NAS'?'nas100-specialist':'ger40-bg-specialist';
     const wr = perf?.[k]?.winRate;
     if (wr != null) sp.vals[0] = Math.min(wr/100,1);
   });
@@ -250,7 +270,6 @@ function drawCalendar(canvas, wrap, ledger) {
     const k = d.getDate();
     dayPnl[k] = (dayPnl[k]||0) + t.finalPnL;
   });
-  const rn = rng32(9876);
   days.forEach((d,i)=>{ctx.fillStyle=C.t3;ctx.font='7px Inter';ctx.textAlign='center';ctx.fillText(d,18+i*cW+cW/2,26);});
   const daysInMonth = new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
   // First day of month
@@ -261,12 +280,11 @@ function drawCalendar(canvas, wrap, ledger) {
     const cellIdx=row*7+col;
     if (cellIdx<startCol||d>daysInMonth) continue;
     const x=18+col*cW, y=28+row*rH;
-    let p = dayPnl[d];
-    if (p==null) { const r=rn(); p=(r<.5)?0:(r-.5)*400-100; } // fallback sim
-    ctx.fillStyle=p===0?C.b:(p>0?`rgba(34,160,96,${.15+Math.min(Math.abs(p)/200,.8)*.55})`:`rgba(192,48,64,${.15+Math.min(Math.abs(p)/200,.8)*.55})`);
+    const p = dayPnl[d] ?? null;
+    ctx.fillStyle = p==null ? C.b : (p===0 ? C.b : (p>0 ? `rgba(34,160,96,${.15+Math.min(Math.abs(p)/200,.8)*.55})` : `rgba(192,48,64,${.15+Math.min(Math.abs(p)/200,.8)*.55})`));
     ctx.fillRect(x+1,y+1,cW-2,rH-2);
     ctx.fillStyle=C.t3; ctx.font='6px Inter'; ctx.textAlign='left'; ctx.fillText(d,x+3,y+9);
-    if (p!==0){ctx.fillStyle=p>0?C.green2:C.red2;ctx.font='6px JetBrains Mono';ctx.textAlign='center';ctx.fillText((p>0?'+':'')+p.toFixed(0),x+cW/2,y+rH-3);}
+    if (p!=null && p!==0){ctx.fillStyle=p>0?C.green2:C.red2;ctx.font='6px JetBrains Mono';ctx.textAlign='center';ctx.fillText((p>0?'+':'')+p.toFixed(0),x+cW/2,y+rH-3);}
     d++;
   }
 }
@@ -295,9 +313,9 @@ function drawHeatmap(canvas, wrap) {
   const [ctx, W, H] = sizeCv(canvas, wrap);
   ctx.fillStyle=C.s1; ctx.fillRect(0,0,W,H);
   ctx.fillStyle=C.t3; ctx.font='8px JetBrains Mono'; ctx.textAlign='center';
-  ctx.fillText('WIN RATE HEATMAP — HOUR × SPECIALIST', W/2, 12);
-  const cols=['GS1','GS2','NAS','GER'], rows=['06','07','08','09','10','11','12','13','14','15','16','17'];
-  const cW=(W-52)/4, rH=(H-24)/12, rn=rng32(12345);
+  ctx.fillText('WIN RATE HEATMAP — HOUR × SPECIALIST (SIMULATED)', W/2, 12);
+  const cols=['GS1','NAS','GER'], rows=['06','07','08','09','10','11','12','13','14','15','16','17'];
+  const cW=(W-52)/3, rH=(H-24)/12, rn=rng32(12345);
   cols.forEach((col,ci)=>{
     ctx.fillStyle=C.t3; ctx.font='7px Inter'; ctx.textAlign='center'; ctx.fillText(col,52+ci*cW+cW/2,23);
     rows.forEach((row,ri)=>{
@@ -312,33 +330,55 @@ function drawHeatmap(canvas, wrap) {
   rows.forEach((row,ri)=>{ctx.fillStyle=C.t3;ctx.font='7px JetBrains Mono';ctx.textAlign='right';ctx.fillText(row+':00',48,24+(ri+.65)*rH);});
 }
 
-function drawMiniCurve(canvas, seed, color) {
+function drawMiniCurve(canvas, pts, color) {
   if (!canvas||!canvas.parentElement) return;
   canvas.width=canvas.parentElement.clientWidth||240;
   const W=canvas.width, H=canvas.height;
   const ctx=canvas.getContext('2d');
   ctx.fillStyle=C.s2; ctx.fillRect(0,0,W,H);
-  const r=rng32(seed); let v=0; const pts=[];
-  for (let i=0;i<40;i++){v+=.1+(r()-.4)*.4;pts.push(v);}
-  const mx=Math.max(...pts), mn=Math.min(...pts);
+  if (!pts||pts.length<2) {
+    ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2);
+    ctx.strokeStyle=color+'50'; ctx.lineWidth=.8; ctx.stroke();
+    return;
+  }
+  const mx=Math.max(...pts),mn=Math.min(...pts),range=mx-mn||1;
   ctx.beginPath();
-  pts.forEach((p,i)=>{const x=i*(W/(pts.length-1)),y=H-2-(p-mn)/(mx-mn)*(H-4);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+  pts.forEach((p,i)=>{const x=i*(W/(pts.length-1)),y=H-2-(p-mn)/range*(H-4);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
   ctx.strokeStyle=color; ctx.lineWidth=1.2; ctx.stroke();
   ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath(); ctx.fillStyle=color+'28'; ctx.fill();
 }
 
-function drawMiniPerf(canvas, wrap) {
+function drawMiniPerf(canvas, wrap, perf) {
   const [ctx, W, H] = sizeCv(canvas, wrap);
   ctx.fillStyle=C.s1; ctx.fillRect(0,0,W,H);
   ctx.fillStyle=C.t3; ctx.font='7px JetBrains Mono'; ctx.textAlign='center';
-  ctx.fillText('SPECIALIST MONTHLY CURVES', W/2, 10);
-  [{seed:110,col:C.gold},{seed:220,col:C.gold2},{seed:330,col:C.blue3},{seed:440,col:C.teal2}].forEach((s,si)=>{
-    const r=rng32(s.seed); let v=0; const pts=[];
-    for(let i=0;i<30;i++){v+=(r()-.38)*.5+.05;pts.push(v);}
-    const mx=Math.max(...pts), mn=Math.min(...pts), sw=W/4, ox=si*sw;
-    ctx.beginPath();
-    pts.forEach((p,i)=>{const x=ox+8+i*(sw-16)/(pts.length-1),y=H-6-(p-mn)/(mx-mn)*(H-18);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
-    ctx.strokeStyle=s.col; ctx.lineWidth=1.2; ctx.stroke();
+  ctx.fillText('SPECIALIST P&L OVERVIEW', W/2, 10);
+  const specs=[
+    {key:'gold-specialist',     label:'GS1', col:C.gold},
+    {key:'nas100-specialist',   label:'NAS', col:C.blue3},
+    {key:'ger40-bg-specialist', label:'GER', col:C.teal2},
+  ];
+  const bW=(W-24)/3, bH=H-28;
+  specs.forEach((sp,i)=>{
+    const p=perf?.[sp.key];
+    const wr=p?.winRate??null;
+    const trades=p?.trades??0;
+    const ox=12+i*bW;
+    ctx.fillStyle=C.t3;ctx.font='7px Inter';ctx.textAlign='center';
+    ctx.fillText(sp.label,ox+bW/2,22);
+    if(wr!=null){
+      const barH=bH*(wr/100);
+      ctx.fillStyle=sp.col+'40';ctx.fillRect(ox+4,H-8-bH,bW-8,bH);
+      ctx.fillStyle=sp.col;ctx.fillRect(ox+4,H-8-barH,bW-8,barH);
+      ctx.fillStyle=sp.col;ctx.font='bold 9px JetBrains Mono';ctx.textAlign='center';
+      ctx.fillText(wr.toFixed(0)+'%',ox+bW/2,H-10-barH-2);
+      ctx.fillStyle=C.t3;ctx.font='6px Inter';
+      ctx.fillText(trades+'t',ox+bW/2,H-5);
+    } else {
+      ctx.fillStyle=C.b;ctx.fillRect(ox+4,H-8-bH,bW-8,bH);
+      ctx.fillStyle=C.t3;ctx.font='8px JetBrains Mono';ctx.textAlign='center';
+      ctx.fillText('—',ox+bW/2,H/2+4);
+    }
   });
 }
 
@@ -375,11 +415,11 @@ function QBLogo() {
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function TerminalLayout({
-  positions, quotes, capital, jarvis, ledger, perf, ftmoStatus, gatingRules, onPositionAction,
-  accounts, accountStatus,
+  positions, quotes, capital, jarvis, ledger, perf, totalPerf, ftmoStatus, gatingRules, onPositionAction,
+  accounts, accountStatus, upcomingNews = [], newsStatus = 'clear',
 }) {
   const [activeView, setActiveView] = useState('telemetry');
-  const [specOn,  setSpecOn]  = useState({gs1:true,gs2:true,nas:true,ger:true});
+  const [specOn,  setSpecOn]  = useState({gs1:true,nas:true,ger:true});
   const [compound, setCompound] = useState(3);
   const [utc, setUtc] = useState('--:--:-- UTC');
   const [sessions, setSessions] = useState({asian:false,london:false,ny:false});
@@ -394,7 +434,7 @@ export default function TerminalLayout({
   const hmRef     = useRef(null); const hmWrap     = useRef(null);
   const miniPRef  = useRef(null); const miniPWrap  = useRef(null);
   const corrRef   = useRef(null);
-  const mcGs1     = useRef(null); const mcGs2 = useRef(null);
+  const mcGs1     = useRef(null);
   const mcNas     = useRef(null); const mcGer = useRef(null);
   const rafRef    = useRef(null); const angleRef = useRef(0);
 
@@ -409,9 +449,11 @@ export default function TerminalLayout({
   const openPos  = (positions||[]).filter(p => /QB-V20-/i.test(p.comment||''));
   const today    = new Date().toISOString().slice(0,10);
   const todayPnl = (ledger||[]).filter(t => t.closedAt && new Date(t.closedAt).toISOString().slice(0,10)===today).reduce((s,t)=>s+(t.finalPnL||0),0);
-  const jarvisText = jarvis?.speech ?? jarvis?.text ?? jarvis?.directive ?? 'Monitoring market conditions. London session active. Watching for high-probability setups across all 4 specialists.';
-  const jarvisScore = jarvis?.score ?? 78;
+  const jarvisText = jarvis?.speech ?? jarvis?.text ?? jarvis?.directive ?? 'Monitoring market conditions. Watching for high-probability setups across GS1, NAS and GER specialists.';
+  const jarvisScore = jarvis?.score ?? null;
   const jarvisUrgency = (jarvis?.urgency ?? 'nominal').toUpperCase();
+  const lastTrade = (ledger||[]).filter(t=>t.closedAt).sort((a,b)=>(b.closedAt||0)-(a.closedAt||0))[0] ?? null;
+  const lastSpec = lastTrade ? (lastTrade.template||'').replace('ger40-bg-specialist','GER').replace('nas100-specialist','NAS').replace('gold-specialist','GS1') : null;
 
   // ── Clock ────────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -428,14 +470,21 @@ export default function TerminalLayout({
   // ── Canvas draw ──────────────────────────────────────────────────────────────
   const drawAll = useCallback(() => {
     if (ftmoRef.current) drawFTMO(ftmoRef.current, dailyDD, totalDD);
-    drawMiniCurve(mcGs1.current,101,C.gold); drawMiniCurve(mcGs2.current,202,C.gold2);
-    drawMiniCurve(mcNas.current,303,C.blue3); drawMiniCurve(mcGer.current,404,C.teal2);
+    const specPts = key => {
+      let c=0; const p=[0];
+      (ledger||[]).filter(t=>t.template===key&&t.closedAt&&t.finalPnL!=null)
+        .sort((a,b)=>(a.closedAt||0)-(b.closedAt||0)).forEach(t=>{c+=t.finalPnL;p.push(c);});
+      return p.length>1?p:null;
+    };
+    drawMiniCurve(mcGs1.current,specPts('gold-specialist'),C.gold);
+    drawMiniCurve(mcNas.current,specPts('nas100-specialist'),C.blue3);
+    drawMiniCurve(mcGer.current,specPts('ger40-bg-specialist'),C.teal2);
     drawCorrGauge(corrRef.current);
     if (activeView==='telemetry') drawEquityCurve(equityRef.current, equityWrap.current, ledger);
-    if (activeView==='performance') { drawCalendar(calRef.current,calWrap.current,ledger); drawMiniPerf(miniPRef.current,miniPWrap.current); }
+    if (activeView==='performance') { drawCalendar(calRef.current,calWrap.current,ledger); drawMiniPerf(miniPRef.current,miniPWrap.current,perf); }
     if (activeView==='specialists') { drawRadar(radarRef.current,radarWrap.current,perf); drawCompound(compRef.current,compWrap.current,compound,equity); }
     if (activeView==='nexus') drawHeatmap(hmRef.current,hmWrap.current);
-  }, [activeView, dailyDD, totalDD, ledger, perf, compound, equity]);
+  }, [activeView, dailyDD, totalDD, ledger, perf, compound, equity, newsStatus, ftmoStatus, accountStatus]);
 
   useLayoutEffect(() => { drawAll(); }, [drawAll]);
 
@@ -473,8 +522,7 @@ export default function TerminalLayout({
             {accountStatus==='live'?'LIVE':accountStatus==='standby'?'STANDBY':accountStatus==='loading'?'…':'NO ACCT'}
           </span>
         </div>
-        <div className="qc-tb-blk"><span className="qc-dot qc-dot-live"/><span className="qc-tb-lbl">REDIS</span><span className="qc-tb-val">OK</span></div>
-        <div className="qc-tb-blk"><span className="qc-dot qc-dot-live"/><span className="qc-tb-lbl">TG</span><span className="qc-tb-val">OK</span></div>
+        <div className="qc-tb-blk"><span className={`qc-dot ${ftmoStatus!=null?'qc-dot-live':'qc-dot-dead'}`}/><span className="qc-tb-lbl">REDIS</span><span className="qc-tb-val" style={{color:ftmoStatus!=null?C.green2:C.t3}}>{ftmoStatus!=null?'OK':'—'}</span></div>
         <div className="qc-sep"/>
         <div className="qc-tb-blk"><span className="qc-tb-lbl">BAL</span><span className="qc-tb-val qc-mono">{balance>0?`$${Number(balance).toLocaleString('en-US',{minimumFractionDigits:0})}`:'—'}</span></div>
         <div className="qc-tb-blk"><span className="qc-tb-lbl">EQUITY</span><span className="qc-tb-val qc-mono" style={{color:C.green2}}>{equity>0?`$${Number(equity).toLocaleString('en-US',{minimumFractionDigits:0})}`:'—'}</span></div>
@@ -489,7 +537,7 @@ export default function TerminalLayout({
           </div>
         ))}
         <div className="qc-tb-blk"><span className="qc-tb-lbl">FTMO</span><span className="qc-tb-val qc-mono" style={{color:ftmoColor}}>{ftmoBadge}</span></div>
-        <div className="qc-tb-blk"><span className="qc-tb-lbl">NEWS</span><span className="qc-tb-val qc-mono" style={{color:C.green2}}>CLEAR</span></div>
+        <div className="qc-tb-blk"><span className="qc-tb-lbl">NEWS</span><span className="qc-tb-val qc-mono" style={{color:newsStatus==='block'?C.red2:newsStatus==='warn'?C.warn2:C.green2}}>{newsStatus==='block'?'BLOCK':newsStatus==='warn'?'WARN':'CLEAR'}</span></div>
         <div className="qc-spacer"/>
         <div className="qc-sessions">
           {[['asian','ASIAN'],['london','LONDON'],['ny','NEW YORK']].map(([k,lbl])=>(
@@ -540,40 +588,35 @@ export default function TerminalLayout({
                 <div className="qc-jdir-l">ACTIVE DIRECTIVE</div>
                 <div className="qc-jdir-t">{String(jarvisText).slice(0,200)}</div>
                 <div className="qc-jdir-m">
-                  <span className="qc-jscore">SCORE: {jarvisScore}/100</span>
+                  <span className="qc-jscore">SCORE: {jarvisScore!=null?`${jarvisScore}/100`:'—'}</span>
                   <span className="qc-jurg">{jarvisUrgency}</span>
                 </div>
               </div>
               <div className="qc-stitle" style={{marginBottom:5}}>SIZING ENGINE</div>
-              <div className="qc-row"><span className="qc-rl">Recommended lot</span><span className="qc-rv" style={{color:C.gold}}>0.12</span></div>
-              <div className="qc-row"><span className="qc-rl">Risk per trade</span><span className="qc-rv">{equity>0?`$${(equity*0.0015).toFixed(0)}`:'$148'}</span></div>
-              <div className="qc-row"><span className="qc-rl">Account %</span><span className="qc-rv">0.15%</span></div>
+              <div className="qc-row"><span className="qc-rl">Risk per trade</span><span className="qc-rv" style={{color:C.gold}}>{equity>0?`$${(equity*0.01).toFixed(0)}`:'—'}</span></div>
+              <div className="qc-row"><span className="qc-rl">Account risk</span><span className="qc-rv">1.00%</span></div>
+              <div className="qc-row"><span className="qc-rl">Lot size</span><span className="qc-rv" style={{color:C.t3}}>—</span></div>
               <div className="qc-row"><span className="qc-rl">Compound mode</span><span className="qc-rv" style={{color:C.ml2}}>ADAPTIVE</span></div>
-              <div className="qc-stitle" style={{margin:'8px 0 5px'}}>POST-TRADE VERDICT</div>
-              <div className="qc-verdict">Last: GS1 Frankfurt — R×1.4. Slippage 0.3pts. BE optimal. <span style={{color:C.green2}}>EFFICIENT</span></div>
+              <div className="qc-stitle" style={{margin:'8px 0 5px'}}>LAST CLOSED TRADE</div>
+              <div className="qc-verdict">{lastTrade?`${lastSpec} · ${(lastTrade.direction||'').toUpperCase()||'—'} · ${fmtMony(lastTrade.finalPnL??0)}`:<span style={{color:C.t3}}>No trades closed yet</span>}</div>
             </div>
           </div>
 
           {/* SYS OPS */}
           <div className="qc-psec">
-            <div className="qc-phdr"><span className="qc-phdr-t">SYS OPS</span><span className="qc-badge qc-b-ok">ALL OK</span></div>
+            <div className="qc-phdr"><span className="qc-phdr-t">SYS OPS</span><span className={`qc-badge ${accountStatus==='live'?'qc-b-ok':accountStatus==='standby'?'qc-b-warn':'qc-b-block'}`}>{accountStatus==='live'?'ONLINE':accountStatus==='standby'?'STANDBY':'OFFLINE'}</span></div>
             <div className="qc-pbody">
-              <div className="qc-so-row"><span className="qc-so-l">MetaAPI</span><span className="qc-so-v" style={{color:C.green2}}>LIVE · 84ms</span></div>
-              <div className="qc-lat-bar"><div className="qc-lat-fill" style={{width:'21%'}}/></div>
-              <div className="qc-so-row" style={{marginTop:4}}><span className="qc-so-l">Redis</span><span className="qc-so-v" style={{color:C.green2}}>CONNECTED</span></div>
-              <div className="qc-so-row"><span className="qc-so-l">Vercel Fn</span><span className="qc-so-v" style={{color:C.green2}}>WARM</span></div>
-              <div className="qc-so-row"><span className="qc-so-l">Telegram</span><span className="qc-so-v" style={{color:C.green2}}>BOT ONLINE</span></div>
+              <div className="qc-so-row"><span className="qc-so-l">MetaAPI</span><span className="qc-so-v" style={{color:accountStatus==='live'?C.green2:accountStatus==='standby'?C.warn2:C.t3}}>{accountStatus==='live'?'LIVE':accountStatus==='standby'?'STANDBY':accountStatus==='loading'?'CONNECTING…':'OFFLINE'}</span></div>
+              <div className="qc-so-row" style={{marginTop:4}}><span className="qc-so-l">Redis</span><span className="qc-so-v" style={{color:ftmoStatus!=null?C.green2:C.t3}}>{ftmoStatus!=null?'OK':'—'}</span></div>
+              <div className="qc-so-row"><span className="qc-so-l">FTMO Guard</span><span className="qc-so-v" style={{color:ftmoColor}}>{ftmoBadge}</span></div>
+              <div className="qc-so-row"><span className="qc-so-l">News Filter</span><span className="qc-so-v" style={{color:newsStatus==='block'?C.red2:newsStatus==='warn'?C.warn2:C.green2}}>{newsStatus==='block'?'BLOCK':newsStatus==='warn'?'WARN':'CLEAR'}</span></div>
               <div className="qc-so-row"><span className="qc-so-l">Webhook hits</span><span className="qc-so-v" style={{color:C.green2}}>{openPos.length} open · today</span></div>
               <div className="qc-wh-log">
                 {(ledger||[]).filter(t=>t.closedAt).sort((a,b)=>(b.closedAt||0)-(a.closedAt||0)).slice(0,5).map((t,i)=>{
                   const spec=(t.template||'').replace('ger40-bg-specialist','GER').replace('nas100-specialist','NAS').replace('gold-specialist-2','GS2').replace('gold-specialist','GS1');
                   return <div key={i} className={`qc-wle ${(t.finalPnL||0)>=0?'ok':'err'}`}>{fmtDate(t.closedAt)} {spec} ▸ {(t.finalPnL||0)>=0?'+':'−'}${Math.abs(t.finalPnL||0).toFixed(0)}</div>;
                 })}
-                {!(ledger||[]).length&&<>
-                  <div className="qc-wle ok">14:22:07 GS1 ▸ BUY XAUUSD 0.12</div>
-                  <div className="qc-wle ok">13:41:33 GS2 ▸ BUY XAUUSD 0.10</div>
-                  <div className="qc-wle err">11:08:44 GER ▸ NEWS BLOCK EUR</div>
-                </>}
+                {!(ledger||[]).filter(t=>t.closedAt).length&&<div className="qc-wle" style={{color:C.t3}}>No closed trades yet</div>}
               </div>
               <div className="qc-exp-wrap">
                 <div className="qc-exp-lbl">CORRELATION EXPOSURE</div>
@@ -625,10 +668,10 @@ export default function TerminalLayout({
             <div className="qc-tel">
               <div className="qc-stat-row">
                 {[
-                  {lbl:'EQUITY',val:equity>0?`$${Number(equity).toLocaleString('en-US',{minimumFractionDigits:0})}`:'—',sub:fmtMony(todayPnl)+' today',color:C.green2,fill:100},
-                  {lbl:'WIN RATE',val:perf?.['gold-specialist']?.winRate!=null?(perf['gold-specialist'].winRate).toFixed(1)+'%':'61.3%',sub:'tracked trades',color:C.blue3,fill:61},
-                  {lbl:'PROF FACTOR',val:'1.89',sub:'gross P/L ratio',color:C.gold,fill:75},
-                  {lbl:'AVG R-MULT',val:'1.42×',sub:'per closed trade',color:C.ml2,fill:71},
+                  {lbl:'EQUITY',val:equity>0?`$${Number(equity).toLocaleString('en-US',{minimumFractionDigits:0})}`:'—',sub:fmtMony(todayPnl)+' today',color:C.green2,fill:equity>0?100:0},
+                  {lbl:'WIN RATE',val:totalPerf?.winRate!=null?totalPerf.winRate.toFixed(1)+'%':'—',sub:totalPerf?.trades?`${totalPerf.trades} trades`:'no data',color:C.blue3,fill:totalPerf?.winRate??0},
+                  {lbl:'PROF FACTOR',val:totalPerf?.profitFactor!=null?totalPerf.profitFactor.toFixed(2):'—',sub:'gross P/L ratio',color:C.gold,fill:totalPerf?.profitFactor!=null?Math.min(totalPerf.profitFactor/3*100,100):0},
+                  {lbl:'CLOSED TRADES',val:totalPerf?.trades??'—',sub:'all specialists',color:C.ml2,fill:Math.min((totalPerf?.trades||0)*2,100)},
                 ].map(({lbl,val,sub,color,fill})=>(
                   <div key={lbl} className="qc-sbc">
                     <div className="qc-sbc-l">{lbl}</div>
@@ -675,22 +718,29 @@ export default function TerminalLayout({
             <div className="qc-perf">
               <div className="qc-cal-wrap" ref={calWrap}><canvas ref={calRef}/></div>
               <div className="qc-eq-quality">
-                <div className="qc-eq-t">EXECUTION QUALITY</div>
-                {[{l:'AVG SLIPPAGE',w:'20%',col:C.green2,a:'0.3 pts',b:'max 1.5'},
-                  {l:'BE EFFECTIVENESS',w:'78%',col:C.blue3,a:'78%',b:'protected'},
-                  {l:'PARTIAL CLOSE OUTCOME',w:'65%',col:C.gold,a:'65% improve',b:'vs full'},
-                  {l:'R-MULT ACHIEVED',w:'71%',col:C.ml2,a:'1.42× avg',b:'tgt 1.5×'},
-                ].map(m=>(
-                  <div key={m.l} className="qc-eq-m">
-                    <div className="qc-eq-lbl">{m.l}</div>
-                    <div className="qc-eq-bw"><div className="qc-eq-bf" style={{width:m.w,background:m.col}}/></div>
-                    <div className="qc-eq-nums"><span style={{color:m.col}}>{m.a}</span><span>{m.b}</span></div>
-                  </div>
-                ))}
+                <div className="qc-eq-t">SPECIALIST PERFORMANCE</div>
+                {[
+                  {key:'gold-specialist',   label:'GS1 · GOLD',  col:C.gold},
+                  {key:'nas100-specialist', label:'NAS · NAS100', col:C.blue3},
+                  {key:'ger40-bg-specialist',label:'GER · GER40', col:C.teal2},
+                ].map(m=>{
+                  const p=perf?.[m.key];
+                  const wr=p?.winRate; const pf=p?.profitFactor; const n=p?.trades??0;
+                  return (
+                    <div key={m.key} className="qc-eq-m">
+                      <div className="qc-eq-lbl">{m.label}</div>
+                      <div className="qc-eq-bw"><div className="qc-eq-bf" style={{width:wr!=null?`${Math.min(wr,100)}%`:'0%',background:m.col}}/></div>
+                      <div className="qc-eq-nums">
+                        <span style={{color:m.col}}>{wr!=null?wr.toFixed(1)+'% WR':'—'}</span>
+                        <span>{pf!=null?'PF '+pf.toFixed(2):n>0?n+'t':'no data'}</span>
+                      </div>
+                    </div>
+                  );
+                })}
                 <div style={{marginTop:10,padding:6,background:C.bg,border:`1px solid ${C.b}`}}>
                   <div className="qc-stitle" style={{marginBottom:4}}>RECOVERY EST.</div>
                   <div className="qc-mono" style={{fontSize:10}}>{equity>0&&balance>0&&equity<balance?`$${(balance-equity).toFixed(0)} needed`:'On track'}</div>
-                  <div style={{fontSize:8,color:C.t2,marginTop:2}}>≈ 3 trades @ 1.5R avg</div>
+                  <div style={{fontSize:8,color:C.t2,marginTop:2}}>{balance>0&&equity>0?`$${(equity-balance>=0?'+':'')}${(equity-balance).toFixed(0)} vs start`:'—'}</div>
                 </div>
               </div>
               <div className="qc-mini-c" ref={miniPWrap}><canvas ref={miniPRef} height={72}/></div>
@@ -742,7 +792,7 @@ export default function TerminalLayout({
                 <div className="qc-ticker">
                   <div className="qc-ticker-l">ANOMALY DETECTOR</div>
                   <div className="qc-ticker-w">
-                    <span className="qc-ticker-s">◆ NO ANOMALIES DETECTED &nbsp;·&nbsp; FTMO {dailyDD.toFixed(2)}% DAILY WITHIN LIMITS &nbsp;·&nbsp; TOTAL DD {totalDD.toFixed(2)}% HEALTHY &nbsp;·&nbsp; ALL 4 SPECIALISTS RESPONSIVE &nbsp;·&nbsp;</span>
+                    <span className="qc-ticker-s">◆ FTMO {dailyDD.toFixed(2)}% DAILY WITHIN LIMITS &nbsp;·&nbsp; TOTAL DD {totalDD.toFixed(2)}% &nbsp;·&nbsp; ALL 3 SPECIALISTS ACTIVE &nbsp;·&nbsp; NEWS {newsStatus.toUpperCase()} &nbsp;·&nbsp;</span>
                   </div>
                 </div>
               </div>
@@ -756,10 +806,9 @@ export default function TerminalLayout({
               <div className="qc-spec-rank">
                 <div className="qc-sr-t">SPECIALIST RANKING</div>
                 {[
-                  {rank:'#1',name:'GER40 B+G',   sub:'Tue+Thu · 15m FVG · Both dirs', wr:perf?.['ger40-bg-specialist']?.winRate??64.1, pf:1.73, col:C.teal2},
-                  {rank:'#2',name:'NAS100 TJR',  sub:'AMD · London→NY · BOS FVG',     wr:perf?.['nas100-specialist']?.winRate??59.7,   pf:2.51, col:C.blue3},
-                  {rank:'#3',name:'GOLD S1 ORB', sub:'Frankfurt+NY · H+M timeframe',  wr:perf?.['gold-specialist']?.winRate??61.3,     pf:1.19, col:C.gold},
-                  {rank:'#4',name:'GOLD S2 H1',  sub:'A/B/D patterns · SB FVG',       wr:perf?.['gold-specialist-2']?.winRate??55.0,   pf:1.89, col:C.gold2},
+                  {rank:'#1',name:'GER40 B+G',   sub:'Tue+Thu · 15m FVG · Both dirs', wr:perf?.['ger40-bg-specialist']?.winRate, pf:perf?.['ger40-bg-specialist']?.profitFactor, bkWr:64.1, bkPf:1.73, col:C.teal2},
+                  {rank:'#2',name:'NAS100 TJR',  sub:'AMD · London→NY · BOS FVG',     wr:perf?.['nas100-specialist']?.winRate,   pf:perf?.['nas100-specialist']?.profitFactor,   bkWr:59.7, bkPf:2.51, col:C.blue3},
+                  {rank:'#3',name:'GOLD S1 ORB', sub:'Frankfurt+NY · H+M timeframe',  wr:perf?.['gold-specialist']?.winRate,     pf:perf?.['gold-specialist']?.profitFactor,     bkWr:61.3, bkPf:1.19, col:C.gold},
                 ].map(s=>(
                   <div key={s.rank} className="qc-srank-row">
                     <span className="qc-srank-n">{s.rank}</span>
@@ -768,8 +817,8 @@ export default function TerminalLayout({
                       <div className="qc-srank-sub">{s.sub}</div>
                     </div>
                     <div className="qc-srank-stats">
-                      <span style={{color:C.green2}}>{Number(s.wr).toFixed(1)}%</span>
-                      <span style={{color:C.blue3}}>{s.pf}</span>
+                      <span style={{color:s.wr!=null?C.green2:C.t3}}>{s.wr!=null?s.wr.toFixed(1)+'%':s.bkWr+'%*'}</span>
+                      <span style={{color:s.pf!=null?C.blue3:C.t3}}>{s.pf!=null?s.pf.toFixed(2):s.bkPf+'*'}</span>
                       <span style={{color:C.gold}}>ON</span>
                     </div>
                   </div>
@@ -795,23 +844,25 @@ export default function TerminalLayout({
               <div className="qc-sess-edges">
                 <div className="qc-se-t">SESSION EDGE BY SPECIALIST</div>
                 {[
-                  {lbl:'GOLD S1 · Frankfurt ORB',wr:perf?.['gold-specialist']?.winRate??61,col:C.gold},
-                  {lbl:'GOLD S2 · H1 A/B/D',     wr:perf?.['gold-specialist-2']?.winRate??55,col:C.gold2},
-                  {lbl:'NAS100 · AMD FVG',        wr:perf?.['nas100-specialist']?.winRate??60,col:C.blue3},
-                  {lbl:'GER40 · B+G Tue/Thu',     wr:perf?.['ger40-bg-specialist']?.winRate??64,col:C.teal2},
-                ].map(s=>(
-                  <div key={s.lbl} className="qc-se-r">
-                    <div className="qc-se-lbl"><span>{s.lbl}</span><span style={{color:C.green2}}>{Number(s.wr).toFixed(0)}%</span></div>
-                    <div className="qc-se-bar"><div className="qc-se-fill" style={{width:`${Math.min(s.wr,100)}%`,background:s.col}}/></div>
-                  </div>
-                ))}
+                  {lbl:'GOLD S1 · Frankfurt ORB', key:'gold-specialist',     bkWr:61, col:C.gold},
+                  {lbl:'NAS100 · AMD FVG',         key:'nas100-specialist',   bkWr:60, col:C.blue3},
+                  {lbl:'GER40 · B+G Tue/Thu',      key:'ger40-bg-specialist', bkWr:64, col:C.teal2},
+                ].map(s=>{
+                  const wr=perf?.[s.key]?.winRate;
+                  return (
+                    <div key={s.lbl} className="qc-se-r">
+                      <div className="qc-se-lbl"><span>{s.lbl}</span><span style={{color:wr!=null?C.green2:C.t3}}>{wr!=null?wr.toFixed(0)+'%':s.bkWr+'%*'}</span></div>
+                      <div className="qc-se-bar"><div className="qc-se-fill" style={{width:`${Math.min(wr??s.bkWr,100)}%`,background:s.col}}/></div>
+                    </div>
+                  );
+                })}
                 <div style={{marginTop:10,borderTop:`1px solid ${C.b}`,paddingTop:8}}>
                   <div className="qc-stitle" style={{marginBottom:6}}>BEST ENTRY WINDOWS</div>
                   <div style={{fontSize:9,color:C.t2,display:'flex',flexDirection:'column',gap:3}}>
-                    <span><span className="qc-mono" style={{color:C.gold}}>07:00</span> Frankfurt ORB open</span>
-                    <span><span className="qc-mono" style={{color:C.gold}}>08:30</span> London liquidity sweep</span>
+                    <span><span className="qc-mono" style={{color:C.gold}}>07:00</span> Frankfurt ORB — GS1</span>
+                    <span><span className="qc-mono" style={{color:C.teal2}}>08:00</span> GER40 B+G window</span>
                     <span><span className="qc-mono" style={{color:C.blue3}}>13:30</span> NY open + NAS AMD</span>
-                    <span><span className="qc-mono" style={{color:C.blue3}}>14:00</span> GS2 H1 pattern watch</span>
+                    <span><span className="qc-mono" style={{color:C.gold}}>13:30</span> GS1 NY ORB</span>
                   </div>
                 </div>
               </div>
@@ -848,7 +899,7 @@ export default function TerminalLayout({
             const pos = activePosFor(positions, sp.key);
             const wr  = perf?.[sp.key]?.winRate ?? sp.wr;
             const pnlDay = todayPnLFor(ledger, sp.key);
-            const mc  = sp.label==='GS1'?mcGs1:sp.label==='GS2'?mcGs2:sp.label==='NAS'?mcNas:mcGer;
+            const mc  = sp.label==='GS1'?mcGs1:sp.label==='NAS'?mcNas:mcGer;
             return (
               <div key={sp.key} className="qc-spec-card">
                 <div className="qc-sc-hdr">
@@ -882,25 +933,28 @@ export default function TerminalLayout({
             </div>
             <canvas ref={corrRef} height={38} style={{width:'100%',display:'block'}}/>
             <div style={{marginTop:5,display:'grid',gridTemplateColumns:'1fr 1fr',gap:4,fontSize:8,color:C.t3}}>
-              <span>XAU/NAS: <span className="qc-mono" style={{color:C.t2}}>0.34</span></span>
-              <span>XAU/GER: <span className="qc-mono" style={{color:C.t2}}>0.18</span></span>
+              <span>XAU/NAS: <span className="qc-mono" style={{color:C.t2}}>—</span></span>
+              <span>XAU/GER: <span className="qc-mono" style={{color:C.t2}}>—</span></span>
             </div>
           </div>
 
           {/* News */}
           <div className="qc-news-sec">
             <div className="qc-news-hdr">UPCOMING NEWS</div>
-            {[
-              {impact:'high',ccy:'USD',title:'Core PCE Price Index m/m',time:'16:30 UTC today',cd:'in 2h 08m'},
-              {impact:'med', ccy:'EUR',title:'German Unemployment Change',time:'07:55 UTC Mon',cd:'tomorrow'},
-              {impact:'high',ccy:'USD',title:'Non-Farm Payrolls',time:'13:30 UTC Fri',cd:'Friday'},
-            ].map(n=>(
-              <div key={n.title} className="qc-ne">
-                <div className={`qc-ne-impact ${n.impact}`}>{n.impact.toUpperCase()} · {n.ccy}</div>
-                <div className="qc-ne-title">{n.title}</div>
-                <div className="qc-ne-meta"><span>{n.time}</span><span className="qc-ne-cd">{n.cd}</span></div>
-              </div>
-            ))}
+            {(upcomingNews||[]).filter(n=>['USD','EUR'].includes(n.currency)&&n.impact!=='low').slice(0,5).map((n,i)=>{
+              const mAbs=Math.abs(n.minutesAway);
+              const when=n.minutesAway<=0?`${mAbs}m ago`:mAbs<60?`in ${mAbs}m`:mAbs<1440?`in ${Math.round(mAbs/60)}h`:`in ${Math.round(mAbs/1440)}d`;
+              return (
+                <div key={i} className="qc-ne">
+                  <div className={`qc-ne-impact ${n.impact}`}>{n.impact.toUpperCase()} · {n.currency}</div>
+                  <div className="qc-ne-title">{n.event}</div>
+                  <div className="qc-ne-meta"><span className="qc-mono">{new Date(n.time).toUTCString().slice(17,22)} UTC</span><span className="qc-ne-cd">{when}</span></div>
+                </div>
+              );
+            })}
+            {!(upcomingNews||[]).filter(n=>['USD','EUR'].includes(n.currency)&&n.impact!=='low').length&&(
+              <div style={{fontSize:9,color:C.t3,fontFamily:'Inter,sans-serif',padding:'4px 0'}}>No high-impact news next 24h</div>
+            )}
           </div>
         </div>
       </div>
@@ -909,7 +963,7 @@ export default function TerminalLayout({
       <div id="qc-controls">
         <div className="qc-ctl-grp">
           <span className="qc-ctl-lbl">SPECIALISTS</span>
-          {['GS1','GS2','NAS','GER'].map(k=>(
+          {['GS1','NAS','GER'].map(k=>(
             <button key={k} className={`qc-btn${specOn[k.toLowerCase()]?' on-g':''}`} onClick={()=>togSpec(k.toLowerCase())}>{k}</button>
           ))}
         </div>

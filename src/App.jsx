@@ -1,5 +1,5 @@
 /* eslint-disable */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import './index.css';
 
 import TerminalLayout from './components/TerminalLayout';
@@ -16,20 +16,6 @@ function normTrade(t) {
   };
 }
 
-// Normalise template-performance by-template map: winRate comes as 0-1 from API
-function normPerf(byTemplate) {
-  if (!byTemplate) return {};
-  const out = {};
-  Object.entries(byTemplate).forEach(([k, v]) => {
-    out[k] = {
-      ...v,
-      winRate: v.winRate != null ? v.winRate * 100
-             : v.wr     != null ? v.wr
-             : null,
-    };
-  });
-  return out;
-}
 
 export default function App() {
   // ── API data ──────────────────────────────────────────────────────────────────
@@ -38,11 +24,12 @@ export default function App() {
   const [capital,     setCapital]     = useState(null);
   const [jarvis,      setJarvis]      = useState(null);
   const [ledger,      setLedger]      = useState([]);
-  const [perf,        setPerf]        = useState({});
+  // perf is derived from ledger — no separate API call needed
   const [ftmoStatus,  setFtmoStatus]  = useState(null);
   const [gatingRules, setGatingRules] = useState({});
   const [accounts,    setAccounts]    = useState([]);
   const [accountStatus, setAccountStatus] = useState('loading'); // 'loading' | 'none' | 'standby' | 'live'
+  const [upcomingNews, setUpcomingNews] = useState([]);
 
   // ── Data fetchers ─────────────────────────────────────────────────────────────
   const fetchQuotes = useCallback(async () => {
@@ -83,12 +70,41 @@ export default function App() {
     } catch {}
   }, []);
 
-  const fetchPerf = useCallback(async () => {
-    try {
-      const data = await fetch('/api/template-performance').then(r => r.ok ? r.json() : null);
-      if (data) setPerf(normPerf(data.byTemplate || data));
-    } catch {}
-  }, []);
+  // Compute live per-specialist WR/PF + combined totals from ledger
+  const { perf, totalPerf } = useMemo(() => {
+    const map = {};
+    ledger.forEach(t => {
+      if (!t.template || t.finalPnL == null) return;
+      if (!map[t.template]) map[t.template] = { wins: 0, total: 0, grossWin: 0, grossLoss: 0 };
+      map[t.template].total++;
+      if (t.finalPnL > 0) { map[t.template].wins++; map[t.template].grossWin += t.finalPnL; }
+      else { map[t.template].grossLoss += Math.abs(t.finalPnL); }
+    });
+    const perf = {};
+    let totWins=0, totTotal=0, totGW=0, totGL=0;
+    Object.entries(map).forEach(([k, v]) => {
+      perf[k] = {
+        winRate: v.total > 0 ? (v.wins / v.total) * 100 : null,
+        profitFactor: v.grossLoss > 0 ? v.grossWin / v.grossLoss : null,
+        trades: v.total,
+      };
+      totWins+=v.wins; totTotal+=v.total; totGW+=v.grossWin; totGL+=v.grossLoss;
+    });
+    const totalPerf = {
+      winRate: totTotal > 0 ? (totWins/totTotal)*100 : null,
+      profitFactor: totGL > 0 ? totGW/totGL : null,
+      trades: totTotal,
+    };
+    return { perf, totalPerf };
+  }, [ledger]);
+
+  // News status: CLEAR / WARN / BLOCK based on high-impact events near window
+  const newsStatus = useMemo(() => {
+    const high = upcomingNews.filter(n => n.impact === 'high' && ['USD','EUR'].includes(n.currency));
+    if (high.some(n => Math.abs(n.minutesAway) <= 60)) return 'block';
+    if (high.some(n => n.minutesAway > 0 && n.minutesAway <= 120)) return 'warn';
+    return 'clear';
+  }, [upcomingNews]);
 
   const fetchFTMO = useCallback(async () => {
     try {
@@ -101,6 +117,13 @@ export default function App() {
     try {
       const data = await fetch('/api/gating-rules').then(r => r.ok ? r.json() : null);
       if (data) setGatingRules(data);
+    } catch {}
+  }, []);
+
+  const fetchNews = useCallback(async () => {
+    try {
+      const data = await fetch('/api/news-context?all=1').then(r => r.ok ? r.json() : null);
+      if (data?.upcoming) setUpcomingNews(data.upcoming);
     } catch {}
   }, []);
 
@@ -125,9 +148,9 @@ export default function App() {
       fetchFTMO(),
       fetchQuotes(),
       fetchLedger(),
-      fetchPerf(),
       fetchGating(),
       fetchAccounts(),
+      fetchNews(),
     ]);
 
     const timers = [
@@ -135,8 +158,8 @@ export default function App() {
       setInterval(fetchFTMO,               30_000),
       setInterval(fetchQuotes,             60_000),
       setInterval(fetchLedger,            300_000),
-      setInterval(fetchPerf,              300_000),
       setInterval(fetchAccounts,           60_000),
+      setInterval(fetchNews,             300_000),
     ];
     return () => timers.forEach(clearInterval);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -161,10 +184,13 @@ export default function App() {
       jarvis={jarvis}
       ledger={ledger}
       perf={perf}
+      totalPerf={totalPerf}
       ftmoStatus={ftmoStatus}
       gatingRules={gatingRules}
       accounts={accounts}
       accountStatus={accountStatus}
+      upcomingNews={upcomingNews}
+      newsStatus={newsStatus}
       onPositionAction={handlePositionAction}
     />
   );
