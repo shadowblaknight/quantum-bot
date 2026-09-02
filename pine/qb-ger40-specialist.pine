@@ -217,7 +217,7 @@ f_json(zType, dir, ep, sl_p, tp1) =>
            (dir == "LONG" ? "BUY"  : "SELL") + " · " + zType + " · " +
            timeframe.period + "m\n---\n"
     j    = '{"version":"2.3","action":"trade"' +
-           ',"template":"ger40-specialist"' +
+           ',"template":"ger40-bg-specialist"' +
            ',"direction":"' + dir + '"' +
            ',"symbol":"'    + syminfo.tickerid + '"' +
            ',"timeframe":"' + timeframe.period + '"' +
@@ -269,7 +269,7 @@ if (a_long or b_long or c_long) and day_trades < MAX_TRD
     ep   = close
     dist = ep - sl_p
     tp1  = ep + dist * TP_MULT
-    zT   = a_long ? "ger40-judas" : (b_long ? "ger40-sb" : "ger40-ny")
+    zT   = a_long ? "B" : (b_long ? "G" : "ger40-ny")
     if dist > 0
         day_trades += 1
         alert(f_json(zT, "LONG", ep, sl_p, tp1), alert.freq_once_per_bar_close)
@@ -289,7 +289,7 @@ if (a_short or b_short or c_short) and day_trades < MAX_TRD
     ep   = close
     dist = sl_p - ep
     tp1  = ep - dist * TP_MULT
-    zT   = a_short ? "ger40-judas" : (b_short ? "ger40-sb" : "ger40-ny")
+    zT   = a_short ? "B" : (b_short ? "G" : "ger40-ny")
     if dist > 0
         day_trades += 1
         alert(f_json(zT, "SHORT", ep, sl_p, tp1), alert.freq_once_per_bar_close)

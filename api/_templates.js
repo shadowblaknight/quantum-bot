@@ -18,7 +18,6 @@
 // carries the sub-signal name (FVG / Judas / SB / ORB / PSYCH / FRB).
 const SPECIALIST_META_MAP = {
   'gold-specialist':    { glyph: '🥇', label: 'Gold Specialist' },
-  'gold-specialist-2':  { glyph: '🥇', label: 'Gold Specialist 2' },
   'nas100-specialist':  { glyph: '📈', label: 'NAS100 Specialist' },
   'gbpusd-specialist':  { glyph: '🇬🇧', label: 'GBPUSD Specialist' },
   'forex-specialist':   { glyph: '💱', label: 'Forex Specialist' },
@@ -27,6 +26,7 @@ const SPECIALIST_META_MAP = {
 
 // ── Legacy templates (history — disabled in V20 mode) ─────────────────────────
 const LEGACY_TEMPLATE_META = {
+  'gold-specialist-2':  { glyph: '🥇', label: 'Gold Specialist 2 (retired)' },
   'silver-bullet':    { glyph: '🥈', label: 'Silver Bullet' },
   'unicorn':          { glyph: '🦄', label: 'Unicorn' },
   'turtle-soup':      { glyph: '🐢', label: 'Turtle Soup' },

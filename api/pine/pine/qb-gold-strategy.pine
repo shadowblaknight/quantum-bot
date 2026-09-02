@@ -87,6 +87,9 @@ orbSeasonFilt  = input.bool(false, "H/M) Seasonal bias (Sep=Short only · Jan=Lo
 orbBreakAsianLo = input.bool(true,  "M) Require entry closes below Asian low (WR 84.6%)",
                  tooltip="Frankfurt ORB SHORT only fires when entry bar closes below the Asian session low (00:00-07:00 UTC range). Sweeps overnight stop-losses = maximum bearish conviction. Python analysis: WR 84.6%, PF 1.655 (N=26/5.5yr ~ 5 trades/year vs 40/yr unfiltered).",
                  group=G_STRAT)
+orbBreakAsianHi = input.bool(true,  "M) Require entry closes above Asian high (LONG, symmetric filter)",
+                 tooltip="Frankfurt ORB LONG only fires when entry bar closes above the Asian session high (00:00-07:00 UTC range). Symmetric to the SHORT Asian-lo filter — tests whether breaking above overnight liquidity gives the same edge on the long side.",
+                 group=G_STRAT)
 orbNYFRBCtxS   = input.bool(false, "H SHORT) Require Frankfurt SHORT today + H1 bear (WR 75%)",
                  tooltip="H SHORT only fires when Frankfurt ORB also broke SHORT today AND H1 is bearish at NY time. Python: WR 75.0%, PF 1.935 (N=64, ~12/yr). Continuation setup: Frankfurt+H1 both bear, NY confirms down.",
                  group=G_STRAT)
@@ -99,6 +102,10 @@ i_hm_dow_tue = input.bool(true,  "H/M   Tue",                group=G_STRAT)
 i_hm_dow_wed = input.bool(false, "H/M   Wed",                group=G_STRAT)
 i_hm_dow_thu = input.bool(false, "H/M   Thu",                group=G_STRAT)
 i_hm_dow_fri = input.bool(false, "H/M   Fri",                group=G_STRAT)
+
+G_C2 = "C2 — OCO (Signal M + H)"
+c2SLBuf = input.float(8.0, "SL beyond C2 structural level (pts)", group=G_C2, step=0.5,
+          tooltip="Tight SL placed this many pts beyond the C2 retest level — not from the C1 close.\nFRB SHORT → SL = frb_lo + 8.  NYORB LONG → SL = nyorb_hi - 8.\nTP targets still use orbTPMult × ORB range measured from the C2 level.")
 
 G_FILT = "Filters"
 adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
@@ -639,8 +646,9 @@ var bool  frb_locked = false
 var bool  frb_done   = false
 var bool  frb_short_today = false  // true if Frankfurt ORB fired SHORT today (used by Signal H)
 
-// Pre-Frankfurt Asian low (00:00-07:00 UTC, before FRB window opens)
+// Pre-Frankfurt Asian range (00:00-07:00 UTC, before FRB window opens)
 var float ar_lo_prefrb = na
+var float ar_hi_prefrb = na
 
 // London ORB: 08:00–08:30 UTC (first 2 bars of London on 15M)
 in_lorb_window = in_london and _minOfDay < 510
@@ -679,6 +687,7 @@ if _newDay
     frb_done       := false
     frb_short_today := false
     ar_lo_prefrb   := na
+    ar_hi_prefrb   := na
     lorb_hi     := na
     lorb_lo     := na
     lorb_locked := false
@@ -696,9 +705,10 @@ if _newDay
     nyorb_locked := false
     nyorb_done   := false
 
-// Track Asian low BEFORE Frankfurt ORB window (strictly 00:00-07:00 UTC)
+// Track Asian range BEFORE Frankfurt ORB window (strictly 00:00-07:00 UTC)
 if _minOfDay >= 0 and _minOfDay < 420
-    ar_lo_prefrb := na(ar_lo_prefrb) ? low : math.min(ar_lo_prefrb, low)
+    ar_lo_prefrb := na(ar_lo_prefrb) ? low  : math.min(ar_lo_prefrb, low)
+    ar_hi_prefrb := na(ar_hi_prefrb) ? high : math.max(ar_hi_prefrb, high)
 
 if in_frb_window
     frb_hi := na(frb_hi) ? high : math.max(frb_hi, high)
@@ -773,15 +783,16 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
     orb_range = frb_hi - frb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range > 0.50
-        if close > frb_hi and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL
-            entryP = close
-            slP    = orbSLMode == "Wide SL" ? (frb_lo - buf) : (frb_hi - buf)
-            slDist = entryP - slP
-            tp1    = orbSLMode == "Tight SL + entry TPs" ? entryP + slDist * orbTPMult : frb_hi + orb_range * orbTPMult
-            tp2    = orbSLMode == "Tight SL + entry TPs" ? entryP + slDist * 2.0       : frb_hi + orb_range * 2.0
-            tp3    = orbSLMode == "Tight SL + entry TPs" ? entryP + slDist * 3.0       : frb_hi + orb_range * 3.0
+        if close > frb_hi and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb))
+            // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support)
+            entryP = frb_hi
+            slP    = frb_hi - c2SLBuf
+            slDist = c2SLBuf
+            tp1    = frb_hi + orb_range * orbTPMult
+            tp2    = frb_hi + orb_range * orbTPMult * 2.0
+            tp3    = frb_hi + orb_range * orbTPMult * 3.0
             frb_done := true
-            strategy.entry("FRB-L", strategy.long, comment="frankfurt-orb · LONG")
+            strategy.entry("FRB-L", strategy.long, limit=entryP, comment="frankfurt-orb · C2 LONG")
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -804,15 +815,16 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             f_drawPosBox(entryP, slP, tp3)
 
         else if close < frb_lo and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb))
-            entryP = close
-            slP    = orbSLMode == "Wide SL" ? (frb_hi + buf) : (frb_lo + buf)
-            slDist = slP - entryP
-            tp1    = orbSLMode == "Tight SL + entry TPs" ? entryP - slDist * orbTPMult : frb_lo - orb_range * orbTPMult
-            tp2    = orbSLMode == "Tight SL + entry TPs" ? entryP - slDist * 2.0       : frb_lo - orb_range * 2.0
-            tp3    = orbSLMode == "Tight SL + entry TPs" ? entryP - slDist * 3.0       : frb_lo - orb_range * 3.0
+            // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance)
+            entryP = frb_lo
+            slP    = frb_lo + c2SLBuf
+            slDist = c2SLBuf
+            tp1    = frb_lo - orb_range * orbTPMult
+            tp2    = frb_lo - orb_range * orbTPMult * 2.0
+            tp3    = frb_lo - orb_range * orbTPMult * 3.0
             frb_done       := true
             frb_short_today := true
-            strategy.entry("FRB-S", strategy.short, comment="frankfurt-orb · SHORT")
+            strategy.entry("FRB-S", strategy.short, limit=entryP, comment="frankfurt-orb · C2 SHORT")
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-S-X", from_entry="FRB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -928,14 +940,15 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range > 0.50
         if close > nyorb_hi and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1))
-            entryP = close
-            slP    = orbSLMode == "Wide SL" ? (nyorb_lo - buf) : (nyorb_hi - buf)
-            slDist = entryP - slP
-            tp1    = orbSLMode == "Tight SL + entry TPs" ? entryP + slDist * orbTPMult : nyorb_hi + orb_range * orbTPMult
-            tp2    = orbSLMode == "Tight SL + entry TPs" ? entryP + slDist * 2.0       : nyorb_hi + orb_range * 2.0
-            tp3    = orbSLMode == "Tight SL + entry TPs" ? entryP + slDist * 3.0       : nyorb_hi + orb_range * 3.0
+            // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support)
+            entryP = nyorb_hi
+            slP    = nyorb_hi - c2SLBuf
+            slDist = c2SLBuf
+            tp1    = nyorb_hi + orb_range * orbTPMult
+            tp2    = nyorb_hi + orb_range * orbTPMult * 2.0
+            tp3    = nyorb_hi + orb_range * orbTPMult * 3.0
             nyorb_done := true
-            strategy.entry("NYORB-L", strategy.long, comment="ny-orb · LONG")
+            strategy.entry("NYORB-L", strategy.long, limit=entryP, comment="ny-orb · C2 LONG")
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -958,14 +971,15 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             f_drawPosBox(entryP, slP, tp3)
 
         else if close < nyorb_lo and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1))
-            entryP = close
-            slP    = orbSLMode == "Wide SL" ? (nyorb_hi + buf) : (nyorb_lo + buf)
-            slDist = slP - entryP
-            tp1    = orbSLMode == "Tight SL + entry TPs" ? entryP - slDist * orbTPMult : nyorb_lo - orb_range * orbTPMult
-            tp2    = orbSLMode == "Tight SL + entry TPs" ? entryP - slDist * 2.0       : nyorb_lo - orb_range * 2.0
-            tp3    = orbSLMode == "Tight SL + entry TPs" ? entryP - slDist * 3.0       : nyorb_lo - orb_range * 3.0
+            // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance)
+            entryP = nyorb_lo
+            slP    = nyorb_lo + c2SLBuf
+            slDist = c2SLBuf
+            tp1    = nyorb_lo - orb_range * orbTPMult
+            tp2    = nyorb_lo - orb_range * orbTPMult * 2.0
+            tp3    = nyorb_lo - orb_range * orbTPMult * 3.0
             nyorb_done := true
-            strategy.entry("NYORB-S", strategy.short, comment="ny-orb · SHORT")
+            strategy.entry("NYORB-S", strategy.short, limit=entryP, comment="ny-orb · C2 SHORT")
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"

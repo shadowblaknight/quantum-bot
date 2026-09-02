@@ -24,14 +24,10 @@
 
 const { getRedis, safeParse, getCurrentSession, applyCors } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
-const { runForAsset: runEventsForAsset } = require('./events-run');
-const { checkCoherence } = require('./coherence-checker');
 const { findSimilarTrades, getSizeMultiplier } = require('./recognition-memory');
 const { getNewsContext, getNewsFeature } = require('./news-context');
-const { suggestLot } = require('./sizing-engine');
 const { fetchAccount, fetchPrice, fetchCandles, fetchPositions } = require('./broker');
 const { atr } = require('./_lib');
-const { notifySetupBrewing } = require('./telegram');
 
 // ===== Redis keys (per-asset state) =====
 const STATE_KEY = (asset) => `v12:watcher:${asset}:state`;

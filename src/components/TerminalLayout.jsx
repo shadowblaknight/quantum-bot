@@ -376,6 +376,7 @@ function QBLogo() {
 // ── Main component ────────────────────────────────────────────────────────────
 export default function TerminalLayout({
   positions, quotes, capital, jarvis, ledger, perf, ftmoStatus, gatingRules, onPositionAction,
+  accounts, accountStatus,
 }) {
   const [activeView, setActiveView] = useState('telemetry');
   const [specOn,  setSpecOn]  = useState({gs1:true,gs2:true,nas:true,ger:true});
@@ -465,7 +466,13 @@ export default function TerminalLayout({
       <div id="qc-topbar">
         <QBLogo />
         <div className="qc-sep"/>
-        <div className="qc-tb-blk"><span className="qc-dot qc-dot-live"/><span className="qc-tb-lbl">META</span><span className="qc-tb-val">LIVE</span></div>
+        <div className="qc-tb-blk">
+          <span className={`qc-dot ${accountStatus==='live'?'qc-dot-live':accountStatus==='standby'?'qc-dot-warn':'qc-dot-dead'}`}/>
+          <span className="qc-tb-lbl">META</span>
+          <span className="qc-tb-val" style={{color:accountStatus==='live'?C.green2:accountStatus==='standby'?C.warn2:C.t3}}>
+            {accountStatus==='live'?'LIVE':accountStatus==='standby'?'STANDBY':accountStatus==='loading'?'…':'NO ACCT'}
+          </span>
+        </div>
         <div className="qc-tb-blk"><span className="qc-dot qc-dot-live"/><span className="qc-tb-lbl">REDIS</span><span className="qc-tb-val">OK</span></div>
         <div className="qc-tb-blk"><span className="qc-dot qc-dot-live"/><span className="qc-tb-lbl">TG</span><span className="qc-tb-val">OK</span></div>
         <div className="qc-sep"/>
@@ -473,6 +480,14 @@ export default function TerminalLayout({
         <div className="qc-tb-blk"><span className="qc-tb-lbl">EQUITY</span><span className="qc-tb-val qc-mono" style={{color:C.green2}}>{equity>0?`$${Number(equity).toLocaleString('en-US',{minimumFractionDigits:0})}`:'—'}</span></div>
         <div className="qc-tb-blk"><span className="qc-tb-lbl">DAILY P&L</span><span className="qc-tb-val qc-mono" style={{color:todayPnl>=0?C.green2:C.red2}}>{fmtMony(todayPnl)}</span></div>
         <div className="qc-sep"/>
+        {(accounts||[]).map((a,i)=>(
+          <div key={i} className="qc-tb-blk" style={{gap:3}}>
+            <span className={`qc-dot ${a.connected?'qc-dot-live':'qc-dot-dead'}`}/>
+            <span className="qc-tb-lbl" style={{maxWidth:60,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{(a.name||'ACCT').toUpperCase()}</span>
+            {a.connected&&a.balance!=null&&<span className="qc-tb-val qc-mono" style={{color:C.gold}}>{a.currency||'$'}{Number(a.balance).toLocaleString('en-US',{maximumFractionDigits:0})}</span>}
+            {!a.connected&&<span className="qc-tb-val" style={{color:C.t3,fontSize:8}}>OFFLINE</span>}
+          </div>
+        ))}
         <div className="qc-tb-blk"><span className="qc-tb-lbl">FTMO</span><span className="qc-tb-val qc-mono" style={{color:ftmoColor}}>{ftmoBadge}</span></div>
         <div className="qc-tb-blk"><span className="qc-tb-lbl">NEWS</span><span className="qc-tb-val qc-mono" style={{color:C.green2}}>CLEAR</span></div>
         <div className="qc-spacer"/>
@@ -576,6 +591,34 @@ export default function TerminalLayout({
               <button key={k} className={`qc-tab${activeView===k?' active':''}`} onClick={()=>switchView(k)}>{lbl}</button>
             ))}
           </div>
+
+          {/* STANDBY OVERLAY — shown when no funded account is connected */}
+          {accountStatus!=='live'&&(
+            <div style={{position:'absolute',inset:0,top:32,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:C.bg,zIndex:10,gap:16}}>
+              <QBLogo/>
+              <div style={{fontFamily:'JetBrains Mono,monospace',fontSize:11,letterSpacing:3,color:C.t3,marginTop:8}}>
+                {accountStatus==='loading'?'CONNECTING…':accountStatus==='standby'?'AWAITING FUNDED ACCOUNT':'NO ACCOUNT CONFIGURED'}
+              </div>
+              {accountStatus==='none'&&(
+                <div style={{fontSize:8,color:C.t3,fontFamily:'Inter,sans-serif',textAlign:'center',maxWidth:280,lineHeight:1.7}}>
+                  Set <span style={{color:C.gold,fontFamily:'JetBrains Mono,monospace'}}>METAAPI_ACCOUNTS</span> env var as a JSON array
+                  <br/>e.g. <span style={{color:C.blue3,fontFamily:'JetBrains Mono,monospace'}}>{'[{"id":"...","name":"FTMO 100K","type":"challenge"}]'}</span>
+                </div>
+              )}
+              {(accounts||[]).length>0&&(
+                <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:4}}>
+                  {(accounts||[]).map((a,i)=>(
+                    <div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 14px',background:C.s1,border:`1px solid ${a.connected?C.green2:C.b}`,fontSize:9,fontFamily:'JetBrains Mono,monospace',letterSpacing:1}}>
+                      <span className={`qc-dot ${a.connected?'qc-dot-live':'qc-dot-dead'}`}/>
+                      <span style={{color:C.t}}>{(a.name||'ACCOUNT').toUpperCase()}</span>
+                      <span style={{color:C.t3}}>{(a.type||'').toUpperCase()}</span>
+                      <span style={{color:a.connected?C.green2:C.t3,marginLeft:4}}>{a.connected?'CONNECTED':'OFFLINE'}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* TELEMETRY */}
           <div className={`qc-view${activeView==='telemetry'?' active':''}`} id="qc-view-telemetry">

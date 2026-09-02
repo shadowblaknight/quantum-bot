@@ -97,7 +97,7 @@
 .qc-exp-val { font-family: 'JetBrains Mono', monospace; font-size: 8px; color: #7A9AB5; text-align: right; margin-top: 2px; }
 
 /* ── CENTER ── */
-#qc-center { display: flex; flex-direction: column; overflow: hidden; }
+#qc-center { display: flex; flex-direction: column; overflow: hidden; position: relative; }
 .qc-tabs { display: flex; background: #060C12; border-bottom: 1px solid #152030; }
 .qc-tab {
   flex: 1; padding: 8px 4px; text-align: center;

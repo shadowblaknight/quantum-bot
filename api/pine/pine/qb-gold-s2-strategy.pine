@@ -31,8 +31,8 @@ modD = input.bool(true, "D  Psych Level Bounce",       group=G_CORE)
 
 G_STRAT = "── Strategy ──"
 exitMode = input.string("TP1", "Exit target",
-           options=["TP1", "TP2"],
-           tooltip="TP1 = default multiplier (A:1R, B:1.5R, D:1.5R).  TP2 = double.",
+           options=["TP0.75", "TP1", "TP2"],
+           tooltip="TP0.75 = 75% of TP1 (tests the GS1 0.75× insight).  TP1 = default multiplier (A:1R, B:1.5R, D:1.5R).  TP2 = double.",
            group=G_STRAT)
 showBoxes = input.bool(true, "Show position boxes", group=G_STRAT)
 
@@ -65,6 +65,9 @@ fvgFill  = input.float(0.20, "FVG max fill",             group=G_FILT, minval=0.
 adrFVG   = input.float(0.85, "ADR max (FVG)",            group=G_FILT, minval=0.5, maxval=1.5)
 adrJudas = input.float(0.90, "ADR max (Judas)",          group=G_FILT, minval=0.5, maxval=1.5)
 adrPsych = input.float(1.20, "ADR max (Psych)",          group=G_FILT, minval=0.5, maxval=2.0)
+slWideA  = input.float(0.0, "A  Wide SL (×ATR from entry, 0=FVG edge)", group=G_FILT, step=0.5, minval=0.0,
+           tooltip="0 = default SL at opposite FVG edge + slBuf×ATR.  >0 = wide structural SL: N×ATR from entry (tests the GS1 150pt insight).")
+sesA     = input.string("both", "A  Session filter", group=G_FILT, options=["both", "London only", "NY only"])
 
 // ─── DAY OF WEEK GATE ─────────────────────────────────────────────────
 _dow   = dayofweek(time, "UTC")
@@ -83,7 +86,8 @@ isWD  = _dow >= 2 and _dow <= 6
 inAs  = _H < 8  and isWD
 inLon = _H >= 8  and _H <= 10 and isWD
 inNY  = _H >= 13 and _H <= 16 and isWD
-inKZ  = inLon or inNY
+inKZ    = inLon or inNY
+_inKZ_A = sesA == "London only" ? inLon : sesA == "NY only" ? inNY : inKZ
 
 // ─── ATR + HTF BIAS ───────────────────────────────────────────────────
 atr  = ta.atr(atrLen)
@@ -224,7 +228,7 @@ var bool firedA = false
 if _newDay
     firedA := false
 
-if modA and barstate.isconfirmed and inKZ and not firedA and _dowOk and atr > 0 and adrC < adrFVG and array.size(fU) > 0 and strategy.position_size == 0
+if modA and barstate.isconfirmed and _inKZ_A and not firedA and _dowOk and atr > 0 and adrC < adrFVG and array.size(fU) > 0 and strategy.position_size == 0
     for i = array.size(fU) - 1 to 0
         if firedA or array.get(fFire, i)
             continue
@@ -246,14 +250,15 @@ if modA and barstate.isconfirmed and inKZ and not firedA and _dowOk and atr > 0 
             continue
 
         eP  = d == 1 ? u : l
-        slP = d == 1 ? l - atr * slBuf : u + atr * slBuf
+        slP = slWideA > 0 ? (d == 1 ? eP - atr * slWideA : eP + atr * slWideA) : (d == 1 ? l - atr * slBuf : u + atr * slBuf)
         slD = math.abs(eP - slP)
         if slD <= 0 or slD / atr < slMin or slD / atr > slMax
             continue
 
-        tp1 = d == 1 ? eP + slD * tpA         : eP - slD * tpA
-        tp2 = d == 1 ? eP + slD * tpA * 2.0   : eP - slD * tpA * 2.0
-        tpL = exitMode == "TP2" ? tp2 : tp1
+        tp075 = d == 1 ? eP + slD * tpA * 0.75 : eP - slD * tpA * 0.75
+        tp1   = d == 1 ? eP + slD * tpA         : eP - slD * tpA
+        tp2   = d == 1 ? eP + slD * tpA * 2.0   : eP - slD * tpA * 2.0
+        tpL   = exitMode == "TP0.75" ? tp075 : exitMode == "TP2" ? tp2 : tp1
 
         array.set(fFire, i, true)
         firedA := true
@@ -289,9 +294,10 @@ if modB and barstate.isconfirmed and inLon and _dowOk and arLocked and atr > 0 a
         slP = high + atr * slBuf
         slD = slP - eP
         if slD > 0 and slD / atr >= slMin and slD / atr <= slMax and f_htfOk(-1, htfB_req)
-            tp1 = eP - slD * tpB
-            tp2 = eP - slD * tpB * 2.0
-            tpL = exitMode == "TP2" ? tp2 : tp1
+            tp075 = eP - slD * tpB * 0.75
+            tp1   = eP - slD * tpB
+            tp2   = eP - slD * tpB * 2.0
+            tpL   = exitMode == "TP0.75" ? tp075 : exitMode == "TP2" ? tp2 : tp1
             bHi := true
             strategy.entry("B-S-pend", strategy.short, limit=eP, comment="S2-B SHORT")
             strategy.exit("B-S-X",     from_entry="B-S-pend", stop=slP, limit=tpL)
@@ -304,9 +310,10 @@ if modB and barstate.isconfirmed and inLon and _dowOk and arLocked and atr > 0 a
         slP = low - atr * slBuf
         slD = eP - slP
         if slD > 0 and slD / atr >= slMin and slD / atr <= slMax and f_htfOk(1, htfB_req)
-            tp1 = eP + slD * tpB
-            tp2 = eP + slD * tpB * 2.0
-            tpL = exitMode == "TP2" ? tp2 : tp1
+            tp075 = eP + slD * tpB * 0.75
+            tp1   = eP + slD * tpB
+            tp2   = eP + slD * tpB * 2.0
+            tpL   = exitMode == "TP0.75" ? tp075 : exitMode == "TP2" ? tp2 : tp1
             bLo := true
             strategy.entry("B-L-pend", strategy.long,  limit=eP, comment="S2-B LONG")
             strategy.exit("B-L-X",     from_entry="B-L-pend", stop=slP, limit=tpL)
@@ -338,9 +345,10 @@ if modD and barstate.isconfirmed and inKZ and not firedD and _dowOk and atr > 0 
         slP  = dir == 1 ? wick - buf2 : wick + buf2
         slD  = math.abs(eP - slP)
         if slD > 0 and slD / atr >= slMin and slD / atr <= slMax
-            tp1 = dir == 1 ? eP + slD * tpD       : eP - slD * tpD
-            tp2 = dir == 1 ? eP + slD * tpD * 2.0 : eP - slD * tpD * 2.0
-            tpL = exitMode == "TP2" ? tp2 : tp1
+            tp075 = dir == 1 ? eP + slD * tpD * 0.75 : eP - slD * tpD * 0.75
+            tp1   = dir == 1 ? eP + slD * tpD       : eP - slD * tpD
+            tp2   = dir == 1 ? eP + slD * tpD * 2.0 : eP - slD * tpD * 2.0
+            tpL   = exitMode == "TP0.75" ? tp075 : exitMode == "TP2" ? tp2 : tp1
             firedD := true
             eId = dir == 1 ? "D-L" : "D-S"
             strategy.entry(eId, dir == 1 ? strategy.long : strategy.short, comment="S2-D")

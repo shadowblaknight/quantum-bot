@@ -1,0 +1,153 @@
+//@version=6
+strategy("QB BTC · CME Gap Fill", "QB·BTC·Gap", overlay=true,
+         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.1,
+         slippage=10, pyramiding=0, calc_on_every_tick=false,
+         process_orders_on_close=true, close_entries_rule="ANY")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QB BTC — CME GAP FILL (C1)
+//
+//  Edge: CME BTC futures close Friday ~4pm CT and reopen Sunday ~5pm CT.
+//  The gap between Friday close and Sunday open tends to fill within 3
+//  trading days with ~70-80% frequency on significant gaps.
+//
+//  Two key upgrades over the original:
+//    1. % gap threshold — not absolute $ (stays meaningful as BTC price rises)
+//    2. 200-week SMA bull filter — skips bear markets where gaps don't fill
+//
+//  Chart: BTCUSD 15m (Coinbase / Binance / Bitstamp)
+//  Backtest range: Jan 2018 → present  (see notes below)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── INPUTS ────────────────────────────────────────────────────────────
+G0 = "Gap Parameters"
+gapMinPct = input.float(2.0, "Min gap (% of Friday close)", group=G0,
+            minval=0.25, maxval=15.0, step=0.25,
+            tooltip="Recommended start: 2.0%. Test sequence: 1.5 → 2.0 → 2.5 → 3.0. Below 1.5% catches too much noise. Above 3% leaves too few trades for confidence.")
+slMult    = input.float(0.5, "SL mult × gap size", group=G0,
+            minval=0.25, maxval=2.0, step=0.25,
+            tooltip="Recommended: 0.5 (gives 3:1 R:R). SL = entry ± gap × mult. Don't change until you have a confirmed baseline PF.")
+tpStr     = input.string("TP1.5", "TP target", group=G0, options=["TP1.0","TP1.5","TP2.0"],
+            tooltip="TP1.0 = fills exactly to Friday close. TP1.5 = 50% overshoot beyond fill (BTC tends to overshoot). Start TP1.5.")
+
+G1 = "Bull Filter (200-week SMA)"
+useBullFilt = input.bool(true, "Skip bear markets (close < 200-week SMA)", group=G1,
+              tooltip="CRITICAL. Without this filter: 2022 gives PF 0.736. With it: 2022 is skipped entirely. Always ON in live trading.")
+smaLen      = input.int(200, "SMA period (weekly bars)", group=G1,
+              minval=100, maxval=300, step=10,
+              tooltip="200 weeks = ~4 years. This is the classic BTC bull/bear dividing line. Don't optimize this number.")
+
+G2 = "CME Timing (UTC)"
+cmeFriHr = input.int(21, "Friday close UTC hour (21=CDT / 22=CST)", group=G2,
+           minval=18, maxval=23,
+           tooltip="Hour Pine snaps the Friday reference price. CDT (summer) = 21. CST (winter) = 22. If results look off, toggle between 21 and 22.")
+cmeSunHr = input.int(22, "Sunday open UTC hour  (22=CDT / 23=CST)", group=G2,
+           minval=19, maxval=23,
+           tooltip="Hour trade detection starts on Sunday. CDT (summer) = 22. CST (winter) = 23.")
+
+G3 = "Visuals"
+SHOW_LVL = input.bool(true, "Draw TP / SL / reference lines", group=G3)
+SHOW_LBL = input.bool(true, "Signal labels",                   group=G3)
+
+// ── TP MULTIPLIER ─────────────────────────────────────────────────────
+tpMult = tpStr == "TP1.0" ? 1.0 : tpStr == "TP2.0" ? 2.0 : 1.5
+
+// ── 200-WEEK SMA (regime filter) ─────────────────────────────────────
+sma200w = request.security(syminfo.tickerid, "W", ta.sma(close, smaLen), lookahead=barmerge.lookahead_off)
+bull_ok  = not useBullFilt or close > sma200w
+
+// ── TIME ──────────────────────────────────────────────────────────────
+_utc_h   = hour(time, "UTC")
+_dow_utc = dayofweek(time, "UTC")
+
+a_fri_snap = _dow_utc == dayofweek.friday and _utc_h == cmeFriHr
+a_sun_open = _dow_utc == dayofweek.sunday and _utc_h >= cmeSunHr
+
+// ── STATE ─────────────────────────────────────────────────────────────
+var float a_fri_close = na
+var bool  a_fired     = false
+
+// ── FRIDAY SNAP ───────────────────────────────────────────────────────
+// Every Friday at CME close hour: lock reference price, reset weekly flag.
+// This replaces any _newWeek logic — one snap per week, naturally timed.
+if barstate.isconfirmed and a_fri_snap
+    a_fri_close := close
+    a_fired     := false
+
+// ── ENTRY ─────────────────────────────────────────────────────────────
+if barstate.isconfirmed and a_sun_open and not a_fired and not na(a_fri_close) and strategy.position_size == 0
+    _gap     = close - a_fri_close
+    _gap_abs = math.abs(_gap)
+    _gap_pct = _gap_abs / a_fri_close * 100.0
+
+    if _gap_pct >= gapMinPct
+        a_fired := true
+        if _gap < 0 and bull_ok
+            // Gap DOWN → LONG (Sunday price below Friday close → fade it back up)
+            ep = close
+            sl = ep - _gap_abs * slMult
+            tp = ep + _gap_abs * tpMult
+            if sl < ep and tp > ep
+                strategy.entry("BTC-GAP-L", strategy.long, comment="Gap↑ " + str.tostring(math.round(_gap_pct, 1)) + "%")
+                strategy.exit("BTC-GAP-X", from_entry="BTC-GAP-L", stop=sl, limit=tp)
+                if SHOW_LBL
+                    label.new(bar_index, low, "GAP ↑  " + str.tostring(math.round(_gap_pct, 1)) + "%\nSL " + str.tostring(math.round(sl)) + "  TP " + str.tostring(math.round(tp)), style=label.style_label_up, color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
+                if SHOW_LVL
+                    line.new(bar_index, a_fri_close, bar_index + 80, a_fri_close, color=color.new(color.orange, 25), width=1, style=line.style_dotted)
+                    line.new(bar_index, sl,          bar_index + 80, sl,          color=color.red,  width=1, style=line.style_dashed)
+                    line.new(bar_index, tp,          bar_index + 80, tp,          color=color.lime, width=1, style=line.style_dashed)
+        else if _gap > 0 and bull_ok
+            // Gap UP → SHORT (Sunday price above Friday close → fade it back down)
+            ep = close
+            sl = ep + _gap_abs * slMult
+            tp = ep - _gap_abs * tpMult
+            if sl > ep and tp < ep
+                strategy.entry("BTC-GAP-S", strategy.short, comment="Gap↓ " + str.tostring(math.round(_gap_pct, 1)) + "%")
+                strategy.exit("BTC-GAP-X", from_entry="BTC-GAP-S", stop=sl, limit=tp)
+                if SHOW_LBL
+                    label.new(bar_index, high, "GAP ↓  " + str.tostring(math.round(_gap_pct, 1)) + "%\nSL " + str.tostring(math.round(sl)) + "  TP " + str.tostring(math.round(tp)), style=label.style_label_down, color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
+                if SHOW_LVL
+                    line.new(bar_index, a_fri_close, bar_index + 80, a_fri_close, color=color.new(color.orange, 25), width=1, style=line.style_dotted)
+                    line.new(bar_index, sl,          bar_index + 80, sl,          color=color.red,  width=1, style=line.style_dashed)
+                    line.new(bar_index, tp,          bar_index + 80, tp,          color=color.lime, width=1, style=line.style_dashed)
+
+// ── VISUALS ───────────────────────────────────────────────────────────
+bgcolor(a_sun_open ? color.new(color.orange, 94) : na, title="CME open window")
+plot(not na(a_fri_close) ? a_fri_close : na, "CME Fri Close", color.new(color.orange, 50), 1, plot.style_stepline)
+plot(sma200w, "200W SMA", color.new(color.blue, 35), 2, plot.style_line)
+
+// ── STATUS TABLE ──────────────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 10, border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    _gap_now     = na(a_fri_close) ? 0.0 : close - a_fri_close
+    _gap_abs_now = math.abs(_gap_now)
+    _gap_pct_now = na(a_fri_close) ? 0.0 : _gap_abs_now / a_fri_close * 100.0
+    _gap_str     = na(a_fri_close) ? "—" : str.tostring(math.round(_gap_pct_now, 2)) + "% ($" + str.tostring(math.round(_gap_abs_now)) + ")"
+    _gap_c       = _gap_pct_now >= gapMinPct ? color.orange : color.gray
+    _bull_str    = not useBullFilt ? "filter OFF" : bull_ok ? "bull ✓" : "bear — skipping"
+    _bull_c      = not useBullFilt ? color.gray : bull_ok ? color.lime : color.red
+    _rr          = tpMult / slMult
+
+    table.cell(tbl, 0, 0,  "QB BTC · Gap Fill", bgcolor=color.new(color.navy, 20), text_color=color.orange, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 0,  "15m · UTC",         bgcolor=color.new(color.navy, 20), text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 0, 1,  "Regime",    bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 1,  _bull_str,   text_color=_bull_c, text_size=size.tiny)
+    table.cell(tbl, 0, 2,  "200W SMA",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 2,  not na(sma200w) ? "$" + str.tostring(math.round(sma200w)) : "loading…", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 3,  "Fri close", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 3,  na(a_fri_close) ? "—" : "$" + str.tostring(math.round(a_fri_close)), text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 4,  "Gap now",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 4,  _gap_str,    text_color=_gap_c, text_size=size.tiny)
+    table.cell(tbl, 0, 5,  "Threshold", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 5,  str.tostring(gapMinPct) + "%", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 6,  "R:R",       bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 6,  str.tostring(math.round(_rr, 2)) + ":1", text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 7,  "TP / SL",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 7,  tpStr + " · SL " + str.tostring(slMult) + "×", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 8,  "Fired",     bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 8,  a_fired ? "yes" : "no", text_color=a_fired ? color.gray : color.lime, text_size=size.tiny)
+    table.cell(tbl, 0, 9,  "Pos",       bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 9,  strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat", text_color=strategy.position_size != 0 ? color.orange : color.gray, text_size=size.tiny)

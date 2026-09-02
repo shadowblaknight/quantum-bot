@@ -218,7 +218,7 @@ f_json(sig, dir, ep, sl_p, tp_p) =>
          ',"entry":"'     + str.tostring(ep,   format.mintick) + '"' +
          ',"sl":"'        + str.tostring(sl_p, format.mintick) + '"' +
          ',"tp1":"'       + str.tostring(tp_p, format.mintick) + '"' +
-         ',"rr1":'        + str.tostring(rr, "#.##") +
+         ',"rr1":'        + str.tostring(rr, "0.##") +
          ',"orbHi":"'     + str.tostring(orb_hi, format.mintick) + '"' +
          ',"orbLo":"'     + str.tostring(orb_lo, format.mintick) + '"' +
          ',"gDir":'       + str.tostring(g_dir) +
@@ -232,7 +232,6 @@ f_json(sig, dir, ep, sl_p, tp_p) =>
 if b_long
     _sl = orb_lo
     _tp = orb_hi + _orh * 1.5
-    alert(f_json("B", "LONG", close, _sl, _tp), alert.freq_once_per_bar_close)
     if SHOW_LBL
         label.new(bar_index, low - atr_val * 0.4,
                   "B ↑  " + str.tostring(close, format.mintick) +
@@ -240,11 +239,12 @@ if b_long
                   "\nTP " + str.tostring(_tp, format.mintick),
                   style=label.style_label_up, color=color.new(color.orange, 5),
                   textcolor=color.white, size=size.small)
+    if _tp > close  // guard: close already past TP → no R:R, skip webhook
+        alert(f_json("B", "LONG", close, _sl, _tp), alert.freq_once_per_bar_close)
 
 if b_short
     _sl = orb_hi
     _tp = orb_lo - _orh * 1.5
-    alert(f_json("B", "SHORT", close, _sl, _tp), alert.freq_once_per_bar_close)
     if SHOW_LBL
         label.new(bar_index, high + atr_val * 0.4,
                   "B ↓  " + str.tostring(close, format.mintick) +
@@ -252,6 +252,8 @@ if b_short
                   "\nTP " + str.tostring(_tp, format.mintick),
                   style=label.style_label_down, color=color.new(color.orange, 5),
                   textcolor=color.white, size=size.small)
+    if _tp < close  // guard: close already past TP → no R:R, skip webhook
+        alert(f_json("B", "SHORT", close, _sl, _tp), alert.freq_once_per_bar_close)
 
 if g_long
     _sl = math.min(g_sw_wick, na(pdl) ? g_sw_wick : pdl) - 5.0

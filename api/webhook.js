@@ -30,11 +30,10 @@ const V20_SPECIALIST_MODE = true;
 // If zoneType is NOT in this list the signal is silently dropped.
 // Update here when a new confirmed signal is unlocked in a specialist Pine.
 const SPECIALIST_ALLOWED_ZONES = {
-  // All 8 confirmed sub-signals from qb-gold-specialist.pine:
-  //   A=FVG  B=Asian-H/L (Judas)  C=SB-FVG  D=PSYCH  D2=PSYCH-EXT  M=FRB  H=NYORB
-  'gold-specialist':   ['FRB', 'NYORB', 'FVG', 'Asian-H', 'Asian-L', 'SB-FVG', 'PSYCH', 'PSYCH-EXT'],
-  // Gold Specialist 2 — H1 chart, 3 confirmed setups (A/B/D backtest: WR 55.4%, PF 1.27, 6yr)
-  'gold-specialist-2': ['gold-s2-a', 'gold-s2-b', 'gold-s2-d'],
+  // GS1 confirmed active: H=NYORB (NY ORB) + M=FRB (Frankfurt Retest Breakout) only.
+  // All other sub-signals (FVG, Asian-H/L, SB-FVG, PSYCH, PSYCH-EXT) dropped silently.
+  'gold-specialist':   ['FRB', 'NYORB'],
+  // gold-specialist-2 retired — signals get 200 template-disabled from webhook
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
   'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)
   'ger40-bg-specialist': ['B', 'G'], // Frankfurt ORB (B) + London 3-Phase FVG (G), Tue+Thu only
@@ -258,60 +257,6 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   }
   // ─────────────────────────────────────────────────────────────────────────
 
-  // ── PHASE 1 REGIME SHADOW (read-only) ────────────────────────────────────
-  // Assess market regime and write what the detector WOULD have done.
-  // Entirely isolated: wrapped in try/catch, hard-capped at 2.5s, no variable
-  // from this block is read by any downstream code. Trade execution is unchanged.
-  try {
-    const { assessRegime, writeShadowLog } = require('./regime-detector');
-    const _ra = await withTimeout(
-      assessRegime({ assetId, template: p.template, nowTs: p.timestamp || Date.now() }),
-      2500, null
-    );
-    if (_ra) {
-      writeShadowLog({
-        signalId:     dedupeKey,
-        assetId,
-        template:     p.template,
-        direction:    p.direction,
-        ts:           p.timestamp || Date.now(),
-        regime:       _ra.regime,
-        newsState:    _ra.newsState,
-        macroVol:     _ra.macroVol,
-        vix:          _ra.vix,
-        vixDate:      _ra.vixDate,
-        instrumentVol: _ra.instrumentVol,
-        wouldAction:  _ra.wouldAction,
-        wouldSizeMult: _ra.wouldSizeMult,
-        reasons:      _ra.reasons,
-      }).catch(() => {});  // fire-and-forget; Redis failure never reaches the trade path
-    }
-  } catch (_regimeErr) {}
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // ── PHASE 2 ENTRYSTYLE SHADOW (read-only) ────────────────────────────────
-  // For signals that carry immediateEntry + retestEntry (branching templates),
-  // write a shadow record comparing what WOULD have happened under each entry
-  // style. Entirely isolated: try/catch, no downstream code reads from this block.
-  try {
-    if (p.immediateEntry != null && p.retestEntry != null && p.template !== 'ote-continuation') {
-      const { writeEntryStyleShadow } = require('./entrystyle-shadow');
-      writeEntryStyleShadow(p, dedupeKey, assetId).catch(() => {});
-    }
-  } catch (_esErr) {}
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // ── PHASE 3 ORDERFLOW SHADOW (read-only) ─────────────────────────────────
-  // Stores the CVD snapshot (slope, confirms, divergence, lowTrust) attached to
-  // this signal for later win-rate comparison against cvdConfirms=false signals.
-  // Entirely isolated: try/catch, no downstream code reads from this block.
-  try {
-    if (p.cvdSlope != null || p.cvdDivergence != null) {
-      const { writeOrderflowShadow } = require('./orderflow-shadow');
-      writeOrderflowShadow(p, dedupeKey, assetId).catch(() => {});
-    }
-  } catch (_ofErr) {}
-  // ─────────────────────────────────────────────────────────────────────────
 
   // ── PHASE 4 SESSION-CONTEXT SHADOW ───────────────────────────────────────
   // Registered directly with _waitUntil in the main handler (see below), NOT
@@ -573,12 +518,15 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     } catch (_) {}
   }
   const finalLot = decision.finalLot;
-  const finalSL = decision.finalSL;
-  const finalTP1 = decision.finalTP1 != null ? decision.finalTP1 : tp1;
+  // V20 specialists: use Pine's exact SL/TP — the rules engine auto-promotes TPs
+  // to 1R/2R/3R (effectiveMinRR >= 1.0 branch) and may widen SL in elevated regime,
+  // both of which override the specialist's structural levels. Bypass for specialists.
+  const finalSL  = isSpecialist ? sl  : decision.finalSL;
+  const finalTP1 = isSpecialist ? tp1 : (decision.finalTP1 != null ? decision.finalTP1 : tp1);
   // v14 all-or-nothing: broker TP parks at the LAST configured target so the full
   // position rides there. SL ratchets to TP1/TP2 in manage-trades (no partials).
-  const _bTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
-  const _bTP3 = decision.finalTP3 != null ? decision.finalTP3 : tp3;
+  const _bTP2 = isSpecialist ? tp2 : (decision.finalTP2 != null ? decision.finalTP2 : tp2);
+  const _bTP3 = isSpecialist ? tp3 : (decision.finalTP3 != null ? decision.finalTP3 : tp3);
   const brokerTP = _bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1);
   // V20 specialists use QB-V20-{asset}-{signalType}; legacy stays QB-V13-{template}-{window}
   // gold-specialist-2 uses QB-V20-GS2-* prefix so its positions don't block gold-specialist
@@ -811,6 +759,45 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
 
   await markExecuted(dedupeKey, { brokerOrderId: placement.orderId, template: p.template, placedAt: Date.now() });
 
+  // ── C2 OCO: place fade limit and arm the pair in Redis ───────────────────
+  if (p.c2Mode === 'OCO' && p.c2FadeEntry && p.c2FadeDir) {
+    try {
+      const _fadeDir  = p.c2FadeDir;
+      const _fadeE    = parseFloat(p.c2FadeEntry);
+      const _fadeSl   = parseFloat(p.c2FadeSl);
+      const _fadeTp1  = parseFloat(p.c2FadeTp1);
+      const _fadeTp2  = isFinite(parseFloat(p.c2FadeTp2)) ? parseFloat(p.c2FadeTp2) : null;
+      const _fadeTp3  = isFinite(parseFloat(p.c2FadeTp3)) ? parseFloat(p.c2FadeTp3) : null;
+      if (isFinite(_fadeE) && isFinite(_fadeSl) && isFinite(_fadeTp1)) {
+        const rFE  = _roundTick(_fadeE,  pipSz, 'nearest');
+        const rFSL = _roundTick(_fadeSl, pipSz, _fadeDir === 'LONG' ? 'down' : 'up');
+        const fBTP = _fadeTp3 ?? _fadeTp2 ?? _fadeTp1;
+        const rFTP = fBTP != null ? _roundTick(fBTP, pipSz, _fadeDir === 'LONG' ? 'down' : 'up') : null;
+        const fadeCmt = `QB-V20-${assetId.slice(0,5)}-${(p.zoneType||'sig').slice(0,8)}-OCO-F`.slice(0, 64);
+        const fadePl  = await placeLimitOrder(brokerSymbol, _fadeDir, finalLot, rFE, rFSL, rFTP, fadeCmt);
+        if (fadePl.ok) {
+          const _r = getRedis();
+          if (_r) {
+            const _ocoRec = JSON.stringify({
+              primaryOrderId: placement.orderId, fadeOrderId: fadePl.orderId,
+              brokerSymbol, assetId, status: 'armed', expiresAt: Date.now() + 86400000,
+            });
+            await _r.set(`v20:oco:dk:${dedupeKey}`, _ocoRec, { ex: 86400 }).catch(() => {});
+          }
+          await logActivity({ type: 'c2-oco-armed', asset: assetId, template: p.template,
+            direction: p.direction, primaryOrderId: placement.orderId,
+            fadeOrderId: fadePl.orderId, fadeDir: _fadeDir });
+        } else {
+          await logActivity({ type: 'c2-oco-fade-failed', asset: assetId,
+            template: p.template, error: fadePl.error });
+        }
+      }
+    } catch (_ocoErr) {
+      try { await logActivity({ type: 'c2-oco-error', asset: assetId, error: _ocoErr?.message }); } catch (_) {}
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   // v2.3: real R-multiples from actual prices — the SL/minRR recompute can put
   // TP1 at 2R (etc.), so the old hardcoded 1/2/3 labels misreported the trade
   // AND corrupted recognition-memory R-data. Compute the truth from prices.
@@ -819,8 +806,8 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
 
   try {
     const { addPendingSetup } = require('./watcher');
-    const finalTP2 = decision.finalTP2 != null ? decision.finalTP2 : tp2;
-    const finalTP3 = decision.finalTP3 != null ? decision.finalTP3 : tp3;
+    const finalTP2 = isSpecialist ? tp2 : (decision.finalTP2 != null ? decision.finalTP2 : tp2);
+    const finalTP3 = isSpecialist ? tp3 : (decision.finalTP3 != null ? decision.finalTP3 : tp3);
     const slDistance = Math.abs(entry - finalSL);
     const _kzAtSignal  = checkKillZone(new Date(p.timestamp || Date.now()));
     const _sigUtcMin   = (() => { const d = new Date(p.timestamp || Date.now()); return d.getUTCHours() * 60 + d.getUTCMinutes(); })();
@@ -1156,31 +1143,8 @@ module.exports = async (req, res) => {
           await markExecuted(dedupeKey, { status: 'failed', failedAt: Date.now() }, 60);
         })
     );
-    // Session-context shadow needs a live MetaAPI candle fetch and must be
-    // registered here \u2014 NOT inside processSignalBackground \u2014 so Vercel includes
-    // it in the lifecycle set captured before the response is sent.
-    try {
-      const { writeSessionCtxShadow } = require('./session-context-shadow');
-      _waitUntil(writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {}));
-    } catch (_scErr) {}
-    // Wick-ratio shadow \u2014 capture signal bar OHLC (from Pine payload).
-    // barOpen/barHigh/barLow/barClose absent until Pine scripts updated:
-    // records store hasBarData:false until then.
-    try {
-      const { writeWickRatioShadow } = require('./wickratio-shadow');
-      _waitUntil(writeWickRatioShadow(p, dedupeKey, assetId).catch(() => {}));
-    } catch (_wrErr) {}
   } else {
-    // Local / dev fallback: Node keeps the process alive for pending promises,
-    // so a plain fire-and-forget is sufficient.
-    try {
-      const { writeSessionCtxShadow } = require('./session-context-shadow');
-      writeSessionCtxShadow(p, dedupeKey, assetId).catch(() => {});
-    } catch (_scErr) {}
-    try {
-      const { writeWickRatioShadow } = require('./wickratio-shadow');
-      writeWickRatioShadow(p, dedupeKey, assetId).catch(() => {});
-    } catch (_wrErr) {}
+    // Local / dev fallback
     try {
       await processSignalBackground({ p, assetId, pineTicker, dedupeKey, entry, sl, tp1, tp2, tp3 });
       if (!res.headersSent) res.status(200).json({ ok: true, dedupeKey, ms: Date.now() - t0 });

@@ -31,10 +31,13 @@ const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
 const goalHandler = require('./jarvis-goal');
 const addGoalPnL  = goalHandler.addGoalPnL;
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
-const { notifyTPHit, notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired, notifySpecialistTradeClosed } = require('./telegram');
+const {
+  notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired,
+  notifySpecialistTradeClosed, notifySpecialistTPConfirmed,
+  notifySpecialistSLLocked, notifySpecialistSLWarning, notifyOCOFailed,
+} = require('./telegram');
 const { SPECIALIST_SIGNALS } = require('./_templates');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
-const { runEntryStyleEvaluator } = require('./entrystyle-evaluator');
 
 // v14: all-or-nothing exits. The full position rides to the FINAL TP (parked as
 // the broker TP at placement). At TP1/TP2 touches we ONLY ratchet the SL up to
@@ -101,14 +104,6 @@ function estimateDollarsFromDistance(assetId, distance, lot) {
   return pips * meta.dollarPerPipPerLot * lot;
 }
 
-function signedDollarsForLeg(assetId, entryPrice, exitPrice, direction, lot) {
-  const meta = getAssetById(assetId);
-  if (!meta || !meta.pipSize || !meta.dollarPerPipPerLot) return null;
-  const isLong = direction === 'LONG';
-  const signedDistance = isLong ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
-  const signedPips = signedDistance / meta.pipSize;
-  return signedPips * meta.dollarPerPipPerLot * lot;
-}
 
 // ===== MetaAPI: modify position SL/TP =====
 async function modifyPosition(positionId, slPrice, tpPrice, assetId) {
@@ -133,18 +128,22 @@ async function modifyPosition(positionId, slPrice, tpPrice, assetId) {
     takeProfit: tp,
   };
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'auth-token': token, 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
+    clearTimeout(timer);
     if (!resp.ok) {
       const txt = await resp.text().catch(() => '');
       return { ok: false, error: `modify ${resp.status}: ${txt.slice(0, 200)}` };
     }
     return { ok: true, data: await resp.json() };
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.name === 'AbortError' ? 'modify-timeout>8s' : e.message };
   }
 }
 
@@ -184,7 +183,10 @@ async function fetchClosedTradesRecent() {
   const until = new Date().toISOString();
   const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/history-deals/time/${since}/${until}`;
   try {
-    const resp = await fetch(url, { headers: { 'auth-token': token, 'Accept': 'application/json' } });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch(url, { headers: { 'auth-token': token, 'Accept': 'application/json' }, signal: controller.signal });
+    clearTimeout(timer);
     if (!resp.ok) return [];
     const deals = await resp.json();
     return Array.isArray(deals) ? deals : [];
@@ -206,7 +208,10 @@ async function getTodayRealized() {
   const until = now.toISOString();
   const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${accountId}/history-deals/time/${since}/${until}`;
   try {
-    const resp = await fetch(url, { headers: { 'auth-token': token, 'Accept': 'application/json' } });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch(url, { headers: { 'auth-token': token, 'Accept': 'application/json' }, signal: controller.signal });
+    clearTimeout(timer);
     if (!resp.ok) return { ok: false, error: `deals ${resp.status}` };
     const deals = await resp.json();
     const list = Array.isArray(deals) ? deals : [];
@@ -362,6 +367,36 @@ async function managePosition(position) {
       createdAt: Date.now(),
     };
     await setPositionState(position.id, state);
+
+    // C2 OCO: first time we see this position — cancel the other pending leg
+    if (state.dedupeKey) {
+      try {
+        const _rOco = getRedis();
+        if (_rOco) {
+          const _ocoRaw = await _rOco.get(`v20:oco:dk:${state.dedupeKey}`).catch(() => null);
+          if (_ocoRaw) {
+            const _oco = safeParse(_ocoRaw);
+            if (_oco && _oco.status === 'armed') {
+              const _isFade  = (position.comment || '').includes('-OCO-F');
+              const _cancelId = _isFade ? _oco.primaryOrderId : _oco.fadeOrderId;
+              if (_cancelId) {
+                const { cancelBrokerOrder } = require('./watcher');
+                const _cxlResult = await cancelBrokerOrder(_cancelId).catch((e) => ({ ok: false, error: e?.message }));
+                if (!_cxlResult.ok) {
+                  console.error(`[OCO] cancel failed orderId=${_cancelId}: ${_cxlResult.error} — both legs may be open`);
+                  try {
+                    await notifyOCOFailed({ orderId: _cancelId, error: _cxlResult.error }).catch(() => {});
+                  } catch (_) {}
+                }
+                await _rOco.set(`v20:oco:dk:${state.dedupeKey}`,
+                  JSON.stringify({ ..._oco, status: _cxlResult.ok ? 'settled' : 'cancel-failed', settledAt: Date.now() }),
+                  { ex: 86400 }).catch(() => {});
+              }
+            }
+          }
+        }
+      } catch (_ocoErr) {}
+    }
   }
 
   const tpLevels = matchedPending.tpLevels || [];
@@ -449,11 +484,7 @@ async function managePosition(position) {
       // Ensures the user is always notified even when the ratchet can't lock immediately
       // (e.g. price bounced back within the stop-buffer window).
       try {
-        const tpEmoji = tpName === 'TP1' ? '🥉' : tpName === 'TP2' ? '🥈' : '🥇';
-        await sendOnce(`tp-confirmed:${position.id}:${tpName}`,
-          `${tpEmoji} <b>${tpName} CONFIRMED — ${asset.toUpperCase()}</b>\n\n` +
-          `${isLong ? '🟢' : '🔴'} ${direction} · <code>${tpPrice.toFixed(tpPrice > 100 ? 2 : 5)}</code> (${rMult.toFixed(1)}R)\n` +
-          `SL lock will fire once price clears TP by >${(stopBuffer / pipSz).toFixed(1)} pips`);
+        await notifySpecialistTPConfirmed({ positionId: position.id, asset, direction, tpName, tpPrice, rMult });
       } catch (_) {}
     }
   }
@@ -599,11 +630,8 @@ async function managePosition(position) {
             `SL-lock SKIPPED: ${chosen.price.toFixed(2)} is ${distFromMarket.toFixed(2)} pts from market (min ${minStopDist}) -- clamp not viable`);
           await logMTError({ type: 'sl-skip-unclamped', asset, positionId: position.id, tpName: chosen.name, proposed: chosen.price, distFromMarket, minStopDist });
           try {
-            await sendOnce(`sllock-skip:${position.id}:${chosen.name}`,
-              `⚠️ <b>${chosen.name} hit but SL-lock SKIPPED — ${asset.toUpperCase()}</b>\n\n` +
-              `Proposed SL <code>${chosen.price.toFixed(chosen.price > 100 ? 2 : 5)}</code> is ${distFromMarket.toFixed(2)} pts from market\n` +
-              `Broker minimum: ${minStopDist} pts — clamp would not improve on current SL\n` +
-              `<b>Position unprotected at this TP level. Intervene manually.</b>`);
+            await notifySpecialistSLWarning({ positionId: position.id, asset, tpName: chosen.name, type: 'skip',
+              detail: `SL ${chosen.price.toFixed(2)} is ${distFromMarket.toFixed(2)} pts from market (min ${minStopDist} pts) — position unprotected` });
           } catch (_) {}
         }
       }
@@ -645,28 +673,8 @@ async function managePosition(position) {
             const rMult = plannedSLDist > 0
               ? Math.abs(slCandidate - matchedPending.plannedEntry) / plannedSLDist
               : (Math.abs(slCandidate - state.entry) / initialSLForR);
-            const lockedDollars = signedDollarsForLeg(asset, state.entry, slCandidate, direction, position.volume);
-            const ridingTo      = tpLevels[finalIdx] ? tpLevels[finalIdx].price : null;
-            // When the SL was clamped, label it clearly — the stop is NOT at TP price.
-            const pFmt = (v) => v.toFixed(v > 100 ? 2 : 5);
-            const isRetraceLock = chosen.name.endsWith('-retrace');
-            const isScalpBELock = chosen.name.endsWith('-be');
-            const displayName   = isRetraceLock ? hitRungs[0].name + ' (retrace-lock)'
-                                : isScalpBELock ? chosen.name.replace('-be', '') + ' (break-even lock)'
-                                : chosen.name;
-            const stopDesc = slClamped
-              ? `<code>${pFmt(slCandidate)}</code> ⚠️ clamped (${displayName} ${pFmt(chosen.price)} too close to market)`
-              : isRetraceLock
-                ? `<code>${pFmt(slCandidate)}</code> ↩️ retrace-lock (${displayName} retraced before SL could move)`
-              : isScalpBELock
-                ? `<code>${pFmt(slCandidate)}</code> ⚡ break-even locked (scalp — riding to TP or zero)`
-                : `${chosen.name} <code>${pFmt(slCandidate)}</code>`;
             try {
-              await sendOnce(`tplock:${position.id}:${chosen.name}`,
-                `\u{1F3AF} <b>${displayName} LOCKED — ${asset.toUpperCase()}</b>\n\n` +
-                `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · stop now at ${stopDesc} (${rMult.toFixed(1)}R)\n` +
-                (lockedDollars != null ? `Locked in: <b>${lockedDollars >= 0 ? '+' : ''}$${lockedDollars.toFixed(2)}</b> guaranteed if stopped\n` : '') +
-                (ridingTo != null ? `Riding to TP${finalIdx + 1}: <code>${ridingTo.toFixed(ridingTo > 100 ? 2 : 5)}</code>` : ''));
+              await notifySpecialistSLLocked({ positionId: position.id, asset, direction, tpName: chosen.name, slPrice: slCandidate, rMult });
             } catch (_) {}
           }
         } else if (slAfter === null) {
@@ -682,11 +690,8 @@ async function managePosition(position) {
           await pushCommentary(asset, 'sl-rejected', `SL-lock rejected by broker: ${errDetail}`);
           await logMTError({ type: 'sl-verify-failed', asset, positionId: position.id, tpName: chosen.name, submittedSL: slCandidate, brokerSL: slAfter });
           try {
-            await sendOnce(`sllock-rejected:${position.id}:${chosen.name}`,
-              `⚠️ <b>${chosen.name} hit but SL-lock REJECTED — ${asset.toUpperCase()}</b>\n\n` +
-              `Submitted: <code>${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}</code>\n` +
-              `Broker shows: <code>${slAfter.toFixed(slAfter > 100 ? 2 : 5)}</code>\n` +
-              `<b>Position is UNPROTECTED. Manual intervention required.</b>`);
+            await notifySpecialistSLWarning({ positionId: position.id, asset, tpName: chosen.name, type: 'reject',
+              detail: `Submitted ${slCandidate.toFixed(2)}, broker shows ${slAfter.toFixed(2)} — position UNPROTECTED` });
           } catch (_) {}
         }
       } else {
@@ -697,11 +702,8 @@ async function managePosition(position) {
         // Alert the user: the lock failed so the position is currently unprotected.
         // The SL modify will be retried on the next manage-trades tick.
         try {
-          await sendOnce(`sllock-fail:${position.id}:${chosen.name}`,
-            `⚠️ <b>${chosen.name} SL-lock FAILED — ${asset.toUpperCase()}</b>\n\n` +
-            `${isLong ? '\u{1F7E2}' : '\u{1F534}'} ${direction} · attempted SL: <code>${slCandidate.toFixed(slCandidate > 100 ? 2 : 5)}</code>\n` +
-            `Error: <code>${(modifyResult.error || '').slice(0, 150)}</code>\n\n` +
-            `<b>Position is UNPROTECTED at this TP level. Will retry next tick. Consider intervening manually.</b>`);
+          await notifySpecialistSLWarning({ positionId: position.id, asset, tpName: chosen.name, type: 'fail',
+            detail: `SL ${slCandidate.toFixed(2)} rejected — position UNPROTECTED, retrying next tick. ${(modifyResult.error || '').slice(0, 80)}` });
         } catch (_) {}
       }
     }
@@ -1017,20 +1019,18 @@ async function detectAndProcessClosed(currentOpenIds) {
       const _isV20    = SPECIALIST_SIGNALS.includes(_tmpl);
 
       if (_isV20) {
-        // Lot is now computed dynamically per-signal (FTMO 1% risk-based) — no fixed next lot.
-        const _nextLot  = null;
         const _zoneType = matchedPending.setup?.zoneType || null;
         await notifySpecialistTradeClosed({
-          asset:      state.asset,
-          direction:  state.direction,
-          template:   _tmpl,
-          zoneType:   _zoneType,
-          session:    matchedPending.setup?.session || null,
+          asset:       state.asset,
+          direction:   state.direction,
+          template:    _tmpl,
+          zoneType:    _zoneType,
+          session:     matchedPending.setup?.session || null,
           totalPnL,
           tpsHit,
+          riskDollars: matchedPending.sizing?.baseRisk || null,
           positionId,
-          openedAt:   state.createdAt,
-          nextLot:    _nextLot,
+          openedAt:    state.createdAt,
         });
       } else {
         const isCleanSLHit = tpsHit.length === 0 && totalPnL < -0.5;
@@ -1141,20 +1141,6 @@ async function runManageTick() {
     closedAndRecorded: recordings,
     watched,
   };
-
-  // ── Entrystyle shadow evaluator ─────────────────────────────────────────────
-  // Resolves immediate-vs-retest shadow records older than 4 h via MetaAPI 5m
-  // candles. MAX_PER_TICK = 20 (cap is in entrystyle-evaluator.js).
-  // 8 s hard timeout so a slow network call can't delay the next minute's tick.
-  // Errors are swallowed — never affects live position state.
-  try {
-    result.entryStyle = await Promise.race([
-      runEntryStyleEvaluator(),
-      new Promise((resolve) => setTimeout(() => resolve({ skipped: 'timeout' }), 8000)),
-    ]);
-  } catch (_) {
-    result.entryStyle = { error: 'evaluator-threw' };
-  }
 
   return result;
 }

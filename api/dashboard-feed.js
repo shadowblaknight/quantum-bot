@@ -8,7 +8,6 @@ const {
 const { fetchAccount, fetchPositions } = require('./broker');
 const { computeDailyPivots } = require('./pivots');
 const { getPendingSetups, getCommentary } = require('./watcher');
-const { computeTemplatePerformance } = require('./template-performance');
 const { getActiveWatched, removeWatchedSetup } = require('./watched-setups');
 
 const KNOWN_ASSETS = ['gold','eurusd','gbpusd','usdjpy','nas100','us500','btc'];
@@ -35,7 +34,7 @@ async function actionSummary() {
   const equity = account ? (account.equity || balance) : 0;
   const freeMargin = account ? (account.freeMargin || equity) : 0;
   const managedPositions = (positions || []).filter((p) =>
-    p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-')));
+    p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-') || p.comment.startsWith('QB-V20-')));
   const watched = await getActiveWatched();
   const watchingCount = watched.filter((w) => w.status === 'watching').length;
   const alertedCount = watched.filter((w) => w.status === 'alerted').length;
@@ -99,7 +98,7 @@ async function actionPositions() {
     withTimeout(fetchAccount(), 2000, null),
   ]);
   const managed = (positions || []).filter((p) =>
-    p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-')));
+    p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-') || p.comment.startsWith('QB-V20-')));
   const enriched = managed.map((pos) => {
     let template = null;
     if (pos.comment) {
@@ -131,7 +130,7 @@ async function actionHistory() {
     if (!resp.ok) return err('failed to fetch history', 500);
     const deals = await resp.json();
     if (!Array.isArray(deals)) return ok({ history: [] });
-    const qbDeals = deals.filter((d) => d.comment && (d.comment.startsWith('QB-V12-') || d.comment.startsWith('QB-V13-')));
+    const qbDeals = deals.filter((d) => d.comment && (d.comment.startsWith('QB-V12-') || d.comment.startsWith('QB-V13-') || d.comment.startsWith('QB-V20-')));
     const grouped = {};
     for (const d of qbDeals) {
       const pid = d.positionId;
@@ -196,9 +195,34 @@ async function actionPending(_body, query) {
   return ok({ pending: all });
 }
 
-async function actionTemplatePerformance() {
-  const stats = await computeTemplatePerformance();
-  return ok(stats);
+async function actionAccounts() {
+  const token   = process.env.METAAPI_TOKEN;
+  const region  = process.env.METAAPI_REGION || 'london';
+
+  let accounts = [];
+  try { accounts = JSON.parse(process.env.METAAPI_ACCOUNTS || '[]'); } catch (_) {}
+  if (!accounts.length && process.env.METAAPI_ACCOUNT_ID) {
+    accounts = [{ id: process.env.METAAPI_ACCOUNT_ID, name: 'Primary', type: 'unknown' }];
+  }
+  if (!accounts.length) return ok({ accounts: [], configured: false });
+
+  const results = await Promise.all(accounts.map(async (acct) => {
+    if (!token || !acct.id) return { ...acct, connected: false, balance: null };
+    try {
+      const url = `https://mt-client-api-v1.${region}.agiliumtrade.ai/users/current/accounts/${acct.id}/account-information`;
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), 5000);
+      const resp = await fetch(url, { headers: { 'auth-token': token, Accept: 'application/json' }, signal: controller.signal });
+      clearTimeout(tid);
+      if (!resp.ok) return { ...acct, connected: false, balance: null, httpStatus: resp.status };
+      const d = await resp.json();
+      return { ...acct, connected: true, balance: d.balance || 0, equity: d.equity || 0, currency: d.currency || 'USD', leverage: d.leverage || null, server: d.server || null };
+    } catch (e) {
+      return { ...acct, connected: false, balance: null, error: String(e.message || e).slice(0, 60) };
+    }
+  }));
+
+  return ok({ accounts: results, configured: true });
 }
 
 async function actionWatchedSetups() {
@@ -218,7 +242,7 @@ const ACTIONS = {
   'positions': actionPositions, 'history': actionHistory,
   'pivots': actionPivots, 'activity': actionActivity,
   'commentary': actionCommentary, 'pending': actionPending,
-  'template-performance': actionTemplatePerformance,
+  'accounts': actionAccounts,
   'watched-setups': actionWatchedSetups,
   'set-rules': actionSetRules, 'set-instrument': actionSetInstrument,
   'set-mode': actionSetMode, 'set-trading-mode': actionSetTradingMode,

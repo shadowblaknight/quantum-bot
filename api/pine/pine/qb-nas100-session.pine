@@ -33,8 +33,11 @@ strategy("QB NAS100 · Session Intel", "QB·NAS·SI", overlay=true,
 
 // ── INPUTS ───────────────────────────────────────────────────────────
 G0 = "Trade"
-tpMult    = input.float(2.0,  "TP (× R)",           group=G0, minval=0.5,  maxval=5.0,   step=0.5)
+tpMode    = input.string("TP2", "TP target",         group=G0, options=["TP0.75", "TP1", "TP2"],
+            tooltip="TP0.75 tests the GS1-proven insight (drove ~96% WR on gold). TP2 = confirmed baseline (2R). Test TP0.75 + wide SL.")
 slBuf     = input.float(0.15, "SL buffer (× ATR)",  group=G0, minval=0.05, maxval=0.5,   step=0.05)
+slWide    = input.float(0.0,  "C2 wide SL (NAS pts, 0 = standard)", group=G0, step=5.0, minval=0.0,
+            tooltip="0 = standard: SL at FVG distal edge + slBuf×ATR.  >0 = wide structural SL N pts from C2 entry (GS1 150pt concept scaled to NAS).")
 fvgMinPts = input.float(20.0, "Min FVG size (pts)", group=G0, minval=2.0,  maxval=100.0, step=2.0,
             tooltip="Confirmed best: 20pts + extended SB window → 56.67% WR / PF 2.167 / 60 trades yr (Aug 2026 run). 40pts = 57.14% / PF 2.307 / 35/yr. 10pts = 50.85% / PF 1.902 / 59/yr.")
 atrLen    = input.int(14,     "ATR length",          group=G0, minval=5,    maxval=50)
@@ -93,6 +96,9 @@ i_orbGate    = input.float(2.5,  "ORB news gate (× ATR) — skip if ORB itself 
 i_barGate    = input.float(2.0,  "Entry bar gate (× ATR) — skip if entry bar is a news spike", group=G6,
                minval=1.0, maxval=5.0, step=0.5,
                tooltip="Catches events firing DURING 14:00-16:00 UTC (Jackson Hole, ISM at 15:00, surprise events). If the bar trying to enter has range > N × ATR, block it. This is what catches Jackson Hole-style spikes.")
+
+// ─── TP MULTIPLIER ────────────────────────────────────────────────────
+tpMult = tpMode == "TP0.75" ? 0.75 : tpMode == "TP1" ? 1.0 : 2.0
 
 // ── SESSION GATES (UTC minutes) ───────────────────────────────────────
 _mu     = hour(time, "UTC") * 60 + minute(time, "UTC")
@@ -158,6 +164,8 @@ var float fvg_lo       = na
 var int   fvg_dir      = 0
 
 var int   trades_today = 0
+var bool  c2_armed_L   = false
+var bool  c2_armed_S   = false
 
 // ── DAILY RESET ───────────────────────────────────────────────────────
 if _newDay
@@ -187,6 +195,10 @@ if _newDay
     fvg_lo       := na
     fvg_dir      := 0
     trades_today := 0
+    c2_armed_L   := false
+    c2_armed_S   := false
+    strategy.cancel("NAS-L")
+    strategy.cancel("NAS-S")
 
 // ── PHASE 1: ASIAN RANGE ──────────────────────────────────────────────
 if in_asian
@@ -292,9 +304,20 @@ if barstate.isconfirmed and in_ny and day_bias != 0 and fvg_dir == 0
 // When PM window opens and we still have budget, wipe the SB FVG so a
 // new 20pt gap can be found in the PM session using the same day bias.
 if barstate.isconfirmed and in_pm and not in_pm[1] and day_bias != 0 and trades_today < maxTrades and strategy.position_size == 0
-    fvg_dir := 0
-    fvg_hi  := na
-    fvg_lo  := na
+    fvg_dir    := 0
+    fvg_hi     := na
+    fvg_lo     := na
+    c2_armed_L := false
+    c2_armed_S := false
+    strategy.cancel("NAS-L")
+    strategy.cancel("NAS-S")
+
+// ── C2: CANCEL PENDING LIMITS WHEN ENTRY WINDOW CLOSES ───────────────
+_entryWin     = (tradeInSB and in_sb_ext) or (tradeInPM and in_pm)
+_entryWin_prv = (tradeInSB and in_sb_ext[1]) or (tradeInPM and in_pm[1])
+if barstate.isconfirmed and not _entryWin and _entryWin_prv and strategy.position_size == 0
+    strategy.cancel("NAS-L")
+    strategy.cancel("NAS-S")
 
 // ── ENTRY ─────────────────────────────────────────────────────────────
 _in_entry  = (tradeInSB and in_sb_ext) or (tradeInPM and in_pm)
@@ -310,43 +333,41 @@ _newsOk    = not i_useNews or (not (i_blockThurs and _is_claims) and not (i_bloc
 
 if barstate.isconfirmed and _in_entry and trades_today < maxTrades and day_bias != 0 and fvg_dir != 0 and _bos_ready and strategy.position_size == 0 and not in_close and vixOK and _dowOk and _newsOk
 
-    // LONG
+    // LONG — market entry when bar closes inside bullish FVG
     _smt_l = not useSMT or smt_bull_ok
-    if day_bias == 1 and fvg_dir == 1 and _smt_l and not na(fvg_lo) and not na(fvg_hi)
-        if low <= fvg_hi and high >= fvg_lo
-            ep   = close
-            sl   = fvg_lo - atrVal * slBuf
-            dist = ep - sl
-            if dist > 0
-                tp           = ep + dist * tpMult
-                trades_today += 1
-                lbl          = smt_ok and sw_lo ? "L  A+" : sw_lo ? "L  A" : "L  B"
-                strategy.entry("NAS-L", strategy.long, comment="session-L")
-                strategy.exit("NAS-L-X", from_entry="NAS-L", stop=sl, limit=tp)
-                label.new(bar_index, low - atrVal * 0.35, lbl,
-                          style=label.style_label_up, color=color.teal, textcolor=color.white, size=size.small)
-                line.new(bar_index, ep, bar_index + 45, ep, color=color.teal, width=1)
-                line.new(bar_index, sl, bar_index + 45, sl, color=color.red,  width=1, style=line.style_dashed)
-                line.new(bar_index, tp, bar_index + 45, tp, color=color.lime, width=1, style=line.style_dashed)
+    if day_bias == 1 and fvg_dir == 1 and _smt_l and not na(fvg_lo) and not na(fvg_hi) and close <= fvg_hi and close >= fvg_lo
+        ep   = close
+        sl   = fvg_lo - atrVal * slBuf
+        dist = ep - sl
+        if dist > 0
+            tp           = ep + dist * tpMult
+            trades_today += 1
+            lbl          = smt_ok and sw_lo ? "L  A+" : sw_lo ? "L  A" : "L  B"
+            strategy.entry("NAS-L", strategy.long, comment="session-L")
+            strategy.exit("NAS-L-X", from_entry="NAS-L", stop=sl, limit=tp)
+            label.new(bar_index, low - atrVal * 0.35, lbl,
+                      style=label.style_label_up, color=color.teal, textcolor=color.white, size=size.small)
+            line.new(bar_index, ep, bar_index + 45, ep, color=color.teal, width=1)
+            line.new(bar_index, sl, bar_index + 45, sl, color=color.red,  width=1, style=line.style_dashed)
+            line.new(bar_index, tp, bar_index + 45, tp, color=color.lime, width=1, style=line.style_dashed)
 
-    // SHORT
+    // SHORT — market entry when bar closes inside bearish FVG
     _smt_s = not useSMT or smt_bear_ok
-    if day_bias == -1 and fvg_dir == -1 and _smt_s and not na(fvg_lo) and not na(fvg_hi)
-        if high >= fvg_lo and low <= fvg_hi
-            ep   = close
-            sl   = fvg_hi + atrVal * slBuf
-            dist = sl - ep
-            if dist > 0
-                tp           = ep - dist * tpMult
-                trades_today += 1
-                lbl          = smt_ok and sw_hi ? "S  A+" : sw_hi ? "S  A" : "S  B"
-                strategy.entry("NAS-S", strategy.short, comment="session-S")
-                strategy.exit("NAS-S-X", from_entry="NAS-S", stop=sl, limit=tp)
-                label.new(bar_index, high + atrVal * 0.35, lbl,
-                          style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
-                line.new(bar_index, ep, bar_index + 45, ep, color=color.red,  width=1)
-                line.new(bar_index, sl, bar_index + 45, sl, color=color.red,  width=1, style=line.style_dashed)
-                line.new(bar_index, tp, bar_index + 45, tp, color=color.lime, width=1, style=line.style_dashed)
+    if day_bias == -1 and fvg_dir == -1 and _smt_s and not na(fvg_lo) and not na(fvg_hi) and close >= fvg_lo and close <= fvg_hi
+        ep   = close
+        sl   = fvg_hi + atrVal * slBuf
+        dist = sl - ep
+        if dist > 0
+            tp           = ep - dist * tpMult
+            trades_today += 1
+            lbl          = smt_ok and sw_hi ? "S  A+" : sw_hi ? "S  A" : "S  B"
+            strategy.entry("NAS-S", strategy.short, comment="session-S")
+            strategy.exit("NAS-S-X", from_entry="NAS-S", stop=sl, limit=tp)
+            label.new(bar_index, high + atrVal * 0.35, lbl,
+                      style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+            line.new(bar_index, ep, bar_index + 45, ep, color=color.red,  width=1)
+            line.new(bar_index, sl, bar_index + 45, sl, color=color.red,  width=1, style=line.style_dashed)
+            line.new(bar_index, tp, bar_index + 45, tp, color=color.lime, width=1, style=line.style_dashed)
 
 // ── HARD CLOSE 19:30 UTC ──────────────────────────────────────────────
 if barstate.isconfirmed and in_close and strategy.position_size != 0

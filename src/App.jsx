@@ -41,6 +41,8 @@ export default function App() {
   const [perf,        setPerf]        = useState({});
   const [ftmoStatus,  setFtmoStatus]  = useState(null);
   const [gatingRules, setGatingRules] = useState({});
+  const [accounts,    setAccounts]    = useState([]);
+  const [accountStatus, setAccountStatus] = useState('loading'); // 'loading' | 'none' | 'standby' | 'live'
 
   // ── Data fetchers ─────────────────────────────────────────────────────────────
   const fetchQuotes = useCallback(async () => {
@@ -102,6 +104,19 @@ export default function App() {
     } catch {}
   }, []);
 
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const data = await fetch('/api/dashboard-feed?action=accounts').then(r => r.ok ? r.json() : null).catch(() => null);
+      if (!data) { setAccountStatus('none'); return; }
+      if (!data.configured) { setAccountStatus('none'); setAccounts([]); return; }
+      const list = data.accounts || [];
+      setAccounts(list);
+      const live = list.some(a => a.connected && a.balance != null);
+      const configured = list.length > 0;
+      setAccountStatus(live ? 'live' : configured ? 'standby' : 'none');
+    } catch { setAccountStatus('none'); }
+  }, []);
+
   // ── Polling schedule ──────────────────────────────────────────────────────────
   useEffect(() => {
     // Initial load (parallel)
@@ -112,6 +127,7 @@ export default function App() {
       fetchLedger(),
       fetchPerf(),
       fetchGating(),
+      fetchAccounts(),
     ]);
 
     const timers = [
@@ -120,6 +136,7 @@ export default function App() {
       setInterval(fetchQuotes,             60_000),
       setInterval(fetchLedger,            300_000),
       setInterval(fetchPerf,              300_000),
+      setInterval(fetchAccounts,           60_000),
     ];
     return () => timers.forEach(clearInterval);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -146,6 +163,8 @@ export default function App() {
       perf={perf}
       ftmoStatus={ftmoStatus}
       gatingRules={gatingRules}
+      accounts={accounts}
+      accountStatus={accountStatus}
       onPositionAction={handlePositionAction}
     />
   );
