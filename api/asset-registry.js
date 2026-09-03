@@ -379,7 +379,8 @@ const ASSETS = [
     description: 'German DAX 40 futures',
     pipSize: 0.1,
     contractSize: 1,
-    dollarPerPipPerLot: 0.1,
+    dollarPerPipPerLot: 0.1,   // EUR per pip per lot — multiply by EUR/USD for USD value
+    quoteCurrency: 'EUR',       // P&L in EUR; sizing must apply live EUR/USD conversion
     typicalSpreadPips: 10,
     typicalH1ATR: 30,
     preferredSessions: ['LONDON', 'OVERLAP'],

@@ -8,7 +8,7 @@
 
 const { getRedis, applyCors, roundToPipSize } = require('./_lib');
 const { resolveSymbol } = require('./symbol-resolver');
-const { fetchAccount, fetchPositions, fetchCandles } = require('./broker');
+const { fetchAccount, fetchPositions, fetchCandles, fetchPrice } = require('./broker');
 const { placeLimitOrder, placeMarketOrder } = require('./execute');
 const { notifyTradePlaced, sendOnce } = require('./telegram');
 const { getAssetById } = require('./asset-registry');
@@ -506,8 +506,17 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       };
       const _slDist = Math.abs(entry - sl);
       if (_slDist > 0 && assetMeta.pipSize > 0 && assetMeta.dollarPerPipPerLot > 0) {
-        const _riskDollars   = (capital || 0) * _RISK_PCT;
-        const _dollarPerLot  = (_slDist / assetMeta.pipSize) * assetMeta.dollarPerPipPerLot;
+        const _riskDollars = (capital || 0) * _RISK_PCT;
+        // EUR-denominated instruments (GER40): pip value is in EUR, convert to USD
+        let _fxMult = 1.0;
+        if (assetMeta.quoteCurrency === 'EUR') {
+          try {
+            const _fxRes = await fetchPrice('eurusd');
+            if (_fxRes.price > 0.5 && _fxRes.price < 3.0) _fxMult = _fxRes.price;
+          } catch (_fxErr) {}
+          if (_fxMult === 1.0) _fxMult = 1.12; // conservative fallback if fetch fails
+        }
+        const _dollarPerLot = (_slDist / assetMeta.pipSize) * assetMeta.dollarPerPipPerLot * _fxMult;
         const _cfg = _LOT_CFG[assetId] || { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 };
         if (_riskDollars > 0 && _dollarPerLot > 0) {
           const _raw = _riskDollars / _dollarPerLot;
