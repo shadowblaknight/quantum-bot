@@ -110,7 +110,7 @@ function symbolPriority(sym, matchType) {
 
   // Strong negatives — these aren't the canonical tradeable spot/CFD
   if (upper.endsWith('FT.S')) score -= 25;   // futures: NAS100FT.S, DJ30FT.S, JPN225FT.S
-  if (upper.endsWith('.CASH')) score -= 10;
+  // .cash is the canonical CFD on FTMO — no penalty (PU Prime used .s instead, but .s bonus handles that)
   if (upper.endsWith('.CRP')) score -= 25;
   if (upper.endsWith('.24H')) score -= 15;
   if (upper.includes('FT')) score -= 5;

@@ -336,7 +336,7 @@ const ASSETS = [
     preferredSessions: ['NEW_YORK', 'OVERLAP'],
     aliases: [
       'NAS100', 'NDX100', 'NDXUSD', 'NDX', 'USTEC', 'USTEC.cash',
-      'NAS100.s', 'NAS100m', 'NAS100#', 'NAS100.cash', 'US100',
+      'NAS100.s', 'NAS100m', 'NAS100#', 'NAS100.cash', 'US100', 'US100.cash',
       'USTECH100', 'NASDAQ', 'NASDAQ100',
     ],
   },
