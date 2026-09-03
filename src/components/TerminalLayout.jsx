@@ -781,7 +781,7 @@ export default function TerminalLayout({
                     ['Intent parsed', jarvis?.intent?.toUpperCase()||'NOMINAL', C.green2],
                     ['Anomalies',     '0 active',  C.green2],
                     ['FTMO guard',    ftmoBadge,   ftmoColor],
-                    ['News filter',   'CLEAR',     C.green2],
+                    ['News filter',   newsStatus.toUpperCase(), newsStatus==='block'?C.red2:newsStatus==='warn'?C.warn2:C.green2],
                     ['Last cycle',    fmtTime(Date.now()), null],
                   ].map(([l,v,col])=>(
                     <div key={l} className="qc-row">
@@ -802,11 +802,7 @@ export default function TerminalLayout({
                       </div>
                     );
                   })}
-                  {!(ledger||[]).length&&<>
-                    <div className="qc-jfe"><div className="qc-jfe-time">--:--</div><div className="qc-jfe-txt" style={{color:C.green2}}>GS1 entry staged. Frankfurt ORB break confirmed. FTMO CLEAR.</div></div>
-                    <div className="qc-jfe"><div className="qc-jfe-time">--:--</div><div className="qc-jfe-txt" style={{color:C.blue3}}>NAS AMD FVG zone tagged. London sweep above 19820 pending BOS.</div></div>
-                    <div className="qc-jfe"><div className="qc-jfe-time">--:--</div><div className="qc-jfe-txt" style={{color:C.warn2}}>GER blocked — EUR high impact news ±1h window active.</div></div>
-                  </>}
+                  {!(ledger||[]).filter(t=>t.closedAt).length&&<div className="qc-jfe"><div className="qc-jfe-time">--:--</div><div className="qc-jfe-txt" style={{color:C.t3}}>Awaiting first closed trade</div></div>}
                 </div>
                 <div className="qc-ticker">
                   <div className="qc-ticker-l">ANOMALY DETECTOR</div>
@@ -902,11 +898,7 @@ export default function TerminalLayout({
                     </div>
                   );
                 })}
-                {!(ledger||[]).length&&<>
-                  <div className="qc-sig-row"><span style={{color:C.t2}}>14:22</span><span style={{color:C.gold}}>GS1</span><span style={{color:C.green2}}>BUY</span><span style={{color:C.t2}}>Frankfurt ORB break</span><span style={{color:C.green2}}>+1.4R OPEN</span></div>
-                  <div className="qc-sig-row"><span style={{color:C.t2}}>12:15</span><span style={{color:C.blue3}}>NAS</span><span style={{color:C.green2}}>BUY</span><span style={{color:C.t2}}>London sweep BOS AMD</span><span style={{color:C.green2}}>+0.8R OPEN</span></div>
-                  <div className="qc-sig-row"><span style={{color:C.t2}}>11:08</span><span style={{color:C.teal2}}>GER</span><span style={{color:C.red2}}>BLOCK</span><span style={{color:C.warn2}}>EUR news ±1h</span><span style={{color:C.warn2}}>BLOCKED</span></div>
-                </>}
+                {!(ledger||[]).filter(t=>t.closedAt).length&&<div className="qc-sig-row" style={{color:C.t3,gridColumn:'1/-1',padding:'4px 0'}}>No signals closed yet — monitoring</div>}
               </div>
             </div>
           </div>
@@ -928,11 +920,22 @@ export default function TerminalLayout({
                   </div>
                   <div className={`qc-sc-tog${specOn[sp.label.toLowerCase()]?' on':''}`} onClick={()=>togSpec(sp.label.toLowerCase())}/>
                 </div>
-                <div className="qc-sc-metrics">
-                  <div className="qc-sc-m"><div className="qc-sc-mv" style={{color:C.green2}}>{Number(wr).toFixed(1)}%</div><div className="qc-sc-ml">WIN RATE</div></div>
-                  <div className="qc-sc-m"><div className="qc-sc-mv" style={{color:C.blue3}}>{sp.pf}</div><div className="qc-sc-ml">PROF FAC</div></div>
-                  <div className="qc-sc-m"><div className="qc-sc-mv" style={{color:C.gold}}>{sp.trades}</div><div className="qc-sc-ml">TRADES/YR</div></div>
-                </div>
+                {(()=>{
+                  const lv=perf?.[sp.key]; const hasLive=lv?.trades>0;
+                  const dispWr=lv?.winRate!=null?lv.winRate.toFixed(1)+'%':sp.wr+'%*';
+                  const dispPf=lv?.profitFactor!=null?lv.profitFactor.toFixed(2):sp.pf+'*';
+                  const dispTr=hasLive?lv.trades:sp.trades+(hasLive?'':'/yr*');
+                  const wrCol=lv?.winRate!=null?C.green2:C.t2;
+                  const pfCol=lv?.profitFactor!=null?C.blue3:C.t2;
+                  const trCol=hasLive?C.gold:C.t2;
+                  return (
+                    <div className="qc-sc-metrics">
+                      <div className="qc-sc-m"><div className="qc-sc-mv" style={{color:wrCol}}>{dispWr}</div><div className="qc-sc-ml">WIN RATE</div></div>
+                      <div className="qc-sc-m"><div className="qc-sc-mv" style={{color:pfCol}}>{dispPf}</div><div className="qc-sc-ml">PROF FAC</div></div>
+                      <div className="qc-sc-m"><div className="qc-sc-mv" style={{color:trCol}}>{dispTr}</div><div className="qc-sc-ml">{hasLive?'TRADES':'TRADES/YR'}</div></div>
+                    </div>
+                  );
+                })()}
                 <div className="qc-sc-sess">
                   {sp.sessions.map(s=><span key={s} className={`qc-sc-s${(s.includes('LONDON')&&sessions.london)||(s.includes('NY')&&sessions.ny)||(s.includes('FRANKFURT')&&sessions.london)||(s.includes('ASIAN')&&sessions.asian)?' active':''}`}>{s}</span>)}
                   {sp.dayOnly&&<span className="qc-sc-s day">TUE+THU ONLY</span>}
