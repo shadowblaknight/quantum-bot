@@ -509,9 +509,26 @@ module.exports = async (req, res) => {
       return res.status(200).json({ ok: true, ...result });
     }
 
+    if (action === 'clear') {
+      const key = String(q.key || '');
+      if (!process.env.WEBHOOK_API_KEY || key !== process.env.WEBHOOK_API_KEY) {
+        return res.status(401).json({ error: 'unauthorized — pass ?key=WEBHOOK_API_KEY' });
+      }
+      const r = getRedis();
+      if (!r) return res.status(500).json({ error: 'redis unavailable' });
+      const indexRaw = await r.get(LEDGER_INDEX_KEY).catch(() => null);
+      const index = safeParse(indexRaw) || [];
+      let deleted = 0;
+      for (const entry of index) {
+        if (entry.id) { await r.del(LEDGER_TRADE_KEY(entry.id)).catch(() => {}); deleted++; }
+      }
+      await r.del(LEDGER_INDEX_KEY).catch(() => {});
+      return res.status(200).json({ ok: true, deletedTrades: deleted, message: 'Ledger cleared — fresh start for new account.' });
+    }
+
     return res.status(400).json({
       error: 'unknown action',
-      valid: ['summary', 'list', 'backfill'],
+      valid: ['summary', 'list', 'backfill', 'clear'],
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });

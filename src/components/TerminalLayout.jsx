@@ -60,16 +60,35 @@ function todayPnLFor(ledger, key) {
 
 // ── Canvas drawing (module-level, no React deps) ──────────────────────────────
 function sizeCv(canvas, wrap) {
+  const dpr = window.devicePixelRatio || 1;
   const W = wrap?.clientWidth || 300;
   const H = wrap?.clientHeight || 100;
-  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
-  return [canvas.getContext('2d'), W, H];
+  const pw = Math.round(W * dpr);
+  const ph = Math.round(H * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [ctx, W, H];
 }
 
 function drawFTMO(canvas, daily, total) {
   if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.offsetWidth || 240;
+  const cssH = canvas.offsetHeight || 110;
+  const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw; canvas.height = ph;
+    canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
+  }
   const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
   ctx.clearRect(0,0,W,H);
   const pi = Math.PI;
 
