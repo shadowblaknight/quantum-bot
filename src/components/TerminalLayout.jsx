@@ -237,11 +237,13 @@ function drawRadar(canvas, wrap, perf) {
     {name:'NAS',col:C.blue3, vals:[.597,1.0, .21,.95,.80]},
     {name:'GER',col:C.teal2, vals:[.641,.865,.15,.75,.88]},
   ];
-  // If real perf data available, update WR
+  // Update WR and PF axes from live perf where available
   specs.forEach(sp => {
     const k = sp.name==='GS1'?'gold-specialist':sp.name==='NAS'?'nas100-specialist':'ger40-bg-specialist';
     const wr = perf?.[k]?.winRate;
-    if (wr != null) sp.vals[0] = Math.min(wr/100,1);
+    const pf = perf?.[k]?.profitFactor;
+    if (wr != null) sp.vals[0] = Math.min(wr/100, 1);
+    if (pf != null) sp.vals[1] = Math.min(pf/3, 1); // normalise 0–3 → 0–1
   });
   for (let r=1;r<=4;r++) {
     ctx.beginPath();
@@ -309,7 +311,17 @@ function drawCalendar(canvas, wrap, ledger) {
 }
 
 function drawCompound(canvas, wrap, month, startVal) {
-  const [ctx, W, H] = sizeCv(canvas, wrap);
+  if (!canvas || !wrap) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap?.clientWidth || 300;
+  const H = canvas.offsetHeight || 56;
+  const pw = Math.round(W * dpr), ph = Math.round(H * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw; canvas.height = ph;
+    canvas.style.width = W + 'px';
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle=C.s1; ctx.fillRect(0,0,W,H);
   const sv = startVal||100000;
   let val=sv; const pts=[val];
@@ -328,32 +340,60 @@ function drawCompound(canvas, wrap, month, startVal) {
   for (let i=0;i<=12;i+=2){ctx.fillStyle=C.t3;ctx.font='6px JetBrains Mono';ctx.textAlign='center';ctx.fillText('M'+i,8+i*(W-16)/12,H-2);}
 }
 
-function drawHeatmap(canvas, wrap) {
+function drawHeatmap(canvas, wrap, ledger) {
   const [ctx, W, H] = sizeCv(canvas, wrap);
   ctx.fillStyle=C.s1; ctx.fillRect(0,0,W,H);
-  ctx.fillStyle=C.t3; ctx.font='8px JetBrains Mono'; ctx.textAlign='center';
-  ctx.fillText('WIN RATE HEATMAP — HOUR × SPECIALIST (SIMULATED)', W/2, 12);
   const cols=['GS1','NAS','GER'], rows=['06','07','08','09','10','11','12','13','14','15','16','17'];
-  const cW=(W-52)/3, rH=(H-24)/12, rn=rng32(12345);
+  const SPEC_MAP={'GS1':'gold-specialist','NAS':'nas100-specialist','GER':'ger40-bg-specialist'};
+  // Build real hourly win-rate from ledger
+  const cells={};
+  (ledger||[]).forEach(t=>{
+    if(!t.closedAt||t.finalPnL==null||!t.template) return;
+    const lbl=t.template==='gold-specialist'?'GS1':t.template==='nas100-specialist'?'NAS':t.template==='ger40-bg-specialist'?'GER':null;
+    if(!lbl) return;
+    const h=new Date(t.closedAt).getUTCHours();
+    const k=`${lbl}:${h}`; if(!cells[k]) cells[k]={w:0,n:0};
+    cells[k].n++; if(t.finalPnL>0) cells[k].w++;
+  });
+  const hasData=Object.keys(cells).length>0;
+  ctx.fillStyle=C.t3; ctx.font='8px JetBrains Mono'; ctx.textAlign='center';
+  ctx.fillText('WIN RATE HEATMAP — HOUR × SPECIALIST'+(hasData?'':' (NO DATA YET)'), W/2, 12);
+  const cW=(W-52)/3, rH=(H-24)/12;
   cols.forEach((col,ci)=>{
     ctx.fillStyle=C.t3; ctx.font='7px Inter'; ctx.textAlign='center'; ctx.fillText(col,52+ci*cW+cW/2,23);
     rows.forEach((row,ri)=>{
-      const v=rn();
+      const h=parseInt(row), k=`${col}:${h}`, d=cells[k];
       const x=52+ci*cW, y=24+ri*rH;
-      ctx.fillStyle=v<.35?`rgba(192,48,64,${.3+v*.8})`:v<.55?`rgba(176,128,32,${.3+v*.5})`:`rgba(34,160,96,${.2+v*.6})`;
-      ctx.fillRect(x+1,y+1,cW-2,rH-2);
-      ctx.fillStyle=C.t; ctx.font='6px JetBrains Mono'; ctx.textAlign='center';
-      ctx.fillText(Math.round(v*100)+'%',x+cW/2,y+rH/2+2);
+      if(d&&d.n>=2){
+        const v=d.w/d.n;
+        ctx.fillStyle=v<.4?`rgba(192,48,64,${.3+v*.8})`:v<.55?`rgba(176,128,32,${.3+v*.5})`:`rgba(34,160,96,${.2+v*.6})`;
+        ctx.fillRect(x+1,y+1,cW-2,rH-2);
+        ctx.fillStyle=C.t; ctx.font='6px JetBrains Mono'; ctx.textAlign='center';
+        ctx.fillText(Math.round(v*100)+'%',x+cW/2,y+rH/2+2);
+      } else if(d&&d.n===1){
+        ctx.fillStyle=C.b2; ctx.fillRect(x+1,y+1,cW-2,rH-2);
+        ctx.fillStyle=C.t3; ctx.font='6px JetBrains Mono'; ctx.textAlign='center';
+        ctx.fillText('1t',x+cW/2,y+rH/2+2);
+      } else {
+        ctx.fillStyle=C.b; ctx.fillRect(x+1,y+1,cW-2,rH-2);
+      }
     });
   });
   rows.forEach((row,ri)=>{ctx.fillStyle=C.t3;ctx.font='7px JetBrains Mono';ctx.textAlign='right';ctx.fillText(row+':00',48,24+(ri+.65)*rH);});
+  if(!hasData){
+    ctx.fillStyle=C.t3; ctx.font='9px JetBrains Mono'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('ACCUMULATING TRADE DATA…',W/2,H/2+8); ctx.textBaseline='alphabetic';
+  }
 }
 
 function drawMiniCurve(canvas, pts, color) {
   if (!canvas||!canvas.parentElement) return;
-  canvas.width=canvas.parentElement.clientWidth||240;
-  const W=canvas.width, H=canvas.height;
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.parentElement.clientWidth||240, H=canvas.offsetHeight||28;
+  const pw=Math.round(W*dpr), ph=Math.round(H*dpr);
+  if(canvas.width!==pw||canvas.height!==ph){canvas.width=pw;canvas.height=ph;canvas.style.width=W+'px';canvas.style.height=H+'px';}
   const ctx=canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.fillStyle=C.s2; ctx.fillRect(0,0,W,H);
   if (!pts||pts.length<2) {
     ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2);
@@ -403,8 +443,12 @@ function drawMiniPerf(canvas, wrap, perf) {
 
 function drawCorrGauge(canvas) {
   if (!canvas||!canvas.parentElement) return;
-  canvas.width=canvas.parentElement.clientWidth-20||240;
-  const W=canvas.width, H=canvas.height, ctx=canvas.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.parentElement.clientWidth-20||240, H=canvas.offsetHeight||38;
+  const pw=Math.round(W*dpr), ph=Math.round(H*dpr);
+  if(canvas.width!==pw||canvas.height!==ph){canvas.width=pw;canvas.height=ph;canvas.style.width=W+'px';canvas.style.height=H+'px';}
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.fillStyle=C.s1; ctx.fillRect(0,0,W,H);
   const exp=.34;
   ctx.fillStyle=C.b; ctx.fillRect(0,H/2-5,W,10);
@@ -502,7 +546,7 @@ export default function TerminalLayout({
     if (activeView==='telemetry') drawEquityCurve(equityRef.current, equityWrap.current, ledger);
     if (activeView==='performance') { drawCalendar(calRef.current,calWrap.current,ledger); drawMiniPerf(miniPRef.current,miniPWrap.current,perf); }
     if (activeView==='specialists') { drawRadar(radarRef.current,radarWrap.current,perf); drawCompound(compRef.current,compWrap.current,compound,equity); }
-    if (activeView==='nexus') drawHeatmap(hmRef.current,hmWrap.current);
+    if (activeView==='nexus') drawHeatmap(hmRef.current,hmWrap.current,ledger);
   }, [activeView, dailyDD, totalDD, ledger, perf, compound, equity, newsStatus, ftmoStatus, accountStatus]);
 
   useLayoutEffect(() => { drawAll(); }, [drawAll]);
@@ -867,7 +911,7 @@ export default function TerminalLayout({
                   return (
                     <div key={s.lbl} className="qc-se-r">
                       <div className="qc-se-lbl"><span>{s.lbl}</span><span style={{color:wr!=null?C.green2:C.t3}}>{wr!=null?wr.toFixed(0)+'%':s.bkWr+'%*'}</span></div>
-                      <div className="qc-se-bar"><div className="qc-se-fill" style={{width:`${Math.min(wr??s.bkWr,100)}%`,background:s.col}}/></div>
+                      <div className="qc-se-bar"><div className="qc-se-fill" style={{width:wr!=null?`${Math.min(wr,100)}%`:'0%',background:s.col}}/></div>
                     </div>
                   );
                 })}
