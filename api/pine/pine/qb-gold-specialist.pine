@@ -51,8 +51,6 @@ c2SLBuf    = input.float(150.0, "SL beyond C2 level (pts)",        group=G_C2, s
               tooltip="Stop loss placed this many pts beyond the C2 structural level — not from the C1 close.\nFor FRB SHORT retest at frb_lo, SL = frb_lo + 8.")
 c2TpMult   = input.float(0.75, "TP = ORB range × (from C2 level)", group=G_C2, step=0.05,
               tooltip="TP measured from the ORB structural level, not from C1 close.\n0.75 matches the confirmed best-config multiple.")
-c2FadeDist = input.float(0.50, "Fade limit = ORB range ×",         group=G_C2, step=0.05,
-              tooltip="Distance of the false-break FADE limit beyond the break.\n0.5 = half the ORB range above/below the break candle.")
 
 G_FILT = "Filters"
 // Per-signal ADR thresholds — each setup has different tolerance for range consumption.
@@ -384,20 +382,6 @@ f_drawPosBox(float e, float slP, float tp3) =>
             border_color=color.new(color.red,  55), bgcolor=color.new(color.red,  90))
     line.new(bar_index, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
 
-// Appends C2 OCO fields to an existing alert JSON string (which ends with "}").
-// Webhook reads c2Mode:"OCO" and arms two pending limits — primary is the
-// retest (entry/sl/tp in base alert), fade is the opposite-side limit.
-f_appendOCO(string s, string fadeDir, float fadeEntry, float fadeSl,
-            float fadeTp1, float fadeTp2, float fadeTp3) =>
-    n    = str.length(s)
-    base = str.substring(s, 0, n - 1)
-    base + ",\"c2Mode\":\"OCO\"" +
-           ",\"c2FadeDir\":\""   + fadeDir                                    + "\"" +
-           ",\"c2FadeEntry\":\"" + str.tostring(fadeEntry, format.mintick)    + "\"" +
-           ",\"c2FadeSl\":\""    + str.tostring(fadeSl,    format.mintick)    + "\"" +
-           ",\"c2FadeTp1\":\""   + str.tostring(fadeTp1,   format.mintick)    + "\"" +
-           ",\"c2FadeTp2\":\""   + str.tostring(fadeTp2,   format.mintick)    + "\"" +
-           ",\"c2FadeTp3\":\""   + str.tostring(fadeTp3,   format.mintick)    + "\"}"
 
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL A — Gold FVG  (template: gold-fvg)
@@ -774,61 +758,46 @@ if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_h
 // One signal per day.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok
+if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
     orb_range_frb = frb_hi - frb_lo
-    buf_frb       = math.max(atrVal * 0.10, 0.50)
-    if orb_range_frb > 0.50
+    if orb_range_frb >= 5.0
         if close < frb_lo and h1B == -1 and h4B == -1 and not na(ar_lo_prefrb) and close < ar_lo_prefrb
-            // C2 primary — SELL LIMIT: retest of broken FRB low (now resistance)
+            // C2 — SELL LIMIT: retest of broken FRB low (now resistance)
             entryP  = frb_lo
             slP     = frb_lo + c2SLBuf
             slDist  = slP - entryP
             tp1     = frb_lo - orb_range_frb * c2TpMult
             tp2     = frb_lo - orb_range_frb * c2TpMult * 2.0
             tp3     = frb_lo - orb_range_frb * c2TpMult * 3.0
-            // C2 secondary — BUY LIMIT: false-break fade
-            fEntry  = frb_lo - orb_range_frb * c2FadeDist
-            fSl     = fEntry - c2SLBuf
-            fTp1    = frb_lo + orb_range_frb * c2TpMult
-            fTp2    = frb_lo + orb_range_frb * c2TpMult * 2.0
-            fTp3    = frb_lo + orb_range_frb * c2TpMult * 3.0
             frb_done := true
             fStr    = "FRB-C2✓ H1-H4-SHORT✓ ASIAN-LO✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            _rawFRB = f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
-                                    frb_hi, frb_lo, "FRB",
-                                    sess_label, "A", "h1+h4", fStr,
-                                    math.max(0, _minOfDay - 450))
-            alert(f_appendOCO(_rawFRB, "LONG", fEntry, fSl, fTp1, fTp2, fTp3),
+            alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                frb_hi, frb_lo, "FRB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 450)),
                   alert.freq_once_per_bar)
-            label.new(bar_index, high, "⚡ FRB C2-OCO SHORT",
+            label.new(bar_index, high, "⚡ FRB C2 SHORT",
                       style=label.style_label_down, color=color.new(color.red, 5),
                       textcolor=color.white, size=size.small)
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
         else if close > frb_hi and h1B == 1 and h4B == 1 and not na(ar_hi_prefrb) and close > ar_hi_prefrb
-            // C2 primary — BUY LIMIT: retest of broken FRB high (now support)
+            // C2 — BUY LIMIT: retest of broken FRB high (now support)
             entryP  = frb_hi
             slP     = frb_hi - c2SLBuf
             slDist  = entryP - slP
             tp1     = frb_hi + orb_range_frb * c2TpMult
             tp2     = frb_hi + orb_range_frb * c2TpMult * 2.0
             tp3     = frb_hi + orb_range_frb * c2TpMult * 3.0
-            // C2 secondary — SELL LIMIT: false-break fade
-            fEntry  = frb_hi + orb_range_frb * c2FadeDist
-            fSl     = fEntry + c2SLBuf
-            fTp1    = frb_hi - orb_range_frb * c2TpMult
-            fTp2    = frb_hi - orb_range_frb * c2TpMult * 2.0
-            fTp3    = frb_hi - orb_range_frb * c2TpMult * 3.0
             frb_done := true
             fStr    = "FRB-C2✓ H1-H4-LONG✓ ASIAN-HI✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            _rawFRB = f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
-                                    frb_hi, frb_lo, "FRB",
-                                    sess_label, "A", "h1+h4", fStr,
-                                    math.max(0, _minOfDay - 450))
-            alert(f_appendOCO(_rawFRB, "SHORT", fEntry, fSl, fTp1, fTp2, fTp3),
+            alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+                                frb_hi, frb_lo, "FRB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 450)),
                   alert.freq_once_per_bar)
-            label.new(bar_index, low, "⚡ FRB C2-OCO LONG",
+            label.new(bar_index, low, "⚡ FRB C2 LONG",
                       style=label.style_label_up, color=color.new(color.teal, 5),
                       textcolor=color.white, size=size.small)
             if showPosBox
@@ -842,60 +811,46 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
 // One signal per day.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok
+if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
     orb_range_ny = nyorb_hi - nyorb_lo
-    if orb_range_ny > 0.50
+    if orb_range_ny >= 5.0
         if close > nyorb_hi and h1B == 1 and h4B == 1
-            // C2 primary — BUY LIMIT: retest of broken NY ORB high (now support)
+            // C2 — BUY LIMIT: retest of broken NY ORB high (now support)
             entryP  = nyorb_hi
             slP     = nyorb_hi - c2SLBuf
             slDist  = entryP - slP
             tp1     = nyorb_hi + orb_range_ny * c2TpMult
             tp2     = nyorb_hi + orb_range_ny * c2TpMult * 2.0
             tp3     = nyorb_hi + orb_range_ny * c2TpMult * 3.0
-            // C2 secondary — SELL LIMIT: false-break fade
-            fEntry  = nyorb_hi + orb_range_ny * c2FadeDist
-            fSl     = fEntry + c2SLBuf
-            fTp1    = nyorb_hi - orb_range_ny * c2TpMult
-            fTp2    = nyorb_hi - orb_range_ny * c2TpMult * 2.0
-            fTp3    = nyorb_hi - orb_range_ny * c2TpMult * 3.0
             nyorb_done := true
             fStr    = "NYORB-C2✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            _rawNY  = f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
-                                    nyorb_hi, nyorb_lo, "NYORB",
-                                    sess_label, "A", "h1+h4", fStr,
-                                    math.max(0, _minOfDay - 870))
-            alert(f_appendOCO(_rawNY, "SHORT", fEntry, fSl, fTp1, fTp2, fTp3),
+            alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+                                nyorb_hi, nyorb_lo, "NYORB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 870)),
                   alert.freq_once_per_bar)
-            label.new(bar_index, low, "⚡ NYORB C2-OCO LONG",
+            label.new(bar_index, low, "⚡ NYORB C2 LONG",
                       style=label.style_label_up, color=color.new(color.teal, 5),
                       textcolor=color.white, size=size.small)
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
         else if close < nyorb_lo and h1B == -1 and h4B == -1
-            // C2 primary — SELL LIMIT: retest of broken NY ORB low (now resistance)
+            // C2 — SELL LIMIT: retest of broken NY ORB low (now resistance)
             entryP  = nyorb_lo
             slP     = nyorb_lo + c2SLBuf
             slDist  = slP - entryP
             tp1     = nyorb_lo - orb_range_ny * c2TpMult
             tp2     = nyorb_lo - orb_range_ny * c2TpMult * 2.0
             tp3     = nyorb_lo - orb_range_ny * c2TpMult * 3.0
-            // C2 secondary — BUY LIMIT: false-break fade
-            fEntry  = nyorb_lo - orb_range_ny * c2FadeDist
-            fSl     = fEntry - c2SLBuf
-            fTp1    = nyorb_lo + orb_range_ny * c2TpMult
-            fTp2    = nyorb_lo + orb_range_ny * c2TpMult * 2.0
-            fTp3    = nyorb_lo + orb_range_ny * c2TpMult * 3.0
             nyorb_done := true
             fStr    = "NYORB-C2✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            _rawNY  = f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
-                                    nyorb_hi, nyorb_lo, "NYORB",
-                                    sess_label, "A", "h1+h4", fStr,
-                                    math.max(0, _minOfDay - 870))
-            alert(f_appendOCO(_rawNY, "LONG", fEntry, fSl, fTp1, fTp2, fTp3),
+            alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                nyorb_hi, nyorb_lo, "NYORB",
+                                sess_label, "A", "h1+h4", fStr,
+                                math.max(0, _minOfDay - 870)),
                   alert.freq_once_per_bar)
-            label.new(bar_index, high, "⚡ NYORB C2-OCO SHORT",
+            label.new(bar_index, high, "⚡ NYORB C2 SHORT",
                       style=label.style_label_down, color=color.new(color.red, 5),
                       textcolor=color.white, size=size.small)
             if showPosBox

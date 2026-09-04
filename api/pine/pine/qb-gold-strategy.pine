@@ -69,7 +69,7 @@ orbBiasTF      = input.string("H1+H4", "H/M) Bias timeframe",
 nyorbDirFilter = input.string("Both", "H) Direction filter",  options=["Both", "Long only", "Short only"],
                  tooltip="London Bias study (54yr): the PM fix window (14:00 UTC) has a structural short tailwind. Test 'Short only' to isolate whether H shorts carry the PF.",
                  group=G_STRAT)
-frbDirFilter   = input.string("Short only", "M) Direction filter",  options=["Both", "Long only", "Short only"], group=G_STRAT)
+frbDirFilter   = input.string("Both", "M) Direction filter",  options=["Both", "Long only", "Short only"], group=G_STRAT)
 sDirFilter     = input.string("Short only", "S) Direction filter", options=["Both", "Long only", "Short only"],
                  tooltip="Short only = Pre-NY triple-bear (67% WR, PF 1.52 — the proven setup). Long only = Pre-NY triple-bull (untested inverse). Both = fire whichever side aligns.",
                  group=G_STRAT)
@@ -80,7 +80,7 @@ orbTPMult      = input.float(0.75, "H/M) TP1 multiplier",    minval=0.25, maxval
                  tooltip="1.0 = standard 1R (baseline PF 1.145). 0.75 = ¾R — raises WR at cost of smaller wins. Find the WR/PF sweet spot between 0.75 and 1.0.",
                  group=G_STRAT)
 orbNFPFilter   = input.bool(false, "H/M) Skip first-Friday of month (NFP days)", group=G_STRAT)
-orbADRGuard    = input.bool(false, "H/M) Skip when >90% ADR already consumed",   group=G_STRAT)
+orbADRGuard    = input.bool(true,  "H/M) Skip when >90% ADR already consumed",   group=G_STRAT)
 orbSeasonFilt  = input.bool(false, "H/M) Seasonal bias (Sep=Short only · Jan=Long only)",
                  tooltip="September is 90% bearish over 10yr (gold seasonal). January is 80% bullish. Blocks counter-seasonal trades in these two months only.",
                  group=G_STRAT)
@@ -96,7 +96,16 @@ orbNYFRBCtxS   = input.bool(false, "H SHORT) Require Frankfurt SHORT today + H1 
 orbNYFRBCtxL   = input.bool(false, "H LONG) Require Frankfurt SHORT today + H1 bull (WR 73.6%)",
                  tooltip="H LONG only fires when Frankfurt ORB broke SHORT earlier today AND H1 has since flipped bullish. Python: WR 73.6%, PF 1.542 (N=91, ~17/yr). Reversal setup: Frankfurt exhausted sellers, NY sees fresh buyers.",
                  group=G_STRAT)
-i_hm_useDow  = input.bool(true,  "H/M) Day of Week filter",  group=G_STRAT)
+orbNYLonHiFilter = input.bool(false, "H LONG)  Require close above London session HIGH (theorem filter)",
+                 tooltip="NY ORB LONG only fires when the breakout bar also closes above the London session high (08:00-14:00 UTC). Mirrors the FRB Asian-extreme gate — theorem predicts WR ≈ 97-98%.",
+                 group=G_STRAT)
+orbNYLonLoFilter = input.bool(false, "H SHORT) Require close below London session LOW (theorem filter)",
+                 tooltip="NY ORB SHORT only fires when the breakout bar also closes below the London session low (08:00-14:00 UTC). Mirrors the FRB Asian-extreme gate — theorem predicts WR ≈ 97-98%.",
+                 group=G_STRAT)
+asianBiasFilter  = input.bool(false, "H/M) Asian cascade — only trade in Asian close direction (T-1: z=+3.68, all sessions significant)",
+                 tooltip="T-1 Theorem: Asian session direction (close vs open, 00:00-07:00 UTC) cascades to Frankfurt (65.7%, z=3.03★), London (61.7%, z=3.63★) and NY (64.6%, z=3.68★). When ON, blocks ORB trades that oppose the Asian session close direction. Default OFF — turn ON to test the cascade filter independently.",
+                 group=G_STRAT)
+i_hm_useDow  = input.bool(false, "H/M) Day of Week filter",  group=G_STRAT)
 i_hm_dow_mon = input.bool(false, "H/M   Mon",                group=G_STRAT)
 i_hm_dow_tue = input.bool(true,  "H/M   Tue",                group=G_STRAT)
 i_hm_dow_wed = input.bool(false, "H/M   Wed",                group=G_STRAT)
@@ -104,8 +113,12 @@ i_hm_dow_thu = input.bool(false, "H/M   Thu",                group=G_STRAT)
 i_hm_dow_fri = input.bool(false, "H/M   Fri",                group=G_STRAT)
 
 G_C2 = "C2 — OCO (Signal M + H)"
-c2SLBuf = input.float(8.0, "SL beyond C2 structural level (pts)", group=G_C2, step=0.5,
-          tooltip="Tight SL placed this many pts beyond the C2 retest level — not from the C1 close.\nFRB SHORT → SL = frb_lo + 8.  NYORB LONG → SL = nyorb_hi - 8.\nTP targets still use orbTPMult × ORB range measured from the C2 level.")
+c2SLBuf   = input.float(8.0,  "SL beyond C2 structural level (pts)", group=G_C2, step=0.5,
+            tooltip="Tight SL placed this many pts beyond the C2 retest level — not from the C1 close.\nFRB SHORT → SL = frb_lo + 8.  NYORB LONG → SL = nyorb_hi - 8.\nTP targets still use orbTPMult × ORB range measured from the C2 level.")
+c2MinRangeFRB  = input.float(5.0,  "M) Min Frankfurt ORB range to trade (pts)", group=G_C2, step=1.0,
+               tooltip="Skip FRB (Signal M) if the 07:00-07:30 UTC ORB range is below this. Frankfurt ranges tend to be tighter than NY — tune separately. Breakeven at SL=8pt, TP mult=0.75: range > 10.67pt.")
+c2MinRangeNY   = input.float(5.0,  "H) Min NY ORB range to trade (pts)",         group=G_C2, step=1.0,
+               tooltip="Skip NYORB (Signal H) if the 14:00-14:30 UTC ORB range is below this. NY ranges expand with US session volatility — tune separately. Breakeven at SL=8pt, TP mult=0.75: range > 10.67pt.")
 
 G_FILT = "Filters"
 adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
@@ -650,6 +663,10 @@ var bool  frb_short_today = false  // true if Frankfurt ORB fired SHORT today (u
 var float ar_lo_prefrb = na
 var float ar_hi_prefrb = na
 
+// Asian session direction (open vs close) for T-1 cascade filter
+var float _asian_sess_open  = na
+var float _asian_sess_close = na
+
 // London ORB: 08:00–08:30 UTC (first 2 bars of London on 15M)
 in_lorb_window = in_london and _minOfDay < 510
 var float lorb_hi = na
@@ -680,6 +697,10 @@ var float nyorb_lo = na
 var bool  nyorb_locked = false
 var bool  nyorb_done   = false
 
+// London extreme before NY ORB (08:00-14:00 UTC) — theorem London filter for Signal H
+var float lon_hi_preny = na
+var float lon_lo_preny = na
+
 if _newDay
     frb_hi         := na
     frb_lo         := na
@@ -688,6 +709,8 @@ if _newDay
     frb_short_today := false
     ar_lo_prefrb   := na
     ar_hi_prefrb   := na
+    _asian_sess_open  := na
+    _asian_sess_close := na
     lorb_hi     := na
     lorb_lo     := na
     lorb_locked := false
@@ -704,11 +727,19 @@ if _newDay
     nyorb_lo     := na
     nyorb_locked := false
     nyorb_done   := false
+    lon_hi_preny := na
+    lon_lo_preny := na
 
 // Track Asian range BEFORE Frankfurt ORB window (strictly 00:00-07:00 UTC)
+// Also capture first/last close for T-1 cascade direction
 if _minOfDay >= 0 and _minOfDay < 420
     ar_lo_prefrb := na(ar_lo_prefrb) ? low  : math.min(ar_lo_prefrb, low)
     ar_hi_prefrb := na(ar_hi_prefrb) ? high : math.max(ar_hi_prefrb, high)
+    if na(_asian_sess_open)
+        _asian_sess_open := open
+    _asian_sess_close := close
+
+_asianBias = na(_asian_sess_open) or na(_asian_sess_close) ? 0 : _asian_sess_close > _asian_sess_open ? 1 : _asian_sess_close < _asian_sess_open ? -1 : 0
 
 if in_frb_window
     frb_hi := na(frb_hi) ? high : math.max(frb_hi, high)
@@ -744,6 +775,11 @@ if in_nyorb_window
 
 if not in_nyorb_window and in_nyorb_window[1] and not na(nyorb_hi)
     nyorb_locked := true
+
+// London + Overlap extreme accumulated BEFORE the NYORB window (08:00-14:00 UTC)
+if _minOfDay >= 480 and _minOfDay < 840
+    lon_hi_preny := na(lon_hi_preny) ? high : math.max(lon_hi_preny, high)
+    lon_lo_preny := na(lon_lo_preny) ? low  : math.min(lon_lo_preny, low)
 
 // ─── SCALE 30/75/150 — BE STOP MANAGEMENT ────────────────────────────
 // Tracks open multi-TP positions (H/M only). When TP1 fires (position
@@ -782,8 +818,8 @@ _mtp_prev := _mtp_cur
 if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     orb_range = frb_hi - frb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
-    if orb_range > 0.50
-        if close > frb_hi and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb))
+    if orb_range >= c2MinRangeFRB
+        if close > frb_hi and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
             // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support)
             entryP = frb_hi
             slP    = frb_hi - c2SLBuf
@@ -814,7 +850,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < frb_lo and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb))
+        else if close < frb_lo and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
             // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance)
             entryP = frb_lo
             slP    = frb_lo + c2SLBuf
@@ -938,8 +974,8 @@ if modPreNY and barstate.isconfirmed and in_preny_trade and preny_locked and not
 if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     orb_range = nyorb_hi - nyorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
-    if orb_range > 0.50
-        if close > nyorb_hi and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1))
+    if orb_range >= c2MinRangeNY
+        if close > nyorb_hi and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support)
             entryP = nyorb_hi
             slP    = nyorb_hi - c2SLBuf
@@ -970,7 +1006,7 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1))
+        else if close < nyorb_lo and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
             // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance)
             entryP = nyorb_lo
             slP    = nyorb_lo + c2SLBuf

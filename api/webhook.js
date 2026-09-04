@@ -768,44 +768,6 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
 
   await markExecuted(dedupeKey, { brokerOrderId: placement.orderId, template: p.template, placedAt: Date.now() });
 
-  // ── C2 OCO: place fade limit and arm the pair in Redis ───────────────────
-  if (p.c2Mode === 'OCO' && p.c2FadeEntry && p.c2FadeDir) {
-    try {
-      const _fadeDir  = p.c2FadeDir;
-      const _fadeE    = parseFloat(p.c2FadeEntry);
-      const _fadeSl   = parseFloat(p.c2FadeSl);
-      const _fadeTp1  = parseFloat(p.c2FadeTp1);
-      const _fadeTp2  = isFinite(parseFloat(p.c2FadeTp2)) ? parseFloat(p.c2FadeTp2) : null;
-      const _fadeTp3  = isFinite(parseFloat(p.c2FadeTp3)) ? parseFloat(p.c2FadeTp3) : null;
-      if (isFinite(_fadeE) && isFinite(_fadeSl) && isFinite(_fadeTp1)) {
-        const rFE  = _roundTick(_fadeE,  pipSz, 'nearest');
-        const rFSL = _roundTick(_fadeSl, pipSz, _fadeDir === 'LONG' ? 'down' : 'up');
-        const fBTP = _fadeTp3 ?? _fadeTp2 ?? _fadeTp1;
-        const rFTP = fBTP != null ? _roundTick(fBTP, pipSz, _fadeDir === 'LONG' ? 'down' : 'up') : null;
-        const fadeCmt = `QB-V20-${assetId.slice(0,5)}-${(p.zoneType||'sig').slice(0,8)}-OCO-F`.slice(0, 64);
-        const fadePl  = await placeLimitOrder(brokerSymbol, _fadeDir, finalLot, rFE, rFSL, rFTP, fadeCmt);
-        if (fadePl.ok) {
-          const _r = getRedis();
-          if (_r) {
-            const _ocoRec = JSON.stringify({
-              primaryOrderId: placement.orderId, fadeOrderId: fadePl.orderId,
-              brokerSymbol, assetId, status: 'armed', expiresAt: Date.now() + 86400000,
-            });
-            await _r.set(`v20:oco:dk:${dedupeKey}`, _ocoRec, { ex: 86400 }).catch(() => {});
-          }
-          await logActivity({ type: 'c2-oco-armed', asset: assetId, template: p.template,
-            direction: p.direction, primaryOrderId: placement.orderId,
-            fadeOrderId: fadePl.orderId, fadeDir: _fadeDir });
-        } else {
-          await logActivity({ type: 'c2-oco-fade-failed', asset: assetId,
-            template: p.template, error: fadePl.error });
-        }
-      }
-    } catch (_ocoErr) {
-      try { await logActivity({ type: 'c2-oco-error', asset: assetId, error: _ocoErr?.message }); } catch (_) {}
-    }
-  }
-  // ─────────────────────────────────────────────────────────────────────────
 
   // v2.3: real R-multiples from actual prices — the SL/minRR recompute can put
   // TP1 at 2R (etc.), so the old hardcoded 1/2/3 labels misreported the trade
