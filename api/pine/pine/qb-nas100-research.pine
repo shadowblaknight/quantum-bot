@@ -1,0 +1,980 @@
+//@version=6
+strategy("QB NAS100 · Research A→T", "QB·NAS·RES", overlay=true,
+         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=2, pyramiding=0, calc_on_every_tick=false,
+         process_orders_on_close=true, close_entries_rule="ANY")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  QB NAS100 RESEARCH SCRIPT  —  Signal A → T
+//
+//  Each letter is a self-contained trade concept. Switch via "Signal" input.
+//  Same SL/TP/ATR framework across all signals so results are comparable.
+//
+//  LIQUIDITY SWEEP FAMILY:
+//    A — Asian sweep → NY SB FVG        (TJR baseline)
+//    B — PDH/PDL sweep → NY FVG
+//    C — Equal H/L sweep → FVG
+//    D — Round number sweep → FVG
+//
+//  OPENING RANGE FAMILY:
+//    E — ORB breakout + FVG pullback
+//    F — ORB fake-out → reversal FVG
+//    G — CME gap fill
+//    H — Opening drive fade at FVG
+//
+//  TIME WINDOW FAMILY:
+//    I — Pure Silver Bullet (H4 trend + 14:00-15:00 FVG)
+//    J — London open play (PDH/PDL bias + 07:00-09:00 FVG)
+//    K — Pre-market range break (12:00-13:30 UTC)
+//    L — 10am ET reversal (fade prior move at FVG)
+//
+//  HTF TREND FAMILY:
+//    M — H4 EMA200 + 15m FVG pullback
+//    N — H1 BOS + 15m FVG retest
+//    O — D1 level sweep + London confirmation
+//
+//  STRUCTURE FAMILY:
+//    P — Displacement FVG (impulse gap retest)
+//    Q — FIB 62% of swing
+//    R — Inside bar breakout at key level
+//    S — Breaker block entry
+//
+//  CROSS-INSTRUMENT:
+//    T — NAS vs SP500 SMT at any structural level
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── GLOBAL INPUTS ─────────────────────────────────────────────────────────────
+G0 = "Research"
+sig      = input.string("A", "Signal", group=G0,
+           options=["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T"])
+tpMode   = input.string("TP2", "TP target", group=G0, options=["TP0.75","TP1","TP2","TP3"])
+slBuf    = input.float(0.15,  "SL buffer (× ATR)", group=G0, minval=0.05, maxval=1.0, step=0.05)
+atrLen   = input.int(14, "ATR length", group=G0, minval=5, maxval=50)
+fvgMin   = input.float(15.0, "Min FVG pts", group=G0, minval=2.0, step=2.0)
+
+G1 = "Display"
+showBoxes = input.bool(true, "Session boxes", group=G1)
+showFVG   = input.bool(true, "FVG zones",     group=G1)
+showPD    = input.bool(true, "Prev-day H/L",  group=G1)
+
+// ── TP MULTIPLIER ─────────────────────────────────────────────────────────────
+tpMult = tpMode == "TP0.75" ? 0.75 : tpMode == "TP1" ? 1.0 : tpMode == "TP3" ? 3.0 : 2.0
+
+// ── TIME HELPERS ──────────────────────────────────────────────────────────────
+_mu       = hour(time, "UTC") * 60 + minute(time, "UTC")
+_newDay   = ta.change(time("D")) != 0
+_newH1    = ta.change(time("60")) != 0
+
+in_asian   = timeframe.isintraday and _mu >= 0    and _mu < 420
+in_london  = timeframe.isintraday and _mu >= 420  and _mu < 810
+in_ldn_op  = timeframe.isintraday and _mu >= 420  and _mu < 540
+in_orb_w   = timeframe.isintraday and _mu >= 810  and _mu < 825
+in_open_hr = timeframe.isintraday and _mu >= 810  and _mu < 870
+in_sb      = timeframe.isintraday and _mu >= 840  and _mu < 900
+in_sb_ext  = timeframe.isintraday and _mu >= 840  and _mu < 960
+in_10am    = timeframe.isintraday and _mu >= 870  and _mu < 930
+in_premkt  = timeframe.isintraday and _mu >= 720  and _mu < 810
+in_ny_full = timeframe.isintraday and _mu >= 810  and _mu < 1170
+in_close   = timeframe.isintraday and _mu >= 1170
+
+// ── EXTERNAL DATA ─────────────────────────────────────────────────────────────
+atrVal = ta.atr(atrLen)
+
+f_ema(int p) => ta.ema(close, p)
+h4Ema200 = request.security(syminfo.tickerid, "240", f_ema(200), lookahead=barmerge.lookahead_off)
+h1Hi     = request.security(syminfo.tickerid, "60",  high,       lookahead=barmerge.lookahead_off)
+h1Lo     = request.security(syminfo.tickerid, "60",  low,        lookahead=barmerge.lookahead_off)
+h1Close  = request.security(syminfo.tickerid, "60",  close,      lookahead=barmerge.lookahead_off)
+s5Lo     = request.security("CAPITALCOM:US500", timeframe.period, low,  lookahead=barmerge.lookahead_off)
+s5Hi     = request.security("CAPITALCOM:US500", timeframe.period, high, lookahead=barmerge.lookahead_off)
+pdH      = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdL      = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+d1Hi     = request.security(syminfo.tickerid, "D", high,    lookahead=barmerge.lookahead_off)
+d1Lo     = request.security(syminfo.tickerid, "D", low,     lookahead=barmerge.lookahead_off)
+
+// ── SHARED PERSISTENT STATE ───────────────────────────────────────────────────
+var float asian_hi      = na
+var float asian_lo      = na
+var bool  asian_locked  = false
+var float ldn_hi        = na
+var float ldn_lo        = na
+var bool  ldn_locked    = false
+var bool  sw_lo         = false
+var bool  sw_hi         = false
+var float orb_hi        = na
+var float orb_lo        = na
+var bool  orb_locked    = false
+var float premkt_hi     = na
+var float premkt_lo     = na
+var bool  premkt_locked = false
+var float fvg_hi        = na
+var float fvg_lo        = na
+var int   fvg_dir       = 0
+var float prev_close    = na
+var bool  gap_set       = false
+var int   trades_today  = 0
+var int   day_bias      = 0
+var bool  bos_long      = false
+var bool  bos_short     = false
+var bool  drive_dir_set = false
+var int   drive_dir     = 0
+var float drive_hi      = na
+var float drive_lo      = na
+
+// SP500 state for SMT (T)
+var float sp5_asian_hi  = na
+var float sp5_asian_lo  = na
+var float sp5_sw_lo     = na
+var float sp5_sw_hi     = na
+var bool  smt_bull      = false
+var bool  smt_bear      = false
+
+// Signal-specific state
+var float eqh_level     = na
+var float eql_level     = na
+var bool  eqh_swept     = false
+var bool  eql_swept     = false
+var float round_level   = na
+var bool  round_swept   = false
+var int   round_dir     = 0
+var bool  pdh_swept     = false
+var bool  pdl_swept     = false
+var bool  orb_hi_faked  = false
+var bool  orb_lo_faked  = false
+var float gap_open_price = na
+var int   gap_dir_g     = 0
+var float ny_open_price = na
+var int   l_fade_dir    = 0
+var int   k_dir         = 0
+var float j_fvg_hi      = na
+var float j_fvg_lo      = na
+var int   j_fvg_dir     = 0
+var float p_fvg_hi      = na
+var float p_fvg_lo      = na
+var int   p_fvg_dir     = 0
+var float fib62_level   = na
+var float fib_swing_hi  = na
+var float fib_swing_lo  = na
+var int   fib_dir       = 0
+var float ib_hi         = na
+var float ib_lo         = na
+var bool  ib_set        = false
+var int   ib_dir        = 0
+var float brk_hi        = na
+var float brk_lo        = na
+var int   brk_dir       = 0
+var bool  brk_set       = false
+var bool  d1_lo_swept   = false
+var bool  d1_hi_swept   = false
+
+// H1 BOS state (N)
+var float _h1_prev_hi   = na
+var float _h1_prev_lo   = na
+var bool  h1_bos_long   = false
+var bool  h1_bos_short  = false
+var float h1_swing_hi   = na
+var float h1_swing_lo   = na
+
+// ── DAILY RESET ───────────────────────────────────────────────────────────────
+if _newDay
+    asian_hi      := na
+    asian_lo      := na
+    asian_locked  := false
+    ldn_hi        := na
+    ldn_lo        := na
+    ldn_locked    := false
+    sw_lo         := false
+    sw_hi         := false
+    sp5_asian_hi  := na
+    sp5_asian_lo  := na
+    sp5_sw_lo     := na
+    sp5_sw_hi     := na
+    smt_bull      := false
+    smt_bear      := false
+    orb_hi        := na
+    orb_lo        := na
+    orb_locked    := false
+    premkt_hi     := na
+    premkt_lo     := na
+    premkt_locked := false
+    fvg_hi        := na
+    fvg_lo        := na
+    fvg_dir       := 0
+    prev_close    := na
+    gap_set       := false
+    trades_today  := 0
+    day_bias      := 0
+    bos_long      := false
+    bos_short     := false
+    drive_dir_set := false
+    drive_dir     := 0
+    drive_hi      := na
+    drive_lo      := na
+    eqh_swept     := false
+    eql_swept     := false
+    round_swept   := false
+    round_dir     := 0
+    pdh_swept     := false
+    pdl_swept     := false
+    orb_hi_faked  := false
+    orb_lo_faked  := false
+    gap_open_price := na
+    gap_dir_g     := 0
+    ny_open_price := na
+    l_fade_dir    := 0
+    k_dir         := 0
+    j_fvg_hi      := na
+    j_fvg_lo      := na
+    j_fvg_dir     := 0
+    p_fvg_hi      := na
+    p_fvg_lo      := na
+    p_fvg_dir     := 0
+    fib62_level   := na
+    fib_dir       := 0
+    ib_set        := false
+    ib_dir        := 0
+    brk_set       := false
+    brk_dir       := 0
+    d1_lo_swept   := false
+    d1_hi_swept   := false
+    h1_bos_long   := false
+    h1_bos_short  := false
+    strategy.cancel_all()
+
+// ── PHASE 1: ASIAN RANGE ──────────────────────────────────────────────────────
+if in_asian
+    asian_hi     := na(asian_hi)     ? high  : math.max(asian_hi, high)
+    asian_lo     := na(asian_lo)     ? low   : math.min(asian_lo, low)
+    sp5_asian_hi := na(sp5_asian_hi) ? s5Hi  : math.max(sp5_asian_hi, s5Hi)
+    sp5_asian_lo := na(sp5_asian_lo) ? s5Lo  : math.min(sp5_asian_lo, s5Lo)
+
+if not in_asian and in_asian[1] and not na(asian_hi)
+    asian_locked := true
+    if showBoxes
+        box.new(bar_index, asian_hi, bar_index + 360, asian_lo,
+                border_color=color.new(color.purple, 35), border_width=1,
+                bgcolor=color.new(color.purple, 91))
+
+// ── PHASE 2: LONDON SESSION ───────────────────────────────────────────────────
+if in_london and asian_locked
+    ldn_hi    := na(ldn_hi) ? high : math.max(ldn_hi, high)
+    ldn_lo    := na(ldn_lo) ? low  : math.min(ldn_lo, low)
+    sp5_sw_lo := na(sp5_sw_lo) ? s5Lo : math.min(sp5_sw_lo, s5Lo)
+    sp5_sw_hi := na(sp5_sw_hi) ? s5Hi : math.max(sp5_sw_hi, s5Hi)
+    if barstate.isconfirmed
+        if not sw_lo and low < asian_lo and close > asian_lo
+            sw_lo := true
+        if not sw_hi and high > asian_hi and close < asian_hi
+            sw_hi := true
+
+if in_london and barstate.isconfirmed
+    if not pdl_swept and not na(pdL) and low < pdL and close > pdL
+        pdl_swept := true
+    if not pdh_swept and not na(pdH) and high > pdH and close < pdH
+        pdh_swept := true
+    if not d1_lo_swept and not na(d1Lo) and low < d1Lo and close > d1Lo
+        d1_lo_swept := true
+    if not d1_hi_swept and not na(d1Hi) and high > d1Hi and close < d1Hi
+        d1_hi_swept := true
+    if not ib_set and not na(pdH) and math.abs(high - pdH) < atrVal * 0.3 and high[1] > high and low[1] < low
+        ib_hi  := high[1]
+        ib_lo  := low[1]
+        ib_set := true
+        ib_dir := -1
+    if not ib_set and not na(pdL) and math.abs(low - pdL) < atrVal * 0.3 and high[1] > high and low[1] < low
+        ib_hi  := high[1]
+        ib_lo  := low[1]
+        ib_set := true
+        ib_dir := 1
+    if sig == "D" and not na(round_level)
+        if not round_swept and low < round_level - 2 and close > round_level
+            round_swept := true
+            round_dir   := 1
+            fvg_dir     := 0
+            fvg_hi      := na
+            fvg_lo      := na
+        if not round_swept and high > round_level + 2 and close < round_level
+            round_swept := true
+            round_dir   := -1
+            fvg_dir     := 0
+            fvg_hi      := na
+            fvg_lo      := na
+
+if not in_london and in_london[1] and not na(ldn_hi)
+    ldn_locked := true
+    smt_bull   := sw_lo and not na(sp5_asian_lo) and sp5_sw_lo >= sp5_asian_lo
+    smt_bear   := sw_hi and not na(sp5_asian_hi) and sp5_sw_hi <= sp5_asian_hi
+    day_bias   := sw_lo and not sw_hi ? 1 : sw_hi and not sw_lo ? -1 : sw_lo and sw_hi ? (close > h4Ema200 ? 1 : -1) : 0
+    if showBoxes
+        box.new(bar_index, ldn_hi, bar_index + 260, ldn_lo,
+                border_color=color.new(color.orange, 35), border_width=1,
+                bgcolor=color.new(color.orange, 93))
+
+// ── ORB RANGE (13:30-13:45 UTC) ───────────────────────────────────────────────
+if in_orb_w
+    orb_hi := na(orb_hi) ? high : math.max(orb_hi, high)
+    orb_lo := na(orb_lo) ? low  : math.min(orb_lo, low)
+    if not gap_set
+        prev_close := close
+        gap_set    := true
+
+if not in_orb_w and in_orb_w[1] and not na(orb_hi)
+    orb_locked := true
+    if showBoxes
+        box.new(bar_index, orb_hi, bar_index + 200, orb_lo,
+                border_color=color.new(color.blue, 40), border_width=1,
+                bgcolor=color.new(color.blue, 92))
+
+// ── OPENING DRIVE (first 1hr of NY 13:30-14:30) ───────────────────────────────
+if in_open_hr and orb_locked and not drive_dir_set
+    drive_hi := na(drive_hi) ? high : math.max(drive_hi, high)
+    drive_lo := na(drive_lo) ? low  : math.min(drive_lo, low)
+
+if in_open_hr[1] and not in_open_hr and not drive_dir_set and not na(drive_hi)
+    drive_dir_set := true
+    drive_dir     := close > open ? 1 : -1
+
+// ── PRE-MARKET RANGE (12:00-13:30 UTC) ───────────────────────────────────────
+if in_premkt
+    premkt_hi := na(premkt_hi) ? high : math.max(premkt_hi, high)
+    premkt_lo := na(premkt_lo) ? low  : math.min(premkt_lo, low)
+
+if not in_premkt and in_premkt[1] and not na(premkt_hi)
+    premkt_locked := true
+
+// ── ORB BOS ───────────────────────────────────────────────────────────────────
+if orb_locked and barstate.isconfirmed and not in_close
+    if not bos_long and close > orb_hi
+        bos_long := true
+    if not bos_short and close < orb_lo
+        bos_short := true
+
+// ── ORB FAKE-OUT DETECTION (F) ────────────────────────────────────────────────
+if orb_locked and barstate.isconfirmed and in_ny_full
+    if not orb_hi_faked and high > orb_hi and close < orb_hi
+        orb_hi_faked := true
+        if sig == "F"
+            fvg_dir := 0
+            fvg_hi  := na
+            fvg_lo  := na
+    if not orb_lo_faked and low < orb_lo and close > orb_lo
+        orb_lo_faked := true
+        if sig == "F"
+            fvg_dir := 0
+            fvg_hi  := na
+            fvg_lo  := na
+
+// ── CME GAP DIRECTION (G) ─────────────────────────────────────────────────────
+if orb_locked and not na(prev_close) and na(gap_open_price)
+    gap_open_price := open
+    _gap_pts = open - prev_close
+    gap_dir_g := _gap_pts < -10 ? 1 : _gap_pts > 10 ? -1 : 0
+
+// ── NY OPEN PRICE (L) ─────────────────────────────────────────────────────────
+if orb_locked and na(ny_open_price)
+    ny_open_price := close
+
+// ── PRE-MARKET BREAK DIRECTION (K) ───────────────────────────────────────────
+if premkt_locked and barstate.isconfirmed and in_open_hr and k_dir == 0
+    if close > premkt_hi
+        k_dir := 1
+        if sig == "K"
+            fvg_dir := 0
+            fvg_hi  := na
+            fvg_lo  := na
+    if close < premkt_lo
+        k_dir := -1
+        if sig == "K"
+            fvg_dir := 0
+            fvg_hi  := na
+            fvg_lo  := na
+
+// ── ROUND NUMBER (D) ──────────────────────────────────────────────────────────
+round_level := math.round(close / 500) * 500.0
+
+// ── EQUAL HIGHS/LOWS DETECTION (C) ───────────────────────────────────────────
+if barstate.isconfirmed and in_ny_full
+    for i = 1 to 20
+        if math.abs(high[i] - high[i+1]) <= 5.0 and high[i] > asian_hi
+            eqh_level := math.max(high[i], high[i+1])
+            break
+    for i = 1 to 20
+        if math.abs(low[i] - low[i+1]) <= 5.0 and low[i] < asian_lo
+            eql_level := math.min(low[i], low[i+1])
+            break
+
+// ── H1 BOS DETECTION (N) ─────────────────────────────────────────────────────
+if barstate.isconfirmed and _newH1
+    if not na(_h1_prev_hi) and h1Close[1] > _h1_prev_hi
+        h1_bos_long  := true
+        h1_bos_short := false
+        h1_swing_hi  := h1Hi[1]
+    if not na(_h1_prev_lo) and h1Close[1] < _h1_prev_lo
+        h1_bos_short := true
+        h1_bos_long  := false
+        h1_swing_lo  := h1Lo[1]
+    _h1_prev_hi := h1Hi[1]
+    _h1_prev_lo := h1Lo[1]
+
+// ── FIB 62% SWING DETECTION (Q) ──────────────────────────────────────────────
+if ldn_locked and orb_locked and na(fib62_level) and not na(ldn_hi) and not na(ldn_lo)
+    if day_bias == 1
+        fib_swing_lo := ldn_lo
+        fib_swing_hi := ldn_hi
+        fib62_level  := fib_swing_hi - (fib_swing_hi - fib_swing_lo) * 0.618
+        fib_dir      := 1
+    else if day_bias == -1
+        fib_swing_hi := ldn_hi
+        fib_swing_lo := ldn_lo
+        fib62_level  := fib_swing_lo + (fib_swing_hi - fib_swing_lo) * 0.618
+        fib_dir      := -1
+
+// ── BREAKER BLOCK DETECTION (S) ───────────────────────────────────────────────
+if bos_long and not brk_set and barstate.isconfirmed
+    for i = 1 to 15
+        if close[i] < open[i]
+            brk_hi  := high[i]
+            brk_lo  := low[i]
+            brk_dir := 1
+            brk_set := true
+            break
+
+if bos_short and not brk_set and barstate.isconfirmed
+    for i = 1 to 15
+        if close[i] > open[i]
+            brk_hi  := high[i]
+            brk_lo  := low[i]
+            brk_dir := -1
+            brk_set := true
+            break
+
+// ── FVG SEARCH FUNCTION ───────────────────────────────────────────────────────
+f_find_fvg(int dir) =>
+    _found = false
+    _hi    = float(na)
+    _lo    = float(na)
+    _d     = 0
+    if dir == 1
+        _gap = low - high[2]
+        if _gap >= fvgMin
+            _lo    := high[2]
+            _hi    := low
+            _d     := 1
+            _found := true
+    else if dir == -1
+        _gap = low[2] - high
+        if _gap >= fvgMin
+            _lo    := high
+            _hi    := low[2]
+            _d     := -1
+            _found := true
+    [_found, _hi, _lo, _d]
+
+// ── ENTRY FLAGS ───────────────────────────────────────────────────────────────
+var bool _entry_long  = false
+var bool _entry_short = false
+_entry_long  := false
+_entry_short := false
+
+// ════════════════════════════════════════════════════
+//  A — Asian sweep → SB FVG (TJR baseline)
+// ════════════════════════════════════════════════════
+if sig == "A" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and day_bias != 0 and ldn_locked and not in_close
+    if fvg_dir == 0
+        [_fok, _fhi, _flo, _fd] = f_find_fvg(day_bias)
+        if _fok
+            fvg_hi  := _fhi
+            fvg_lo  := _flo
+            fvg_dir := _fd
+        if fvg_dir != 0 and showFVG
+            _fc = fvg_dir == 1 ? color.teal : color.red
+            box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                    border_color=color.new(_fc, 20), border_width=1, bgcolor=color.new(_fc, 83))
+    if fvg_dir == 1 and close >= fvg_lo and close <= fvg_hi
+        _entry_long := true
+    if fvg_dir == -1 and close <= fvg_hi and close >= fvg_lo
+        _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  B — PDH/PDL sweep → NY FVG
+// ════════════════════════════════════════════════════
+if sig == "B" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not in_close
+    _b_bias = pdl_swept and not pdh_swept ? 1 : pdh_swept and not pdl_swept ? -1 : 0
+    if _b_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_b_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+            if fvg_dir != 0 and showFVG
+                _fc = fvg_dir == 1 ? color.teal : color.red
+                box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                        border_color=color.new(_fc, 20), border_width=1, bgcolor=color.new(_fc, 83))
+        if fvg_dir == _b_bias
+            if _b_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _b_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  C — Equal H/L sweep → FVG
+// ════════════════════════════════════════════════════
+if sig == "C" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not in_close
+    if not eql_swept and not na(eql_level) and low < eql_level and close > eql_level
+        eql_swept := true
+        fvg_dir   := 0
+        fvg_hi    := na
+        fvg_lo    := na
+    if not eqh_swept and not na(eqh_level) and high > eqh_level and close < eqh_level
+        eqh_swept := true
+        fvg_dir   := 0
+        fvg_hi    := na
+        fvg_lo    := na
+    _c_bias = eql_swept and not eqh_swept ? 1 : eqh_swept and not eql_swept ? -1 : 0
+    if _c_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_c_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == _c_bias
+            if _c_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _c_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  D — Round number sweep → FVG
+// ════════════════════════════════════════════════════
+if sig == "D" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and round_swept and round_dir != 0 and not in_close
+    if fvg_dir == 0
+        [_fok, _fhi, _flo, _fd] = f_find_fvg(round_dir)
+        if _fok
+            fvg_hi  := _fhi
+            fvg_lo  := _flo
+            fvg_dir := _fd
+    if fvg_dir == round_dir
+        if round_dir == 1 and close >= fvg_lo and close <= fvg_hi
+            _entry_long := true
+        if round_dir == -1 and close <= fvg_hi and close >= fvg_lo
+            _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  E — ORB breakout + FVG pullback
+// ════════════════════════════════════════════════════
+if sig == "E" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and orb_locked and not in_close
+    _e_bias = bos_long and not bos_short ? 1 : bos_short and not bos_long ? -1 : 0
+    if _e_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_e_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+            if fvg_dir != 0 and showFVG
+                _fc = fvg_dir == 1 ? color.teal : color.red
+                box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                        border_color=color.new(_fc, 20), border_width=1, bgcolor=color.new(_fc, 83))
+        if fvg_dir == _e_bias
+            if _e_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _e_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  F — ORB fake-out → reversal FVG
+// ════════════════════════════════════════════════════
+if sig == "F" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not in_close
+    _f_bias = orb_lo_faked and not orb_hi_faked ? 1 : orb_hi_faked and not orb_lo_faked ? -1 : 0
+    if _f_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_f_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == _f_bias
+            if _f_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _f_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  G — CME gap fill
+// ════════════════════════════════════════════════════
+if sig == "G" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and gap_dir_g != 0 and not in_close
+    if fvg_dir == 0
+        [_fok, _fhi, _flo, _fd] = f_find_fvg(gap_dir_g)
+        if _fok
+            fvg_hi  := _fhi
+            fvg_lo  := _flo
+            fvg_dir := _fd
+    if fvg_dir == gap_dir_g
+        if gap_dir_g == 1 and close >= fvg_lo and close <= fvg_hi
+            _entry_long := true
+        if gap_dir_g == -1 and close <= fvg_hi and close >= fvg_lo
+            _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  H — Opening drive fade at FVG
+// ════════════════════════════════════════════════════
+if sig == "H" and barstate.isconfirmed and in_10am and trades_today < 1 and
+   strategy.position_size == 0 and drive_dir_set and not in_close
+    _h_fade = drive_dir == 1 ? -1 : 1
+    if fvg_dir == 0
+        [_fok, _fhi, _flo, _fd] = f_find_fvg(_h_fade)
+        if _fok
+            fvg_hi  := _fhi
+            fvg_lo  := _flo
+            fvg_dir := _fd
+    if fvg_dir == _h_fade
+        if _h_fade == 1 and close >= fvg_lo and close <= fvg_hi
+            _entry_long := true
+        if _h_fade == -1 and close <= fvg_hi and close >= fvg_lo
+            _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  I — Pure Silver Bullet (H4 trend + 14:00-15:00 FVG)
+// ════════════════════════════════════════════════════
+if sig == "I" and barstate.isconfirmed and in_sb and trades_today < 1 and
+   strategy.position_size == 0 and not in_close
+    _i_bias = close > h4Ema200 ? 1 : close < h4Ema200 ? -1 : 0
+    if _i_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_i_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+            if fvg_dir != 0 and showFVG
+                _fc = fvg_dir == 1 ? color.teal : color.red
+                box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                        border_color=color.new(_fc, 20), border_width=1, bgcolor=color.new(_fc, 83))
+        if fvg_dir == _i_bias
+            if _i_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _i_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  J — London open play (PDH/PDL bias + 07:00-09:00 FVG)
+// ════════════════════════════════════════════════════
+if sig == "J" and barstate.isconfirmed and in_ldn_op and trades_today < 1 and
+   strategy.position_size == 0 and not na(pdH) and not na(pdL)
+    _j_bias = close > pdH ? 1 : close < pdL ? -1 : 0
+    if _j_bias != 0 and j_fvg_dir == 0
+        _jgap_b = low - high[2]
+        _jgap_s = low[2] - high
+        if _j_bias == 1 and _jgap_b >= fvgMin
+            j_fvg_lo  := high[2]
+            j_fvg_hi  := low
+            j_fvg_dir := 1
+        if _j_bias == -1 and _jgap_s >= fvgMin
+            j_fvg_lo  := high
+            j_fvg_hi  := low[2]
+            j_fvg_dir := -1
+    if j_fvg_dir != 0
+        if j_fvg_dir == 1 and close >= j_fvg_lo and close <= j_fvg_hi
+            _entry_long := true
+        if j_fvg_dir == -1 and close <= j_fvg_hi and close >= j_fvg_lo
+            _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  K — Pre-market range break continuation
+// ════════════════════════════════════════════════════
+if sig == "K" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and k_dir != 0 and not in_close
+    if fvg_dir == 0
+        [_fok, _fhi, _flo, _fd] = f_find_fvg(k_dir)
+        if _fok
+            fvg_hi  := _fhi
+            fvg_lo  := _flo
+            fvg_dir := _fd
+    if fvg_dir == k_dir
+        if k_dir == 1 and close >= fvg_lo and close <= fvg_hi
+            _entry_long := true
+        if k_dir == -1 and close <= fvg_hi and close >= fvg_lo
+            _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  L — 10am ET reversal (15:00 UTC)
+// ════════════════════════════════════════════════════
+if sig == "L" and barstate.isconfirmed and in_10am and trades_today < 1 and
+   strategy.position_size == 0 and not in_close and not na(ny_open_price)
+    if l_fade_dir == 0
+        l_fade_dir := close > ny_open_price ? -1 : close < ny_open_price ? 1 : 0
+    if l_fade_dir != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(l_fade_dir)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == l_fade_dir
+            if l_fade_dir == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if l_fade_dir == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  M — H4 EMA200 + FVG pullback + BOS
+// ════════════════════════════════════════════════════
+if sig == "M" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not in_close
+    _m_bias = close > h4Ema200 ? 1 : close < h4Ema200 ? -1 : 0
+    _m_bos  = (_m_bias == 1 and bos_long) or (_m_bias == -1 and bos_short)
+    if _m_bias != 0 and _m_bos
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_m_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+            if fvg_dir != 0 and showFVG
+                _fc = fvg_dir == 1 ? color.teal : color.red
+                box.new(bar_index - 2, fvg_hi, bar_index + 80, fvg_lo,
+                        border_color=color.new(_fc, 20), border_width=1, bgcolor=color.new(_fc, 83))
+        if fvg_dir == _m_bias
+            if _m_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _m_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  N — H1 BOS + 15m FVG retest
+// ════════════════════════════════════════════════════
+if sig == "N" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not in_close
+    _n_bias = h1_bos_long ? 1 : h1_bos_short ? -1 : 0
+    if _n_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_n_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == _n_bias
+            if _n_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _n_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  O — D1 level sweep + London Asian sweep (double confluence)
+// ════════════════════════════════════════════════════
+if sig == "O" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not in_close and ldn_locked
+    _o_bias = d1_lo_swept and sw_lo ? 1 : d1_hi_swept and sw_hi ? -1 : 0
+    if _o_bias != 0
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(_o_bias)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == _o_bias
+            if _o_bias == 1 and close >= fvg_lo and close <= fvg_hi
+                _entry_long := true
+            if _o_bias == -1 and close <= fvg_hi and close >= fvg_lo
+                _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  P — Displacement FVG (≥ 1.5× fvgMin)
+// ════════════════════════════════════════════════════
+if barstate.isconfirmed and in_ny_full and p_fvg_dir == 0
+    _pg_b = low - high[2]
+    _pg_s = low[2] - high
+    if _pg_b >= fvgMin * 1.5
+        p_fvg_lo  := high[2]
+        p_fvg_hi  := low
+        p_fvg_dir := 1
+    else if _pg_s >= fvgMin * 1.5
+        p_fvg_lo  := high
+        p_fvg_hi  := low[2]
+        p_fvg_dir := -1
+
+if sig == "P" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and p_fvg_dir != 0 and not in_close
+    if p_fvg_dir == 1 and close >= p_fvg_lo and close <= p_fvg_hi
+        _entry_long := true
+    if p_fvg_dir == -1 and close <= p_fvg_hi and close >= p_fvg_lo
+        _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  Q — FIB 62% of London swing
+// ════════════════════════════════════════════════════
+if sig == "Q" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and not na(fib62_level) and fib_dir != 0 and not in_close
+    if fib_dir == 1 and math.abs(close - fib62_level) <= atrVal * 0.3 and close > open
+        _entry_long := true
+    if fib_dir == -1 and math.abs(close - fib62_level) <= atrVal * 0.3 and close < open
+        _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  R — Inside bar breakout at key level
+// ════════════════════════════════════════════════════
+if sig == "R" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and ib_set and not in_close
+    if ib_dir == 1 and close > ib_hi
+        _entry_long := true
+    if ib_dir == -1 and close < ib_lo
+        _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  S — Breaker block entry
+// ════════════════════════════════════════════════════
+if sig == "S" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and brk_set and not in_close
+    if brk_dir == 1 and close >= brk_lo and close <= brk_hi
+        _entry_long := true
+    if brk_dir == -1 and close <= brk_hi and close >= brk_lo
+        _entry_short := true
+
+// ════════════════════════════════════════════════════
+//  T — NAS vs SP500 SMT → FVG
+// ════════════════════════════════════════════════════
+if sig == "T" and barstate.isconfirmed and in_sb_ext and trades_today < 1 and
+   strategy.position_size == 0 and ldn_locked and not in_close
+    if smt_bull and day_bias == 1
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(1)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == 1 and close >= fvg_lo and close <= fvg_hi
+            _entry_long := true
+    if smt_bear and day_bias == -1
+        if fvg_dir == 0
+            [_fok, _fhi, _flo, _fd] = f_find_fvg(-1)
+            if _fok
+                fvg_hi  := _fhi
+                fvg_lo  := _flo
+                fvg_dir := _fd
+        if fvg_dir == -1 and close <= fvg_hi and close >= fvg_lo
+            _entry_short := true
+
+// ── UNIFIED ENTRY + EXIT ──────────────────────────────────────────────────────
+if _entry_long and strategy.position_size == 0
+    ep   = close
+    sl   = sig == "R" ? ib_lo - atrVal * slBuf : sig == "S" ? brk_lo - atrVal * slBuf : not na(fvg_lo) ? fvg_lo - atrVal * slBuf : ep - atrVal * 1.5
+    dist = ep - sl
+    if dist > 0
+        tp = ep + dist * tpMult
+        trades_today += 1
+        strategy.entry("NAS-L", strategy.long)
+        strategy.exit("NAS-L-X", from_entry="NAS-L", stop=sl, limit=tp)
+        label.new(bar_index, low - atrVal * 0.35, sig + " L",
+                  style=label.style_label_up, color=color.teal, textcolor=color.white, size=size.small)
+        line.new(bar_index, ep, bar_index + 40, ep, color=color.teal, width=1)
+        line.new(bar_index, sl, bar_index + 40, sl, color=color.red,  width=1, style=line.style_dashed)
+        line.new(bar_index, tp, bar_index + 40, tp, color=color.lime, width=1, style=line.style_dashed)
+
+if _entry_short and strategy.position_size == 0
+    ep   = close
+    sl   = sig == "R" ? ib_hi + atrVal * slBuf : sig == "S" ? brk_hi + atrVal * slBuf : not na(fvg_hi) ? fvg_hi + atrVal * slBuf : ep + atrVal * 1.5
+    dist = sl - ep
+    if dist > 0
+        tp = ep - dist * tpMult
+        trades_today += 1
+        strategy.entry("NAS-S", strategy.short)
+        strategy.exit("NAS-S-X", from_entry="NAS-S", stop=sl, limit=tp)
+        label.new(bar_index, high + atrVal * 0.35, sig + " S",
+                  style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+        line.new(bar_index, ep, bar_index + 40, ep, color=color.red,  width=1)
+        line.new(bar_index, sl, bar_index + 40, sl, color=color.red,  width=1, style=line.style_dashed)
+        line.new(bar_index, tp, bar_index + 40, tp, color=color.lime, width=1, style=line.style_dashed)
+
+// ── HARD CLOSE 19:30 UTC ──────────────────────────────────────────────────────
+if barstate.isconfirmed and in_close and strategy.position_size != 0
+    strategy.close_all("hard-close")
+
+// ── PREV-DAY LINES ────────────────────────────────────────────────────────────
+if _newDay and showPD and not na(pdH) and not na(pdL)
+    line.new(bar_index, pdH, bar_index + 320, pdH,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+    line.new(bar_index, pdL, bar_index + 320, pdL,
+             color=color.new(color.yellow, 30), style=line.style_dashed, width=1)
+
+// ── SESSION BACKGROUNDS ───────────────────────────────────────────────────────
+bgcolor(in_asian  ? color.new(color.purple, 93) : na, title="Asian")
+bgcolor(in_london ? color.new(color.orange, 90) : na, title="London")
+bgcolor(in_sb     ? color.new(color.lime,   87) : na, title="Silver Bullet")
+
+// ── STATUS TABLE ──────────────────────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 12,
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 40), frame_width=1)
+
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    _sig_desc = switch sig
+        "A" => "Asian sweep→SB FVG"
+        "B" => "PDH/PDL sweep→FVG"
+        "C" => "EQH/EQL sweep→FVG"
+        "D" => "Round# sweep→FVG"
+        "E" => "ORB breakout+FVG"
+        "F" => "ORB fake-out→FVG"
+        "G" => "CME gap fill"
+        "H" => "Open drive fade"
+        "I" => "Pure Silver Bullet"
+        "J" => "London open play"
+        "K" => "Pre-mkt rng break"
+        "L" => "10am ET reversal"
+        "M" => "H4 EMA+FVG pullbk"
+        "N" => "H1 BOS+FVG retest"
+        "O" => "D1 level+Ldn conf"
+        "P" => "Displacement FVG"
+        "Q" => "FIB 62% swing"
+        "R" => "Inside bar brkout"
+        "S" => "Breaker block"
+        => "NAS/SP5 SMT"
+
+    biasStr = day_bias ==  1 ? "BULL" : day_bias == -1 ? "BEAR" : "NONE"
+    biasCol = day_bias ==  1 ? color.lime : day_bias == -1 ? color.red : color.gray
+    fvgStr  = fvg_dir == 1 ? "BULL set" : fvg_dir == -1 ? "BEAR set" : "Watching"
+    fvgCol  = fvg_dir == 1 ? color.teal : fvg_dir == -1 ? color.red  : color.gray
+    trdStr  = trades_today > 0 ? str.tostring(trades_today) + " fired" : "Waiting"
+    trdCol  = trades_today > 0 ? color.aqua : color.orange
+    h4Str   = close > h4Ema200 ? "BULL" : "BEAR"
+    h4Col   = close > h4Ema200 ? color.lime : color.red
+    swpStr  = sw_lo and sw_hi ? "BOTH" : sw_lo ? "Asian LO" : sw_hi ? "Asian HI" : ldn_locked ? "None" : "Pending"
+    orbStr  = bos_long ? "BOS UP" : bos_short ? "BOS DN" : orb_locked ? "Waiting" : "Pending"
+    smtStr  = smt_bull ? "BULL" : smt_bear ? "BEAR" : "None"
+    _sessStr = in_close ? "CLOSED" : in_sb ? "SILV BULL" : in_open_hr ? "OPEN HR" : in_orb_w ? "ORB" : in_london ? "LONDON" : in_asian ? "ASIAN" : in_premkt ? "PRE-MKT" : "OFF HRS"
+    _sessCol = in_sb ? color.lime : in_open_hr ? color.aqua : in_london ? color.orange : in_asian ? color.purple : in_close ? color.red : color.gray
+
+    table.cell(tbl, 0, 0,  "QB NAS RESEARCH",      bgcolor=color.new(color.navy, 10), text_color=color.white,  text_size=size.small, text_halign=text.align_center)
+    table.cell(tbl, 1, 0,  sig + " · " + _sig_desc, bgcolor=color.new(color.navy, 10), text_color=color.yellow, text_size=size.tiny,  text_halign=text.align_center)
+    table.cell(tbl, 0, 1,  "Bias",      bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 1,  biasStr,     text_color=biasCol, text_size=size.tiny)
+    table.cell(tbl, 0, 2,  "H4 EMA200", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 2,  h4Str,       text_color=h4Col,   text_size=size.tiny)
+    table.cell(tbl, 0, 3,  "Ldn Sweep", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 3,  swpStr,      text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 4,  "ORB/BOS",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 4,  orbStr,      text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 5,  "FVG",       bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 5,  fvgStr,      text_color=fvgCol,  text_size=size.tiny)
+    table.cell(tbl, 0, 6,  "SMT",       bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 6,  smtStr,      text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 7,  "Trade",     bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 7,  trdStr,      text_color=trdCol,  text_size=size.tiny)
+    table.cell(tbl, 0, 8,  "ATR",       bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 8,  str.tostring(math.round(atrVal, 1)) + " pts", text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 9,  "Session",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 9,  _sessStr,    text_color=_sessCol, text_size=size.tiny)
+    table.cell(tbl, 0, 10, "TP mode",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 10, tpMode + "  SL×" + str.tostring(slBuf, "0.00"), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 11, "PDH/L",     bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 11, not na(pdH) ? str.tostring(math.round(pdH)) + " / " + str.tostring(math.round(pdL)) : "--", text_color=color.gray, text_size=size.tiny)

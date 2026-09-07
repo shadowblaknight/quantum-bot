@@ -1,0 +1,675 @@
+//@version=6
+strategy(
+    title                  = "QB NAS100 RS1 — Regime Switch",
+    shorttitle             = "QB-NAS100-RS1",
+    overlay                = true,
+    pyramiding             = 0,
+    initial_capital        = 10000,
+    default_qty_type       = strategy.percent_of_equity,
+    default_qty_value      = 1,
+    currency               = currency.USD,
+    commission_type        = strategy.commission.cash_per_contract,
+    commission_value       = 2,
+    process_orders_on_close = true,   // entry/exit at signal close — R:R accurate
+    calc_on_every_tick     = false,
+    slippage               = 2        // 2 ticks; adjust after checking syminfo.mintick
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Instrument  : CAPITALCOM:NAS100  |  NQ1!  |  US100
+// Timeframe   : 15 m  (recommended)
+//
+// Three engines, one fires per day — priority  E1 > E2 > E3:
+//
+//   E1  NEWS  — FOMC announcement day OR exact NFP date
+//               Detect strong release bar → pullback → continuation entry
+//
+//   E2  VXN   — extreme-volatility day  (VXN < vxnLowT  OR  VXN ≥ vxnHighT)
+//               Price breaches prev-close ± VXN/1600 expected-move band
+//               VXN-A (toggle ON ): wick breach → fade on first reclaim close
+//               VXN-B (toggle OFF): close breach → fade on first reclaim close
+//
+//   E3  ORB   — normal-volatility day  (VXN between thresholds)
+//               NY opening range 09:30–10:00 ET, DST-aware
+//               Do NOT enter the raw breakout.
+//               Wait for fast retest of OR boundary (1–4 bars ≈ 15–60 min)
+//               Entry: rejection candle that closes back beyond the level
+//               Extension guard: price must not have run > maxExtR × OR range
+//
+// NOTE — current limitations (backtest-only version):
+//   • E1 covers FOMC + NFP only.  CPI / ISM / PCE / PPI need event arrays.
+//   • newsManual=true disables E2+E3 on ALL bars — use only on specific dates.
+//   • Qty = 1% equity position, not risk-based sizing.  P&L $ values are
+//     indicative only; WR and PF are the metrics to judge.
+//   • No webhook / alert layer — add separately before going live.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+G1 = "Engine 1 — News / Macro"
+newsManual = input.bool(false,  "News day override  (⚠ disables E2+E3 on ALL bars when on)",  group=G1)
+autoFOMC   = input.bool(true,   "Auto-detect FOMC  (exact announcement dates, no ±1-day)",   group=G1)
+autoNFP    = input.bool(true,   "Auto-detect NFP   (exact BLS release dates 2023-2026)",      group=G1)
+nBarMin    = input.int(100,     "News bar: min range (pts)",  minval=50,                       group=G1)
+nBodyMin   = input.float(0.60,  "News bar: min body/range",  step=0.05,                       group=G1)
+pbZone     = input.int(20,      "Pullback zone ±pts from news-bar close",                      group=G1)
+rrNews     = input.float(1.5,   "R:R — News engine", step=0.5, minval=0.5,                    group=G1)
+
+G2 = "Engine 2 — VXN Expected-Move Snapback"
+vxnLowT    = input.int(20,    "VXN < this  → extreme low-vol  (E2 active)",
+             minval=10, maxval=25, group=G2)
+vxnHighT   = input.int(30,    "VXN ≥ this  → extreme high-vol (E2 active)",
+             minval=25, maxval=60, group=G2)
+emMult     = input.int(1600,  "EM divisor  (band = prev_close × VXN / divisor)",
+             minval=800, maxval=3200, group=G2,
+             tooltip="1600 ≈ VXN/16 daily expected-move.  Tune if bands look off for your feed.")
+vxnWickMode = input.bool(true, "VXN-A: breach on wick (true)  vs  VXN-B: breach on close (false)",
+             group=G2,
+             tooltip="VXN-A is the primary hypothesis from the RS1 research paper.")
+vxnRTHOnly = input.bool(true, "E2 RTH only 09:30–16:00 ET  (false = full 24H CFD session)",
+             group=G2,
+             tooltip="RTH = E2-A baseline.  Set false to test E2-A-24H and compare WR/PF/trades.")
+vxnATRBuf  = input.float(0.15,"SL buffer beyond breach extreme (× ATR14)",
+             step=0.05, minval=0.05, maxval=0.5, group=G2)
+rrVXN      = input.float(1.5, "R:R — VXN engine", step=0.5, minval=0.5, group=G2)
+maxHoldV   = input.int(3,     "Max hold after VXN entry (M15 bars;  3 = 45 min)",
+             minval=1, maxval=10, group=G2)
+
+G3 = "Engine 3 — NY Fast-Retest ORB"
+fastRetestMin = input.int(1,   "Fast retest: min bars after BO (1 bar = 15 min)",
+             minval=1, maxval=4, group=G3)
+fastRetestMax = input.int(4,   "Fast retest: max bars after BO (4 bars = 60 min)",
+             minval=1, maxval=8, group=G3)
+maxExtR    = input.float(0.5,  "Max extension before retest (× OR range)",
+             step=0.1, minval=0.1, maxval=2.0, group=G3,
+             tooltip="0.5 → skip if price ran > ½ OR range before retest")
+rtBuf      = input.int(10,     "Retest zone ±pts around OR boundary (true ± check)",
+             minval=0, maxval=50, group=G3)
+rrORB      = input.float(1.5,  "R:R — ORB engine", step=0.5, minval=0.5, group=G3)
+
+G4 = "Shared / Exits"
+enableNews = input.bool(true, "Enable E1 News",  group=G4)
+enableVXN  = input.bool(true, "Enable E2 VXN",   group=G4)
+enableORB  = input.bool(true, "Enable E3 ORB",   group=G4)
+slBuf      = input.int(5,    "Extra SL buffer (pts)",  minval=0, maxval=30, group=G4)
+tradeDir   = input.string("Both","Direction",
+             options=["Both","Long only","Short only"],                      group=G4)
+hardEOD    = input.bool(false, "Hard EOD close",                            group=G4)
+eodH       = input.int(21,    "EOD close hour (UTC)", minval=16, maxval=23, group=G4)
+
+G5 = "Display"
+showBands  = input.bool(true,  "Show VXN expected-move bands",  group=G5)
+showORBL   = input.bool(true,  "Show NY ORB lines",             group=G5)
+showTable  = input.bool(true,  "Show status table",             group=G5)
+
+// ─── TIME & DATE ─────────────────────────────────────────────────────────────
+newDay = ta.change(time("D")) != 0
+_d     = dayofmonth(time, "UTC")
+_m     = month(time, "UTC")
+_y     = year(time, "UTC")
+utcH   = hour(time, "UTC")
+_ETZ   = "America/New_York"
+
+// ─── EXTERNAL DAILY DATA ─────────────────────────────────────────────────────
+// FIX 1: use "1D" + lookahead_on + close[1] for confirmed previous-day value
+// that behaves identically on historical bars and real-time bars.
+prevClose = request.security(syminfo.tickerid, "1D", close[1], lookahead=barmerge.lookahead_on)
+vxnD      = request.security("CBOE:VXN",      "1D", close[1], lookahead=barmerge.lookahead_on)
+
+// ─── EXPECTED-MOVE BANDS & ATR14 ─────────────────────────────────────────────
+emUpper = (not na(prevClose) and not na(vxnD)) ? prevClose * (1 + vxnD / emMult) : na
+emLower = (not na(prevClose) and not na(vxnD)) ? prevClose * (1 - vxnD / emMult) : na
+atr14   = ta.atr(14)
+
+// ─── VXN REGIME ──────────────────────────────────────────────────────────────
+extremeVXN = not na(vxnD) and (vxnD < vxnLowT or vxnD >= vxnHighT)
+normalVXN  = not na(vxnD) and not extremeVXN
+
+// ─── FOMC — EXACT ANNOUNCEMENT DATES (2nd day of meeting, 14:00 ET) ──────────
+// FIX 9: exact dates only — no ±1 day window; previous code needlessly disabled
+// ORB/VXN on the day before and after every meeting.
+_isFOMC = autoFOMC and (
+    // ── 2023 ──
+    (_y == 2023 and _m ==  2 and _d ==  1) or
+    (_y == 2023 and _m ==  3 and _d == 22) or
+    (_y == 2023 and _m ==  5 and _d ==  3) or
+    (_y == 2023 and _m ==  6 and _d == 14) or
+    (_y == 2023 and _m ==  7 and _d == 26) or
+    (_y == 2023 and _m ==  9 and _d == 20) or
+    (_y == 2023 and _m == 11 and _d ==  1) or
+    (_y == 2023 and _m == 12 and _d == 13) or
+    // ── 2024 ──
+    (_y == 2024 and _m ==  1 and _d == 31) or
+    (_y == 2024 and _m ==  3 and _d == 20) or
+    (_y == 2024 and _m ==  5 and _d ==  1) or
+    (_y == 2024 and _m ==  6 and _d == 12) or
+    (_y == 2024 and _m ==  7 and _d == 31) or
+    (_y == 2024 and _m ==  9 and _d == 18) or
+    (_y == 2024 and _m == 11 and _d ==  7) or
+    (_y == 2024 and _m == 12 and _d == 18) or
+    // ── 2025 ──
+    (_y == 2025 and _m ==  1 and _d == 29) or
+    (_y == 2025 and _m ==  3 and _d == 19) or
+    (_y == 2025 and _m ==  5 and _d ==  7) or
+    (_y == 2025 and _m ==  6 and _d == 18) or
+    (_y == 2025 and _m ==  7 and _d == 30) or
+    (_y == 2025 and _m ==  9 and _d == 17) or
+    (_y == 2025 and _m == 10 and _d == 29) or
+    (_y == 2025 and _m == 12 and _d == 10) or
+    // ── 2026 ──
+    (_y == 2026 and _m ==  1 and _d == 28) or
+    (_y == 2026 and _m ==  3 and _d == 18) or
+    (_y == 2026 and _m ==  4 and _d == 29) or
+    (_y == 2026 and _m ==  6 and _d == 17) or
+    (_y == 2026 and _m ==  7 and _d == 29) or
+    (_y == 2026 and _m ==  9 and _d == 16) or
+    (_y == 2026 and _m == 10 and _d == 28) or
+    (_y == 2026 and _m == 12 and _d ==  9))
+
+// ─── NFP — EXACT BLS RELEASE DATES (2023–2026) ───────────────────────────────
+// FIX 8: "first Friday" heuristic fails when Jan 2 is a holiday, or BLS delays.
+// Using exact historical dates. 2026 dates are BLS-scheduled; update if revised.
+_isNFP = autoNFP and (
+    // ── 2023 ──
+    (_y == 2023 and _m ==  1 and _d ==  6) or
+    (_y == 2023 and _m ==  2 and _d ==  3) or
+    (_y == 2023 and _m ==  3 and _d == 10) or
+    (_y == 2023 and _m ==  4 and _d ==  7) or
+    (_y == 2023 and _m ==  5 and _d ==  5) or
+    (_y == 2023 and _m ==  6 and _d ==  2) or
+    (_y == 2023 and _m ==  7 and _d ==  7) or
+    (_y == 2023 and _m ==  8 and _d ==  4) or
+    (_y == 2023 and _m ==  9 and _d ==  1) or
+    (_y == 2023 and _m == 10 and _d ==  6) or
+    (_y == 2023 and _m == 11 and _d ==  3) or
+    (_y == 2023 and _m == 12 and _d ==  8) or
+    // ── 2024 ──
+    (_y == 2024 and _m ==  1 and _d ==  5) or
+    (_y == 2024 and _m ==  2 and _d ==  2) or
+    (_y == 2024 and _m ==  3 and _d ==  8) or
+    (_y == 2024 and _m ==  4 and _d ==  5) or
+    (_y == 2024 and _m ==  5 and _d ==  3) or
+    (_y == 2024 and _m ==  6 and _d ==  7) or
+    (_y == 2024 and _m ==  7 and _d ==  5) or
+    (_y == 2024 and _m ==  8 and _d ==  2) or
+    (_y == 2024 and _m ==  9 and _d ==  6) or
+    (_y == 2024 and _m == 10 and _d ==  4) or
+    (_y == 2024 and _m == 11 and _d ==  1) or
+    (_y == 2024 and _m == 12 and _d ==  6) or
+    // ── 2025 ──
+    (_y == 2025 and _m ==  1 and _d == 10) or
+    (_y == 2025 and _m ==  2 and _d ==  7) or
+    (_y == 2025 and _m ==  3 and _d ==  7) or
+    (_y == 2025 and _m ==  4 and _d ==  4) or
+    (_y == 2025 and _m ==  5 and _d ==  2) or
+    (_y == 2025 and _m ==  6 and _d ==  6) or
+    (_y == 2025 and _m ==  7 and _d ==  3) or
+    (_y == 2025 and _m ==  8 and _d ==  1) or
+    (_y == 2025 and _m ==  9 and _d ==  5) or
+    (_y == 2025 and _m == 10 and _d ==  3) or
+    (_y == 2025 and _m == 11 and _d ==  7) or
+    (_y == 2025 and _m == 12 and _d ==  5) or
+    // ── 2026 (BLS-scheduled; verify if revised) ──
+    (_y == 2026 and _m ==  1 and _d ==  9) or
+    (_y == 2026 and _m ==  2 and _d == 11) or
+    (_y == 2026 and _m ==  3 and _d ==  6) or
+    (_y == 2026 and _m ==  4 and _d ==  3) or
+    (_y == 2026 and _m ==  5 and _d ==  8) or
+    (_y == 2026 and _m ==  6 and _d ==  5) or
+    (_y == 2026 and _m ==  7 and _d ==  2) or
+    (_y == 2026 and _m ==  8 and _d ==  7) or
+    (_y == 2026 and _m ==  9 and _d ==  4) or
+    (_y == 2026 and _m == 10 and _d ==  2) or
+    (_y == 2026 and _m == 11 and _d ==  6) or
+    (_y == 2026 and _m == 12 and _d ==  4))
+
+isNewsDay = newsManual or _isFOMC or _isNFP
+
+// ─── ENGINE GATES ─────────────────────────────────────────────────────────────
+canNews = enableNews and isNewsDay
+canVXN  = enableVXN  and not isNewsDay and extremeVXN
+canORB  = enableORB  and not isNewsDay and normalVXN
+
+// ─── TRADE GATE (max one trade per day) ──────────────────────────────────────
+var bool traded = false
+if newDay
+    traded := false
+
+noPos    = strategy.position_size == 0
+canTrade = noPos and not traded
+
+// ─── ENGINE 1: NEWS CATALYST ─────────────────────────────────────────────────
+var float nbH      = na
+var float nbL      = na
+var float nbC      = na
+var int   nbDir    = 0
+var bool  nbSet    = false
+var int   nbBarIdx = -1
+var bool  pbDone   = false
+var float pbH      = na
+var float pbL      = na
+
+if newDay
+    nbH      := na
+    nbL      := na
+    nbC      := na
+    nbDir    := 0
+    nbSet    := false
+    nbBarIdx := -1
+    pbDone   := false
+    pbH      := na
+    pbL      := na
+
+// FIX 10: ET session windows instead of fixed UTC hours — handles DST correctly
+// NFP / CPI / ISM / PPI: 08:30 ET | FOMC announcement: 14:00 ET
+isNFPWin   = not na(time(timeframe.period, "0830-0930", _ETZ))
+isFOMCWin  = not na(time(timeframe.period, "1400-1500", _ETZ))
+newsRlsWin = (_isNFP and isNFPWin) or (_isFOMC and isFOMCWin)
+
+if canNews and newsRlsWin and not nbSet and barstate.isconfirmed
+    _nr = high - low
+    _nb = math.abs(close - open)
+    if _nr >= nBarMin and _nb >= nBodyMin * _nr
+        nbH      := high
+        nbL      := low
+        nbC      := close
+        nbDir    := close > open ? 1 : -1
+        nbSet    := true
+        nbBarIdx := bar_index
+
+pbWin = nbSet and not pbDone and bar_index > nbBarIdx
+pbTimeOK = not na(time(timeframe.period, "0830-2100", _ETZ))
+
+if pbWin and pbTimeOK and barstate.isconfirmed
+    if nbDir == 1
+        if low <= nbC + pbZone and close > nbC - pbZone
+            pbDone := true
+            pbH    := high
+            pbL    := low
+    else
+        if high >= nbC - pbZone and close < nbC + pbZone
+            pbDone := true
+            pbH    := high
+            pbL    := low
+
+newsEntryOK = not na(time(timeframe.period, "0830-2100", _ETZ))
+
+longNews = (
+    canNews and nbSet and pbDone and nbDir == 1 and
+    newsEntryOK and canTrade and barstate.isconfirmed and
+    (tradeDir == "Both" or tradeDir == "Long only") and
+    not na(pbH) and close > pbH
+)
+shortNews = (
+    canNews and nbSet and pbDone and nbDir == -1 and
+    newsEntryOK and canTrade and barstate.isconfirmed and
+    (tradeDir == "Both" or tradeDir == "Short only") and
+    not na(pbL) and close < pbL
+)
+
+// ─── ENGINE 2: VXN EXPECTED-MOVE SNAPBACK ────────────────────────────────────
+var bool  vxnBreached  = false
+var int   vxnBreachDir = 0      // 1 = upper (→ short)   -1 = lower (→ long)
+var float vxnBreachExt = na     // highest high OR lowest low during breach
+
+if newDay
+    vxnBreached  := false
+    vxnBreachDir := 0
+    vxnBreachExt := na
+
+vxnRTH = not na(time(timeframe.period, "0930-1600", _ETZ))
+vxnSessOK = not vxnRTHOnly or vxnRTH
+
+// FIX 5: VXN-A uses wick; VXN-B uses candle close — toggled by vxnWickMode input
+if canVXN and vxnSessOK and not vxnBreached and not na(emUpper) and barstate.isconfirmed
+    _breachUp   = vxnWickMode ? high > emUpper : close > emUpper
+    _breachDown = vxnWickMode ? low  < emLower : close < emLower
+    if _breachUp
+        vxnBreached  := true
+        vxnBreachDir := 1
+        vxnBreachExt := high
+    else if _breachDown
+        vxnBreached  := true
+        vxnBreachDir := -1
+        vxnBreachExt := low
+
+// Accumulate SL anchor (worst excursion during breach)
+if vxnBreached and barstate.isconfirmed
+    vxnBreachExt := (vxnBreachDir == 1) ? math.max(vxnBreachExt, high) :
+                                           math.min(vxnBreachExt, low)
+
+// Entry: first close back inside the band (reclaim)
+longVXN = (
+    canVXN and vxnSessOK and vxnBreached and vxnBreachDir == -1 and
+    canTrade and barstate.isconfirmed and
+    not na(emLower) and not na(vxnBreachExt) and not na(atr14) and
+    (tradeDir == "Both" or tradeDir == "Long only") and
+    close > emLower
+)
+shortVXN = (
+    canVXN and vxnSessOK and vxnBreached and vxnBreachDir == 1 and
+    canTrade and barstate.isconfirmed and
+    not na(emUpper) and not na(vxnBreachExt) and not na(atr14) and
+    (tradeDir == "Both" or tradeDir == "Short only") and
+    close < emUpper
+)
+
+// ─── ENGINE 3: NY FAST-RETEST ORB ────────────────────────────────────────────
+isInORB  = not na(time(timeframe.period, "0930-1000", _ETZ))
+isPostOR = not na(time(timeframe.period, "1000-1600", _ETZ))
+
+var float orbH       = na
+var float orbL       = na
+var bool  orbLocked  = false
+var bool  orbBOSet   = false
+var int   orbDir     = 0        // 1=bull  -1=bear
+var float orbBOExt   = na       // max (bull) or min (bear) excursion since BO
+var int   orbBOBar   = na       // FIX 2: bar_index of breakout bar
+
+if newDay
+    orbH      := na
+    orbL      := na
+    orbLocked := false
+    orbBOSet  := false
+    orbDir    := 0
+    orbBOExt  := na
+    orbBOBar  := na
+
+// Build opening range
+if isInORB and barstate.isconfirmed
+    orbH := na(orbH) ? high : math.max(orbH, high)
+    orbL := na(orbL) ? low  : math.min(orbL, low)
+
+// Lock range when session ends
+if not orbLocked and not isInORB and not na(orbH) and barstate.isconfirmed
+    orbLocked := true
+
+// FIX 2: detect first close outside OR and record breakout bar
+if canORB and orbLocked and not orbBOSet and isPostOR and barstate.isconfirmed
+    if close > orbH
+        orbBOSet := true
+        orbDir   := 1
+        orbBOExt := high
+        orbBOBar := bar_index
+    else if close < orbL
+        orbBOSet := true
+        orbDir   := -1
+        orbBOExt := low
+        orbBOBar := bar_index
+
+// Accumulate extension after breakout
+if orbBOSet and barstate.isconfirmed
+    orbBOExt := (orbDir == 1) ? math.max(orbBOExt, high) :
+                                 math.min(orbBOExt, low)
+
+orbRange = (not na(orbH) and not na(orbL)) ? orbH - orbL : na
+
+// FIX 2 + 3: fast-retest window — must be 1-4 bars AFTER the BO bar (not same bar)
+barsAfterBO = (orbBOSet and not na(orbBOBar)) ? bar_index - orbBOBar : na
+fastRetest  = (not na(barsAfterBO) and
+               barsAfterBO >= fastRetestMin and
+               barsAfterBO <= fastRetestMax)
+
+// FIX 4: true ±rtBuf zone around the OR boundary — both floor AND ceiling
+longTouch  = low  <= orbH + rtBuf and low  >= orbH - rtBuf
+shortTouch = high >= orbL - rtBuf and high <= orbL + rtBuf
+
+// Use orbBOExt[1] — extension as of the PREVIOUS bar, before this retest candle
+// updates the running max/min, so the retest candle's own wick is excluded.
+longORB = (
+    canORB and orbBOSet and orbDir == 1 and
+    not na(orbRange) and canTrade and barstate.isconfirmed and isPostOR and
+    (tradeDir == "Both" or tradeDir == "Long only") and
+    fastRetest and
+    longTouch and
+    close > orbH and
+    not na(orbBOExt[1]) and (orbBOExt[1] - orbH) <= maxExtR * orbRange
+)
+shortORB = (
+    canORB and orbBOSet and orbDir == -1 and
+    not na(orbRange) and canTrade and barstate.isconfirmed and isPostOR and
+    (tradeDir == "Both" or tradeDir == "Short only") and
+    fastRetest and
+    shortTouch and
+    close < orbL and
+    not na(orbBOExt[1]) and (orbL - orbBOExt[1]) <= maxExtR * orbRange
+)
+
+// ─── ENTRY TRACKING ──────────────────────────────────────────────────────────
+var int activeEng = 0
+var int entryBar  = -999
+
+// ─── EXECUTE: NEWS ───────────────────────────────────────────────────────────
+if longNews
+    _sl   = nbL - slBuf
+    _risk = close - _sl
+    if _risk > 0
+        strategy.entry("LN", strategy.long)
+        strategy.exit("LNX", "LN", stop=_sl, limit=close + _risk * rrNews)
+        traded    := true
+        activeEng := 1
+        entryBar  := bar_index
+
+if shortNews
+    _sl   = nbH + slBuf
+    _risk = _sl - close
+    if _risk > 0
+        strategy.entry("SN", strategy.short)
+        strategy.exit("SNX", "SN", stop=_sl, limit=close - _risk * rrNews)
+        traded    := true
+        activeEng := 1
+        entryBar  := bar_index
+
+// ─── EXECUTE: VXN SNAPBACK ───────────────────────────────────────────────────
+if longVXN
+    _sl   = vxnBreachExt - vxnATRBuf * atr14 - slBuf
+    _risk = close - _sl
+    if _risk > 0
+        strategy.entry("LV", strategy.long)
+        strategy.exit("LVX", "LV", stop=_sl, limit=close + _risk * rrVXN)
+        traded    := true
+        activeEng := 2
+        entryBar  := bar_index
+
+if shortVXN
+    _sl   = vxnBreachExt + vxnATRBuf * atr14 + slBuf
+    _risk = _sl - close
+    if _risk > 0
+        strategy.entry("SV", strategy.short)
+        strategy.exit("SVX", "SV", stop=_sl, limit=close - _risk * rrVXN)
+        traded    := true
+        activeEng := 2
+        entryBar  := bar_index
+
+// ─── EXECUTE: ORB RETEST ─────────────────────────────────────────────────────
+if longORB
+    _sl   = low - slBuf
+    _risk = close - _sl
+    if _risk > 0
+        strategy.entry("LO", strategy.long)
+        strategy.exit("LOX", "LO", stop=_sl, limit=close + _risk * rrORB)
+        traded    := true
+        activeEng := 3
+        entryBar  := bar_index
+
+if shortORB
+    _sl   = high + slBuf
+    _risk = _sl - close
+    if _risk > 0
+        strategy.entry("SO", strategy.short)
+        strategy.exit("SOX", "SO", stop=_sl, limit=close - _risk * rrORB)
+        traded    := true
+        activeEng := 3
+        entryBar  := bar_index
+
+// ─── VXN MAX-HOLD EXIT ───────────────────────────────────────────────────────
+if activeEng == 2 and strategy.position_size != 0 and bar_index >= entryBar + maxHoldV
+    strategy.close_all("VXN MaxHold")
+
+// ─── HARD EOD CLOSE ──────────────────────────────────────────────────────────
+if hardEOD and utcH >= eodH and strategy.position_size != 0
+    strategy.close_all("EOD")
+
+// ─── COLOUR PALETTE ──────────────────────────────────────────────────────────
+C_GOLD  = color.new(#F4C430, 0)
+C_GREEN = color.new(#22C55E, 0)
+C_RED   = color.new(#F43F5E, 0)
+C_AQUA  = color.new(#06B6D4, 0)
+C_FUCH  = color.new(#D946EF, 0)
+C_ORB   = color.new(#FB923C, 0)
+C_MUTED = color.new(#5c7ea0, 0)
+
+// ─── VISUAL OVERLAYS ─────────────────────────────────────────────────────────
+plot(showBands ? emUpper : na, "EM Upper",
+     color=color.new(#F43F5E, 60), linewidth=1, style=plot.style_stepline)
+plot(showBands ? emLower : na, "EM Lower",
+     color=color.new(#22C55E, 60), linewidth=1, style=plot.style_stepline)
+
+plot(showORBL and orbLocked ? orbH : na, "ORB High",
+     color=color.new(#FB923C, 40), linewidth=1, style=plot.style_stepline)
+plot(showORBL and orbLocked ? orbL : na, "ORB Low",
+     color=color.new(#FB923C, 40), linewidth=1, style=plot.style_stepline)
+
+// ─── SIGNAL MARKERS ──────────────────────────────────────────────────────────
+plotshape(nbSet and not nbSet[1], "News Bar",
+          shape.diamond, location.abovebar, color.orange, size=size.small)
+
+plotshape(longNews,  "Long News",  shape.triangleup,   location.belowbar, C_AQUA,  size=size.large)
+plotshape(shortNews, "Short News", shape.triangledown, location.abovebar, C_FUCH,  size=size.large)
+plotshape(longVXN,   "Long VXN",  shape.triangleup,   location.belowbar, C_GREEN, size=size.large)
+plotshape(shortVXN,  "Short VXN", shape.triangledown, location.abovebar, C_RED,   size=size.large)
+plotshape(longORB,   "Long ORB",  shape.triangleup,   location.belowbar, C_ORB,   size=size.normal)
+plotshape(shortORB,  "Short ORB", shape.triangledown, location.abovebar, C_ORB,   size=size.normal)
+
+// ─── ENTRY LABELS ────────────────────────────────────────────────────────────
+if longNews
+    _lsl = nbL - slBuf
+    label.new(bar_index, low,
+        "NEWS LONG\nSL " + str.tostring(math.round(_lsl)) +
+        "\nTP " + str.tostring(math.round(close + (close - _lsl) * rrNews)),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up,
+        color=color.new(#06B6D4, 72), textcolor=color.white, size=size.small)
+
+if shortNews
+    _ssl = nbH + slBuf
+    label.new(bar_index, high,
+        "NEWS SHORT\nSL " + str.tostring(math.round(_ssl)) +
+        "\nTP " + str.tostring(math.round(close - (_ssl - close) * rrNews)),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down,
+        color=color.new(#D946EF, 72), textcolor=color.white, size=size.small)
+
+if longVXN
+    _lsl = vxnBreachExt - vxnATRBuf * atr14 - slBuf
+    label.new(bar_index, low,
+        "VXN LONG\nSL " + str.tostring(math.round(_lsl)) +
+        "\nTP " + str.tostring(math.round(close + (close - _lsl) * rrVXN)) +
+        "\nVXN " + str.tostring(math.round(vxnD, 1)) +
+        (vxnWickMode ? "  [A-wick]" : "  [B-close]"),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up,
+        color=color.new(#22C55E, 72), textcolor=color.white, size=size.small)
+
+if shortVXN
+    _ssl = vxnBreachExt + vxnATRBuf * atr14 + slBuf
+    label.new(bar_index, high,
+        "VXN SHORT\nSL " + str.tostring(math.round(_ssl)) +
+        "\nTP " + str.tostring(math.round(close - (_ssl - close) * rrVXN)) +
+        "\nVXN " + str.tostring(math.round(vxnD, 1)) +
+        (vxnWickMode ? "  [A-wick]" : "  [B-close]"),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down,
+        color=color.new(#F43F5E, 72), textcolor=color.white, size=size.small)
+
+if longORB
+    _lsl = low - slBuf
+    label.new(bar_index, low,
+        "ORB LONG  +" + str.tostring(barsAfterBO) + "b\n" +
+        "OR " + str.tostring(math.round(orbL)) + "–" + str.tostring(math.round(orbH)) +
+        "\nSL " + str.tostring(math.round(_lsl)) +
+        "\nTP " + str.tostring(math.round(close + (close - _lsl) * rrORB)),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up,
+        color=color.new(#FB923C, 72), textcolor=color.white, size=size.small)
+
+if shortORB
+    _ssl = high + slBuf
+    label.new(bar_index, high,
+        "ORB SHORT  +" + str.tostring(barsAfterBO) + "b\n" +
+        "OR " + str.tostring(math.round(orbL)) + "–" + str.tostring(math.round(orbH)) +
+        "\nSL " + str.tostring(math.round(_ssl)) +
+        "\nTP " + str.tostring(math.round(close - (_ssl - close) * rrORB)),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down,
+        color=color.new(#FB923C, 72), textcolor=color.white, size=size.small)
+
+// ─── STATUS TABLE ─────────────────────────────────────────────────────────────
+if showTable
+    var table tbl = table.new(position.top_right, 2, 12,
+        bgcolor      = color.new(#020408, 25),
+        border_color = color.new(#1a3354, 65),
+        border_width = 1,
+        frame_color  = color.new(#F4C430, 60),
+        frame_width  = 1)
+
+    if true
+        _eng  = (canNews ? "E1 NEWS" : canVXN ? "E2 VXN" : canORB ? "E3 ORB" : "—")
+        _engC = (canNews ? C_AQUA    : canVXN ? C_RED    : canORB ? C_ORB   : C_MUTED)
+
+        _vxn  = (na(vxnD) ? "—" :
+                 (vxnD < vxnLowT  ? "▼ " + str.tostring(math.round(vxnD, 1)) + "  low-vol"  :
+                  vxnD >= vxnHighT ? "▲ " + str.tostring(math.round(vxnD, 1)) + "  hi-vol"   :
+                                     "→ " + str.tostring(math.round(vxnD, 1)) + "  normal"))
+        _vxnC = (na(vxnD) ? C_MUTED : extremeVXN ? C_RED : C_GREEN)
+
+        _em   = (na(emUpper) ? "—" :
+                 str.tostring(math.round(emLower)) + " / " + str.tostring(math.round(emUpper)))
+        _emC  = na(emUpper) ? C_MUTED : C_GOLD
+
+        _orb  = (not orbLocked ? "building…" :
+                 not orbBOSet  ? str.tostring(math.round(orbL)) + "–" + str.tostring(math.round(orbH)) + " locked" :
+                 orbDir == 1   ? "↑ BO +" + str.tostring(barsAfterBO) + "b  ext " + str.tostring(math.round(orbBOExt - orbH)) + "pt" :
+                                 "↓ BO +" + str.tostring(barsAfterBO) + "b  ext " + str.tostring(math.round(orbL - orbBOExt)) + "pt")
+        _orbC = (not orbLocked ? C_MUTED : not orbBOSet ? C_GOLD : orbDir == 1 ? C_GREEN : C_RED)
+
+        _vxnBr = (not canVXN ? "—" :
+                  vxnBreached ? (vxnBreachDir == 1 ? "↑ above EM" : "↓ below EM") : "watching…")
+        _vxnBC = vxnBreached ? (vxnBreachDir == 1 ? C_RED : C_GREEN) : C_MUTED
+
+        _nb   = (not canNews ? "—" :
+                 nbSet ? (nbDir == 1 ? "↑ " + str.tostring(math.round(nbC)) :
+                                       "↓ " + str.tostring(math.round(nbC))) : "watching…")
+        _nbC  = nbSet ? (nbDir == 1 ? C_GREEN : C_RED) : C_MUTED
+
+        _pb   = (not nbSet ? "—" : pbDone ? "✓ formed" : "waiting…")
+        _pbC  = pbDone ? C_GREEN : C_MUTED
+
+        _sig  = (traded ? "trade done" :
+                 (longNews  or longVXN  or longORB)  ? "▲ LONG"  :
+                 (shortNews or shortVXN or shortORB) ? "▼ SHORT" : "—")
+        _sigC = (str.contains(_sig, "LONG") ? C_GREEN : str.contains(_sig, "SHORT") ? C_RED : C_MUTED)
+
+        table.cell(tbl, 0, 0, "QB NAS100 RS1",
+                   text_color=C_GOLD, text_size=size.small,
+                   bgcolor=color.new(#0d1f3c,30), text_halign=text.align_left)
+        table.cell(tbl, 1, 0, "", bgcolor=color.new(#0d1f3c,30))
+
+        table.cell(tbl, 0,  1, "Engine",     text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  1, _eng,         text_color=_engC,   text_size=size.tiny)
+        table.cell(tbl, 0,  2, "VXN D-1",    text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  2, _vxn,         text_color=_vxnC,   text_size=size.tiny)
+        table.cell(tbl, 0,  3, "EM Bands",   text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  3, _em,          text_color=_emC,    text_size=size.tiny)
+        table.cell(tbl, 0,  4, "ORB Status", text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  4, _orb,         text_color=_orbC,   text_size=size.tiny)
+        table.cell(tbl, 0,  5, "VXN Breach", text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  5, _vxnBr,       text_color=_vxnBC,  text_size=size.tiny)
+        table.cell(tbl, 0,  6, "News Bar",   text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  6, _nb,          text_color=_nbC,    text_size=size.tiny)
+        table.cell(tbl, 0,  7, "Pullback",   text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  7, _pb,          text_color=_pbC,    text_size=size.tiny)
+        table.cell(tbl, 0,  8, "Signal",     text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  8, _sig,         text_color=_sigC,   text_size=size.tiny)
+        table.cell(tbl, 0,  9, "Traded",     text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1,  9, traded ? "✓" : "—",  text_color=C_MUTED, text_size=size.tiny)
+        table.cell(tbl, 0, 10, "R:R N/V/O",  text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 10,
+            str.tostring(rrNews,"#.#") + " / " + str.tostring(rrVXN,"#.#") + " / " + str.tostring(rrORB,"#.#"),
+            text_color=C_MUTED, text_size=size.tiny)
+        table.cell(tbl, 0, 11, "VXN mode",   text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 11, vxnWickMode ? "A-wick" : "B-close",
+            text_color=C_MUTED, text_size=size.tiny)

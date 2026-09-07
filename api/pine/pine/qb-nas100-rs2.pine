@@ -1,0 +1,297 @@
+//@version=6
+strategy(
+    title                   = "QB NAS100 RS2 — NY Displacement FVG",
+    shorttitle              = "QB-NAS100-RS2",
+    overlay                 = true,
+    pyramiding              = 0,
+    initial_capital         = 10000,
+    default_qty_type        = strategy.percent_of_equity,
+    default_qty_value       = 1,
+    currency                = currency.USD,
+    commission_type         = strategy.commission.cash_per_contract,
+    commission_value        = 2,
+    process_orders_on_close = true,
+    calc_on_every_tick      = false,
+    slippage                = 2
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Instrument  : CAPITALCOM:NAS100  |  NQ1!  |  US100
+// Timeframe   : 15 m
+//
+// Single-engine strategy — raw RS2 baseline, no filters beyond core rules:
+//
+//   1. Displacement candle detected  09:30–11:30 ET
+//      body/range ≥ 0.60  |  range ≥ 1.20× ATR14  |  close breaks 4-bar extreme
+//
+//   2. 3-candle FVG confirmed on the very next bar
+//      Bullish: low > high[2]  → zone = (high[2], low)
+//      Bearish: high < low[2]  → zone = (high, low[2])
+//      Minimum gap: 20 pts (baseline)
+//
+//   3. Wait for first retracement touch into FVG (max 4 M15 bars = 60 min)
+//      Entry: bar must also close in the direction of the trade
+//      Entry must occur before 12:00 ET
+//
+//   4. SL = 0.15 × ATR14 beyond the far FVG edge
+//      TP = 2R
+//      Max 2 trades/day  |  one active position at a time
+//      Each FVG gets exactly one entry attempt
+//      Hard EOD close at 16:00 ET
+//
+// Run this baseline first, unchanged, before touching any parameter.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+G1 = "Displacement"
+dispBodyMin = input.float(0.60, "Min body/range ratio",
+              step=0.05, minval=0.3, maxval=0.95, group=G1)
+dispAtrMult = input.float(1.20, "Min range (× ATR14)",
+              step=0.05, minval=0.5, maxval=3.0,  group=G1)
+bosBars     = input.int(4,      "BOS lookback bars",
+              minval=2, maxval=10, group=G1)
+
+G2 = "FVG"
+fvgMinPts  = input.int(20, "Min FVG size (pts)",
+             minval=5, maxval=200, group=G2)
+fvgTimeout = input.int(4,  "Retest timeout (M15 bars)",
+             minval=1, maxval=12, group=G2,
+             tooltip="4 bars = 60 min.  FVG is abandoned if no touch within this window.")
+
+G3 = "Risk"
+atrSlBuf = input.float(0.15, "SL buffer (× ATR14)",
+           step=0.05, minval=0.05, maxval=1.0, group=G3,
+           tooltip="SL = far FVG edge − (atrSlBuf × ATR14) for long, + for short.")
+rrTarget = input.float(2.0,  "R:R target",
+           step=0.5, minval=0.5, group=G3)
+
+G4 = "Session / Filters"
+maxPerDay = input.int(2,      "Max trades per day",
+            minval=1, maxval=4, group=G4)
+tradeDir  = input.string("Both", "Direction",
+            options=["Both","Long only","Short only"], group=G4)
+eodClose  = input.bool(true,  "Hard EOD close at 16:00 ET", group=G4)
+
+G5 = "Display"
+showDisp  = input.bool(true, "Show displacement marks",  group=G5)
+showFVG   = input.bool(true, "Show FVG zone lines",      group=G5)
+showTable = input.bool(true, "Show status table",         group=G5)
+
+// ─── TIMEZONE & SESSIONS ─────────────────────────────────────────────────────
+_ETZ       = "America/New_York"
+newDay     = ta.change(time("D")) != 0
+isSetupWin = not na(time(timeframe.period, "0930-1130", _ETZ))  // displacement window
+isEntryWin = not na(time(timeframe.period, "0930-1200", _ETZ))  // entry cutoff
+isRTH      = not na(time(timeframe.period, "0930-1600", _ETZ))  // full RTH (EOD gate)
+
+// ─── ATR ─────────────────────────────────────────────────────────────────────
+atr14 = ta.atr(14)
+
+// ─── DISPLACEMENT DETECTION ──────────────────────────────────────────────────
+_rng      = high - low
+_body     = math.abs(close - open)
+// Highest / lowest of the bosBars bars BEFORE the current bar (not including it)
+prev4High = ta.highest(high[1], bosBars)
+prev4Low  = ta.lowest(low[1],   bosBars)
+
+isBullDisp = (
+    not na(atr14) and
+    _body  >= dispBodyMin * _rng and
+    _rng   >= dispAtrMult * atr14 and
+    close  >  open and
+    close  >  prev4High
+)
+isBearDisp = (
+    not na(atr14) and
+    _body  >= dispBodyMin * _rng and
+    _rng   >= dispAtrMult * atr14 and
+    close  <  open and
+    close  <  prev4Low
+)
+
+// ─── FVG DETECTION ───────────────────────────────────────────────────────────
+// 3-candle pattern: bar[2] | bar[1] = displacement | current bar
+// Bullish: current low > bar[2] high  →  gap = (high[2], low)
+// Bearish: current high < bar[2] low  →  gap = (high, low[2])
+bullGap = low  - high[2]   // positive = bullish FVG
+bearGap = low[2] - high    // positive = bearish FVG
+
+// FVG valid only when displacement was the immediately preceding bar and in window
+newBullFVG = bullGap >= fvgMinPts and isBullDisp[1] and isSetupWin[1] and barstate.isconfirmed
+newBearFVG = bearGap >= fvgMinPts and isBearDisp[1] and isSetupWin[1] and barstate.isconfirmed
+
+// ─── FVG STATE MACHINE ───────────────────────────────────────────────────────
+var float fvgTop     = na     // upper boundary of active FVG zone
+var float fvgBot     = na     // lower boundary of active FVG zone
+var int   fvgDir     = 0      // 1 = bullish FVG (long bias)  -1 = bearish FVG (short bias)
+var int   fvgFormBar = na     // bar_index when FVG was detected
+var bool  fvgActive  = false  // waiting for a retest entry
+var int   dayTrades  = 0      // trades taken today
+
+if newDay
+    fvgTop     := na
+    fvgBot     := na
+    fvgDir     := 0
+    fvgFormBar := na
+    fvgActive  := false
+    dayTrades  := 0
+
+// Expire FVG that was never touched within the timeout window
+if fvgActive and not na(fvgFormBar) and
+   (bar_index - fvgFormBar) > fvgTimeout and barstate.isconfirmed
+    fvgActive := false
+
+// Detect new FVG when flat, no current FVG, and daily budget remains
+if barstate.isconfirmed and
+   not fvgActive and
+   strategy.position_size == 0 and
+   dayTrades < maxPerDay
+    if newBullFVG and (tradeDir == "Both" or tradeDir == "Long only")
+        fvgTop     := low       // current bar's low = top of bull FVG
+        fvgBot     := high[2]   // bar[2]'s high = bottom of bull FVG
+        fvgDir     := 1
+        fvgFormBar := bar_index
+        fvgActive  := true
+    else if newBearFVG and (tradeDir == "Both" or tradeDir == "Short only")
+        fvgTop     := low[2]    // bar[2]'s low = top of bear FVG
+        fvgBot     := high      // current bar's high = bottom of bear FVG
+        fvgDir     := -1
+        fvgFormBar := bar_index
+        fvgActive  := true
+
+// ─── ENTRY CONDITIONS ────────────────────────────────────────────────────────
+noPos = strategy.position_size == 0
+
+longRS2 = (
+    fvgActive and fvgDir == 1 and noPos and
+    isEntryWin and barstate.isconfirmed and
+    not na(fvgTop) and not na(fvgBot) and not na(atr14) and
+    low  <= fvgTop and    // retraced into zone
+    close >= fvgBot and   // close holds above zone bottom
+    close >  open         // bullish close confirmation
+)
+shortRS2 = (
+    fvgActive and fvgDir == -1 and noPos and
+    isEntryWin and barstate.isconfirmed and
+    not na(fvgTop) and not na(fvgBot) and not na(atr14) and
+    high >= fvgBot and    // rallied into zone
+    close <= fvgTop and   // close holds below zone top
+    close <  open         // bearish close confirmation
+)
+
+// ─── EXECUTE ─────────────────────────────────────────────────────────────────
+if longRS2
+    _sl   = fvgBot - atrSlBuf * atr14
+    _risk = close - _sl
+    if _risk > 0
+        strategy.entry("LF", strategy.long)
+        strategy.exit("LFX", "LF", stop=_sl, limit=close + _risk * rrTarget)
+        fvgActive := false
+        dayTrades := dayTrades + 1
+
+if shortRS2
+    _sl   = fvgTop + atrSlBuf * atr14
+    _risk = _sl - close
+    if _risk > 0
+        strategy.entry("SF", strategy.short)
+        strategy.exit("SFX", "SF", stop=_sl, limit=close - _risk * rrTarget)
+        fvgActive := false
+        dayTrades := dayTrades + 1
+
+// ─── EOD CLOSE ───────────────────────────────────────────────────────────────
+if eodClose and not isRTH and strategy.position_size != 0 and barstate.isconfirmed
+    strategy.close_all("EOD")
+
+// ─── COLOUR PALETTE ──────────────────────────────────────────────────────────
+C_BULL  = color.new(#22C55E, 0)
+C_BEAR  = color.new(#F43F5E, 0)
+C_GOLD  = color.new(#F4C430, 0)
+C_MUTED = color.new(#5c7ea0, 0)
+C_AQUA  = color.new(#06B6D4, 0)
+
+// ─── VISUAL: DISPLACEMENT MARKS ──────────────────────────────────────────────
+plotshape(showDisp and isBullDisp and isSetupWin,
+          "Bull Disp", shape.circle, location.belowbar, C_BULL, size=size.tiny)
+plotshape(showDisp and isBearDisp and isSetupWin,
+          "Bear Disp", shape.circle, location.abovebar, C_BEAR, size=size.tiny)
+
+// ─── VISUAL: ACTIVE FVG ZONE BOUNDARIES ──────────────────────────────────────
+_fvgLineC = fvgDir == 1 ? color.new(#22C55E, 45) : color.new(#F43F5E, 45)
+plot(showFVG and fvgActive ? fvgTop : na, "FVG Top",
+     color=_fvgLineC, linewidth=1, style=plot.style_stepline)
+plot(showFVG and fvgActive ? fvgBot : na, "FVG Bot",
+     color=_fvgLineC, linewidth=1, style=plot.style_stepline)
+
+// ─── SIGNAL MARKERS ──────────────────────────────────────────────────────────
+plotshape(longRS2,  "Long FVG",  shape.triangleup,   location.belowbar, C_BULL, size=size.large)
+plotshape(shortRS2, "Short FVG", shape.triangledown, location.abovebar, C_BEAR, size=size.large)
+
+// ─── ENTRY LABELS ────────────────────────────────────────────────────────────
+if longRS2
+    _lsl = fvgBot - atrSlBuf * atr14
+    label.new(bar_index, low,
+        "FVG LONG\nSL " + str.tostring(math.round(_lsl)) +
+        "\nTP " + str.tostring(math.round(close + (close - _lsl) * rrTarget)),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up,
+        color=color.new(#22C55E, 72), textcolor=color.white, size=size.small)
+
+if shortRS2
+    _ssl = fvgTop + atrSlBuf * atr14
+    label.new(bar_index, high,
+        "FVG SHORT\nSL " + str.tostring(math.round(_ssl)) +
+        "\nTP " + str.tostring(math.round(close - (_ssl - close) * rrTarget)),
+        xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down,
+        color=color.new(#F43F5E, 72), textcolor=color.white, size=size.small)
+
+// ─── STATUS TABLE ─────────────────────────────────────────────────────────────
+if showTable
+    var table tbl = table.new(position.top_right, 2, 8,
+        bgcolor      = color.new(#020408, 25),
+        border_color = color.new(#1a3354, 65),
+        border_width = 1,
+        frame_color  = color.new(#F4C430, 60),
+        frame_width  = 1)
+
+    if true
+        _fvgZone = (
+            fvgActive and not na(fvgBot) and not na(fvgTop) ?
+                str.tostring(math.round(fvgBot)) + "–" +
+                str.tostring(math.round(fvgTop)) +
+                (fvgDir == 1 ? " ▲" : " ▼") :
+            dayTrades >= maxPerDay ? "limit reached" : "—")
+        _fvgC = fvgActive ? (fvgDir == 1 ? C_BULL : C_BEAR) : C_MUTED
+
+        _timeout = (
+            (fvgActive and not na(fvgFormBar)) ?
+                str.tostring(math.max(0, fvgTimeout - (bar_index - fvgFormBar))) + " bars" : "—")
+
+        _sig   = longRS2 ? "▲ LONG" : shortRS2 ? "▼ SHORT" : "—"
+        _sigC  = (str.contains(_sig, "LONG") ? C_BULL :
+                  str.contains(_sig, "SHORT") ? C_BEAR : C_MUTED)
+
+        _sess  = (isSetupWin ? "setup win" : isEntryWin ? "entry win" :
+                  isRTH ? "RTH" : "—")
+        _sessC = isSetupWin ? C_AQUA : isEntryWin ? C_GOLD : C_MUTED
+
+        table.cell(tbl, 0, 0, "QB NAS100 RS2",
+                   text_color=C_GOLD, text_size=size.small,
+                   bgcolor=color.new(#0d1f3c, 30), text_halign=text.align_left)
+        table.cell(tbl, 1, 0, "", bgcolor=color.new(#0d1f3c, 30))
+
+        table.cell(tbl, 0, 1, "Session",      text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 1, _sess,           text_color=_sessC,  text_size=size.tiny)
+        table.cell(tbl, 0, 2, "ATR14",        text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 2, na(atr14) ? "—" : str.tostring(math.round(atr14, 1)),
+                   text_color=C_MUTED, text_size=size.tiny)
+        table.cell(tbl, 0, 3, "FVG zone",     text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 3, _fvgZone,       text_color=_fvgC,   text_size=size.tiny)
+        table.cell(tbl, 0, 4, "FVG timeout",  text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 4, _timeout,        text_color=C_MUTED, text_size=size.tiny)
+        table.cell(tbl, 0, 5, "Signal",       text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 5, _sig,            text_color=_sigC,   text_size=size.tiny)
+        table.cell(tbl, 0, 6, "Today",        text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 6, str.tostring(dayTrades) + "/" + str.tostring(maxPerDay),
+                   text_color=C_MUTED, text_size=size.tiny)
+        table.cell(tbl, 0, 7, "R:R",          text_color=C_MUTED, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(tbl, 1, 7, str.tostring(rrTarget, "#.#"),
+                   text_color=C_MUTED, text_size=size.tiny)

@@ -486,6 +486,9 @@ export default function TerminalLayout({
   const [compound, setCompound] = useState(3);
   const [utc, setUtc] = useState('--:--:-- UTC');
   const [sessions, setSessions] = useState({asian:false,london:false,ny:false});
+  const [lotSize,  setLotSize]  = useState(() => parseFloat(localStorage.getItem('qb_lot_size') || '0.01'));
+  const [lotInput, setLotInput] = useState(() => parseFloat(localStorage.getItem('qb_lot_size') || '0.01').toFixed(2));
+  const [lotSaved, setLotSaved] = useState(false);
 
   // Canvas refs
   const ftmoRef   = useRef(null);
@@ -518,6 +521,24 @@ export default function TerminalLayout({
   const lastTrade = (ledger||[]).filter(t=>t.closedAt).sort((a,b)=>(b.closedAt||0)-(a.closedAt||0))[0] ?? null;
   const lastSpec = lastTrade ? (lastTrade.template||'').replace('ger40-bg-specialist','GER').replace('nas100-specialist','NAS').replace('gold-specialist','GS1') : null;
 
+  // ── Risk Station calculations ─────────────────────────────────────────────────
+  const GS1_SL = 150, GS1_TP = 200, POINT_VAL = 1; // $1/pt/lot — XAUUSD standard
+  const accEq = equity || capital || 100000;
+  const riskAmt = lotSize * GS1_SL * POINT_VAL;
+  const rewardAmt = lotSize * GS1_TP * POINT_VAL;
+  const rrRatio = rewardAmt / riskAmt;
+  const riskPct = (riskAmt / accEq) * 100;
+  const ftmoInitBal = balance || capital || 100000;
+  const dailyLimit = ftmoInitBal * 0.05;
+  const dailyLoss = (ledger||[]).filter(t=>t.closedAt&&new Date(t.closedAt).toISOString().slice(0,10)===today&&(t.finalPnL||0)<0).reduce((s,t)=>s+Math.abs(t.finalPnL||0),0);
+  const dailyRemain = Math.max(0, dailyLimit - dailyLoss);
+  const budgetPct = (riskAmt / dailyLimit) * 100;
+  const recLot = Math.max(0.01, Math.floor((accEq * 0.01) / (GS1_SL * POINT_VAL) * 100) / 100);
+  const expectedWeekly = 1.37 * (0.975 * rewardAmt - 0.025 * riskAmt);
+  const riskBlock = riskAmt >= dailyRemain || riskPct >= 4.5;
+  const riskWarn = !riskBlock && (riskPct >= 2 || budgetPct >= 40);
+  const riskColor = riskBlock ? C.red2 : riskWarn ? C.warn2 : C.green2;
+
   // ── Clock ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     const tick = () => {
@@ -545,7 +566,7 @@ export default function TerminalLayout({
     drawCorrGauge(corrRef.current);
     if (activeView==='telemetry') drawEquityCurve(equityRef.current, equityWrap.current, ledger);
     if (activeView==='performance') { drawCalendar(calRef.current,calWrap.current,ledger); drawMiniPerf(miniPRef.current,miniPWrap.current,perf); }
-    if (activeView==='specialists') { drawRadar(radarRef.current,radarWrap.current,perf); drawCompound(compRef.current,compWrap.current,compound,equity); }
+    // risk station is pure HTML — no canvas draws needed
     if (activeView==='nexus') drawHeatmap(hmRef.current,hmWrap.current,ledger);
   }, [activeView, dailyDD, totalDD, ledger, perf, compound, equity, newsStatus, ftmoStatus, accountStatus]);
 
@@ -693,7 +714,7 @@ export default function TerminalLayout({
         {/* ═══ CENTER PANEL ═══ */}
         <div id="qc-center">
           <div className="qc-tabs">
-            {[['telemetry','TELEMETRY'],['performance','PERFORMANCE'],['jarvis','JARVIS'],['specialists','SPECIALISTS'],['nexus','SIGNAL NEXUS']].map(([k,lbl])=>(
+            {[['telemetry','TELEMETRY'],['performance','PERFORMANCE'],['jarvis','JARVIS'],['risk','RISK STATION'],['nexus','SIGNAL NEXUS']].map(([k,lbl])=>(
               <button key={k} className={`qc-tab${activeView===k?' active':''}`} onClick={()=>switchView(k)}>{lbl}</button>
             ))}
           </div>
@@ -858,41 +879,116 @@ export default function TerminalLayout({
             </div>
           </div>
 
-          {/* SPECIALISTS VIEW */}
-          <div className={`qc-view${activeView==='specialists'?' active':''}`} id="qc-view-specialists">
-            <div className="qc-sv">
-              <div className="qc-radar-wrap" ref={radarWrap}><canvas ref={radarRef} style={{display:'block'}}/></div>
-              <div className="qc-spec-rank">
-                <div className="qc-sr-t">SPECIALIST RANKING</div>
+          {/* RISK MANAGEMENT STATION */}
+          <div className={`qc-view${activeView==='risk'?' active':''}`} id="qc-view-risk">
+            <div style={{padding:'12px 14px',display:'flex',flexDirection:'column',gap:10,height:'100%',overflowY:'auto',boxSizing:'border-box'}}>
+
+              {/* Header */}
+              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between'}}>
+                <div>
+                  <div style={{fontFamily:'JetBrains Mono,monospace',fontSize:10,letterSpacing:2,color:C.t,fontWeight:700}}>RISK MANAGEMENT STATION</div>
+                  <div style={{fontSize:8,color:C.t3,marginTop:2,fontFamily:'Inter,sans-serif'}}>GS1 · XAUUSD · SL 150pt · TP ~200pt · $1 / pt / lot</div>
+                </div>
+                <span className={`qc-badge ${riskBlock?'qc-b-block':riskWarn?'qc-b-warn':'qc-b-ok'}`}>{riskBlock?'BLOCKED':riskWarn?'WARN':'CLEAR'}</span>
+              </div>
+
+              {/* Lot size input */}
+              <div style={{background:C.s1,border:`1px solid ${riskBlock?C.red2:riskWarn?C.warn2:C.b2}`,padding:'10px 14px',transition:'border-color .2s'}}>
+                <div style={{fontSize:8,color:C.t3,letterSpacing:1,marginBottom:8,fontFamily:'JetBrains Mono,monospace'}}>SET LOT SIZE</div>
+                <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                  <button onClick={()=>{const v=Math.max(0.01,+(lotSize-0.01).toFixed(2));setLotSize(v);setLotInput(v.toFixed(2));setLotSaved(false);}}
+                    style={{width:28,height:28,background:C.b2,border:'none',color:C.t,fontFamily:'JetBrains Mono,monospace',fontSize:15,cursor:'pointer',flexShrink:0}}>−</button>
+                  <input type="number" value={lotInput} min="0.01" step="0.01"
+                    onChange={e=>{setLotInput(e.target.value);const v=parseFloat(e.target.value);if(!isNaN(v)&&v>0){setLotSize(v);setLotSaved(false);}}}
+                    style={{width:80,background:C.bg,border:`1px solid ${riskBlock?C.red2:riskWarn?C.warn2:C.b2}`,color:riskColor,fontFamily:'JetBrains Mono,monospace',fontSize:16,textAlign:'center',padding:'4px 8px',outline:'none',fontWeight:700}}/>
+                  <button onClick={()=>{const v=+(lotSize+0.01).toFixed(2);setLotSize(v);setLotInput(v.toFixed(2));setLotSaved(false);}}
+                    style={{width:28,height:28,background:C.b2,border:'none',color:C.t,fontFamily:'JetBrains Mono,monospace',fontSize:15,cursor:'pointer',flexShrink:0}}>+</button>
+                  <span style={{fontSize:9,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>LOTS</span>
+                  <div style={{marginLeft:'auto',display:'flex',gap:4}}>
+                    {[{v:recLot,lbl:'1%',col:C.green2},{v:+(recLot*1.5).toFixed(2),lbl:'1.5%',col:C.warn2},{v:+(recLot*2).toFixed(2),lbl:'2%',col:C.red2}].map(p=>(
+                      <button key={p.lbl} onClick={()=>{setLotSize(p.v);setLotInput(p.v.toFixed(2));setLotSaved(false);}}
+                        style={{padding:'3px 8px',background:'transparent',border:`1px solid ${p.col}`,color:p.col,fontSize:7,fontFamily:'JetBrains Mono,monospace',cursor:'pointer',letterSpacing:.5,lineHeight:1.4}}>
+                        {p.v.toFixed(2)}<br/>{p.lbl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Warning / Block banner */}
+              {(riskBlock||riskWarn)&&(
+                <div style={{border:`1px solid ${riskBlock?C.red2:C.warn2}`,background:riskBlock?'rgba(192,48,64,.14)':'rgba(208,160,48,.10)',padding:'8px 12px'}}>
+                  <div style={{fontSize:9,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:riskBlock?C.red2:C.warn2,letterSpacing:1}}>
+                    {riskBlock?'⛔  EXECUTION BLOCKED — EXCEEDS FTMO DAILY LIMIT':'⚠  RISK WARNING — APPROACHING SAFE THRESHOLD'}
+                  </div>
+                  <div style={{fontSize:8,color:C.t2,marginTop:5,lineHeight:1.7,fontFamily:'Inter,sans-serif'}}>
+                    {riskBlock
+                      ?`$${riskAmt.toFixed(0)} risk (${riskPct.toFixed(2)}% equity) would breach the FTMO $${dailyLimit.toFixed(0)} daily loss cap. Reduce to ${recLot.toFixed(2)} lots or less.`
+                      :`${riskPct.toFixed(2)}% equity exposed. Daily budget used: ${budgetPct.toFixed(1)}%. Recommended max: ${recLot.toFixed(2)} lots at 1% risk.`
+                    }
+                  </div>
+                </div>
+              )}
+
+              {/* Metrics grid */}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
                 {[
-                  {rank:'#1',name:'GER40 B+G',   sub:'Tue+Thu · 15m FVG · Both dirs', wr:perf?.['ger40-bg-specialist']?.winRate, pf:perf?.['ger40-bg-specialist']?.profitFactor, bkWr:64.1, bkPf:1.73, col:C.teal2},
-                  {rank:'#2',name:'NAS100 TJR',  sub:'AMD · London→NY · BOS FVG',     wr:perf?.['nas100-specialist']?.winRate,   pf:perf?.['nas100-specialist']?.profitFactor,   bkWr:59.7, bkPf:2.51, col:C.blue3},
-                  {rank:'#3',name:'GOLD S1 ORB', sub:'Frankfurt+NY · H+M timeframe',  wr:perf?.['gold-specialist']?.winRate,     pf:perf?.['gold-specialist']?.profitFactor,     bkWr:61.3, bkPf:1.19, col:C.gold},
-                ].map(s=>(
-                  <div key={s.rank} className="qc-srank-row">
-                    <span className="qc-srank-n">{s.rank}</span>
-                    <div style={{flex:1}}>
-                      <div className="qc-srank-name" style={{color:s.col}}>{s.name}</div>
-                      <div className="qc-srank-sub">{s.sub}</div>
-                    </div>
-                    <div className="qc-srank-stats">
-                      <span style={{color:s.wr!=null?C.green2:C.t3}}>{s.wr!=null?s.wr.toFixed(1)+'%':s.bkWr+'%*'}</span>
-                      <span style={{color:s.pf!=null?C.blue3:C.t3}}>{s.pf!=null?s.pf.toFixed(2):s.bkPf+'*'}</span>
-                      <span style={{color:C.gold}}>ON</span>
-                    </div>
+                  {lbl:'RISK / TRADE',   val:`$${riskAmt.toFixed(0)}`,    sub:`${riskPct.toFixed(2)}% equity`,             col:riskColor},
+                  {lbl:'REWARD / TRADE', val:`$${rewardAmt.toFixed(0)}`,  sub:`${((rewardAmt/accEq)*100).toFixed(2)}% gain`,col:C.green2},
+                  {lbl:'R : R',          val:`1 : ${rrRatio.toFixed(2)}`, sub:'reward per unit risk',                       col:C.blue3},
+                  {lbl:'DAILY BUDGET',   val:`$${dailyRemain.toFixed(0)}`,sub:'remaining today',                            col:dailyRemain>riskAmt*2?C.green2:dailyRemain>riskAmt?C.warn2:C.red2},
+                  {lbl:'BUDGET USED',    val:`${budgetPct.toFixed(1)}%`,  sub:`of $${dailyLimit.toFixed(0)} limit`,         col:budgetPct>=75?C.red2:budgetPct>=40?C.warn2:C.green2},
+                  {lbl:'RECOMMENDED',    val:`${recLot.toFixed(2)} lots`, sub:'at 1% equity risk',                          col:C.gold},
+                ].map(m=>(
+                  <div key={m.lbl} className="qc-fstat">
+                    <div className="qc-fs-l">{m.lbl}</div>
+                    <div className="qc-fs-v" style={{color:m.col}}>{m.val}</div>
+                    <div className="qc-fs-s">{m.sub}</div>
                   </div>
                 ))}
               </div>
-              <div className="qc-compound" ref={compWrap}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
-                  <span className="qc-stitle">COMPOUND GROWTH TRACKER</span>
-                  <div style={{display:'flex',alignItems:'center',gap:8}}>
-                    <input type="range" min={1} max={12} value={compound} onChange={e=>{ setCompound(Number(e.target.value)); setTimeout(()=>drawCompound(compRef.current,compWrap.current,Number(e.target.value),equity),0); }} style={{width:90,accentColor:C.gold}}/>
-                    <span className="qc-mono" style={{fontSize:9,color:C.gold}}>M{compound}: ${equity>0?(equity*Math.pow(1.025,compound)).toFixed(0):'—'}</span>
-                  </div>
+
+              {/* Scenario analysis */}
+              <div>
+                <div className="qc-stitle" style={{marginBottom:6}}>SCENARIO ANALYSIS · CURRENT LOT SIZE</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
+                  {[
+                    {lbl:'3 LOSSES',val:-3*riskAmt,      pct:(-3*riskAmt/accEq)*100,        col:C.red2,  bg:'rgba(192,48,64,.10)'},
+                    {lbl:'AVG WEEK', val:expectedWeekly,  pct:(expectedWeekly/accEq)*100,     col:C.gold,  bg:'rgba(200,152,32,.08)'},
+                    {lbl:'3 WINS',   val:3*rewardAmt,     pct:(3*rewardAmt/accEq)*100,        col:C.green2,bg:'rgba(34,160,96,.10)'},
+                  ].map(s=>(
+                    <div key={s.lbl} style={{background:s.bg,border:`1px solid ${s.col}33`,padding:'8px 10px',textAlign:'center'}}>
+                      <div style={{fontSize:6,color:C.t3,letterSpacing:1,fontFamily:'Inter,sans-serif',marginBottom:4}}>{s.lbl}</div>
+                      <div style={{fontSize:13,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:s.col}}>
+                        {s.val>=0?'+':''}{s.val>=0?'':'-'}${Math.abs(s.val).toFixed(0)}
+                      </div>
+                      <div style={{fontSize:8,color:C.t3,marginTop:2}}>{s.pct>=0?'+':''}{s.pct.toFixed(2)}%</div>
+                    </div>
+                  ))}
                 </div>
-                <canvas ref={compRef} height={56} style={{display:'block',width:'100%'}}/>
               </div>
+
+              {/* Apply button */}
+              <button
+                disabled={riskBlock}
+                onClick={()=>{
+                  localStorage.setItem('qb_lot_size', lotSize.toString());
+                  setLotSaved(true);
+                  setTimeout(()=>setLotSaved(false), 2500);
+                  fetch('/api/manage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setLotSize',lotSize})}).catch(()=>{});
+                }}
+                style={{
+                  marginTop:4,padding:'10px 0',
+                  background:riskBlock?'transparent':lotSaved?'rgba(34,160,96,.12)':C.b2,
+                  border:`1px solid ${riskBlock?C.red2:lotSaved?C.green2:C.b}`,
+                  color:riskBlock?C.red2:lotSaved?C.green2:C.t,
+                  fontFamily:'JetBrains Mono,monospace',fontSize:10,letterSpacing:2,
+                  cursor:riskBlock?'not-allowed':'pointer',fontWeight:700,transition:'all .25s',
+                }}
+              >
+                {riskBlock?`BLOCKED — MAX SAFE LOT: ${recLot.toFixed(2)}`:lotSaved?`✓ LOT SIZE ${lotSize.toFixed(2)} APPLIED`:'APPLY LOT SIZE'}
+              </button>
+
             </div>
           </div>
 
@@ -1042,7 +1138,7 @@ export default function TerminalLayout({
         <div className="qc-sep"/>
         <div className="qc-ctl-grp">
           <span className="qc-ctl-lbl">VIEW</span>
-          {[['telemetry','TELEMETRY'],['performance','PERF'],['jarvis','JARVIS'],['specialists','SPECS'],['nexus','NEXUS']].map(([k,lbl])=>(
+          {[['telemetry','TELEMETRY'],['performance','PERF'],['jarvis','JARVIS'],['risk','RISK'],['nexus','NEXUS']].map(([k,lbl])=>(
             <button key={k} className={`qc-btn${activeView===k?' on':''}`} onClick={()=>switchView(k)}>{lbl}</button>
           ))}
         </div>
