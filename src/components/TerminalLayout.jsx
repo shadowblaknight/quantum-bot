@@ -522,7 +522,10 @@ export default function TerminalLayout({
   const lastSpec = lastTrade ? (lastTrade.template||'').replace('ger40-bg-specialist','GER').replace('nas100-specialist','NAS').replace('gold-specialist','GS1') : null;
 
   // ── Risk Station calculations ─────────────────────────────────────────────────
-  const GS1_SL = 150, GS1_TP = 200, POINT_VAL = 1; // $1/pt/lot — XAUUSD standard
+  // XAUUSD: 1 standard lot = 100 oz. $1 price move × 100 oz = $100 per lot.
+  // GS1 SL = 150 price-unit dollars (structural, placed $150 from ORB edge).
+  // GS1 TP1 ≈ 0.75 × avg ORB range ≈ 0.75 × $20 = $15 typical price move.
+  const GS1_SL = 150, GS1_TP = 15, POINT_VAL = 100;
   const accEq = equity || capital || 100000;
   const riskAmt = lotSize * GS1_SL * POINT_VAL;
   const rewardAmt = lotSize * GS1_TP * POINT_VAL;
@@ -887,7 +890,7 @@ export default function TerminalLayout({
               <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between'}}>
                 <div>
                   <div style={{fontFamily:'JetBrains Mono,monospace',fontSize:10,letterSpacing:2,color:C.t,fontWeight:700}}>RISK MANAGEMENT STATION</div>
-                  <div style={{fontSize:8,color:C.t3,marginTop:2,fontFamily:'Inter,sans-serif'}}>GS1 · XAUUSD · SL 150pt · TP ~200pt · $1 / pt / lot</div>
+                  <div style={{fontSize:8,color:C.t3,marginTop:2,fontFamily:'Inter,sans-serif'}}>GS1 · XAUUSD · SL $150 structural · TP ~$15 (0.75×ORB) · $100/lot per $1 move</div>
                 </div>
                 <span className={`qc-badge ${riskBlock?'qc-b-block':riskWarn?'qc-b-warn':'qc-b-ok'}`}>{riskBlock?'BLOCKED':riskWarn?'WARN':'CLEAR'}</span>
               </div>
@@ -935,7 +938,7 @@ export default function TerminalLayout({
                 {[
                   {lbl:'RISK / TRADE',   val:`$${riskAmt.toFixed(0)}`,    sub:`${riskPct.toFixed(2)}% equity`,             col:riskColor},
                   {lbl:'REWARD / TRADE', val:`$${rewardAmt.toFixed(0)}`,  sub:`${((rewardAmt/accEq)*100).toFixed(2)}% gain`,col:C.green2},
-                  {lbl:'R : R',          val:`1 : ${rrRatio.toFixed(2)}`, sub:'reward per unit risk',                       col:C.blue3},
+                  {lbl:'TP / SL',         val:`1 : ${(GS1_SL/GS1_TP).toFixed(1)}`, sub:'97.5% WR overcomes R:R',                col:C.blue3},
                   {lbl:'DAILY BUDGET',   val:`$${dailyRemain.toFixed(0)}`,sub:'remaining today',                            col:dailyRemain>riskAmt*2?C.green2:dailyRemain>riskAmt?C.warn2:C.red2},
                   {lbl:'BUDGET USED',    val:`${budgetPct.toFixed(1)}%`,  sub:`of $${dailyLimit.toFixed(0)} limit`,         col:budgetPct>=75?C.red2:budgetPct>=40?C.warn2:C.green2},
                   {lbl:'RECOMMENDED',    val:`${recLot.toFixed(2)} lots`, sub:'at 1% equity risk',                          col:C.gold},
