@@ -489,6 +489,9 @@ export default function TerminalLayout({
   const [lotSize,  setLotSize]  = useState(() => parseFloat(localStorage.getItem('qb_lot_size') || '0.01'));
   const [lotInput, setLotInput] = useState(() => parseFloat(localStorage.getItem('qb_lot_size') || '0.01').toFixed(2));
   const [lotSaved, setLotSaved] = useState(false);
+  const [lotSizeSP, setLotSizeSP] = useState(() => parseFloat(localStorage.getItem('qb_lot_size_sp') || '6.67'));
+  const [lotInputSP, setLotInputSP] = useState(() => parseFloat(localStorage.getItem('qb_lot_size_sp') || '6.67').toFixed(2));
+  const [lotSavedSP, setLotSavedSP] = useState(false);
 
   // Canvas refs
   const ftmoRef   = useRef(null);
@@ -537,10 +540,31 @@ export default function TerminalLayout({
   const dailyRemain = Math.max(0, dailyLimit - dailyLoss);
   const budgetPct = (riskAmt / dailyLimit) * 100;
   const recLot = Math.max(0.01, Math.floor((accEq * 0.01) / (GS1_SL * POINT_VAL) * 100) / 100);
-  const expectedWeekly = 1.37 * (0.975 * rewardAmt - 0.025 * riskAmt);
+  // Trailing stop EV model: 97.5% reach TP1 (BE trigger)
+  // Of those: 35% close BE($0), 40% close at TP1-trail (+$15), 15% at TP2-trail (+$30), 10% runner (+$50 avg)
+  const trailEV_price = 0.025*(-GS1_SL) + 0.975*(0.35*0 + 0.40*GS1_TP + 0.15*GS1_TP*2 + 0.10*GS1_TP*3.33);
+  const trailEVperTrade = trailEV_price * lotSize * POINT_VAL;
+  const annualPnL_71  = trailEVperTrade * 71;
+  const annualPnL_96  = trailEVperTrade * 96;
+  const phase1Months_71 = accEq > 0 ? (accEq * 0.10) / (annualPnL_71 / 12) : 0;
+  const phase1Months_96 = accEq > 0 ? (accEq * 0.10) / (annualPnL_96 / 12) : 0;
+  const phase2Months_71 = phase1Months_71 / 2;
+  const phase2Months_96 = phase1Months_96 / 2;
+  const expectedWeekly = trailEVperTrade * (71/52);
   const riskBlock = riskAmt >= dailyRemain || riskPct >= 4.5;
   const riskWarn = !riskBlock && (riskPct >= 2 || budgetPct >= 40);
   const riskColor = riskBlock ? C.red2 : riskWarn ? C.warn2 : C.green2;
+
+  // SP500 risk: US500 pipSize=0.1, dollarPerPipPerLot=0.1 → 0.1/0.1 × 10pip/pt = $1/pt/lot
+  const SP500_SL = 150, SP500_TP = 22, SP500_POINT_VAL = 1;
+  const riskAmtSP    = lotSizeSP * SP500_SL * SP500_POINT_VAL;
+  const rewardAmtSP  = lotSizeSP * SP500_TP * SP500_POINT_VAL;
+  const riskPctSP    = (riskAmtSP / accEq) * 100;
+  const recLotSP     = Math.max(0.01, Math.floor((accEq * 0.01) / (SP500_SL * SP500_POINT_VAL) * 100) / 100);
+  const budgetPctSP  = (riskAmtSP / dailyLimit) * 100;
+  const riskBlockSP  = riskAmtSP >= dailyRemain || riskPctSP >= 4.5;
+  const riskWarnSP   = !riskBlockSP && (riskPctSP >= 2 || budgetPctSP >= 40);
+  const riskColorSP  = riskBlockSP ? C.red2 : riskWarnSP ? C.warn2 : C.blue3;
 
   // ── Clock ────────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -951,23 +975,45 @@ export default function TerminalLayout({
                 ))}
               </div>
 
-              {/* Scenario analysis */}
+              {/* FTMO Challenge Pace */}
               <div>
-                <div className="qc-stitle" style={{marginBottom:6}}>SCENARIO ANALYSIS · CURRENT LOT SIZE</div>
-                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
+                <div className="qc-stitle" style={{marginBottom:6}}>FTMO CHALLENGE PACE · TRAILING STOP MODEL</div>
+                <div style={{fontSize:7,color:C.t3,fontFamily:'Inter,sans-serif',marginBottom:8,lineHeight:1.6}}>
+                  Trail plan: BE at TP1 ($15) · lock +$15 at TP2 · lock +$30 at TP3 · let runners go<br/>
+                  97.5% reach TP1 → 35% scratch to BE · 40% exit +$15 · 15% exit +$30 · 10% runners
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:8}}>
                   {[
-                    {lbl:'3 LOSSES',val:-3*riskAmt,      pct:(-3*riskAmt/accEq)*100,        col:C.red2,  bg:'rgba(192,48,64,.10)'},
-                    {lbl:'AVG WEEK', val:expectedWeekly,  pct:(expectedWeekly/accEq)*100,     col:C.gold,  bg:'rgba(200,152,32,.08)'},
-                    {lbl:'3 WINS',   val:3*rewardAmt,     pct:(3*rewardAmt/accEq)*100,        col:C.green2,bg:'rgba(34,160,96,.10)'},
-                  ].map(s=>(
-                    <div key={s.lbl} style={{background:s.bg,border:`1px solid ${s.col}33`,padding:'8px 10px',textAlign:'center'}}>
-                      <div style={{fontSize:6,color:C.t3,letterSpacing:1,fontFamily:'Inter,sans-serif',marginBottom:4}}>{s.lbl}</div>
-                      <div style={{fontSize:13,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:s.col}}>
-                        {s.val>=0?'+':''}{s.val>=0?'':'-'}${Math.abs(s.val).toFixed(0)}
-                      </div>
-                      <div style={{fontSize:8,color:C.t3,marginTop:2}}>{s.pct>=0?'+':''}{s.pct.toFixed(2)}%</div>
+                    {lbl:'EV / TRADE',     val:`+$${trailEVperTrade.toFixed(0)}`,  col:trailEVperTrade>0?C.green2:C.red2},
+                    {lbl:'EV / WEEK',      val:`+$${(expectedWeekly).toFixed(0)}`, col:C.gold},
+                    {lbl:'ANNUAL (71 tr)', val:`+$${annualPnL_71.toFixed(0)} · ${(annualPnL_71/accEq*100).toFixed(1)}%`, col:C.blue3},
+                    {lbl:'ANNUAL (96 tr)', val:`+$${annualPnL_96.toFixed(0)} · ${(annualPnL_96/accEq*100).toFixed(1)}%`, col:C.teal2},
+                  ].map(m=>(
+                    <div key={m.lbl} className="qc-fstat">
+                      <div className="qc-fs-l">{m.lbl}</div>
+                      <div className="qc-fs-v" style={{color:m.col,fontSize:10}}>{m.val}</div>
                     </div>
                   ))}
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+                  {[
+                    {lbl:'PHASE 1 (10%) · 71 tr/yr', val:phase1Months_71, col:C.gold,  bg:'rgba(200,152,32,.08)'},
+                    {lbl:'PHASE 1 (10%) · 96 tr/yr', val:phase1Months_96, col:C.green2,bg:'rgba(34,160,96,.08)'},
+                    {lbl:'PHASE 2 (5%)  · 71 tr/yr', val:phase2Months_71, col:C.gold,  bg:'rgba(200,152,32,.06)'},
+                    {lbl:'PHASE 2 (5%)  · 96 tr/yr', val:phase2Months_96, col:C.green2,bg:'rgba(34,160,96,.06)'},
+                  ].map(m=>(
+                    <div key={m.lbl} style={{background:m.bg,border:`1px solid ${m.col}33`,padding:'8px 10px',textAlign:'center'}}>
+                      <div style={{fontSize:6,color:C.t3,letterSpacing:1,fontFamily:'Inter,sans-serif',marginBottom:4}}>{m.lbl}</div>
+                      <div style={{fontSize:16,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:m.col}}>
+                        {m.val>0?m.val.toFixed(1):'—'}
+                        <span style={{fontSize:9,fontWeight:400,marginLeft:2}}>mo</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginTop:6,fontSize:7,color:C.t3,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
+                  Total per challenge: <span style={{color:C.gold,fontFamily:'JetBrains Mono,monospace'}}>{(phase1Months_71+phase2Months_71).toFixed(0)}–{(phase1Months_96+phase2Months_96).toFixed(0)} months</span> ·
+                  To cut Phase 1 to &lt;9 mo → use 2% risk or add London setups (130+ trades/yr)
                 </div>
               </div>
 
@@ -991,6 +1037,102 @@ export default function TerminalLayout({
               >
                 {riskBlock?`BLOCKED — MAX SAFE LOT: ${recLot.toFixed(2)}`:lotSaved?`✓ LOT SIZE ${lotSize.toFixed(2)} APPLIED`:'APPLY LOT SIZE'}
               </button>
+
+              {/* ── SP500 Risk Station ────────────────────────────────── */}
+              <div style={{marginTop:10,borderTop:`1px solid ${C.b}`,paddingTop:10}}>
+
+                {/* SP500 Header */}
+                <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:10}}>
+                  <div>
+                    <div style={{fontFamily:'JetBrains Mono,monospace',fontSize:10,letterSpacing:2,color:C.blue3,fontWeight:700}}>S&P500 RISK STATION</div>
+                    <div style={{fontSize:8,color:C.t3,marginTop:2,fontFamily:'Inter,sans-serif'}}>SP500 · US500.cash · SL 150pt structural · TP ~22pt (0.75×ORB) · $1/lot per 1pt move</div>
+                  </div>
+                  <span className={`qc-badge ${riskBlockSP?'qc-b-block':riskWarnSP?'qc-b-warn':'qc-b-ok'}`}>{riskBlockSP?'BLOCKED':riskWarnSP?'WARN':'CLEAR'}</span>
+                </div>
+
+                {/* SP500 Lot input */}
+                <div style={{background:C.s1,border:`1px solid ${riskBlockSP?C.red2:riskWarnSP?C.warn2:C.blue3}33`,padding:'10px 14px',transition:'border-color .2s',marginBottom:8}}>
+                  <div style={{fontSize:8,color:C.t3,letterSpacing:1,marginBottom:8,fontFamily:'JetBrains Mono,monospace'}}>SET LOT SIZE · SP500</div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                    <button onClick={()=>{const v=Math.max(0.01,+(lotSizeSP-0.01).toFixed(2));setLotSizeSP(v);setLotInputSP(v.toFixed(2));setLotSavedSP(false);}}
+                      style={{width:28,height:28,background:C.b2,border:'none',color:C.t,fontFamily:'JetBrains Mono,monospace',fontSize:15,cursor:'pointer',flexShrink:0}}>−</button>
+                    <input type="number" value={lotInputSP} min="0.01" step="0.01"
+                      onChange={e=>{setLotInputSP(e.target.value);const v=parseFloat(e.target.value);if(!isNaN(v)&&v>0){setLotSizeSP(v);setLotSavedSP(false);}}}
+                      style={{width:80,background:C.bg,border:`1px solid ${riskBlockSP?C.red2:riskWarnSP?C.warn2:C.blue3}`,color:riskColorSP,fontFamily:'JetBrains Mono,monospace',fontSize:16,textAlign:'center',padding:'4px 8px',outline:'none',fontWeight:700}}/>
+                    <button onClick={()=>{const v=+(lotSizeSP+0.01).toFixed(2);setLotSizeSP(v);setLotInputSP(v.toFixed(2));setLotSavedSP(false);}}
+                      style={{width:28,height:28,background:C.b2,border:'none',color:C.t,fontFamily:'JetBrains Mono,monospace',fontSize:15,cursor:'pointer',flexShrink:0}}>+</button>
+                    <span style={{fontSize:9,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>LOTS</span>
+                    <div style={{marginLeft:'auto',display:'flex',gap:4}}>
+                      {[{v:recLotSP,lbl:'1%',col:C.green2},{v:+(recLotSP*1.5).toFixed(2),lbl:'1.5%',col:C.warn2},{v:+(recLotSP*2).toFixed(2),lbl:'2%',col:C.red2}].map(p=>(
+                        <button key={p.lbl} onClick={()=>{setLotSizeSP(p.v);setLotInputSP(p.v.toFixed(2));setLotSavedSP(false);}}
+                          style={{padding:'3px 8px',background:'transparent',border:`1px solid ${p.col}`,color:p.col,fontSize:7,fontFamily:'JetBrains Mono,monospace',cursor:'pointer',letterSpacing:.5,lineHeight:1.4}}>
+                          {p.v.toFixed(2)}<br/>{p.lbl}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* SP500 Metrics grid */}
+                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:8}}>
+                  {[
+                    {lbl:'RISK / TRADE',   val:`$${riskAmtSP.toFixed(0)}`,   sub:`${riskPctSP.toFixed(2)}% equity`,              col:riskColorSP},
+                    {lbl:'REWARD / TRADE', val:`$${rewardAmtSP.toFixed(0)}`, sub:`${((rewardAmtSP/accEq)*100).toFixed(2)}% gain`, col:C.green2},
+                    {lbl:'TP / SL',        val:`1 : ${(SP500_SL/SP500_TP).toFixed(1)}`, sub:'98% WR overcomes R:R',              col:C.blue3},
+                    {lbl:'DAILY BUDGET',   val:`$${dailyRemain.toFixed(0)}`, sub:'remaining today',                               col:dailyRemain>riskAmtSP*2?C.green2:dailyRemain>riskAmtSP?C.warn2:C.red2},
+                    {lbl:'BUDGET USED',    val:`${budgetPctSP.toFixed(1)}%`, sub:`of $${dailyLimit.toFixed(0)} limit`,            col:budgetPctSP>=75?C.red2:budgetPctSP>=40?C.warn2:C.green2},
+                    {lbl:'RECOMMENDED',    val:`${recLotSP.toFixed(2)} lots`,sub:'at 1% equity risk',                             col:C.blue3},
+                  ].map(m=>(
+                    <div key={m.lbl} className="qc-fstat">
+                      <div className="qc-fs-l">{m.lbl}</div>
+                      <div className="qc-fs-v" style={{color:m.col}}>{m.val}</div>
+                      <div className="qc-fs-s">{m.sub}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* vs Gold comparison callout */}
+                <div style={{background:'rgba(41,98,255,.06)',border:`1px solid ${C.blue3}22`,padding:'8px 12px',marginBottom:8}}>
+                  <div style={{fontSize:8,color:C.t3,fontFamily:'JetBrains Mono,monospace',letterSpacing:1,marginBottom:4}}>SCALE COMPARISON · 1% RISK ON ${(accEq/1000).toFixed(0)}K</div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{fontSize:7,color:C.t3,fontFamily:'Inter,sans-serif'}}>GOLD · XAUUSD</div>
+                      <div style={{fontSize:14,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:C.gold}}>{recLot.toFixed(2)}</div>
+                      <div style={{fontSize:6,color:C.t3}}>lots · $150/lot SL</div>
+                    </div>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{fontSize:7,color:C.t3,fontFamily:'Inter,sans-serif'}}>S&P500 · US500</div>
+                      <div style={{fontSize:14,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:C.blue3}}>{recLotSP.toFixed(2)}</div>
+                      <div style={{fontSize:6,color:C.t3}}>lots · $150/lot SL</div>
+                    </div>
+                  </div>
+                  <div style={{marginTop:4,fontSize:7,color:C.t3,fontFamily:'Inter,sans-serif',textAlign:'center'}}>
+                    SP500 is <span style={{color:C.blue3,fontFamily:'JetBrains Mono,monospace',fontWeight:700}}>{recLot>0?(recLotSP/recLot).toFixed(0)+'×':'—'}</span> more lots — same dollar risk, same 1% rule
+                  </div>
+                </div>
+
+                {/* SP500 Apply button */}
+                <button
+                  disabled={riskBlockSP}
+                  onClick={()=>{
+                    localStorage.setItem('qb_lot_size_sp', lotSizeSP.toString());
+                    setLotSavedSP(true);
+                    setTimeout(()=>setLotSavedSP(false), 2500);
+                    fetch('/api/manage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setLotSizeSP',lotSize:lotSizeSP})}).catch(()=>{});
+                  }}
+                  style={{
+                    width:'100%',padding:'10px 0',
+                    background:riskBlockSP?'transparent':lotSavedSP?'rgba(34,160,96,.12)':C.b2,
+                    border:`1px solid ${riskBlockSP?C.red2:lotSavedSP?C.green2:C.blue3}`,
+                    color:riskBlockSP?C.red2:lotSavedSP?C.green2:C.blue3,
+                    fontFamily:'JetBrains Mono,monospace',fontSize:10,letterSpacing:2,
+                    cursor:riskBlockSP?'not-allowed':'pointer',fontWeight:700,transition:'all .25s',
+                  }}
+                >
+                  {riskBlockSP?`BLOCKED — MAX SAFE LOT: ${recLotSP.toFixed(2)}`:lotSavedSP?`✓ SP500 LOT ${lotSizeSP.toFixed(2)} APPLIED`:'APPLY SP500 LOT SIZE'}
+                </button>
+
+              </div>
 
             </div>
           </div>

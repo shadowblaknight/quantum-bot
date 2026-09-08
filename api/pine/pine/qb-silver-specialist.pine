@@ -1,65 +1,58 @@
 //@version=6
-indicator("Quantum Bot — GBP/USD Specialist", "QB GBPUSD", overlay=true,
+indicator("Quantum Bot — Silver Specialist", "QB SILVER", overlay=true,
           max_bars_back=500, max_labels_count=200, max_lines_count=100, max_boxes_count=100)
 
 // ═══════════════════════════════════════════════════════════════════════
-//  QUANTUM BOT — GBP/USD SPECIALIST  (GBPUSD, 15m recommended)
+//  QUANTUM BOT — SILVER SPECIALIST  (XAGUSD, 15m recommended)
 //  ─────────────────────────────────────────────────────────────────────
-//  Three ORB sessions — Frankfurt Trap exploits pre-London sweep;
-//  London ORB is the primary high-WR setup on GBP/USD; NY ORB adds
-//  a third opportunity in USD-driven sessions.
-//
-//  Research basis: GBPUSD Frankfurt ORB retest documented at 74.56% WR
-//  and PF 2.512 on 114 trades WITHOUT structural SL or bias filter.
-//  With structural SL + H1+H4 bias, target is 88-95% WR.
+//  Ported from GS1 Gold Specialist architecture (97.54% WR confirmed).
+//  Silver shares Gold's institutional session structure (Frankfurt +
+//  NY ORB) and H1/H4 USD-macro bias, but with 1.5–2× wider ATR and
+//  no LBMA/COMEX fix dependency. SL buffer and ORB minimums scaled
+//  for Silver's typical $0.60–1.00 daily range.
 //
 //  Signals:
-//    A) gbp-fvg       — FVG retest London KZ / NY-Lon Overlap + BOS
+//    A) silver-fvg    — FVG retest London KZ / NY-Lon Overlap + BOS
 //    B) judas-swing   — Asian-range sweep play (pure sweep, no FVG)
 //    M) frankfurt-orb — Frankfurt 07:00-07:30 UTC C2 OCO retest
-//                       Asian extreme confirmation (same as GS1)
-//    L) london-orb    — London 08:00-08:30 UTC C2 OCO retest
-//                       PRIMARY setup for GBP/USD — highest frequency
 //    H) ny-orb        — NY 14:00-14:30 UTC C2 OCO retest
 //
-//  SL: 45 pips (0.00450) structural — placed beyond ORB edge where
-//  daily noise almost never reaches on a valid C2 retest setup.
-//  TP: 0.75× ORB range from ORB edge (C2TpMult).
+//  Engine: ADR gate, Asian range, FRB/NYORB trackers, FVG pool,
+//  BOS tracker, HTF bias (H1/H4/D), CVD, status table.
 // ═══════════════════════════════════════════════════════════════════════
 
 WEBHOOK_KEY = "x5YFG4TDJKqi2fVEbBHO0r3vUPgmZACk"
 
 // ─── INPUTS ──────────────────────────────────────────────────────────
 G_CORE = "Core"
-modFVG    = input.bool(true, "A) FVG Signal (gbp-fvg)",                         group=G_CORE)
-modJudas  = input.bool(true, "B) Judas Sweep — pure sweep, no FVG",             group=G_CORE)
-modFRB    = input.bool(true, "M) Frankfurt ORB — H1+H4 + Asian extreme req'd",  group=G_CORE)
-modLON    = input.bool(true, "L) London ORB — H1+H4 required (PRIMARY)",        group=G_CORE)
-modNYORB  = input.bool(true, "H) NY ORB — H1+H4 required",                     group=G_CORE)
+modFVG    = input.bool(true, "A) FVG Signal (silver-fvg)",             group=G_CORE)
+modJudas  = input.bool(true, "B) Judas Sweep — pure sweep, no FVG",    group=G_CORE)
+modFRB    = input.bool(true, "M) Frankfurt ORB — H1+H4 + Asian extreme required", group=G_CORE)
+modNYORB  = input.bool(true, "H) NY ORB — H1+H4 required",             group=G_CORE)
 
-G_C2 = "C2 — OCO (Signals M + L + H)"
-c2SLBuf  = input.float(0.00450, "SL beyond C2 level (price units)", group=G_C2, step=0.00010,
-             tooltip="45 pips structural. Placed beyond ORB edge — noise almost never reaches this on valid C2 setups.")
-c2TpMult = input.float(0.75,   "TP = ORB range × (from C2 level)", group=G_C2, step=0.05)
+G_C2 = "C2 — OCO (Signal M + H)"
+c2SLBuf  = input.float(2.00, "SL beyond C2 level (price units)", group=G_C2, step=0.05,
+             tooltip="Silver: $2.00 ≈ 3× typical daily ATR. Placed beyond ORB structural edge.")
+c2TpMult = input.float(0.75, "TP = ORB range × (from C2 level)", group=G_C2, step=0.05)
 
 G_FILT = "Filters"
-adrFVGMax    = input.float(0.85, "FVG max ADR consumed",   group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
-adrJudasMax  = input.float(0.90, "Judas max ADR consumed", group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
-atrLength    = input.int(14, "ATR period",                 group=G_FILT, minval=2, maxval=50)
-emaLength    = input.int(20, "HTF bias EMA period",        group=G_FILT, minval=5, maxval=100)
+adrFVGMax   = input.float(0.85, "FVG max ADR consumed",   group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
+adrJudasMax = input.float(0.90, "Judas max ADR consumed", group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
+atrLength   = input.int(14,    "ATR period",               group=G_FILT, minval=2, maxval=50)
+emaLength   = input.int(20,    "HTF bias EMA period",      group=G_FILT, minval=5, maxval=100)
 fvgMinGapATR  = input.float(0.10, "FVG min gap (× ATR)",             group=G_FILT, minval=0.03, step=0.03)
 fvgMaxFillPct = input.float(0.50, "FVG max fill before entry fires",  group=G_FILT, minval=0.0, maxval=1.0, step=0.05)
 fvgMaxAgeBars = input.int(20,    "FVG max age (bars)",                group=G_FILT, minval=4, maxval=100)
-slMinH1ATR   = input.float(0.30, "SL min (× H1 ATR)", group=G_FILT, minval=0.1, step=0.05)
-slMaxH1ATR   = input.float(3.00, "SL max (× H1 ATR)", group=G_FILT, minval=1.0, step=0.10)
-orbMinRange  = input.float(0.00080, "Min ORB range (price units)", group=G_FILT, step=0.00010,
-               tooltip="8 pips minimum. Avoids trading in tight, directionless ranges.")
+slMinH1ATR  = input.float(0.30, "SL min (× H1 ATR)", group=G_FILT, minval=0.1, step=0.05)
+slMaxH1ATR  = input.float(3.00, "SL max (× H1 ATR)", group=G_FILT, minval=1.0, step=0.10)
+orbMinRange = input.float(0.15, "Min ORB range (price units)", group=G_FILT, step=0.01,
+              tooltip="Silver: $0.15 = ~8 pips minimum range to trade.")
 
 G_VIS = "Visuals"
-showPosBox    = input.bool(true, "Position box on fire",     group=G_VIS)
-posBoxBars    = input.int(40,   "Position box width (bars)", group=G_VIS, minval=5, maxval=200)
-showStatusTbl = input.bool(true, "Corner status table",      group=G_VIS)
-showFVGZones  = input.bool(true, "FVG zones on chart",       group=G_VIS)
+showPosBox    = input.bool(true, "Position box on fire",      group=G_VIS)
+posBoxBars    = input.int(40,   "Position box width (bars)",  group=G_VIS, minval=5, maxval=200)
+showStatusTbl = input.bool(true, "Corner status table",       group=G_VIS)
+showFVGZones  = input.bool(true, "FVG zones on chart",        group=G_VIS)
 
 // ─── HTF BIAS ─────────────────────────────────────────────────────────
 f_htfBias(int emaLen, int atrLen) =>
@@ -95,12 +88,12 @@ _gapDirLong  = _gapSign
 _gapDirShort = _gapSign * -1
 _priorDayPos = _todayOpen > _priorDayHi ? 1 : _todayOpen < _priorDayLo ? -1 : 0
 
-_adrTierStr  = _adrConsumed >= 2.50 ? "OUTLIER" :
-               _adrConsumed >= 1.50 ? "NEWS-EXT" :
-               _adrConsumed >= 0.90 ? "EXHAUST"  :
-               _adrConsumed >= 0.75 ? "HIGH-PROB" : "BUILDING"
-_adrQuiet      = _adrConsumed < 0.75
-_adrRemainTo75 = math.max(0.0, _atr14d * 0.75 - (_todayHigh - _todayLow))
+_adrTierStr = _adrConsumed >= 2.50 ? "OUTLIER" :
+              _adrConsumed >= 1.50 ? "NEWS-EXT" :
+              _adrConsumed >= 0.90 ? "EXHAUST"  :
+              _adrConsumed >= 0.75 ? "HIGH-PROB" : "BUILDING"
+_adrQuiet       = _adrConsumed < 0.75
+_adrRemainTo75  = math.max(0.0, _atr14d * 0.75 - (_todayHigh - _todayLow))
 
 // ─── CVD ──────────────────────────────────────────────────────────────
 _signedVol  = close > open ? volume : close < open ? -volume : 0.0
@@ -116,15 +109,13 @@ cvdMa    = ta.ema(cvd, 14)
 cvdSlope = cvd > cvd[1] and cvd > cvdMa ? "rising" : cvd < cvd[1] and cvd < cvdMa ? "falling" : "flat"
 
 // ─── SESSION GATES (UTC) ──────────────────────────────────────────────
-in_asian         = timeframe.isintraday and (_minOfDay >= 0    and _minOfDay < 480)
-in_london        = timeframe.isintraday and (_minOfDay >= 480  and _minOfDay < 660)   // 08:00-11:00 UTC
-in_overlap       = timeframe.isintraday and (_minOfDay >= 780  and _minOfDay < 1020)  // 13:00-17:00 UTC
-in_kz            = in_london or in_overlap
-in_frb_window    = timeframe.isintraday and (_minOfDay >= 420  and _minOfDay < 450)   // 07:00-07:30 UTC FRB range
-in_frb_trade     = timeframe.isintraday and (_minOfDay >= 450  and _minOfDay < 660)   // 07:30-11:00 UTC FRB trade
-in_lon_window    = timeframe.isintraday and (_minOfDay >= 480  and _minOfDay < 510)   // 08:00-08:30 UTC London range
-in_lon_trade     = timeframe.isintraday and (_minOfDay >= 510  and _minOfDay < 660)   // 08:30-11:00 UTC London trade
-in_nyorb_window  = timeframe.isintraday and (_minOfDay >= 840  and _minOfDay < 870)   // 14:00-14:30 UTC NY range
+in_asian        = timeframe.isintraday and (_minOfDay >= 0    and _minOfDay < 480)
+in_london       = timeframe.isintraday and (_minOfDay >= 480  and _minOfDay < 660)
+in_overlap      = timeframe.isintraday and (_minOfDay >= 780  and _minOfDay < 1020)
+in_kz           = in_london or in_overlap
+in_frb_window   = timeframe.isintraday and (_minOfDay >= 420  and _minOfDay < 450)
+in_frb_trade    = timeframe.isintraday and (_minOfDay >= 450  and _minOfDay < 660)
+in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840  and _minOfDay < 870)
 
 string sess_label = in_overlap ? "NY_AM" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
 
@@ -149,21 +140,13 @@ if in_asian
 if not in_asian and in_asian[1] and not na(ar_hi)
     ar_locked := true
 
-// ─── FRANKFURT ORB ────────────────────────────────────────────────────
+// ─── FRANKFURT ORB + NY ORB ───────────────────────────────────────────
 var float ar_lo_prefrb = na
 var float ar_hi_prefrb = na
 var float frb_hi       = na
 var float frb_lo       = na
 var bool  frb_locked   = false
 var bool  frb_done     = false
-
-// ─── LONDON ORB (Primary GBP/USD setup) ───────────────────────────────
-var float lon_hi       = na
-var float lon_lo       = na
-var bool  lon_locked   = false
-var bool  lon_done     = false
-
-// ─── NY ORB ───────────────────────────────────────────────────────────
 var float nyorb_hi     = na
 var float nyorb_lo     = na
 var bool  nyorb_locked = false
@@ -176,10 +159,6 @@ if _newDay
     frb_lo       := na
     frb_locked   := false
     frb_done     := false
-    lon_hi       := na
-    lon_lo       := na
-    lon_locked   := false
-    lon_done     := false
     nyorb_hi     := na
     nyorb_lo     := na
     nyorb_locked := false
@@ -195,13 +174,6 @@ if in_frb_window
 
 if not in_frb_window and in_frb_window[1] and not na(frb_hi)
     frb_locked := true
-
-if in_lon_window
-    lon_hi := na(lon_hi) ? high : math.max(lon_hi, high)
-    lon_lo := na(lon_lo) ? low  : math.min(lon_lo, low)
-
-if not in_lon_window and in_lon_window[1] and not na(lon_hi)
-    lon_locked := true
 
 if in_nyorb_window
     nyorb_hi := na(nyorb_hi) ? high : math.max(nyorb_hi, high)
@@ -304,10 +276,10 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
              float zU, float zL, string zType,
              string sess, string tier, string conf,
              string filters, int minsIntoWin) =>
-    slRisk   = math.abs(entry - slP)
-    rr1      = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
-    rr2      = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
-    rr3      = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
+    slRisk  = math.abs(entry - slP)
+    rr1     = slRisk > 0 ? math.abs(tp1 - entry) / slRisk : 0.0
+    rr2     = slRisk > 0 ? math.abs(tp2 - entry) / slRisk : 0.0
+    rr3     = slRisk > 0 ? math.abs(tp3 - entry) / slRisk : 0.0
     scGapDir = dir == "LONG" ? _gapDirLong : _gapDirShort
     cvdOk    = dir == "LONG" ? cvdSlope == "rising" : cvdSlope == "falling"
     dEmoji   = dir == "LONG" ? "🟢" : "🔴"
@@ -337,9 +309,11 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
               "\",\"htfBiasAlign\":" + str.tostring(tier == "A" ? 1 : 0) +
               ",\"htfConfluence\":\"" + conf + "\""
     ctx    = ",\"window\":\"" + sess +
-              "\",\"filters\":\"" + filters + "\"" +
+              "\",\"swept\":\"\",\"impulseATR\":\"0.00\"" +
+              ",\"filters\":\"" + filters + "\"" +
               ",\"cvdSlope\":\"" + cvdSlope + "\"" +
               ",\"cvdConfirms\":" + str.tostring(cvdOk) +
+              ",\"cvdDivergence\":\"none\",\"cvdLowTrust\":false" +
               ",\"barOpen\":\""  + str.tostring(open,  format.mintick) + "\"" +
               ",\"barHigh\":\""  + str.tostring(high,  format.mintick) + "\"" +
               ",\"barLow\":\""   + str.tostring(low,   format.mintick) + "\"" +
@@ -347,6 +321,9 @@ f_buildAlert(string tmpl, string dir, float entry, float slP,
               ",\"adrConsumed\":\"" + str.tostring(_adrConsumed,  "#.####") + "\"" +
               ",\"adrTier\":\""    + _adrTierStr                              + "\"" +
               ",\"gapAtr\":\""      + str.tostring(_gapAtr,        "#.####") + "\"" +
+              ",\"gapDir\":\""      + str.tostring(scGapDir)                 + "\"" +
+              ",\"priorDayPos\":\"" + str.tostring(_priorDayPos)             + "\"" +
+              ",\"hourUtc\":\""     + str.tostring(_hourUtc)                 + "\"" +
               ",\"dayOfWeek\":\""   + str.tostring(_dayOfWeek)               + "\"" +
               ",\"minsIntoWindow\":" + str.tostring(minsIntoWin) +
               ",\"apiKey\":\"" + WEBHOOK_KEY + "\"}"
@@ -361,7 +338,7 @@ f_drawPosBox(float e, float slP, float tp3) =>
     line.new(bar_index, e, r, e, color=color.new(color.gray, 10), style=line.style_dashed, width=1)
 
 // ═══════════════════════════════════════════════════════════════════════
-// SIGNAL A — GBP/USD FVG  (template: gbp-specialist)
+// SIGNAL A — Silver FVG  (template: silver-specialist)
 // ═══════════════════════════════════════════════════════════════════════
 if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0
     firedA = false
@@ -394,11 +371,11 @@ if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and 
         if str.length(conf) == 0
             conf := "counter-bias"
 
-        buf    = math.max(0.20 * atrVal, 0.08 * h1ATR)
-        entryP = d == 1 ? l : u
-        slP    = d == 1 ? l - buf : u + buf
-        slDist = math.abs(entryP - slP)
-        slH1   = slDist / h1ATR
+        buf     = math.max(0.20 * atrVal, 0.08 * h1ATR)
+        entryP  = d == 1 ? l : u
+        slP     = d == 1 ? l - buf : u + buf
+        slDist  = math.abs(entryP - slP)
+        slH1    = slDist / h1ATR
 
         if slDist <= 0 or slH1 < slMinH1ATR or slH1 > slMaxH1ATR
             continue
@@ -417,9 +394,11 @@ if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and 
         minsIn = in_london ? math.max(0, _minOfDay - 480) : math.max(0, _minOfDay - 780)
         fStr   = "FVG✓ BOS✓" + (aligned ? " H1✓" : " H1✗") +
                  " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-        alert(f_buildAlert("gbp-specialist", dirStr, entryP, slP, tp1, tp2, tp3,
+
+        alert(f_buildAlert("silver-specialist", dirStr, entryP, slP, tp1, tp2, tp3,
                             u, l, "FVG", sess_label, tier, conf, fStr, minsIn),
               alert.freq_once_per_bar)
+
         if showPosBox
             f_drawPosBox(entryP, slP, tp3)
 
@@ -452,8 +431,8 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_o
                     judas_hi_done := true
                     tier = (h1B == -1 or h4B == -1 or hdB == -1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("gbp-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
-                                        ar_hi + 0.00010, ar_hi - 0.00010, "Asian-H",
+                    alert(f_buildAlert("silver-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                        ar_hi + 0.01, ar_hi - 0.01, "Asian-H",
                                         "LONDON", tier, "judas-hi-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
                           alert.freq_once_per_bar)
@@ -478,8 +457,8 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_o
                     judas_lo_done := true
                     tier = (h1B == 1 or h4B == 1 or hdB == 1) ? "A" : "B"
                     fStr = "SWEEP✓ CLOSE-INSIDE✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-                    alert(f_buildAlert("gbp-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
-                                        ar_lo + 0.00010, ar_lo - 0.00010, "Asian-L",
+                    alert(f_buildAlert("silver-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+                                        ar_lo + 0.01, ar_lo - 0.01, "Asian-L",
                                         "LONDON", tier, "judas-lo-sweep", fStr,
                                         math.max(0, _minOfDay - 480)),
                           alert.freq_once_per_bar)
@@ -491,7 +470,6 @@ if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_o
 
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL M — Frankfurt ORB C2 OCO
-// With Asian extreme confirmation (same as GS1 Gold)
 // ═══════════════════════════════════════════════════════════════════════
 if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
     orb_range_frb = frb_hi - frb_lo
@@ -504,7 +482,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             tp3      = frb_lo - orb_range_frb * c2TpMult * 3.0
             frb_done := true
             fStr     = "FRB-C2✓ H1-H4-SHORT✓ ASIAN-LO✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gbp-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+            alert(f_buildAlert("silver-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
                                 frb_hi, frb_lo, "FRB", sess_label, "A", "h1+h4", fStr,
                                 math.max(0, _minOfDay - 450)),
                   alert.freq_once_per_bar)
@@ -522,57 +500,12 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             tp3      = frb_hi + orb_range_frb * c2TpMult * 3.0
             frb_done := true
             fStr     = "FRB-C2✓ H1-H4-LONG✓ ASIAN-HI✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gbp-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+            alert(f_buildAlert("silver-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
                                 frb_hi, frb_lo, "FRB", sess_label, "A", "h1+h4", fStr,
                                 math.max(0, _minOfDay - 450)),
                   alert.freq_once_per_bar)
             label.new(bar_index, low, "⚡ FRB C2 LONG",
                       style=label.style_label_up, color=color.new(color.teal, 5),
-                      textcolor=color.white, size=size.small)
-            if showPosBox
-                f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL L — London ORB C2 OCO  (PRIMARY GBP/USD SETUP)
-// 08:00-08:30 UTC range. GBP/USD is London-primary: London open
-// produces the clearest institutional ORBs on this pair.
-// Research: 74.56% WR / PF 2.512 base without structural SL or bias.
-// ═══════════════════════════════════════════════════════════════════════
-if modLON and barstate.isconfirmed and in_lon_trade and lon_locked and not lon_done and not na(lon_hi) and not na(lon_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
-    orb_range_lon = lon_hi - lon_lo
-    if orb_range_lon >= orbMinRange
-        if close < lon_lo and h1B == -1 and h4B == -1
-            entryP   = lon_lo
-            slP      = lon_lo + c2SLBuf
-            tp1      = lon_lo - orb_range_lon * c2TpMult
-            tp2      = lon_lo - orb_range_lon * c2TpMult * 2.0
-            tp3      = lon_lo - orb_range_lon * c2TpMult * 3.0
-            lon_done := true
-            fStr     = "LON-C2✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gbp-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
-                                lon_hi, lon_lo, "LON-ORB", "LONDON", "A", "h1+h4", fStr,
-                                math.max(0, _minOfDay - 510)),
-                  alert.freq_once_per_bar)
-            label.new(bar_index, high, "⚡ LON C2 SHORT",
-                      style=label.style_label_down, color=color.new(color.fuchsia, 5),
-                      textcolor=color.white, size=size.small)
-            if showPosBox
-                f_drawPosBox(entryP, slP, tp3)
-
-        else if close > lon_hi and h1B == 1 and h4B == 1
-            entryP   = lon_hi
-            slP      = lon_hi - c2SLBuf
-            tp1      = lon_hi + orb_range_lon * c2TpMult
-            tp2      = lon_hi + orb_range_lon * c2TpMult * 2.0
-            tp3      = lon_hi + orb_range_lon * c2TpMult * 3.0
-            lon_done := true
-            fStr     = "LON-C2✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gbp-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
-                                lon_hi, lon_lo, "LON-ORB", "LONDON", "A", "h1+h4", fStr,
-                                math.max(0, _minOfDay - 510)),
-                  alert.freq_once_per_bar)
-            label.new(bar_index, low, "⚡ LON C2 LONG",
-                      style=label.style_label_up, color=color.new(color.fuchsia, 5),
                       textcolor=color.white, size=size.small)
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
@@ -591,7 +524,7 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             tp3         = nyorb_hi + orb_range_ny * c2TpMult * 3.0
             nyorb_done := true
             fStr        = "NYORB-C2✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gbp-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+            alert(f_buildAlert("silver-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
                                 nyorb_hi, nyorb_lo, "NYORB", sess_label, "A", "h1+h4", fStr,
                                 math.max(0, _minOfDay - 870)),
                   alert.freq_once_per_bar)
@@ -609,7 +542,7 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             tp3         = nyorb_lo - orb_range_ny * c2TpMult * 3.0
             nyorb_done := true
             fStr        = "NYORB-C2✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
-            alert(f_buildAlert("gbp-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+            alert(f_buildAlert("silver-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
                                 nyorb_hi, nyorb_lo, "NYORB", sess_label, "A", "h1+h4", fStr,
                                 math.max(0, _minOfDay - 870)),
                   alert.freq_once_per_bar)
@@ -624,7 +557,7 @@ var table stTbl = na
 
 if showStatusTbl and barstate.islast
     if na(stTbl)
-        stTbl := table.new(position.top_right, 2, 13,
+        stTbl := table.new(position.top_right, 2, 11,
                            bgcolor=color.new(color.black, 70),
                            border_color=color.new(color.gray, 60), border_width=1,
                            frame_color=color.new(color.gray, 60), frame_width=1)
@@ -644,61 +577,38 @@ if showStatusTbl and barstate.islast
     arStr  = ar_locked and not na(ar_hi) ?
              str.tostring(ar_hi, format.mintick) + " / " + str.tostring(ar_lo, format.mintick) : "—"
 
-    table.cell(stTbl, 0, 0,  "QB GBP/USD", text_color=color.new(#4FC3F7, 0), text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_left)
-    table.cell(stTbl, 1, 0,  "GBPUSD · " + timeframe.period + "m", text_color=color.new(color.white,20), text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_right)
-    table.cell(stTbl, 0, 1,  "Session",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 1,  sess_label,  text_color=color.new(sCol,0),        text_size=size.tiny, text_halign=text.align_right)
-    table.cell(stTbl, 0, 2,  "ADR",       text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 2,  str.tostring(adrPct) + "% · " + _adrTierStr, text_color=color.new(adrCol,0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(stTbl, 0, 3,  "H1 bias",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 3,  h1Str,       text_color=color.new(h1Col,0),       text_size=size.tiny, text_halign=text.align_right)
-    table.cell(stTbl, 0, 4,  "H4 bias",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 4,  h4Str,       text_color=color.new(h4Col,0),       text_size=size.tiny, text_halign=text.align_right)
-    table.cell(stTbl, 0, 5,  "D bias",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 5,  hdStr,       text_color=color.new(hdCol,0),       text_size=size.tiny, text_halign=text.align_right)
-    table.cell(stTbl, 0, 6,  "Asian R",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 6,  arStr,       text_color=color.new(color.aqua,0),  text_size=size.tiny, text_halign=text.align_right)
-    table.cell(stTbl, 0, 7,  "FVGs",      text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 7,  str.tostring(array.size(fU)) + " live", text_color=color.new(color.white,20), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 0, "QB SILVER",  text_color=color.new(color.silver, 0), text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_left)
+    table.cell(stTbl, 1, 0, "XAGUSD · " + timeframe.period + "m", text_color=color.new(color.white,20), text_size=size.tiny, bgcolor=color.new(color.black,55), text_halign=text.align_right)
+    table.cell(stTbl, 0, 1, "Session",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 1, sess_label,  text_color=color.new(sCol,0),        text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 2, "ADR",       text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 2, str.tostring(adrPct) + "% · " + _adrTierStr, text_color=color.new(adrCol,0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 3, "H1 bias",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 3, h1Str,       text_color=color.new(h1Col,0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 4, "H4 bias",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 4, h4Str,       text_color=color.new(h4Col,0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 5, "D bias",    text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 5, hdStr,       text_color=color.new(hdCol,0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 6, "Asian R",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 6, arStr,       text_color=color.new(color.aqua,0),  text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 7, "FVGs",      text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 7, str.tostring(array.size(fU)) + " live", text_color=color.new(color.white,20), text_size=size.tiny, text_halign=text.align_right)
 
     frbStr = frb_done ? "fired" : (frb_locked and in_frb_trade and adr_hard_ok ? "watching" : in_frb_window ? "building" : "off")
     frbCol = frb_done ? color.red : (frb_locked and in_frb_trade and adr_hard_ok ? color.lime : color.gray)
-    table.cell(stTbl, 0, 8,  "FRB (M)",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 8,  frbStr,      text_color=color.new(frbCol,0),      text_size=size.tiny, text_halign=text.align_right)
-
-    lonStr = lon_done ? "fired" : (lon_locked and in_lon_trade and adr_hard_ok ? "watching" : in_lon_window ? "building" : "off")
-    lonCol = lon_done ? color.fuchsia : (lon_locked and in_lon_trade and adr_hard_ok ? color.lime : color.gray)
-    table.cell(stTbl, 0, 9,  "LON ORB (L)", text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 9,  lonStr,        text_color=color.new(lonCol,0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 8, "FRB (M)",   text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 8, frbStr,      text_color=color.new(frbCol, 0),     text_size=size.tiny, text_halign=text.align_right)
 
     nyStr  = nyorb_done ? "fired" : (nyorb_locked and adr_hard_ok ? "watching" : in_nyorb_window ? "building" : "off")
     nyCol  = nyorb_done ? color.teal : (nyorb_locked and adr_hard_ok ? color.lime : color.gray)
-    table.cell(stTbl, 0, 10, "NY ORB (H)", text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 10, nyStr,        text_color=color.new(nyCol,0),       text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 9, "NY ORB (H)", text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 9, nyStr,        text_color=color.new(nyCol, 0),      text_size=size.tiny, text_halign=text.align_right)
 
     judStr = (judas_hi_done or judas_lo_done) ? "fired" : (in_london and ar_locked and adr_judas_ok ? "watching" : "off")
     judCol = (judas_hi_done or judas_lo_done) ? color.orange : (in_london and ar_locked and adr_judas_ok ? color.lime : color.gray)
-    table.cell(stTbl, 0, 11, "Judas (B)", text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 11, judStr,      text_color=color.new(judCol,0),      text_size=size.tiny, text_halign=text.align_right)
-
-    slPips = math.round(c2SLBuf / syminfo.mintick / 10)
-    table.cell(stTbl, 0, 12, "SL (pips)", text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(stTbl, 1, 12, str.tostring(slPips) + " pips structural", text_color=color.new(color.yellow,0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(stTbl, 0, 10, "Judas (B)", text_color=color.new(color.gray,15), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 10, judStr,      text_color=color.new(judCol, 0),     text_size=size.tiny, text_halign=text.align_right)
 
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
 bgcolor(in_london  ? color.new(color.yellow, 90) : na, title="London KZ")
 bgcolor(in_overlap ? color.new(color.orange, 88) : na, title="NY-Lon Overlap")
-
-// Frankfurt ORB zone line
-if barstate.islast and frb_locked and not na(frb_hi) and not na(frb_lo)
-    line.new(bar_index - 60, frb_hi, bar_index + 10, frb_hi,
-             color=color.new(color.yellow, 30), style=line.style_dotted, width=1)
-    line.new(bar_index - 60, frb_lo, bar_index + 10, frb_lo,
-             color=color.new(color.yellow, 30), style=line.style_dotted, width=1)
-
-// London ORB zone line
-if barstate.islast and lon_locked and not na(lon_hi) and not na(lon_lo)
-    line.new(bar_index - 40, lon_hi, bar_index + 10, lon_hi,
-             color=color.new(color.fuchsia, 30), style=line.style_dotted, width=1)
-    line.new(bar_index - 40, lon_lo, bar_index + 10, lon_lo,
-             color=color.new(color.fuchsia, 30), style=line.style_dotted, width=1)

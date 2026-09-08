@@ -22,6 +22,7 @@ const SPECIALIST_META_MAP = {
   'gbpusd-specialist':  { glyph: '🇬🇧', label: 'GBPUSD Specialist' },
   'forex-specialist':   { glyph: '💱', label: 'Forex Specialist' },
   'ger40-bg-specialist': { glyph: '🇩🇪', label: 'GER40 B+G Specialist' },
+  'sp500-specialist':   { glyph: '📊', label: 'S&P500 Specialist' },
 };
 
 // ── Legacy templates (history — disabled in V20 mode) ─────────────────────────
@@ -71,7 +72,7 @@ const LEGACY_TEMPLATES = Object.keys(LEGACY_TEMPLATE_META);
 
 // Display order (heatmaps, cards) — specialists first, legacy after
 const TEMPLATE_ORDER = [
-  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist',
+  'gold-specialist', 'gold-specialist-2', 'nas100-specialist', 'gbpusd-specialist', 'forex-specialist', 'ger40-bg-specialist', 'sp500-specialist',
   'silver-bullet', 'unicorn', 'turtle-soup', 'judas-swing', 'ote-continuation', 'am-ifvg',
   'orb', 'orb-pro', 'reaction', 'reaction-fvg', 'reaction-ifvg', 'reaction-impulse', 'reaction-ext', 'alexg',
   'gold-fvg', 'gold-sb', 'frankfurt-orb', 'ny-orb',

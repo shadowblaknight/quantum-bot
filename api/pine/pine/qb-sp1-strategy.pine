@@ -1,0 +1,527 @@
+//@version=6
+// QB SP1 — S&P Institutional Flow Engine — Strategy v2
+// Engines: E1 Opening Drive, E2 Failed Opening, E3 Late Momentum, E4 Midday VWAP Reversion
+// Two-confirmation architecture: Stage 1 = regime/signal, Stage 2 = acceptance
+// CME_MINI:ES1!, 5-minute chart
+strategy("QB SP1 — Strategy", "QB SP1 ST", overlay=true,
+         pyramiding=0,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=1.25,
+         slippage=1,
+         initial_capital=25000,
+         currency=currency.USD,
+         max_bars_back=500,
+         calc_on_every_tick=false)
+
+// ── INPUTS ────────────────────────────────────────────────────────────────────
+G_OR = "Opening Range"
+orbMinRange  = input.float(5.0,  "Min OR range (pts) for TREND regime",   group=G_OR, step=0.5)
+
+G_E1 = "E1 — Opening Drive"
+e1_on        = input.bool(true,  "Enable E1",                             group=G_E1)
+e1_bodyRatio = input.float(0.65, "Stage 1: min body/range",               group=G_E1, step=0.05, minval=0.1, maxval=1.0)
+e1_dispMult  = input.float(1.25, "Stage 1: min displacement (×ATR5)",     group=G_E1, step=0.05)
+e1_rvolMin   = input.float(1.20, "Stage 1: min same-time RVOL",           group=G_E1, step=0.05)
+e1_vixMax    = input.float(30.0, "Stage 1: max VIX",                      group=G_E1, step=1.0)
+e1_waitBars  = input.int(3,      "Stage 2: max wait (bars)",              group=G_E1, minval=1, maxval=5)
+e1_slMult    = input.float(1.0,  "SL (×ATR5)",                           group=G_E1, step=0.1)
+e1_tpR       = input.float(1.5,  "TP (×R)",                              group=G_E1, step=0.1)
+
+G_E2 = "E2 — Failed Opening"
+e2_on        = input.bool(true,  "Enable E2",                             group=G_E2)
+e2_gapMult   = input.float(0.50, "Stage 1: min gap (×Daily ATR20)",       group=G_E2, step=0.05)
+e2_waitBars  = input.int(1,      "Stage 2: max wait (bars)",              group=G_E2, minval=1, maxval=3)
+e2_slMult    = input.float(1.0,  "SL (×ATR5)",                           group=G_E2, step=0.1)
+e2_tpR       = input.float(1.5,  "TP (×R)",                              group=G_E2, step=0.1)
+
+G_E3 = "E3 — Late Momentum"
+e3_on        = input.bool(true,  "Enable E3",                             group=G_E3)
+e3_dispMult  = input.float(0.75, "Stage 1: min late-window move (×ATR14)",group=G_E3, step=0.05)
+e3_bodyMin   = input.float(0.65, "Stage 1: min body/range (any late bar)",group=G_E3, step=0.05)
+e3_rvolMin   = input.float(1.20, "Stage 1: min late-window RVOL",         group=G_E3, step=0.05)
+e3_vwapCap   = input.float(1.25, "Stage 1: max dist from VWAP (×ATR14)", group=G_E3, step=0.05)
+e3_waitBars  = input.int(2,      "Stage 2: max wait (bars)",              group=G_E3, minval=1, maxval=3)
+e3_slMult    = input.float(0.75, "SL (×ATR14)",                          group=G_E3, step=0.1)
+e3_tpR       = input.float(1.25, "TP (×R)",                              group=G_E3, step=0.1)
+
+G_E4 = "E4 — Midday VWAP Reversion"
+e4_on        = input.bool(true,  "Enable E4",                             group=G_E4)
+e4_devMult   = input.float(1.50, "Stage 1: min VWAP deviation (×ATR5)",  group=G_E4, step=0.10)
+e4_bodyRatio = input.float(0.60, "Stage 1: min body/range",               group=G_E4, step=0.05, minval=0.1, maxval=1.0)
+e4_waitBars  = input.int(2,      "Stage 2: max wait (bars)",              group=G_E4, minval=1, maxval=4)
+e4_slMult    = input.float(1.0,  "SL (×ATR5)",                           group=G_E4, step=0.1)
+e4_tpR       = input.float(1.5,  "TP (×R)",                              group=G_E4, step=0.1)
+
+G_SYS = "System"
+maxTradesDay = input.int(2,      "Max trades per day",                    group=G_SYS, minval=1, maxval=6)
+rvolWindow   = input.int(20,     "RVOL rolling sessions",                 group=G_SYS, minval=5, maxval=50)
+
+// ── EXTERNAL DATA ─────────────────────────────────────────────────────────────
+vixClose     = request.security("CBOE:VIX",       "D", close,      lookahead=barmerge.lookahead_off)
+prevDayClose = request.security(syminfo.tickerid, "D", close[1],   lookahead=barmerge.lookahead_on)
+dailyATR20   = request.security(syminfo.tickerid, "D", ta.atr(20), lookahead=barmerge.lookahead_off)
+
+// ── TIME (ET) ─────────────────────────────────────────────────────────────────
+etH = hour(time, "America/New_York")
+etM = minute(time, "America/New_York")
+
+isRTHOpen    = etH == 9  and etM == 30
+isORLock     = etH == 10 and etM == 0
+isPreLateBar = etH == 15 and etM == 10
+isE3S1Bar    = etH == 15 and etM == 30
+isEODTime    = etH == 15 and etM == 55
+
+rthOpenEdge = isRTHOpen    and not isRTHOpen[1]
+orLockEdge  = isORLock     and not isORLock[1]
+preLateEdge = isPreLateBar and not isPreLateBar[1]
+e3S1Edge    = isE3S1Bar    and not isE3S1Bar[1]
+
+// ── BAR PROPERTIES ───────────────────────────────────────────────────────────
+barRange  = high - low
+barBody   = math.abs(close - open)
+bodyRatio = barRange > 0 ? barBody / barRange : 0.0
+
+// ── ATR ──────────────────────────────────────────────────────────────────────
+atr5  = ta.atr(5)
+atr14 = ta.atr(14)
+
+// ── SESSION STATE ─────────────────────────────────────────────────────────────
+var float rthOpen   = na
+var float orHi      = na
+var float orLo      = na
+var float orVolAcc  = 0.0
+var float dayHi     = na
+var float dayLo     = na
+var float gapAtRTH  = na
+var bool  e2Elig    = false
+var bool  orLocked  = false
+var float lockHi    = na
+var float lockLo    = na
+var float lockMid   = na
+var float orRVOL    = na
+var int   regime    = 0
+var bool  e1Done    = false
+var bool  e2Done    = false
+var bool  e3Done    = false
+var bool  e4Done    = false
+var int   tradesCnt = 0
+var rvolArr = array.new_float(0)
+
+// E1 two-stage state
+var bool  e1LongArmed  = false
+var bool  e1ShortArmed = false
+var int   e1ArmBar     = -1000
+var float e1BrkLvl     = na
+var float e1SetupHi    = na
+var float e1SetupLo    = na
+
+// E2 two-stage state
+var bool  e2LongArmed  = false
+var bool  e2ShortArmed = false
+var int   e2ArmBar     = -1000
+
+// E3 late-window accumulators
+var float e3StartPrice   = na
+var float e3VolAcc       = 0.0
+var float e3MaxBodyRatio = 0.0
+var float e3RVOL         = na
+var rvolE3Arr = array.new_float(0)
+
+// E3 two-stage state
+var bool  e3LongArmed  = false
+var bool  e3ShortArmed = false
+var int   e3S1Bar      = -1000
+var float e3TrigLvl    = na
+var float e3VwapSnap   = na
+var float e3SetupHi    = na
+var float e3SetupLo    = na
+
+// E4 two-stage state
+var bool  e4LongArmed  = false
+var bool  e4ShortArmed = false
+var int   e4ArmBar     = -1000
+var float e4ArmLow     = na
+var float e4ArmHigh    = na
+var float e4TrigLvl    = na
+
+// ── DAILY RESET (09:30 bar) ───────────────────────────────────────────────────
+if rthOpenEdge
+    rthOpen       := open
+    orHi          := na
+    orLo          := na
+    orVolAcc      := 0.0
+    dayHi         := high
+    dayLo         := low
+    gapAtRTH      := open - prevDayClose
+    e2Elig        := math.abs(open - prevDayClose) >= e2_gapMult * dailyATR20
+    orLocked      := false
+    lockHi        := na
+    lockLo        := na
+    lockMid       := na
+    orRVOL        := na
+    regime        := 0
+    e1Done        := false
+    e2Done        := false
+    e3Done        := false
+    e4Done        := false
+    tradesCnt     := 0
+    e1LongArmed   := false
+    e1ShortArmed  := false
+    e1ArmBar      := -1000
+    e1BrkLvl      := na
+    e1SetupHi     := na
+    e1SetupLo     := na
+    e2LongArmed   := false
+    e2ShortArmed  := false
+    e2ArmBar      := -1000
+    e4LongArmed   := false
+    e4ShortArmed  := false
+    e4ArmBar      := -1000
+    e4ArmLow      := na
+    e4ArmHigh     := na
+    e4TrigLvl     := na
+
+// ── OR ACCUMULATION (09:30-09:55) ─────────────────────────────────────────────
+inORWin = etH == 9 and etM >= 30
+
+if inORWin
+    orHi     := na(orHi) ? high : math.max(orHi, high)
+    orLo     := na(orLo) ? low  : math.min(orLo, low)
+    orVolAcc += volume
+
+// ── INTRADAY H/L ─────────────────────────────────────────────────────────────
+inRTH = (etH > 9 or (etH == 9 and etM >= 30)) and etH <= 16
+if inRTH and not rthOpenEdge
+    dayHi := math.max(na(dayHi) ? high : dayHi, high)
+    dayLo := math.min(na(dayLo) ? low  : dayLo, low)
+
+// ── OR LOCK at 10:00 ──────────────────────────────────────────────────────────
+if orLockEdge
+    lockHi   := na(orHi) ? close : orHi
+    lockLo   := na(orLo) ? close : orLo
+    lockMid  := (lockHi + lockLo) / 2.0
+    orLocked := true
+
+    prevSize = array.size(rvolArr)
+    if prevSize > 0
+        avgV   = array.avg(rvolArr)
+        orRVOL := avgV > 0 ? orVolAcc / avgV : na
+    if prevSize >= rvolWindow
+        array.shift(rvolArr)
+    array.push(rvolArr, orVolAcc)
+
+    gapMag  = math.abs(gapAtRTH)
+    orRange = lockHi - lockLo
+    if gapMag >= e2_gapMult * dailyATR20
+        regime := -1
+    else if orRange >= orbMinRange and gapMag < 0.30 * dailyATR20
+        regime := 1
+    else
+        regime := 0
+
+    regTxt = regime == 1 ? "TREND" : regime == -1 ? "REVERSAL" : "NORMAL"
+    regClr = regime == 1 ? color.teal : regime == -1 ? color.red : color.gray
+    label.new(bar_index, lockHi + atr5 * 0.4, regTxt,
+              style=label.style_label_down, color=color.new(regClr, 20),
+              textcolor=color.white, size=size.small)
+    line.new(bar_index, lockHi, bar_index + 180, lockHi,
+             color=color.new(color.yellow, 20), style=line.style_dashed, width=1)
+    line.new(bar_index, lockLo, bar_index + 180, lockLo,
+             color=color.new(color.yellow, 20), style=line.style_dashed, width=1)
+
+// ── VWAP ─────────────────────────────────────────────────────────────────────
+vwapVal = ta.vwap
+
+// ── E3 LATE-WINDOW TRACKING ──────────────────────────────────────────────────
+inLateWin = etH == 15 and etM >= 15 and etM <= 30
+
+if preLateEdge
+    e3StartPrice   := close
+    e3VolAcc       := 0.0
+    e3MaxBodyRatio := 0.0
+    e3RVOL         := na
+    e3LongArmed    := false
+    e3ShortArmed   := false
+    e3S1Bar        := -1000
+    e3TrigLvl      := na
+    e3VwapSnap     := na
+    e3SetupHi      := na
+    e3SetupLo      := na
+
+if inLateWin
+    e3VolAcc       += volume
+    e3MaxBodyRatio := math.max(e3MaxBodyRatio, bodyRatio)
+
+if e3S1Edge
+    prevE3 = array.size(rvolE3Arr)
+    if prevE3 > 0
+        avgV3  = array.avg(rvolE3Arr)
+        e3RVOL := avgV3 > 0 ? e3VolAcc / avgV3 : na
+    if prevE3 >= rvolWindow
+        array.shift(rvolE3Arr)
+    array.push(rvolE3Arr, e3VolAcc)
+
+// ── E1 STAGE 1: ARM ──────────────────────────────────────────────────────────
+inE1Win = etH == 10 or (etH == 11 and etM < 30)
+
+if barstate.isconfirmed and e1_on and orLocked and inE1Win and
+   (regime == 1 or regime == 0) and not e1Done and not e2Done and
+   tradesCnt < maxTradesDay and bodyRatio >= e1_bodyRatio and
+   barRange >= e1_dispMult * atr5 and (lockHi - lockLo) >= orbMinRange and
+   not na(orRVOL) and orRVOL >= e1_rvolMin and
+   (na(vixClose) or vixClose <= e1_vixMax) and
+   not e1LongArmed and not e1ShortArmed
+    if close > lockHi and close > vwapVal and close > open
+        e1LongArmed := true
+        e1ArmBar    := bar_index
+        e1BrkLvl    := lockHi
+        e1SetupHi   := high
+        label.new(bar_index, low, "·S1↑", style=label.style_label_up,
+                  color=color.new(color.teal, 55), textcolor=color.white, size=size.tiny)
+    if close < lockLo and close < vwapVal and close < open
+        e1ShortArmed := true
+        e1ArmBar     := bar_index
+        e1BrkLvl     := lockLo
+        e1SetupLo    := low
+        label.new(bar_index, high, "·S1↓", style=label.style_label_down,
+                  color=color.new(color.red, 55), textcolor=color.white, size=size.tiny)
+
+// Disarm if price closes back through the OR level
+if e1LongArmed and barstate.isconfirmed and close < e1BrkLvl
+    e1LongArmed := false
+    e1ArmBar    := -1000
+    e1BrkLvl    := na
+    e1SetupHi   := na
+
+if e1ShortArmed and barstate.isconfirmed and close > e1BrkLvl
+    e1ShortArmed := false
+    e1ArmBar     := -1000
+    e1BrkLvl     := na
+    e1SetupLo    := na
+
+// ── E1 STAGE 2: CONFIRM + ENTRY ──────────────────────────────────────────────
+e1InWait  = bar_index > e1ArmBar and bar_index <= e1ArmBar + e1_waitBars
+e1RetestL = low >= e1BrkLvl - atr5 * 0.50 and close > e1BrkLvl
+e1ContL   = close > e1SetupHi
+e1RetestS = high <= e1BrkLvl + atr5 * 0.50 and close < e1BrkLvl
+e1ContS   = close < e1SetupLo
+
+if barstate.isconfirmed and e1LongArmed and e1InWait and
+   etH < 12 and close > vwapVal and (e1RetestL or e1ContL)
+    slP = close - e1_slMult * atr5
+    tpP = close + e1_tpR * (close - slP)
+    strategy.entry("E1-L", strategy.long,  comment="E1-LONG")
+    strategy.exit("E1-L-X", from_entry="E1-L", stop=slP, limit=tpP)
+    e1Done      := true
+    tradesCnt   += 1
+    e1LongArmed := false
+    label.new(bar_index, low, "E1↑", style=label.style_label_up,
+              color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+
+if barstate.isconfirmed and e1ShortArmed and e1InWait and
+   etH < 12 and close < vwapVal and (e1RetestS or e1ContS)
+    slP = close + e1_slMult * atr5
+    tpP = close - e1_tpR * (slP - close)
+    strategy.entry("E1-S", strategy.short, comment="E1-SHORT")
+    strategy.exit("E1-S-X", from_entry="E1-S", stop=slP, limit=tpP)
+    e1Done       := true
+    tradesCnt    += 1
+    e1ShortArmed := false
+    label.new(bar_index, high, "E1↓", style=label.style_label_down,
+              color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+// ── E2 STAGE 1: ARM ──────────────────────────────────────────────────────────
+inE2Win = (etH == 9 and etM >= 35) or (etH == 10 and etM < 30)
+
+if barstate.isconfirmed and e2_on and inE2Win and e2Elig and
+   not e2Done and not e1Done and tradesCnt < maxTradesDay and
+   not e2LongArmed and not e2ShortArmed
+    if gapAtRTH < 0 and close > rthOpen and close > vwapVal
+        e2LongArmed := true
+        e2ArmBar    := bar_index
+        label.new(bar_index, low, "·S1↑", style=label.style_label_up,
+                  color=color.new(color.blue, 55), textcolor=color.white, size=size.tiny)
+    if gapAtRTH > 0 and close < rthOpen and close < vwapVal
+        e2ShortArmed := true
+        e2ArmBar     := bar_index
+        label.new(bar_index, high, "·S1↓", style=label.style_label_down,
+                  color=color.new(color.purple, 55), textcolor=color.white, size=size.tiny)
+
+// Disarm if flip reverses
+if e2LongArmed and barstate.isconfirmed and close < rthOpen
+    e2LongArmed := false
+    e2ArmBar    := -1000
+
+if e2ShortArmed and barstate.isconfirmed and close > rthOpen
+    e2ShortArmed := false
+    e2ArmBar     := -1000
+
+// ── E2 STAGE 2: HOLD CONFIRM + ENTRY ─────────────────────────────────────────
+e2InWait = bar_index > e2ArmBar and bar_index <= e2ArmBar + e2_waitBars
+
+if barstate.isconfirmed and e2LongArmed and e2InWait and
+   etH <= 10 and close > rthOpen and close > vwapVal
+    slP = close - e2_slMult * atr5
+    tpP = close + e2_tpR * (close - slP)
+    strategy.entry("E2-L", strategy.long,  comment="E2-LONG")
+    strategy.exit("E2-L-X", from_entry="E2-L", stop=slP, limit=tpP)
+    e2Done      := true
+    tradesCnt   += 1
+    e2LongArmed := false
+    label.new(bar_index, low, "E2↑", style=label.style_label_up,
+              color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
+
+if barstate.isconfirmed and e2ShortArmed and e2InWait and
+   etH <= 10 and close < rthOpen and close < vwapVal
+    slP = close + e2_slMult * atr5
+    tpP = close - e2_tpR * (slP - close)
+    strategy.entry("E2-S", strategy.short, comment="E2-SHORT")
+    strategy.exit("E2-S-X", from_entry="E2-S", stop=slP, limit=tpP)
+    e2Done       := true
+    tradesCnt    += 1
+    e2ShortArmed := false
+    label.new(bar_index, high, "E2↓", style=label.style_label_down,
+              color=color.new(color.purple, 10), textcolor=color.white, size=size.small)
+
+// ── E3 STAGE 1: ARM (15:30 bar) ──────────────────────────────────────────────
+lateMove     = na(e3StartPrice) ? 0.0 : math.abs(close - e3StartPrice)
+distFromVWAP = math.abs(close - vwapVal)
+
+if barstate.isconfirmed and e3_on and isE3S1Bar and
+   lateMove >= e3_dispMult * atr14 and e3MaxBodyRatio >= e3_bodyMin and
+   (na(e3RVOL) or e3RVOL >= e3_rvolMin) and
+   distFromVWAP <= e3_vwapCap * atr14 and
+   strategy.position_size == 0 and not e3Done and orLocked and
+   not e3LongArmed and not e3ShortArmed
+    if close > vwapVal and close > e3StartPrice
+        e3LongArmed := true
+        e3S1Bar     := bar_index
+        e3TrigLvl   := close
+        e3VwapSnap  := vwapVal
+        e3SetupHi   := high
+        label.new(bar_index, low, "·S1↑", style=label.style_label_up,
+                  color=color.new(color.orange, 55), textcolor=color.white, size=size.tiny)
+    if close < vwapVal and close < e3StartPrice
+        e3ShortArmed := true
+        e3S1Bar      := bar_index
+        e3TrigLvl    := close
+        e3VwapSnap   := vwapVal
+        e3SetupLo    := low
+        label.new(bar_index, high, "·S1↓", style=label.style_label_down,
+                  color=color.new(color.orange, 55), textcolor=color.white, size=size.tiny)
+
+// ── E3 STAGE 2: CONFIRM + ENTRY ──────────────────────────────────────────────
+e3InWait  = bar_index > e3S1Bar and bar_index <= e3S1Bar + e3_waitBars and etH == 15 and etM <= 45
+e3RetestL = low >= e3TrigLvl - atr14 * 0.25 and close > e3TrigLvl
+e3ContL   = close > e3SetupHi
+e3RetestS = high <= e3TrigLvl + atr14 * 0.25 and close < e3TrigLvl
+e3ContS   = close < e3SetupLo
+
+if barstate.isconfirmed and e3LongArmed and e3InWait and
+   close > e3VwapSnap and (e3RetestL or e3ContL)
+    slP = close - e3_slMult * atr14
+    tpP = close + e3_tpR * (close - slP)
+    strategy.entry("E3-L", strategy.long,  comment="E3-LONG")
+    strategy.exit("E3-L-X", from_entry="E3-L", stop=slP, limit=tpP)
+    e3Done      := true
+    tradesCnt   += 1
+    e3LongArmed := false
+    label.new(bar_index, low, "E3↑", style=label.style_label_up,
+              color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+
+if barstate.isconfirmed and e3ShortArmed and e3InWait and
+   close < e3VwapSnap and (e3RetestS or e3ContS)
+    slP = close + e3_slMult * atr14
+    tpP = close - e3_tpR * (slP - close)
+    strategy.entry("E3-S", strategy.short, comment="E3-SHORT")
+    strategy.exit("E3-S-X", from_entry="E3-S", stop=slP, limit=tpP)
+    e3Done       := true
+    tradesCnt    += 1
+    e3ShortArmed := false
+    label.new(bar_index, high, "E3↓", style=label.style_label_down,
+              color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+
+// ── E4 MIDDAY VWAP REVERSION ──────────────────────────────────────────────────
+// Window: 10:30-12:30 ET  |  Direction: fade the deviation, target VWAP
+// Stage 1: price ≥ e4_devMult×ATR5 from VWAP, reversion body bar, vol > SMA20
+// Stage 2: retest-hold OR continuation above Stage 1 bar extreme
+// Regime gate: not TREND (regime != 1) — reversion fails in trending days
+inE4Win     = (etH == 10 and etM >= 30) or etH == 11 or (etH == 12 and etM < 30)
+devFromVWAP = math.abs(close - vwapVal)
+volSma20    = ta.sma(volume, 20)
+
+if barstate.isconfirmed and e4_on and inE4Win and orLocked and
+   regime != 1 and not e4Done and tradesCnt < maxTradesDay and
+   strategy.position_size == 0 and
+   devFromVWAP >= e4_devMult * atr5 and bodyRatio >= e4_bodyRatio and
+   volume > volSma20 and not e4LongArmed and not e4ShortArmed
+    // Long: price extended below VWAP, bullish reversion bar
+    if close < vwapVal and close > open
+        e4LongArmed  := true
+        e4ArmBar     := bar_index
+        e4ArmLow     := low
+        e4ArmHigh    := high
+        e4TrigLvl    := close
+        label.new(bar_index, low, "·S1↑", style=label.style_label_up,
+                  color=color.new(color.lime, 55), textcolor=color.white, size=size.tiny)
+    // Short: price extended above VWAP, bearish reversion bar
+    if close > vwapVal and close < open
+        e4ShortArmed := true
+        e4ArmBar     := bar_index
+        e4ArmLow     := low
+        e4ArmHigh    := high
+        e4TrigLvl    := close
+        label.new(bar_index, high, "·S1↓", style=label.style_label_down,
+                  color=color.new(color.fuchsia, 55), textcolor=color.white, size=size.tiny)
+
+// Disarm if Stage 1 bar extreme is violated (deviation extends further)
+if e4LongArmed and barstate.isconfirmed and low < e4ArmLow
+    e4LongArmed := false
+    e4ArmBar    := -1000
+
+if e4ShortArmed and barstate.isconfirmed and high > e4ArmHigh
+    e4ShortArmed := false
+    e4ArmBar     := -1000
+
+// ── E4 STAGE 2: CONFIRM + ENTRY ──────────────────────────────────────────────
+e4InWait  = bar_index > e4ArmBar and bar_index <= e4ArmBar + e4_waitBars and inE4Win
+e4RetestL = low >= e4TrigLvl - atr5 * 0.50 and close > e4TrigLvl
+e4ContL   = close > e4ArmHigh
+e4RetestS = high <= e4TrigLvl + atr5 * 0.50 and close < e4TrigLvl
+e4ContS   = close < e4ArmLow
+
+if barstate.isconfirmed and e4LongArmed and e4InWait and
+   strategy.position_size == 0 and (e4RetestL or e4ContL)
+    slP = close - e4_slMult * atr5
+    tpP = close + e4_tpR * (close - slP)
+    strategy.entry("E4-L", strategy.long,  comment="E4-LONG")
+    strategy.exit("E4-L-X", from_entry="E4-L", stop=slP, limit=tpP)
+    e4Done      := true
+    tradesCnt   += 1
+    e4LongArmed := false
+    label.new(bar_index, low, "E4↑", style=label.style_label_up,
+              color=color.new(color.lime, 10), textcolor=color.white, size=size.small)
+
+if barstate.isconfirmed and e4ShortArmed and e4InWait and
+   strategy.position_size == 0 and (e4RetestS or e4ContS)
+    slP = close + e4_slMult * atr5
+    tpP = close - e4_tpR * (slP - close)
+    strategy.entry("E4-S", strategy.short, comment="E4-SHORT")
+    strategy.exit("E4-S-X", from_entry="E4-S", stop=slP, limit=tpP)
+    e4Done       := true
+    tradesCnt    += 1
+    e4ShortArmed := false
+    label.new(bar_index, high, "E4↓", style=label.style_label_down,
+              color=color.new(color.fuchsia, 10), textcolor=color.white, size=size.small)
+
+// ── EOD CLOSE at 15:55 ET ─────────────────────────────────────────────────────
+if barstate.isconfirmed and isEODTime and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+// ── PLOTS ────────────────────────────────────────────────────────────────────
+plot(vwapVal, "VWAP", color=color.new(color.yellow, 20), linewidth=2)
+bgcolor(inORWin   ? color.new(color.yellow, 93) : na, title="OR Window")
+bgcolor(inLateWin ? color.new(color.aqua,   93) : na, title="E3 Late Window")
+bgcolor(inE4Win   ? color.new(color.green,  96) : na, title="E4 Midday Window")

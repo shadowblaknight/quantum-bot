@@ -1,0 +1,129 @@
+//@version=6
+// QB BTC CME Gap Specialist — Strategy  (BTC1! or BTCUSDT, 1h recommended)
+// Backtest version of qb-btc-gap-specialist.pine
+// Entry: market order at first bar of week. Exit: TP=Friday close, SL=structural $750
+strategy("QB BTC Gap — Strategy", "QB BTC-GAP ST", overlay=true,
+         pyramiding=0,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=1,
+         commission_type=strategy.commission.percent,
+         commission_value=0.05,
+         slippage=5,
+         initial_capital=10000,
+         currency=currency.USD,
+         max_bars_back=500,
+         calc_on_every_tick=false)
+
+// ─── INPUTS ──────────────────────────────────────────────────────────
+G_GAP = "Gap Parameters"
+maxGapSize = input.float(700.0, "Max gap ($) to trade",  group=G_GAP, step=50.0)
+minGapSize = input.float(100.0, "Min gap ($) to trade",  group=G_GAP, step=25.0)
+slBuffer   = input.float(750.0, "Structural SL ($)",      group=G_GAP, step=50.0)
+
+G_TP = "Take Profit"
+tpMode    = input.string("TP1-only", "TP mode", options=["TP1-only", "TP1+TP2", "TP1+TP2+TP3"], group=G_TP,
+             tooltip="TP1=gap fill (100%). TP2=overshoot 50%. TP3=runner 100%.")
+tp2OvershootPct = input.float(0.50, "TP2 overshoot (×gap beyond fill)", group=G_TP, step=0.10)
+tp3OvershootPct = input.float(1.00, "TP3 runner  (×gap beyond fill)",   group=G_TP, step=0.10)
+
+G_FILT = "Filters"
+requireBias = input.bool(true,  "Require H1+H4 alignment with fill direction", group=G_FILT)
+emaLength   = input.int(20,    "HTF EMA period",  group=G_FILT)
+atrLength   = input.int(14,    "ATR period",      group=G_FILT)
+
+// ─── HTF BIAS ─────────────────────────────────────────────────────────
+f_htfBias(int emaLen, int atrLen) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    [b, a]
+
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+
+// ─── GAP DETECTION ────────────────────────────────────────────────────
+// Detect weekend close by checking elapsed time between bars.
+// On BTC1! 1h: Friday close → Sunday open = ~25h gap. Weekday bars = 1h apart.
+// This fires exactly on the Sunday reopen bar (not Monday midnight like time("W")).
+_hoursElapsed = bar_index > 0 ? (time - time[1]) / 3600000.0 : 0.0
+_newWeek      = _hoursElapsed >= 20.0  // >20h = weekend closure detected
+
+_gapRaw  = open - close[1]
+_gapAbs  = math.abs(_gapRaw)
+_fillDir = _gapRaw > 0 ? -1 : 1   // fill direction opposite to gap
+
+_biasOk = not requireBias or (_fillDir == 1 ? (h1B == 1 or h4B == 1) : (h1B == -1 or h4B == -1))
+
+// ─── WEEKLY STATE ─────────────────────────────────────────────────────
+var bool  gap_fired    = false
+var float gap_fill_lvl = na
+var float gap_open_lvl = na
+
+if _newWeek
+    gap_fired    := false
+    gap_fill_lvl := na
+    gap_open_lvl := na
+
+// ═══════════════════════════════════════════════════════════════════════
+// GAP FILL SIGNAL
+// Entry: market at gap open. TP1: Friday close (100% fill). SL: structural.
+// Note: entry fills on next bar's open (~1h lag) due to barstate.isconfirmed.
+// Use BTC1! (CME futures) for true Friday-Sunday gap visibility.
+// ═══════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed and _newWeek and not gap_fired and strategy.position_size == 0
+    if _gapAbs >= minGapSize and _gapAbs < maxGapSize and _biasOk
+        gapFillLevel = close[1]   // Friday close = 100% gap fill
+        entryP       = open
+
+        slP  = _fillDir == 1 ? entryP - slBuffer : entryP + slBuffer
+        tp1  = gapFillLevel
+        tp2  = _fillDir == 1 ? gapFillLevel + _gapAbs * tp2OvershootPct : gapFillLevel - _gapAbs * tp2OvershootPct
+        tp3  = _fillDir == 1 ? gapFillLevel + _gapAbs * tp3OvershootPct : gapFillLevel - _gapAbs * tp3OvershootPct
+
+        slOk = _fillDir == 1 ? slP < entryP : slP > entryP
+        tpOk = _fillDir == 1 ? tp1 > entryP : tp1 < entryP
+
+        if slOk and tpOk
+            dirStr = _fillDir == 1 ? "LONG" : "SHORT"
+            gap_fired    := true
+            gap_fill_lvl := gapFillLevel
+            gap_open_lvl := entryP
+
+            eDir = _fillDir == 1 ? strategy.long : strategy.short
+            strategy.entry("GAP", eDir, comment="BTC-GAP-" + dirStr)
+
+            // Exit based on TP mode
+            if tpMode == "TP1-only"
+                strategy.exit("GAP-XT", from_entry="GAP", stop=slP, limit=tp1)
+            else if tpMode == "TP1+TP2"
+                strategy.exit("GAP-XT1", from_entry="GAP", qty_percent=60, stop=slP, limit=tp1)
+                strategy.exit("GAP-XT2", from_entry="GAP", qty_percent=100, limit=tp2)
+            else
+                // TP1+TP2+TP3
+                strategy.exit("GAP-XT1", from_entry="GAP", qty_percent=40, stop=slP, limit=tp1)
+                strategy.exit("GAP-XT2", from_entry="GAP", qty_percent=50, limit=tp2)
+                strategy.exit("GAP-XT3", from_entry="GAP", qty_percent=100, limit=tp3)
+
+            lblColor = _fillDir == 1 ? color.new(color.teal, 5) : color.new(color.red, 5)
+            lblStyle = _fillDir == 1 ? label.style_label_up : label.style_label_down
+            lblY     = _fillDir == 1 ? low : high
+            label.new(bar_index, lblY,
+                      "⚡ GAP " + dirStr + "\n$" + str.tostring(math.round(_gapAbs)) + " → " + str.tostring(math.round(gapFillLevel)),
+                      style=lblStyle, color=lblColor, textcolor=color.white, size=size.small)
+
+            if not na(gapFillLevel)
+                line.new(bar_index, gapFillLevel, bar_index + 120, gapFillLevel,
+                         color=color.new(color.yellow, 10), style=line.style_dashed, width=2)
+
+// Rejected gap label
+if barstate.isconfirmed and _newWeek and not gap_fired and _gapAbs >= minGapSize
+    rejectReason = _gapAbs >= maxGapSize ? "GAP $" + str.tostring(math.round(_gapAbs)) + ">MAX" :
+                   not _biasOk ? "BIAS-FAIL" : ""
+    if str.length(rejectReason) > 0
+        label.new(bar_index, high, "✗ " + rejectReason,
+                  style=label.style_label_down, color=color.new(color.gray, 40),
+                  textcolor=color.new(color.white, 30), size=size.tiny)
+
+// Weekend background
+bgcolor(dayofweek(time, "UTC") == dayofweek.saturday or dayofweek(time, "UTC") == dayofweek.sunday
+        ? color.new(color.gray, 92) : na, title="Weekend")

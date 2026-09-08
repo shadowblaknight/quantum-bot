@@ -37,6 +37,7 @@ const SPECIALIST_ALLOWED_ZONES = {
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
   'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)
   'ger40-bg-specialist': ['B', 'G'], // Frankfurt ORB (B) + London 3-Phase FVG (G), Tue+Thu only
+  'sp500-specialist':   ['FRB', 'NYORB'], // Frankfurt ORB (M) + NY ORB (H), Mon+Fri only
 };
 
 // v14: tick-rounding must NOT depend on _lib exporting roundToPipSize. If that
@@ -60,8 +61,9 @@ const PINE_TO_ASSET = {
   // NAS100 aliases — NAS100.s (Spreadex) strips to NAS100S; NDQ was previously the feed symbol.
   NAS100: 'nas100', NAS100S: 'nas100', NDQ: 'nas100', US100: 'nas100', USTEC: 'nas100',
   NDX: 'nas100', USTECH: 'nas100', NASDAQ: 'nas100', NAS100M: 'nas100', USTECCASH: 'nas100',
-  // SP500 aliases
+  // SP500 aliases — US500.cash (FTMO) strips to US500CASH after non-alphanumeric removal
   SP500: 'us500', US500: 'us500', SPX500: 'us500', SPX: 'us500',
+  US500CASH: 'us500', US500S: 'us500', US500M: 'us500',
   BTCUSD: 'btc', BTCUSDT: 'btc', BTCUSDC: 'btc',
   // GER40 aliases — GER40.s (Spreadex) strips to GER40S; others map directly
   GER40: 'ger40', GER40S: 'ger40', DE40: 'ger40', DAX: 'ger40', DAX40: 'ger40', GER40M: 'ger40',
@@ -503,6 +505,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         gold:   { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
         nas100: { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
         ger40:  { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
+        us500:  { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
       };
       const _slDist = Math.abs(entry - sl);
       if (_slDist > 0 && assetMeta.pipSize > 0 && assetMeta.dollarPerPipPerLot > 0) {

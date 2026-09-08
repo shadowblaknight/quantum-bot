@@ -1,0 +1,389 @@
+//@version=6
+// QB GBP/USD Specialist — Strategy  (GBPUSD, 15m recommended)
+// Backtest version of qb-gbpusd-specialist.pine
+// Signals: M=Frankfurt ORB C2  L=London ORB C2 (primary)  H=NY ORB C2  A=FVG  B=Judas
+strategy("QB GBP/USD — Strategy", "QB GBPUSD ST", overlay=true,
+         pyramiding=0,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=1,
+         commission_type=strategy.commission.percent,
+         commission_value=0.005,
+         slippage=1,
+         initial_capital=10000,
+         currency=currency.USD,
+         max_bars_back=500,
+         calc_on_every_tick=false)
+
+// ─── INPUTS ──────────────────────────────────────────────────────────
+G_SIG = "Signals"
+modFVG   = input.bool(true, "A) FVG signal",               group=G_SIG)
+modJudas = input.bool(true, "B) Judas Sweep",              group=G_SIG)
+modFRB   = input.bool(true, "M) Frankfurt ORB C2",         group=G_SIG)
+modLON   = input.bool(true, "L) London ORB C2 (primary)",  group=G_SIG)
+modNYORB = input.bool(true, "H) NY ORB C2",                group=G_SIG)
+
+G_C2 = "C2 Parameters"
+c2SLBuf  = input.float(0.00450, "Structural SL buffer (price units)", group=G_C2, step=0.00010)
+c2TpMult = input.float(0.75,    "TP = ORB range ×",                   group=G_C2, step=0.05)
+orbMinRange = input.float(0.00080, "Min ORB range",                   group=G_C2, step=0.00010)
+
+G_FILT = "Filters"
+adrFVGMax    = input.float(0.85, "FVG max ADR",      group=G_FILT, step=0.05)
+adrJudasMax  = input.float(0.90, "Judas max ADR",    group=G_FILT, step=0.05)
+atrLength    = input.int(14,   "ATR period",          group=G_FILT)
+emaLength    = input.int(20,   "HTF EMA period",      group=G_FILT)
+fvgMinGapATR  = input.float(0.10, "FVG min gap×ATR",  group=G_FILT, step=0.03)
+fvgMaxFillPct = input.float(0.50, "FVG max fill %",   group=G_FILT, step=0.05)
+fvgMaxAgeBars = input.int(20,   "FVG max age bars",   group=G_FILT)
+slMinH1ATR   = input.float(0.30, "SL min×H1ATR",      group=G_FILT, step=0.05)
+slMaxH1ATR   = input.float(3.00, "SL max×H1ATR",      group=G_FILT, step=0.10)
+
+// ─── HTF BIAS ─────────────────────────────────────────────────────────
+f_htfBias(int emaLen, int atrLen) =>
+    e = ta.ema(close, emaLen)
+    b = close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+    a = ta.atr(atrLen)
+    [b, a]
+
+[h1B, h1ATR] = request.security(syminfo.tickerid, "60",  f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[h4B, h4ATR] = request.security(syminfo.tickerid, "240", f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+[hdB, hdATR] = request.security(syminfo.tickerid, "D",   f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
+atrVal = ta.atr(atrLength)
+
+// ─── SESSION ──────────────────────────────────────────────────────────
+_hourUtc  = hour(time, "UTC")
+_minOfDay = _hourUtc * 60 + minute(time, "UTC")
+
+_atr14d    = request.security(syminfo.tickerid, "D", ta.atr(14))
+_todayHigh = request.security(syminfo.tickerid, "D", high)
+_todayLow  = request.security(syminfo.tickerid, "D", low)
+
+_adrConsumed = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
+_newDay      = ta.change(time("D")) != 0
+
+in_asian        = _minOfDay >= 0   and _minOfDay < 480
+in_london       = _minOfDay >= 480 and _minOfDay < 660
+in_overlap      = _minOfDay >= 780 and _minOfDay < 1020
+in_kz           = in_london or in_overlap
+in_frb_window   = _minOfDay >= 420 and _minOfDay < 450
+in_frb_trade    = _minOfDay >= 450 and _minOfDay < 660
+in_lon_window   = _minOfDay >= 480 and _minOfDay < 510
+in_lon_trade    = _minOfDay >= 510 and _minOfDay < 660
+in_nyorb_window = _minOfDay >= 840 and _minOfDay < 870
+
+adr_fvg_ok   = _adrConsumed[1] < adrFVGMax
+adr_judas_ok = _adrConsumed[1] < adrJudasMax
+adr_hard_ok  = _adrConsumed    < 2.50
+
+// ─── ASIAN RANGE ──────────────────────────────────────────────────────
+var float ar_hi     = na
+var float ar_lo     = na
+var bool  ar_locked = false
+
+if _newDay
+    ar_hi     := na
+    ar_lo     := na
+    ar_locked := false
+
+if in_asian
+    ar_hi := na(ar_hi) ? high : math.max(ar_hi, high)
+    ar_lo := na(ar_lo) ? low  : math.min(ar_lo, low)
+
+if not in_asian and in_asian[1] and not na(ar_hi)
+    ar_locked := true
+
+// ─── FRANKFURT ORB ────────────────────────────────────────────────────
+var float ar_lo_prefrb = na
+var float ar_hi_prefrb = na
+var float frb_hi       = na
+var float frb_lo       = na
+var bool  frb_locked   = false
+var bool  frb_done     = false
+
+// ─── LONDON ORB ───────────────────────────────────────────────────────
+var float lon_hi       = na
+var float lon_lo       = na
+var bool  lon_locked   = false
+var bool  lon_done     = false
+
+// ─── NY ORB ───────────────────────────────────────────────────────────
+var float nyorb_hi     = na
+var float nyorb_lo     = na
+var bool  nyorb_locked = false
+var bool  nyorb_done   = false
+
+if _newDay
+    ar_lo_prefrb := na
+    ar_hi_prefrb := na
+    frb_hi   := na
+    frb_lo   := na
+    frb_locked := false
+    frb_done := false
+    lon_hi   := na
+    lon_lo   := na
+    lon_locked := false
+    lon_done := false
+    nyorb_hi := na
+    nyorb_lo := na
+    nyorb_locked := false
+    nyorb_done := false
+    strategy.cancel("M-S")
+    strategy.cancel("M-L")
+    strategy.cancel("L-S")
+    strategy.cancel("L-L")
+    strategy.cancel("H-S")
+    strategy.cancel("H-L")
+
+if _minOfDay >= 0 and _minOfDay < 420
+    ar_lo_prefrb := na(ar_lo_prefrb) ? low  : math.min(ar_lo_prefrb, low)
+    ar_hi_prefrb := na(ar_hi_prefrb) ? high : math.max(ar_hi_prefrb, high)
+
+if in_frb_window
+    frb_hi := na(frb_hi) ? high : math.max(frb_hi, high)
+    frb_lo := na(frb_lo) ? low  : math.min(frb_lo, low)
+
+if not in_frb_window and in_frb_window[1] and not na(frb_hi)
+    frb_locked := true
+
+if in_lon_window
+    lon_hi := na(lon_hi) ? high : math.max(lon_hi, high)
+    lon_lo := na(lon_lo) ? low  : math.min(lon_lo, low)
+
+if not in_lon_window and in_lon_window[1] and not na(lon_hi)
+    lon_locked := true
+
+if in_nyorb_window
+    nyorb_hi := na(nyorb_hi) ? high : math.max(nyorb_hi, high)
+    nyorb_lo := na(nyorb_lo) ? low  : math.min(nyorb_lo, low)
+
+if not in_nyorb_window and in_nyorb_window[1] and not na(nyorb_hi)
+    nyorb_locked := true
+
+// ─── BOS ──────────────────────────────────────────────────────────────
+SWG = 3
+var float _prev_sh = na
+var float _prev_sl_v = na
+var int   bos_bull_b = na
+var int   bos_bear_b = na
+
+_sh_now = ta.pivothigh(high, SWG, SWG)
+_sl_now = ta.pivotlow(low,   SWG, SWG)
+
+if not na(_sh_now)
+    if not na(_prev_sh) and _sh_now > _prev_sh
+        bos_bull_b := bar_index[SWG]
+    _prev_sh := _sh_now
+
+if not na(_sl_now)
+    if not na(_prev_sl_v) and _sl_now < _prev_sl_v
+        bos_bear_b := bar_index[SWG]
+    _prev_sl_v := _sl_now
+
+bos_bull_ok = not na(bos_bull_b) and (bar_index - bos_bull_b) <= 30
+bos_bear_ok = not na(bos_bear_b) and (bar_index - bos_bear_b) <= 30
+
+// ─── FVG POOL ─────────────────────────────────────────────────────────
+var array<float> fU    = array.new<float>(0)
+var array<float> fL    = array.new<float>(0)
+var array<int>   fDir  = array.new<int>(0)
+var array<int>   fBar  = array.new<int>(0)
+var array<float> fFill = array.new<float>(0)
+var array<bool>  fFired = array.new<bool>(0)
+
+if barstate.isconfirmed and atrVal > 0
+    bull_fvg = low > high[2]
+    bear_fvg = high < low[2]
+    if bull_fvg and (low - high[2]) >= atrVal * fvgMinGapATR
+        array.push(fU, low)
+        array.push(fL, high[2])
+        array.push(fDir, 1)
+        array.push(fBar, bar_index - 1)
+        array.push(fFill, 0.0)
+        array.push(fFired, false)
+    if bear_fvg and (low[2] - high) >= atrVal * fvgMinGapATR
+        array.push(fU, low[2])
+        array.push(fL, high)
+        array.push(fDir, -1)
+        array.push(fBar, bar_index - 1)
+        array.push(fFill, 0.0)
+        array.push(fFired, false)
+    while array.size(fU) > 25
+        array.shift(fU)
+        array.shift(fL)
+        array.shift(fDir)
+        array.shift(fBar)
+        array.shift(fFill)
+        array.shift(fFired)
+
+if barstate.isconfirmed and array.size(fU) > 0
+    for idx = array.size(fU) - 1 to 0
+        u   = array.get(fU, idx)
+        l   = array.get(fL, idx)
+        d   = array.get(fDir, idx)
+        gsz = u - l
+        if gsz > 0
+            if d == 1 and low < u
+                array.set(fFill, idx, math.min(1.0, math.max(0.0, u - math.max(l, low)) / gsz))
+            if d == -1 and high > l
+                array.set(fFill, idx, math.min(1.0, math.max(0.0, math.min(u, high) - l) / gsz))
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL A — FVG RETEST
+// ═══════════════════════════════════════════════════════════════════════
+if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and strategy.position_size == 0 and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0
+    firedA = false
+    for idx = array.size(fU) - 1 to 0
+        if firedA or array.get(fFired, idx)
+            continue
+        u   = array.get(fU,   idx)
+        l   = array.get(fL,   idx)
+        d   = array.get(fDir, idx)
+        birth   = array.get(fBar,  idx)
+        fillPct = array.get(fFill, idx)
+        if (bar_index - birth) > fvgMaxAgeBars or fillPct > fvgMaxFillPct
+            continue
+        touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
+        if not touch
+            continue
+        if not ((d == 1 and bos_bull_ok) or (d == -1 and bos_bear_ok))
+            continue
+        buf    = math.max(0.20 * atrVal, 0.08 * h1ATR)
+        entryP = d == 1 ? l : u
+        slP    = d == 1 ? l - buf : u + buf
+        slDist = math.abs(entryP - slP)
+        slH1   = slDist / h1ATR
+        if slDist <= 0 or slH1 < slMinH1ATR or slH1 > slMaxH1ATR
+            continue
+        tp1 = d == 1 ? entryP + slDist : entryP - slDist
+        if d == 1 ? (slP >= entryP or tp1 <= entryP) : (slP <= entryP or tp1 >= entryP)
+            continue
+        array.set(fFired, idx, true)
+        firedA := true
+        eDir = d == 1 ? strategy.long : strategy.short
+        eId  = d == 1 ? "FVG-L" : "FVG-S"
+        strategy.entry(eId, eDir, comment=eId)
+        strategy.exit(eId + "-XT", from_entry=eId, stop=slP, limit=tp1)
+        label.new(bar_index, d == 1 ? low : high, "FVG " + (d == 1 ? "▲" : "▼"),
+                  style=d == 1 ? label.style_label_up : label.style_label_down,
+                  color=d == 1 ? color.new(color.teal, 10) : color.new(color.red, 10),
+                  textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL B — JUDAS SWEEP
+// ═══════════════════════════════════════════════════════════════════════
+var bool judas_hi_done = false
+var bool judas_lo_done = false
+
+if _newDay
+    judas_hi_done := false
+    judas_lo_done := false
+
+if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_ok and adr_hard_ok and strategy.position_size == 0 and not na(h1ATR) and h1ATR > 0
+    aRef = nz(atrVal, h1ATR)
+    if not judas_hi_done and not na(ar_hi) and high > ar_hi and close < ar_hi and (high - ar_hi) >= aRef * 0.15
+        slP = high + aRef * 0.20
+        slDist = math.abs(ar_hi - slP)
+        slH1 = slDist / h1ATR
+        if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
+            judas_hi_done := true
+            strategy.entry("JUD-S", strategy.short, comment="Judas-SHORT")
+            strategy.exit("JUD-S-XT", from_entry="JUD-S", stop=slP, limit=ar_hi - slDist)
+            label.new(bar_index, high, "Judas ▼", style=label.style_label_down,
+                      color=color.new(color.red, 5), textcolor=color.white, size=size.tiny)
+
+    if not judas_lo_done and not na(ar_lo) and low < ar_lo and close > ar_lo and (ar_lo - low) >= aRef * 0.15
+        slP = low - aRef * 0.20
+        slDist = math.abs(ar_lo - slP)
+        slH1 = slDist / h1ATR
+        if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
+            judas_lo_done := true
+            strategy.entry("JUD-L", strategy.long, comment="Judas-LONG")
+            strategy.exit("JUD-L-XT", from_entry="JUD-L", stop=slP, limit=ar_lo + slDist)
+            label.new(bar_index, low, "Judas ▲", style=label.style_label_up,
+                      color=color.new(color.teal, 5), textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL M — FRANKFURT ORB C2  (limit at ORB edge)
+// Asian extreme required — same as GS1
+// ═══════════════════════════════════════════════════════════════════════
+if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90 and strategy.position_size == 0
+    orb_rng = frb_hi - frb_lo
+    if orb_rng >= orbMinRange
+        if close < frb_lo and h1B == -1 and h4B == -1 and not na(ar_lo_prefrb) and close < ar_lo_prefrb
+            tp1 = frb_lo - orb_rng * c2TpMult
+            frb_done := true
+            strategy.entry("M-S", strategy.short, limit=frb_lo, comment="FRB-C2-SHORT")
+            strategy.exit("M-S-XT", from_entry="M-S", stop=frb_lo + c2SLBuf, limit=tp1)
+            label.new(bar_index, high, "M ▼", style=label.style_label_down,
+                      color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny)
+
+        else if close > frb_hi and h1B == 1 and h4B == 1 and not na(ar_hi_prefrb) and close > ar_hi_prefrb
+            tp1 = frb_hi + orb_rng * c2TpMult
+            frb_done := true
+            strategy.entry("M-L", strategy.long, limit=frb_hi, comment="FRB-C2-LONG")
+            strategy.exit("M-L-XT", from_entry="M-L", stop=frb_hi - c2SLBuf, limit=tp1)
+            label.new(bar_index, low, "M ▲", style=label.style_label_up,
+                      color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL L — LONDON ORB C2  (PRIMARY — limit at ORB edge)
+// No Asian extreme required for GBP/USD (London-primary pair)
+// ═══════════════════════════════════════════════════════════════════════
+if modLON and barstate.isconfirmed and in_lon_trade and lon_locked and not lon_done and not na(lon_hi) and not na(lon_lo) and adr_hard_ok and _adrConsumed[1] < 0.90 and strategy.position_size == 0
+    orb_rng = lon_hi - lon_lo
+    if orb_rng >= orbMinRange
+        if close < lon_lo and h1B == -1 and h4B == -1
+            tp1 = lon_lo - orb_rng * c2TpMult
+            lon_done := true
+            strategy.entry("L-S", strategy.short, limit=lon_lo, comment="LON-C2-SHORT")
+            strategy.exit("L-S-XT", from_entry="L-S", stop=lon_lo + c2SLBuf, limit=tp1)
+            label.new(bar_index, high, "L ▼", style=label.style_label_down,
+                      color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.tiny)
+
+        else if close > lon_hi and h1B == 1 and h4B == 1
+            tp1 = lon_hi + orb_rng * c2TpMult
+            lon_done := true
+            strategy.entry("L-L", strategy.long, limit=lon_hi, comment="LON-C2-LONG")
+            strategy.exit("L-L-XT", from_entry="L-L", stop=lon_hi - c2SLBuf, limit=tp1)
+            label.new(bar_index, low, "L ▲", style=label.style_label_up,
+                      color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL H — NY ORB C2  (limit at ORB edge)
+// ═══════════════════════════════════════════════════════════════════════
+if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90 and strategy.position_size == 0
+    orb_rng = nyorb_hi - nyorb_lo
+    if orb_rng >= orbMinRange
+        if close > nyorb_hi and h1B == 1 and h4B == 1
+            tp1 = nyorb_hi + orb_rng * c2TpMult
+            nyorb_done := true
+            strategy.entry("H-L", strategy.long, limit=nyorb_hi, comment="NYORB-C2-LONG")
+            strategy.exit("H-L-XT", from_entry="H-L", stop=nyorb_hi - c2SLBuf, limit=tp1)
+            label.new(bar_index, low, "H ▲", style=label.style_label_up,
+                      color=color.new(color.teal, 5), textcolor=color.white, size=size.tiny)
+
+        else if close < nyorb_lo and h1B == -1 and h4B == -1
+            tp1 = nyorb_lo - orb_rng * c2TpMult
+            nyorb_done := true
+            strategy.entry("H-S", strategy.short, limit=nyorb_lo, comment="NYORB-C2-SHORT")
+            strategy.exit("H-S-XT", from_entry="H-S", stop=nyorb_lo + c2SLBuf, limit=tp1)
+            label.new(bar_index, high, "H ▼", style=label.style_label_down,
+                      color=color.new(color.teal, 5), textcolor=color.white, size=size.tiny)
+
+// ─── VISUALS ──────────────────────────────────────────────────────────
+bgcolor(in_asian   ? color.new(color.blue,   92) : na)
+bgcolor(in_london  ? color.new(color.yellow, 93) : na)
+bgcolor(in_overlap ? color.new(color.orange, 91) : na)
+
+// Draw ORB zone lines once when each ORB locks (avoids barstate.islast in strategy)
+if frb_locked and not frb_locked[1] and not na(frb_hi) and not na(frb_lo)
+    line.new(bar_index - 30, frb_hi, bar_index + 200, frb_hi, color=color.new(color.yellow, 40), style=line.style_dotted)
+    line.new(bar_index - 30, frb_lo, bar_index + 200, frb_lo, color=color.new(color.yellow, 40), style=line.style_dotted)
+
+if lon_locked and not lon_locked[1] and not na(lon_hi) and not na(lon_lo)
+    line.new(bar_index - 30, lon_hi, bar_index + 200, lon_hi, color=color.new(color.fuchsia, 40), style=line.style_dotted)
+    line.new(bar_index - 30, lon_lo, bar_index + 200, lon_lo, color=color.new(color.fuchsia, 40), style=line.style_dotted)
+
+if nyorb_locked and not nyorb_locked[1] and not na(nyorb_hi) and not na(nyorb_lo)
+    line.new(bar_index - 30, nyorb_hi, bar_index + 200, nyorb_hi, color=color.new(color.teal, 40), style=line.style_dotted)
+    line.new(bar_index - 30, nyorb_lo, bar_index + 200, nyorb_lo, color=color.new(color.teal, 40), style=line.style_dotted)
