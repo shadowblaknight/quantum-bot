@@ -120,6 +120,7 @@ const DEFAULT_RULES = {
     'gold-specialist':   { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥇 Gold Specialist' },
     'gold-specialist-2': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🥇 Gold Specialist 2' },
     'nas100-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '📈 NAS100 Specialist' },
+    'sp500-specialist':  { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '📊 S&P500 Specialist' },
     'gbpusd-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🇬🇧 GBPUSD Specialist' },
     'forex-specialist':  { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '💱 Forex Specialist' },
     'ger40-bg-specialist': { enabled: true, tradingStyle: 'intraday', lotMultiplier: 1.0, label: '🇩🇪 GER40 B+G Specialist' },

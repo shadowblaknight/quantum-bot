@@ -74,14 +74,7 @@ showBoxes      = input.bool(true, "Show position boxes", group=G_STRAT)
 trailArm  = input.float(0.75, "Ratchet: arm trail after (x ORB range)", group=G_STRAT, minval=0.05, maxval=10.0, step=0.05,
             tooltip="How far price must travel past the ORB level before the trail takes over from the original stop. 0.75 = the old TP1 distance.")
 trailKeep = input.float(0.75, "Ratchet: fraction of reach locked", group=G_STRAT, minval=0.10, maxval=0.95, step=0.05,
-            tooltip="Stop sits at this fraction of the furthest excursion, so it locks PROFIT rather than returning to entry.
-
-  reach 0.75 -> locks 0.56
-  reach 1.00 -> locks 0.75
-  reach 2.00 -> locks 1.50
-  reach 10.0 -> locks 7.50
-
-Giveback is (1 - this). Capped at 0.95 because a stop sitting exactly on the extreme is taken out by the first tick of noise.")
+            tooltip="Stop sits at this fraction of the furthest excursion, so it locks PROFIT rather than returning to entry. reach 0.75 -> locks 0.56 · reach 1.00 -> locks 0.75 · reach 2.00 -> locks 1.50 · reach 10.0 -> locks 7.50. Giveback is (1 - this). Capped at 0.95 because a stop sitting exactly on the extreme is taken out by the first tick of noise.")
 orbSLMode      = input.string("Wide SL", "H/M) SL mode",
                  options=["Wide SL", "Tight SL + entry TPs", "Tight SL + OR-edge TPs"],
                  tooltip="Wide SL: SL at opposite OR extreme, TPs at OR multiples (baseline). Tight SL + entry TPs: SL at breakout level, TPs scale from entry (1:1 system). Tight SL + OR-edge TPs: tiny SL, original large TPs (asymmetric R:R).",
@@ -359,8 +352,14 @@ f_drawPosBox(float e, float slP, float tp3) =>
                  color=color.new(color.gray, 10), style=line.style_dashed, width=1)
 
 // ─── EXIT LIMIT HELPER ────────────────────────────────────────────────
+// BUG FIX: "Ratchet (no TP)" used to fall through this ternary's final `: tp2`,
+// so every signal that is NOT M/H/U/V silently had its target DOUBLED from 1R
+// to 2R the moment ratchet mode was selected. That is not a ratchet — it is a
+// wider TP — and it drags the blended win rate down for no reason. Signals A-T
+// have R-based targets, not ORB-range ones, so the ratchet cannot apply to
+// them: hold them at their proven TP1 instead.
 f_exitLim(float tp1, float tp2, float tp3) =>
-    exitMode == "TP1 · 1R" ? tp1 : exitMode == "TP3 · 3R" ? tp3 : tp2
+    exitMode == "TP1 · 1R" ? tp1 : exitMode == "TP3 · 3R" ? tp3 : exitMode == "Ratchet (no TP)" ? tp1 : tp2
 
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL A — Gold FVG  (gold-fvg)
@@ -892,11 +891,41 @@ if not in_tok_window and in_tok_window[1] and not na(tok_hi)
 // ~112 pts away — 1.5-3 daily ranges — and would essentially never arm. Range
 // units put rung 1 at ~18 pts, where price actually trades.
 //
-//   reach 1 x step  -> stop to ENTRY (true breakeven, accounts for _c2Depth)
-//   reach 2 x step  -> stop to 1 x step beyond the ORB level
-//   reach n x step  -> stop to (n-1) x step        ... unbounded
+//   reach r (>= trailArm) -> stop to (r * trailKeep) x step beyond the level
+//   giveback is always (1 - trailKeep) of the furthest excursion, so the stop
+//   locks PROFIT and never returns to entry. Unbounded above.
 //
 // step = orb_range * orbTPMult, i.e. the same spacing as tp1/tp2/tp3.
+//
+// TIMING CAVEAT — this is why the ratchet cannot hold the TP1 win rate.
+// Under "TP1 · 1R" the exit is a LIMIT order, which TradingView fills the
+// instant the bar's high touches it, INTRABAR. The trail below recalculates
+// only at bar close and the new stop is live from the NEXT bar. So a 15m bar
+// that spikes past the arm level and closes back below is a WIN under TP1 and
+// can still be a full LOSS here. With step ~18 pts, a single gold 15m bar
+// routinely covers the whole distance. That gap is real trading behaviour,
+// not a modelling artifact — it is the price of removing the take-profit.
+
+// ─── C2 PENDING-ORDER EXPIRY ─────────────────────────────────────────
+// A strategy.entry limit stays live until it fills or is cancelled, and none
+// of the C2 limits were ever cancelled. An FRB-S limit armed on Monday could
+// therefore still fill on Thursday against Monday's ORB level. In Ratchet mode
+// that is worse than a stale entry: _rt_lvl would be days old, so `reach`
+// comes out enormous and the trail slams the stop far past current price.
+// Bound every C2 limit to its own session.
+if not in_frb_trade and in_frb_trade[1]
+    strategy.cancel("FRB-L")
+    strategy.cancel("FRB-S")
+if not in_syd_trade and in_syd_trade[1]
+    strategy.cancel("SYD-L")
+    strategy.cancel("SYD-S")
+if not in_tok_trade and in_tok_trade[1]
+    strategy.cancel("TOK-L")
+    strategy.cancel("TOK-S")
+if _newDay
+    strategy.cancel("NYORB-L")
+    strategy.cancel("NYORB-S")
+
 var float  _rt_lvl   = na     // ORB structural level the rungs measure from
 var float  _rt_entry = na     // actual fill reference (level +/- _c2Depth)
 var float  _rt_rng   = na     // ORB range captured at signal time
@@ -1286,6 +1315,18 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
             syd_done := true
             c2LimUL = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("SYD-L", strategy.long, limit=c2LimUL, comment="sydney-orb · C2 LONG")
+            // BUG FIX: U/V never registered ratchet state, so f_c2Exit's ratchet
+            // branch placed a NAKED stop with no TP and no trail. Every filled
+            // Sydney/Tokyo trade could then only ever exit at its original stop —
+            // a guaranteed full loss, 100% of the time.
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := syd_hi
+                _rt_entry := entryP
+                _rt_rng   := rngU
+                _rt_dir   := 1
+                _rt_id    := "SYD-L"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             f_c2Exit("SYD-L", slP, tp1, tp2, tp3, rngU)
             label.new(bar_index, low, "U↑", style=label.style_label_up,
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
@@ -1300,6 +1341,14 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
             syd_done := true
             c2LimUS = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("SYD-S", strategy.short, limit=c2LimUS, comment="sydney-orb · C2 SHORT")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := syd_lo
+                _rt_entry := entryP
+                _rt_rng   := rngU
+                _rt_dir   := -1
+                _rt_id    := "SYD-S"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             f_c2Exit("SYD-S", slP, tp1, tp2, tp3, rngU)
             label.new(bar_index, high, "U↓", style=label.style_label_down,
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
@@ -1318,6 +1367,14 @@ if modTOK and barstate.isconfirmed and in_tok_trade and tok_locked and not tok_d
             tok_done := true
             c2LimVL = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("TOK-L", strategy.long, limit=c2LimVL, comment="tokyo-orb · C2 LONG")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := tok_hi
+                _rt_entry := entryP
+                _rt_rng   := rngV
+                _rt_dir   := 1
+                _rt_id    := "TOK-L"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             f_c2Exit("TOK-L", slP, tp1, tp2, tp3, rngV)
             label.new(bar_index, low, "V↑", style=label.style_label_up,
                       color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
@@ -1332,6 +1389,14 @@ if modTOK and barstate.isconfirmed and in_tok_trade and tok_locked and not tok_d
             tok_done := true
             c2LimVS = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("TOK-S", strategy.short, limit=c2LimVS, comment="tokyo-orb · C2 SHORT")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := tok_lo
+                _rt_entry := entryP
+                _rt_rng   := rngV
+                _rt_dir   := -1
+                _rt_id    := "TOK-S"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             f_c2Exit("TOK-S", slP, tp1, tp2, tp3, rngV)
             label.new(bar_index, high, "V↓", style=label.style_label_down,
                       color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
