@@ -1,0 +1,478 @@
+//@version=6
+strategy("QB FX Specialist — Strategy", "QB FX · STRAT", overlay=true,
+         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=2, pyramiding=0, calc_on_every_tick=false,
+         close_entries_rule="ANY")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QB FX SPECIALIST — STRATEGY  (all 28 majors/crosses, any timeframe)
+//  ─────────────────────────────────────────────────────────────────────
+//  HTF structural S/R  +  Fibonacci golden zone  =  AOI
+//  AOI tap  +  candlestick rejection            =  entry
+//
+//  C1 context : HTF bias — EMA(slow) position + market structure (HH/HL)
+//  C2 entry   : price taps an AOI, a rejection candle confirms
+//  C3 risk    : SL beyond the wick/zone (floored by HTF ATR), TP at R or zone
+//
+//  ADAPTS TO ALL 28 PAIRS BY CONSTRUCTION — nothing is hardcoded per symbol:
+//    · sessions derived from the pair's OWN two currencies
+//        Asian  = JPY / AUD / NZD      London = EUR / GBP / CHF
+//        NY     = USD / CAD            (active if EITHER leg matches)
+//    · pip size auto-detected from mintick (handles JPY + 3/5-digit brokers)
+//    · every distance threshold is in ATR, never fixed pips, so EURUSD
+//      (~58 pip ADR) and GBPJPY (~200 pip ADR) run the same settings
+//
+//  TIMEFRAME-AGNOSTIC — put it on any chart. Zone and bias timeframes
+//  default to "Auto" and step up from whatever TF you are on.
+//
+//  ─────────────────────────────────────────────────────────────────────
+//  FOUR BUGS THIS AVOIDS (found while backtesting this logic in Python —
+//  each produced plausible-looking but wrong results):
+//    1. Structure must compare the previous DISTINCT pivot. Comparing the
+//       previous BAR of a forward-filled pivot series makes HH/HL never
+//       fire (the values are identical) — bias read 0% of bars.
+//    2. A bullish fib retracement requires the swing LOW to print BEFORE
+//       the swing HIGH. Without that check the fib sits on a down-leg
+//       roughly half the time.
+//    3. A pin bar's wick must dominate a SIGNIFICANT candle. Comparing the
+//       wick only to the body makes every doji qualify (body ~ 0), which
+//       turned 18.5% of all bars into "confirmations".
+//    4. Stops must clear the measured adverse excursion. MAE ran ~3.9 ATR
+//       while stops sat near 1 ATR — half the trades were stopped out
+//       before the setup could resolve. Hence the HTF-ATR stop floor.
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── CORE ────────────────────────────────────────────────────────────
+G_CORE = "Core"
+useLong   = input.bool(true, "Allow LONG",  group=G_CORE)
+useShort  = input.bool(true, "Allow SHORT", group=G_CORE)
+
+// ─── AOI: S/R × FIBONACCI ────────────────────────────────────────────
+G_AOI = "AOI — S/R × Fibonacci"
+confluenceMode = input.string("AND — S/R and Fib", "Confluence", options=["AND — S/R and Fib", "OR — S/R or Fib"], group=G_AOI,
+    tooltip="AND = price must sit in a structural S/R zone AND inside the fib golden zone. Fewer, higher-quality setups.\nOR = either alone qualifies. Many more trades.\n\nPython pre-test across 28 pairs / 3y favoured OR (PF 0.969 vs 0.715), but AND only produced ~6 trades per pair — thin enough to be noise. Verify here on real broker data.")
+zoneTFMode = input.string("Auto", "Zone timeframe", options=["Auto", "60", "240", "D", "W"], group=G_AOI,
+    tooltip="Timeframe the structural S/R zones are built from. Auto steps up from the chart TF: ≤5m→H1, ≤30m→H4, ≤1h→D, above→W.")
+swingLeft  = input.int(3, "Swing pivot — left bars",  minval=1, maxval=20, group=G_AOI)
+swingRight = input.int(3, "Swing pivot — right bars", minval=1, maxval=20, group=G_AOI,
+    tooltip="A pivot is only CONFIRMED this many bars after it prints, and the strategy only sees it from that point — no lookahead.")
+zoneAtrMult   = input.float(0.50, "Zone half-width (× zone ATR)", minval=0.05, maxval=3.0, step=0.05, group=G_AOI)
+zoneMaxAge    = input.int(300, "Zone max age (zone-TF bars)", minval=10, maxval=2000, group=G_AOI)
+maxZones      = input.int(40, "Zones tracked per side", minval=5, maxval=200, group=G_AOI)
+fibLo         = input.float(0.618, "Fib golden zone — from", minval=0.1, maxval=1.0, step=0.001, group=G_AOI)
+fibHi         = input.float(0.786, "Fib golden zone — to",   minval=0.1, maxval=1.0, step=0.001, group=G_AOI)
+fibMinLegATR  = input.float(1.50, "Fib impulse leg min (× zone ATR)", minval=0.1, maxval=10.0, step=0.1, group=G_AOI,
+    tooltip="The swing low→high leg must be a real move, not noise, before its retracement counts.")
+requireRejClose = input.bool(true, "Require rejection close (wick into level, body closes back out)", group=G_AOI,
+    tooltip="A true rejection: the wick pierces the zone and the body closes back on the correct side. Merely printing a pattern while inside the zone is often mid-pullback continuation. This was the single biggest improvement in testing.")
+
+// ─── HTF BIAS ────────────────────────────────────────────────────────
+G_BIAS = "HTF Bias"
+biasTF1 = input.string("Auto", "Bias TF 1", options=["Auto", "60", "240", "D", "W", "Off"], group=G_BIAS)
+biasTF2 = input.string("Auto", "Bias TF 2", options=["Auto", "60", "240", "D", "W", "Off"], group=G_BIAS)
+biasMode   = input.string("All must align", "Bias mode", options=["All must align", "Any aligns", "Majority"], group=G_BIAS)
+emaFast    = input.int(50,  "EMA fast", minval=5,  maxval=400, group=G_BIAS)
+emaSlow    = input.int(200, "EMA slow", minval=20, maxval=400, group=G_BIAS,
+    tooltip="200 EMA is the most-cited institutional bias anchor. NOTE: on a Weekly bias TF, 200 weeks ≈ 3.8 years — longer than a 3y backtest, so W bias will read flat. Use D or H4 for 3y tests.")
+requireStructure = input.bool(true, "Require structure agreement (HH/HL vs LH/LL)", group=G_BIAS,
+    tooltip="Bias fires only when the EMA read AND market structure agree. Roughly halves signal count but removes chop.")
+
+// ─── CONFIRMATION CANDLES ────────────────────────────────────────────
+G_CONF = "C2 — Confirmation candle"
+useEngulf = input.bool(true, "Engulfing",            group=G_CONF)
+useStar   = input.bool(true, "Morning / Evening star", group=G_CONF)
+usePin    = input.bool(true, "Pin bar / rejection wick", group=G_CONF)
+pinWickRatio   = input.float(2.0,  "Pin: wick ≥ N × body",        minval=1.0, maxval=10.0, step=0.1, group=G_CONF)
+pinMinWickPct  = input.float(0.50, "Pin: wick ≥ this × candle range", minval=0.2, maxval=0.9, step=0.05, group=G_CONF,
+    tooltip="Guards the doji trap — without it, wick ≥ 2×body is trivially true whenever the body is ~0.")
+pinClosePct    = input.float(0.33, "Pin: close within this fraction of the extreme", minval=0.1, maxval=0.5, step=0.01, group=G_CONF)
+pinMinRangeATR = input.float(0.60, "Pin: candle range ≥ (× ATR)", minval=0.1, maxval=3.0, step=0.05, group=G_CONF)
+engulfMinATR   = input.float(0.25, "Engulf/star: body ≥ (× ATR)", minval=0.0, maxval=3.0, step=0.05, group=G_CONF)
+
+// ─── SESSIONS ────────────────────────────────────────────────────────
+G_SESS = "Sessions"
+sessionFilter = input.bool(true, "Session filter", group=G_SESS)
+sessionMode   = input.string("Auto (from pair)", "Session selection",
+    options=["Auto (from pair)", "Asian only", "London only", "NY only", "London+NY overlap only", "All sessions"], group=G_SESS,
+    tooltip="Auto derives the pair's sessions from its own two currencies: Asian=JPY/AUD/NZD, London=EUR/GBP/CHF, NY=USD/CAD. A pair is active if EITHER leg matches — so AUDJPY is Asian-only, EURGBP London-only, GBPJPY Asian+London.")
+asianStart  = input.int(0,  "Asian start (UTC hour)",  minval=0, maxval=23, group=G_SESS)
+asianEnd    = input.int(9,  "Asian end",               minval=1, maxval=24, group=G_SESS)
+londonStart = input.int(7,  "London start (UTC hour)", minval=0, maxval=23, group=G_SESS)
+londonEnd   = input.int(16, "London end",              minval=1, maxval=24, group=G_SESS)
+nyStart     = input.int(13, "NY start (UTC hour)",     minval=0, maxval=23, group=G_SESS)
+nyEnd       = input.int(22, "NY end",                  minval=1, maxval=24, group=G_SESS)
+
+// ─── RISK ────────────────────────────────────────────────────────────
+G_RISK = "C3 — Risk"
+slMode      = input.string("Wick", "SL anchor", options=["Wick", "Zone edge", "ATR"], group=G_RISK)
+slBufATR    = input.float(0.25, "SL buffer (× ATR)",          minval=0.0, maxval=3.0, step=0.05, group=G_RISK)
+slMinZoneATR= input.float(0.75, "SL floor (× zone ATR)",      minval=0.0, maxval=5.0, step=0.05, group=G_RISK,
+    tooltip="Minimum stop distance, scaled to the STRUCTURE being traded rather than one entry candle's wick. Measured MAE was ~3.9 entry-ATR; a 1-ATR stop is inside the noise.")
+tpMode      = input.string("R multiple", "TP mode", options=["R multiple", "Opposing zone"], group=G_RISK)
+tpR         = input.float(2.0, "TP — R multiple", minval=0.5, maxval=10.0, step=0.25, group=G_RISK)
+useBE       = input.bool(false, "Move stop to breakeven at +1R", group=G_RISK)
+maxHoldBars = input.int(200, "Max hold (bars, 0 = off)", minval=0, maxval=5000, group=G_RISK)
+
+// ─── FILTERS ─────────────────────────────────────────────────────────
+G_FILT = "Filters"
+atrLen       = input.int(14, "ATR period", minval=2, maxval=100, group=G_FILT)
+minAtrPips   = input.float(0.0, "Min ATR (pips, 0 = off)", minval=0.0, step=0.5, group=G_FILT)
+maxAtrPips   = input.float(0.0, "Max ATR (pips, 0 = off)", minval=0.0, step=0.5, group=G_FILT)
+useADR       = input.bool(true,  "Skip when > N% of ADR consumed", group=G_FILT)
+adrMax       = input.float(0.90, "ADR consumed max", minval=0.2, maxval=2.0, step=0.05, group=G_FILT)
+useDow       = input.bool(false, "Day-of-week filter", group=G_FILT)
+dowMon = input.bool(true, "Mon", inline="dow", group=G_FILT)
+dowTue = input.bool(true, "Tue", inline="dow", group=G_FILT)
+dowWed = input.bool(true, "Wed", inline="dow", group=G_FILT)
+dowThu = input.bool(true, "Thu", inline="dow", group=G_FILT)
+dowFri = input.bool(true, "Fri", inline="dow", group=G_FILT)
+
+G_VIS = "Visuals"
+showZones = input.bool(true, "Draw S/R zones", group=G_VIS)
+showFib   = input.bool(true, "Draw fib golden zone", group=G_VIS)
+showBoxes = input.bool(true, "Draw position boxes", group=G_VIS)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SYMBOL ADAPTATION — everything below derives from the pair itself
+// ═══════════════════════════════════════════════════════════════════════
+// mintick × 10 gives the pip on both 5-digit FX (0.00001 → 0.0001) and
+// 3-digit JPY (0.001 → 0.01), so no per-symbol table is needed.
+_pip = syminfo.mintick * 10
+_bc  = syminfo.basecurrency
+_qc  = syminfo.currency
+
+f_isAsian(string c)  => c == "JPY" or c == "AUD" or c == "NZD"
+f_isLondon(string c) => c == "EUR" or c == "GBP" or c == "CHF"
+f_isNY(string c)     => c == "USD" or c == "CAD"
+
+// A pair belongs to a session if EITHER of its legs trades in it.
+_pairAsian  = f_isAsian(_bc)  or f_isAsian(_qc)
+_pairLondon = f_isLondon(_bc) or f_isLondon(_qc)
+_pairNY     = f_isNY(_bc)     or f_isNY(_qc)
+
+// ─── TIMEFRAME RESOLUTION (Auto steps up from the chart) ─────────────
+_chartSec = timeframe.in_seconds(timeframe.period)
+_autoZone = _chartSec <= 300 ? "60" : _chartSec <= 1800 ? "240" : _chartSec <= 3600 ? "D" : "W"
+_autoBias1 = _chartSec <= 300 ? "240" : _chartSec <= 1800 ? "D" : "W"
+_autoBias2 = _chartSec <= 300 ? "60"  : _chartSec <= 1800 ? "240" : "D"
+_zoneTF  = zoneTFMode == "Auto" ? _autoZone  : zoneTFMode
+_biasTF1 = biasTF1 == "Auto" ? _autoBias1 : biasTF1
+_biasTF2 = biasTF2 == "Auto" ? _autoBias2 : biasTF2
+
+atrVal = ta.atr(atrLen)
+
+// ═══════════════════════════════════════════════════════════════════════
+// HTF BIAS  — EMA position + (optional) market structure
+// ═══════════════════════════════════════════════════════════════════════
+// BUG-1 GUARD: phPrev is the previous DISTINCT pivot, captured only when a
+// NEW pivot confirms. Comparing against the previous bar of a held value
+// would make HH/HL permanently false.
+f_bias(int eF, int eS, int sL, int sR, bool needStruct) =>
+    ef = ta.ema(close, eF)
+    es = ta.ema(close, eS)
+    emaB = close > es and ef > es ? 1 : close < es and ef < es ? -1 : 0
+    ph = ta.pivothigh(sL, sR)
+    pl = ta.pivotlow(sL, sR)
+    var float phLast = na
+    var float phPrev = na
+    var float plLast = na
+    var float plPrev = na
+    if not na(ph)
+        phPrev := phLast
+        phLast := ph
+    if not na(pl)
+        plPrev := plLast
+        plLast := pl
+    hh = not na(phLast) and not na(phPrev) and phLast > phPrev
+    hl = not na(plLast) and not na(plPrev) and plLast > plPrev
+    lh = not na(phLast) and not na(phPrev) and phLast < phPrev
+    ll = not na(plLast) and not na(plPrev) and plLast < plPrev
+    st = hh and hl ? 1 : lh and ll ? -1 : 0
+    needStruct ? (emaB == st ? emaB : 0) : emaB
+
+_b1 = biasTF1 == "Off" ? 0 : request.security(syminfo.tickerid, _biasTF1, f_bias(emaFast, emaSlow, swingLeft, swingRight, requireStructure), lookahead=barmerge.lookahead_off)
+_b2 = biasTF2 == "Off" ? 0 : request.security(syminfo.tickerid, _biasTF2, f_bias(emaFast, emaSlow, swingLeft, swingRight, requireStructure), lookahead=barmerge.lookahead_off)
+
+_bOn    = (biasTF1 == "Off" ? 0 : 1) + (biasTF2 == "Off" ? 0 : 1)
+_bSum   = _b1 + _b2
+_bAllUp = (biasTF1 == "Off" or _b1 == 1)  and (biasTF2 == "Off" or _b2 == 1)  and _bOn > 0
+_bAllDn = (biasTF1 == "Off" or _b1 == -1) and (biasTF2 == "Off" or _b2 == -1) and _bOn > 0
+_bAnyUp = _b1 == 1  or _b2 == 1
+_bAnyDn = _b1 == -1 or _b2 == -1
+
+bias = _bOn == 0 ? 0 :
+       biasMode == "All must align" ? (_bAllUp ? 1 : _bAllDn ? -1 : 0) :
+       biasMode == "Any aligns"     ? (_bAnyUp and not _bAnyDn ? 1 : _bAnyDn and not _bAnyUp ? -1 : 0) :
+       (_bSum > 0 ? 1 : _bSum < 0 ? -1 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════
+// HTF STRUCTURE — pivots, ATR and fib leg pulled from the zone timeframe
+// ═══════════════════════════════════════════════════════════════════════
+// BUG-2 GUARD: legDir records whether the LAST confirmed pivot was a high
+// (up-impulse → bullish retracement valid) or a low (down-impulse →
+// bearish valid). Without it the fib is drawn on the wrong leg ~half the time.
+f_zone(int sL, int sR, int aLen) =>
+    ph = ta.pivothigh(sL, sR)
+    pl = ta.pivotlow(sL, sR)
+    a  = ta.atr(aLen)
+    var float hLast = na
+    var float lLast = na
+    var int   dir   = 0
+    if not na(ph)
+        hLast := ph
+        dir   := 1
+    if not na(pl)
+        lLast := pl
+        dir   := -1
+    [ph, pl, a, hLast, lLast, dir]
+
+[zPH, zPL, zATR, swH, swL, legDir] = request.security(syminfo.tickerid, _zoneTF,
+     f_zone(swingLeft, swingRight, atrLen), lookahead=barmerge.lookahead_off)
+
+// ─── ZONE STORE ──────────────────────────────────────────────────────
+var array<float> supLo = array.new<float>(0)
+var array<float> supHi = array.new<float>(0)
+var array<int>   supBr = array.new<int>(0)
+var array<float> resLo = array.new<float>(0)
+var array<float> resHi = array.new<float>(0)
+var array<int>   resBr = array.new<int>(0)
+
+_newRes = not na(zPH) and (na(zPH[1]) or zPH != zPH[1])
+_newSup = not na(zPL) and (na(zPL[1]) or zPL != zPL[1])
+_half   = nz(zATR, atrVal) * zoneAtrMult
+
+if _newRes and _half > 0
+    array.push(resLo, zPH - _half)
+    array.push(resHi, zPH + _half)
+    array.push(resBr, bar_index)
+    if array.size(resLo) > maxZones
+        array.shift(resLo)
+        array.shift(resHi)
+        array.shift(resBr)
+
+if _newSup and _half > 0
+    array.push(supLo, zPL - _half)
+    array.push(supHi, zPL + _half)
+    array.push(supBr, bar_index)
+    if array.size(supLo) > maxZones
+        array.shift(supLo)
+        array.shift(supHi)
+        array.shift(supBr)
+
+// Age limit expressed in zone-TF bars → convert to chart bars.
+_zoneSec  = timeframe.in_seconds(_zoneTF)
+_ageBars  = math.max(1, int(zoneMaxAge * _zoneSec / math.max(_chartSec, 1)))
+
+// Nearest live zone touching this bar (na when none).
+f_touch(array<float> lo, array<float> hi, array<int> br) =>
+    float hitLo = na
+    float hitHi = na
+    n = array.size(lo)
+    if n > 0
+        for i = n - 1 to 0
+            if bar_index - array.get(br, i) > _ageBars
+                break
+            l = array.get(lo, i)
+            h = array.get(hi, i)
+            if low <= h and high >= l
+                hitLo := l
+                hitHi := h
+                break
+    [hitLo, hitHi]
+
+[supTouchLo, supTouchHi] = f_touch(supLo, supHi, supBr)
+[resTouchLo, resTouchHi] = f_touch(resLo, resHi, resBr)
+inSup = not na(supTouchLo)
+inRes = not na(resTouchLo)
+
+// ─── FIBONACCI GOLDEN ZONE ───────────────────────────────────────────
+_leg    = not na(swH) and not na(swL) ? swH - swL : na
+_legOk  = not na(_leg) and _leg > fibMinLegATR * nz(zATR, atrVal)
+_fLo    = math.min(fibLo, fibHi)
+_fHi    = math.max(fibLo, fibHi)
+// bullish retracement measures DOWN from the swing high; bearish UP from the low
+_fibBullHi = not na(swH) ? swH - _fLo * _leg : na
+_fibBullLo = not na(swH) ? swH - _fHi * _leg : na
+_fibBearLo = not na(swL) ? swL + _fLo * _leg : na
+_fibBearHi = not na(swL) ? swL + _fHi * _leg : na
+
+inFibBull = _legOk and legDir == 1  and low  <= _fibBullHi and high >= _fibBullLo
+inFibBear = _legOk and legDir == -1 and high >= _fibBearLo and low  <= _fibBearHi
+
+// ─── AOI ─────────────────────────────────────────────────────────────
+_isAND  = confluenceMode == "AND — S/R and Fib"
+aoiBull = _isAND ? (inSup and inFibBull) : (inSup or inFibBull)
+aoiBear = _isAND ? (inRes and inFibBear) : (inRes or inFibBear)
+
+// A true rejection: wick pierced the level, body closed back out.
+if requireRejClose
+    aoiBull := aoiBull and inSup and low <= supTouchHi and close > supTouchHi
+    aoiBear := aoiBear and inRes and high >= resTouchLo and close < resTouchLo
+
+// ═══════════════════════════════════════════════════════════════════════
+// C2 — CONFIRMATION CANDLES
+// ═══════════════════════════════════════════════════════════════════════
+_body  = math.abs(close - open)
+_rng   = math.max(high - low, syminfo.mintick)
+_upper = high - math.max(open, close)
+_lower = math.min(open, close) - low
+_pBody = math.abs(close[1] - open[1])
+_body2 = math.abs(close[2] - open[2])
+_mid2  = (open[2] + close[2]) / 2
+
+bullEng = close > open and close[1] < open[1] and close >= open[1] and open <= close[1] and _body > _pBody and _body > engulfMinATR * atrVal
+bearEng = close < open and close[1] > open[1] and close <= open[1] and open >= close[1] and _body > _pBody and _body > engulfMinATR * atrVal
+
+// BUG-3 GUARD: the wick must dominate a SIGNIFICANT candle. Testing the wick
+// only against the body lets every doji through (body ≈ 0 ⇒ wick ≥ 2×body).
+_sigCandle = _rng >= pinMinRangeATR * atrVal
+bullPin = _lower >= pinWickRatio * _body and _lower >= pinMinWickPct * _rng and (close - low) / _rng >= (1 - pinClosePct) and _lower > _upper and _sigCandle
+bearPin = _upper >= pinWickRatio * _body and _upper >= pinMinWickPct * _rng and (high - close) / _rng >= (1 - pinClosePct) and _upper > _lower and _sigCandle
+
+morning = close[2] < open[2] and _pBody < 0.5 * _body2 and close > open and close > _mid2 and _body2 > engulfMinATR * atrVal
+evening = close[2] > open[2] and _pBody < 0.5 * _body2 and close < open and close < _mid2 and _body2 > engulfMinATR * atrVal
+
+confBull = (useEngulf and bullEng) or (usePin and bullPin) or (useStar and morning)
+confBear = (useEngulf and bearEng) or (usePin and bearPin) or (useStar and evening)
+
+// ═══════════════════════════════════════════════════════════════════════
+// GATES — session / volatility / ADR / day-of-week
+// ═══════════════════════════════════════════════════════════════════════
+_h = hour(time, "UTC")
+f_win(int s, int e) => e > s ? (_h >= s and _h < e) : (_h >= s or _h < e)
+_inAsian  = f_win(asianStart,  asianEnd)
+_inLondon = f_win(londonStart, londonEnd)
+_inNY     = f_win(nyStart,     nyEnd)
+_inOverlap= _inLondon and _inNY
+
+sessOk = not sessionFilter ? true :
+   sessionMode == "All sessions"            ? true :
+   sessionMode == "Asian only"              ? _inAsian :
+   sessionMode == "London only"             ? _inLondon :
+   sessionMode == "NY only"                 ? _inNY :
+   sessionMode == "London+NY overlap only"  ? _inOverlap :
+   ((_pairAsian and _inAsian) or (_pairLondon and _inLondon) or (_pairNY and _inNY))
+
+_atrPips = atrVal / _pip
+atrOk = (minAtrPips <= 0 or _atrPips >= minAtrPips) and (maxAtrPips <= 0 or _atrPips <= maxAtrPips)
+
+_adr        = request.security(syminfo.tickerid, "D", ta.sma(high - low, 14), lookahead=barmerge.lookahead_off)
+_dHigh      = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
+_dLow       = request.security(syminfo.tickerid, "D", low,  lookahead=barmerge.lookahead_off)
+_adrUsed    = _adr > 0 ? (_dHigh - _dLow) / _adr : 0.0
+adrOk       = not useADR or _adrUsed[1] < adrMax
+
+_dw   = dayofweek(time, "UTC")
+dowOk = not useDow or (_dw == dayofweek.monday and dowMon) or (_dw == dayofweek.tuesday and dowTue) or (_dw == dayofweek.wednesday and dowWed) or (_dw == dayofweek.thursday and dowThu) or (_dw == dayofweek.friday and dowFri)
+
+baseOk = barstate.isconfirmed and sessOk and atrOk and adrOk and dowOk and atrVal > 0 and strategy.position_size == 0
+
+longSig  = baseOk and useLong  and bias == 1  and aoiBull and confBull
+shortSig = baseOk and useShort and bias == -1 and aoiBear and confBear
+
+// ═══════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ═══════════════════════════════════════════════════════════════════════
+var float _entryPx = na
+var float _slPx    = na
+var int   _entryBar = na
+
+f_box(float e, float slP, float tpP) =>
+    if showBoxes
+        r = bar_index + 30
+        box.new(bar_index, math.max(e, tpP), r, math.min(e, tpP), border_color=color.new(color.teal, 55), bgcolor=color.new(color.teal, 88))
+        box.new(bar_index, math.max(e, slP), r, math.min(e, slP), border_color=color.new(color.red, 55), bgcolor=color.new(color.red, 90))
+
+if longSig
+    entryP = close
+    slRaw  = slMode == "Wick"      ? low - slBufATR * atrVal :
+             slMode == "Zone edge" ? nz(supTouchLo, low) - slBufATR * atrVal :
+                                     entryP - 1.5 * atrVal
+    // BUG-4 GUARD: floor the stop on the HTF ATR so it reflects the structure
+    // being traded rather than one entry candle's wick.
+    slFloor = entryP - slMinZoneATR * nz(zATR, atrVal)
+    slP     = math.min(slRaw, slFloor)
+    risk    = entryP - slP
+    if risk > 0
+        tpP = tpMode == "R multiple" or na(resTouchLo) ? entryP + tpR * risk : math.max(resTouchLo, entryP + risk * 0.5)
+        if tpP > entryP
+            _entryPx  := entryP
+            _slPx     := slP
+            _entryBar := bar_index
+            strategy.entry("FX-L", strategy.long, comment="fx · LONG")
+            strategy.exit("FX-L-X", from_entry="FX-L", stop=slP, limit=tpP)
+            f_box(entryP, slP, tpP)
+            label.new(bar_index, low, "▲", style=label.style_label_up, color=color.new(color.teal, 10), textcolor=color.white, size=size.tiny)
+
+if shortSig
+    entryP = close
+    slRaw  = slMode == "Wick"      ? high + slBufATR * atrVal :
+             slMode == "Zone edge" ? nz(resTouchHi, high) + slBufATR * atrVal :
+                                     entryP + 1.5 * atrVal
+    slFloor = entryP + slMinZoneATR * nz(zATR, atrVal)
+    slP     = math.max(slRaw, slFloor)
+    risk    = slP - entryP
+    if risk > 0
+        tpP = tpMode == "R multiple" or na(supTouchHi) ? entryP - tpR * risk : math.min(supTouchHi, entryP - risk * 0.5)
+        if tpP < entryP
+            _entryPx  := entryP
+            _slPx     := slP
+            _entryBar := bar_index
+            strategy.entry("FX-S", strategy.short, comment="fx · SHORT")
+            strategy.exit("FX-S-X", from_entry="FX-S", stop=slP, limit=tpP)
+            f_box(entryP, slP, tpP)
+            label.new(bar_index, high, "▼", style=label.style_label_down, color=color.new(color.red, 10), textcolor=color.white, size=size.tiny)
+
+// ─── BREAKEVEN AT +1R ────────────────────────────────────────────────
+if useBE and strategy.position_size != 0 and not na(_entryPx) and not na(_slPx)
+    r = math.abs(_entryPx - _slPx)
+    if r > 0
+        if strategy.position_size > 0 and high >= _entryPx + r
+            strategy.exit("FX-L-X", from_entry="FX-L", stop=_entryPx, limit=_entryPx + tpR * r)
+        if strategy.position_size < 0 and low <= _entryPx - r
+            strategy.exit("FX-S-X", from_entry="FX-S", stop=_entryPx, limit=_entryPx - tpR * r)
+
+// ─── TIME STOP ───────────────────────────────────────────────────────
+if maxHoldBars > 0 and strategy.position_size != 0 and not na(_entryBar) and bar_index - _entryBar >= maxHoldBars
+    strategy.close_all(comment="time stop")
+
+if strategy.position_size == 0
+    _entryPx  := na
+    _slPx     := na
+    _entryBar := na
+
+// ═══════════════════════════════════════════════════════════════════════
+// VISUALS
+// ═══════════════════════════════════════════════════════════════════════
+plot(showFib and _legOk and legDir == 1  ? _fibBullHi : na, "Fib 0.618 (bull)", color.new(color.orange, 30), 1, plot.style_linebr)
+plot(showFib and _legOk and legDir == 1  ? _fibBullLo : na, "Fib 0.786 (bull)", color.new(color.orange, 60), 1, plot.style_linebr)
+plot(showFib and _legOk and legDir == -1 ? _fibBearLo : na, "Fib 0.618 (bear)", color.new(color.fuchsia, 30), 1, plot.style_linebr)
+plot(showFib and _legOk and legDir == -1 ? _fibBearHi : na, "Fib 0.786 (bear)", color.new(color.fuchsia, 60), 1, plot.style_linebr)
+plot(showZones and inSup ? supTouchHi : na, "Support zone",    color.new(color.teal, 20), 2, plot.style_linebr)
+plot(showZones and inRes ? resTouchLo : na, "Resistance zone", color.new(color.red, 20),  2, plot.style_linebr)
+
+bgcolor(sessionFilter and sessOk ? color.new(color.blue, 94) : na, title="Tradeable session")
+
+// ─── STATUS TABLE ────────────────────────────────────────────────────
+var table st = table.new(position.top_right, 2, 8, border_width=1)
+if barstate.islast
+    _sessTxt = (_pairAsian ? "AS " : "") + (_pairLondon ? "LN " : "") + (_pairNY ? "NY" : "")
+    table.cell(st, 0, 0, "QB FX",       bgcolor=color.new(color.blue, 70), text_color=color.white, text_size=size.small)
+    table.cell(st, 1, 0, _bc + "/" + _qc, bgcolor=color.new(color.blue, 70), text_color=color.white, text_size=size.small)
+    table.cell(st, 0, 1, "Sessions",    text_size=size.tiny)
+    table.cell(st, 1, 1, _sessTxt,      text_size=size.tiny)
+    table.cell(st, 0, 2, "Zone TF",     text_size=size.tiny)
+    table.cell(st, 1, 2, _zoneTF,       text_size=size.tiny)
+    table.cell(st, 0, 3, "Bias TF",     text_size=size.tiny)
+    table.cell(st, 1, 3, (biasTF1 == "Off" ? "-" : _biasTF1) + "/" + (biasTF2 == "Off" ? "-" : _biasTF2), text_size=size.tiny)
+    table.cell(st, 0, 4, "Bias",        text_size=size.tiny)
+    table.cell(st, 1, 4, bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "flat", text_size=size.tiny,
+               bgcolor=bias == 1 ? color.new(color.teal, 60) : bias == -1 ? color.new(color.red, 60) : color.new(color.gray, 80))
+    table.cell(st, 0, 5, "Confluence",  text_size=size.tiny)
+    table.cell(st, 1, 5, _isAND ? "AND" : "OR", text_size=size.tiny)
+    table.cell(st, 0, 6, "Pip",         text_size=size.tiny)
+    table.cell(st, 1, 6, str.tostring(_pip, "#.#####"), text_size=size.tiny)
+    table.cell(st, 0, 7, "ATR (pips)",  text_size=size.tiny)
+    table.cell(st, 1, 7, str.tostring(_atrPips, "#.#"), text_size=size.tiny)

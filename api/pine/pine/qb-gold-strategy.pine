@@ -50,6 +50,20 @@ modQ          = input.bool(false, "Q) Triple-Bull Pullback Long — D+H4+H1 bull
 modR          = input.bool(false, "R) Triple-Bear Rally Fade — D+H4+H1 bear, 4-bar bounce ≥0.38 ATR  [68% WR]", group=G_CORE)
 modS          = input.bool(false, "S) Pre-NY Triple-Bear Short — D+H4+H1 bear, 13:00-14:30 UTC  [67% WR, PF 1.52]", group=G_CORE)
 modT          = input.bool(false, "T) Frankfurt Triple-Bull Long — D+H4+H1 bull, 07:00-09:00 UTC  [64% WR, PF 1.33]", group=G_CORE)
+modSYD        = input.bool(true,  "U) Sydney ORB — session open, same C2 architecture as M/H  [UNTESTED]", group=G_CORE)
+modTOK        = input.bool(true,  "V) Tokyo ORB — session open, same C2 architecture as M/H  [UNTESTED]",  group=G_CORE)
+
+G_ASIA = "U/V — Asian session ORBs"
+sydOpenHr   = input.int(22, "U) Sydney open (UTC hour)", group=G_ASIA, minval=18, maxval=23,
+              tooltip="Sydney is UTC+10 (AEST) / UTC+11 (AEDT), so 07:00 local lands on 21:00 or 22:00 UTC depending on DST.\n\nDefault 22 also keeps the ORB window clear of the broker's daily rollover (21:00/22:00 UTC on XAUUSD) — if the range were built BEFORE the rollover, the daily reset would wipe it mid-trade-window.\n\nSweep 21 vs 22 and compare.")
+sydOrbMins  = input.int(30, "U) Sydney ORB length (mins)", group=G_ASIA, minval=15, maxval=120, step=15)
+sydTradeMins= input.int(90, "U) Sydney trade window after ORB (mins)", group=G_ASIA, minval=30, maxval=300, step=30)
+tokOpenHr   = input.int(0,  "V) Tokyo open (UTC hour)", group=G_ASIA, minval=0, maxval=23,
+              tooltip="Tokyo is UTC+9 with NO daylight saving, so 09:00 local = 00:00 UTC year-round. This one is unambiguous.")
+tokOrbMins  = input.int(30, "V) Tokyo ORB length (mins)", group=G_ASIA, minval=15, maxval=120, step=15)
+tokTradeMins= input.int(180,"V) Tokyo trade window after ORB (mins)", group=G_ASIA, minval=30, maxval=420, step=30)
+c2MinRangeASIA = input.float(5.0, "U/V) Min ORB range to trade (pts)", group=G_ASIA, step=1.0,
+              tooltip="Asian sessions are thin — ranges are typically much smaller than Frankfurt or NY. If this filter blocks nearly every signal, that is the finding: the setup does not exist on gold in Asian hours.")
 
 G_STRAT = "Strategy"
 exitMode  = input.string("TP1 · 1R", "Exit target",
@@ -115,10 +129,20 @@ i_hm_dow_fri = input.bool(false, "H/M   Fri",                group=G_STRAT)
 G_C2 = "C2 — OCO (Signal M + H)"
 c2SLBuf   = input.float(8.0,  "SL beyond C2 structural level (pts)", group=G_C2, step=0.5,
             tooltip="Tight SL placed this many pts beyond the C2 retest level — not from the C1 close.\nFRB SHORT → SL = frb_lo + 8.  NYORB LONG → SL = nyorb_hi - 8.\nTP targets still use orbTPMult × ORB range measured from the C2 level.")
+c2SLMode  = input.string("Absolute points", "SL mode", options=["Absolute points", "x ORB range", "x ATR"], group=G_C2,
+            tooltip="How the C2 stop distance is derived. Applies to M, H, U and V.\n\nABSOLUTE POINTS — the historical behaviour: a flat c2SLBuf regardless of instrument or volatility. The problem: 150 pts is 3.43% of gold's price but 1.97% of SP500's, and 6.25x gold's ORB range vs 9.04x SP500's. It is one number pretending to be one strategy across instruments that differ 3-10x.\n\nx ORB RANGE — stop = k x that day's own opening range. Self-scales across instruments AND across volatility regimes (gold's ranges doubled as it ran 1,900 -> 4,370 while the flat 150 stayed put).\n\nx ATR — stop = k x entry-TF ATR. Similar self-scaling, but keyed to general volatility rather than the specific range being traded.\n\nDefault is Absolute points so the existing baseline reproduces unchanged.")
+c2SLRangeMult = input.float(2.0, "SL = k x ORB range", group=G_C2, minval=0.25, maxval=15.0, step=0.25,
+            tooltip="Only used when SL mode = 'x ORB range'.\n\nReference points (using 1y average ranges - gold 24 pts, SP500 16.6 pts):\n  k=6.25 -> gold 150, SP500 104  (reproduces gold's current stop)\n  k=3.00 -> gold 72,  SP500 50\n  k=2.00 -> gold 48,  SP500 33   <- 3R becomes reachable\n  k=1.50 -> gold 36,  SP500 25\n\nWhy it matters: TP1 is 0.75 x range, so at k=6.25 TP1 is only 0.12R and a 3R target sits ~450 pts away - several daily ranges. Lower k shrinks R until 3R is a normal day's move, which is what makes an R-based ladder fire at all.")
+c2SLAtrMult = input.float(3.0, "SL = k x ATR", group=G_C2, minval=0.25, maxval=20.0, step=0.25,
+            tooltip="Only used when SL mode = 'x ATR'. Stop = k x the entry-timeframe ATR(atrLength).")
 c2MinRangeFRB  = input.float(5.0,  "M) Min Frankfurt ORB range to trade (pts)", group=G_C2, step=1.0,
                tooltip="Skip FRB (Signal M) if the 07:00-07:30 UTC ORB range is below this. Frankfurt ranges tend to be tighter than NY — tune separately. Breakeven at SL=8pt, TP mult=0.75: range > 10.67pt.")
 c2MinRangeNY   = input.float(5.0,  "H) Min NY ORB range to trade (pts)",         group=G_C2, step=1.0,
                tooltip="Skip NYORB (Signal H) if the 14:00-14:30 UTC ORB range is below this. NY ranges expand with US session volatility — tune separately. Breakeven at SL=8pt, TP mult=0.75: range > 10.67pt.")
+c2RetestDepth = input.float(0.0, "C2 partial retest depth (x ORB range)", group=G_C2, minval=0.0, maxval=0.70, step=0.05,
+               tooltip="How far the limit sits from the ORB level, TOWARD current price. Only meaningful in Retest (limit) mode.\n\n0.00 = limit exactly at the ORB level (the backtested baseline). Needs a FULL retest, so runaway breakouts are never taken.\n0.25 = limit a quarter-range closer to price — fills on a shallow bounce.\n0.50 = half a range closer. Fills far more often, entry price worse.\n\nSL and TP stay anchored to the ORB level, so trade geometry is unchanged — only fill probability and entry price move. This is the middle ground between a full-retest limit and chasing at market.\n\nWhy it exists: the breakouts a full-retest limit misses are the ones that travel furthest (they never come back). Sweep 0 / 0.25 / 0.50 and look for the knee.\n\nAuto-clamped below the TP multiplier so the entry can never sit past its own target.")
+c2EntryMode = input.string("Retest (limit)", "C2 entry type", options=["Retest (limit)", "Immediate (market)"], group=G_C2,
+               tooltip="A/B test for signals M + H.\n\nRETEST (limit) — the backtested baseline. Order rests AT the ORB level; fills only if price returns to it. Breakouts that run away are never taken.\n\nIMMEDIATE (market) — fills at the signal bar close, which is ALREADY past the level. Takes every signal, including runaways, but entry is worse: SL and TP stay anchored to the ORB level, so each win banks less and each loss costs more.\n\nBreakeven WR rises from ~90.9% to ~92.7% at 1:10 R:R. Baseline runs 97.5% — verify the blended WR stays above ~95% before switching live.")
 
 G_FILT = "Filters"
 adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
@@ -144,6 +168,20 @@ f_htfBias(int emaLen, int atrLen) =>
 [hdB, hdATR] = request.security(syminfo.tickerid, "D",   f_htfBias(emaLength, atrLength), lookahead=barmerge.lookahead_off)
 
 atrVal = ta.atr(atrLength)
+
+// Partial-retest depth, clamped so the limit can never sit at or past its own
+// TP (which would make the trade nonsensical). At depth >= orbTPMult the entry
+// would be beyond tp1; 0.9x keeps a margin.
+_c2Depth = math.min(c2RetestDepth, orbTPMult * 0.9)
+
+// C2 stop distance. A flat point value is NOT comparable across instruments —
+// 150 pts is 6.25x gold's ORB range but 9.04x SP500's, so the same number is
+// two different strategies. Range/ATR modes derive the stop from the
+// instrument's own volatility instead.
+// Floored at one tick so a degenerate range can never produce SL == entry.
+f_c2SL(float rng) =>
+    d = c2SLMode == "x ORB range" ? rng * c2SLRangeMult : c2SLMode == "x ATR" ? atrVal * c2SLAtrMult : c2SLBuf
+    math.max(d, syminfo.mintick)
 
 // Bias check helpers for H/M filter (resolved once per bar)
 _orbBiasLong  = orbBiasTF == "H1" ? h1B >= 0 : orbBiasTF == "Daily" ? hdB >= 0 : orbBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : orbBiasTF == "H1+H4+D" ? (h1B == 1 and h4B == 1 and hdB == 1) : h4B >= 0
@@ -692,6 +730,38 @@ var bool  preny_done   = false
 
 // NY ORB: 14:00–14:30 UTC (first 2 bars of NY on 15M)
 in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)
+
+// ─── U/V: ASIAN SESSION ORBs (Sydney + Tokyo) ────────────────────────
+// Same C2 architecture as M (Frankfurt) and H (NY): build a 30-min opening
+// range at the session open, then take the first close outside it as a
+// breakout and rest a limit back at the level.
+//
+// Window maths uses a wrap-safe helper because both sessions can straddle
+// 00:00 UTC, where _minOfDay resets to 0 while the BROKER day (which drives
+// the var resets below) rolls at 21:00/22:00 UTC instead.
+_sydOrbStart = sydOpenHr * 60
+_sydOrbEnd   = _sydOrbStart + sydOrbMins
+_tokOrbStart = tokOpenHr * 60
+_tokOrbEnd   = _tokOrbStart + tokOrbMins
+
+f_inWin(int startMin, int endMin) =>
+    s = startMin % 1440
+    e = endMin % 1440
+    timeframe.isintraday and (e > s ? (_minOfDay >= s and _minOfDay < e) : (_minOfDay >= s or _minOfDay < e))
+
+in_syd_window = f_inWin(_sydOrbStart, _sydOrbEnd)
+in_syd_trade  = f_inWin(_sydOrbEnd,   _sydOrbEnd + sydTradeMins)
+in_tok_window = f_inWin(_tokOrbStart, _tokOrbEnd)
+in_tok_trade  = f_inWin(_tokOrbEnd,   _tokOrbEnd + tokTradeMins)
+
+var float syd_hi = na
+var float syd_lo = na
+var bool  syd_locked = false
+var bool  syd_done   = false
+var float tok_hi = na
+var float tok_lo = na
+var bool  tok_locked = false
+var bool  tok_done   = false
 var float nyorb_hi = na
 var float nyorb_lo = na
 var bool  nyorb_locked = false
@@ -729,6 +799,14 @@ if _newDay
     nyorb_done   := false
     lon_hi_preny := na
     lon_lo_preny := na
+    syd_hi       := na
+    syd_lo       := na
+    syd_locked   := false
+    syd_done     := false
+    tok_hi       := na
+    tok_lo       := na
+    tok_locked   := false
+    tok_done     := false
 
 // Track Asian range BEFORE Frankfurt ORB window (strictly 00:00-07:00 UTC)
 // Also capture first/last close for T-1 cascade direction
@@ -781,6 +859,19 @@ if _minOfDay >= 480 and _minOfDay < 840
     lon_hi_preny := na(lon_hi_preny) ? high : math.max(lon_hi_preny, high)
     lon_lo_preny := na(lon_lo_preny) ? low  : math.min(lon_lo_preny, low)
 
+// U/V range building + lock, mirroring the FRB/NYORB trackers
+if in_syd_window
+    syd_hi := na(syd_hi) ? high : math.max(syd_hi, high)
+    syd_lo := na(syd_lo) ? low  : math.min(syd_lo, low)
+if not in_syd_window and in_syd_window[1] and not na(syd_hi)
+    syd_locked := true
+
+if in_tok_window
+    tok_hi := na(tok_hi) ? high : math.max(tok_hi, high)
+    tok_lo := na(tok_lo) ? low  : math.min(tok_lo, low)
+if not in_tok_window and in_tok_window[1] and not na(tok_hi)
+    tok_locked := true
+
 // ─── SCALE 30/75/150 — BE STOP MANAGEMENT ────────────────────────────
 // Tracks open multi-TP positions (H/M only). When TP1 fires (position
 // shrinks by ≥15%), cancels original X2/X3 and re-issues them with
@@ -820,15 +911,20 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeFRB
         if close > frb_hi and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
-            // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support)
-            entryP = frb_hi
-            slP    = frb_hi - c2SLBuf
-            slDist = c2SLBuf
+            // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support).
+            // Depth > 0 lifts the limit toward price so a shallow bounce fills it;
+            // SL/TP stay on the ORB level, so only entry price and fill odds move.
+            entryP = frb_hi + orb_range * _c2Depth
+            slP    = frb_hi - f_c2SL(orb_range)
+            slDist = math.abs(entryP - slP)
             tp1    = frb_hi + orb_range * orbTPMult
             tp2    = frb_hi + orb_range * orbTPMult * 2.0
             tp3    = frb_hi + orb_range * orbTPMult * 3.0
             frb_done := true
-            strategy.entry("FRB-L", strategy.long, limit=entryP, comment="frankfurt-orb · C2 LONG")
+            // limit=na → market fill at this bar's close. SL/TP stay anchored to
+            // the ORB level either way, so only the entry price differs.
+            c2LimFL = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("FRB-L", strategy.long, limit=c2LimFL, comment="frankfurt-orb · C2 LONG")
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -851,16 +947,18 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             f_drawPosBox(entryP, slP, tp3)
 
         else if close < frb_lo and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
-            // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance)
-            entryP = frb_lo
-            slP    = frb_lo + c2SLBuf
-            slDist = c2SLBuf
+            // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance).
+            // Depth > 0 drops the limit toward price so a shallow bounce fills it.
+            entryP = frb_lo - orb_range * _c2Depth
+            slP    = frb_lo + f_c2SL(orb_range)
+            slDist = math.abs(slP - entryP)
             tp1    = frb_lo - orb_range * orbTPMult
             tp2    = frb_lo - orb_range * orbTPMult * 2.0
             tp3    = frb_lo - orb_range * orbTPMult * 3.0
             frb_done       := true
             frb_short_today := true
-            strategy.entry("FRB-S", strategy.short, limit=entryP, comment="frankfurt-orb · C2 SHORT")
+            c2LimFS = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("FRB-S", strategy.short, limit=c2LimFS, comment="frankfurt-orb · C2 SHORT")
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-S-X", from_entry="FRB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -976,15 +1074,17 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeNY
         if close > nyorb_hi and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
-            // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support)
-            entryP = nyorb_hi
-            slP    = nyorb_hi - c2SLBuf
-            slDist = c2SLBuf
+            // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
+            // Depth > 0 lifts the limit toward price so a shallow bounce fills it.
+            entryP = nyorb_hi + orb_range * _c2Depth
+            slP    = nyorb_hi - f_c2SL(orb_range)
+            slDist = math.abs(entryP - slP)
             tp1    = nyorb_hi + orb_range * orbTPMult
             tp2    = nyorb_hi + orb_range * orbTPMult * 2.0
             tp3    = nyorb_hi + orb_range * orbTPMult * 3.0
             nyorb_done := true
-            strategy.entry("NYORB-L", strategy.long, limit=entryP, comment="ny-orb · C2 LONG")
+            c2LimNL = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("NYORB-L", strategy.long, limit=c2LimNL, comment="ny-orb · C2 LONG")
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -1007,15 +1107,17 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             f_drawPosBox(entryP, slP, tp3)
 
         else if close < nyorb_lo and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
-            // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance)
-            entryP = nyorb_lo
-            slP    = nyorb_lo + c2SLBuf
-            slDist = c2SLBuf
+            // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance).
+            // Depth > 0 drops the limit toward price so a shallow bounce fills it.
+            entryP = nyorb_lo - orb_range * _c2Depth
+            slP    = nyorb_lo + f_c2SL(orb_range)
+            slDist = math.abs(slP - entryP)
             tp1    = nyorb_lo - orb_range * orbTPMult
             tp2    = nyorb_lo - orb_range * orbTPMult * 2.0
             tp3    = nyorb_lo - orb_range * orbTPMult * 3.0
             nyorb_done := true
-            strategy.entry("NYORB-S", strategy.short, limit=entryP, comment="ny-orb · C2 SHORT")
+            c2LimNS = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("NYORB-S", strategy.short, limit=c2LimNS, comment="ny-orb · C2 SHORT")
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -1035,6 +1137,100 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
                 _mtp_be  := false
             else
                 strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+            f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNALS U + V — Asian session ORBs  (Sydney / Tokyo)
+// ─────────────────────────────────────────────────────────────────────
+// M and H are really just "session-open ORB" applied to Frankfurt and NY.
+// U and V apply the identical C2 architecture to the two Asian opens:
+//   U) Sydney — 22:00 UTC default (UTC+10/+11, DST-dependent)
+//   V) Tokyo  — 00:00 UTC (UTC+9, no DST, so this one is exact)
+//
+// Identical to M/H in every respect: 30-min opening range, first close
+// outside it is the breakout, limit rests back at the level (shifted by
+// _c2Depth), SL = level ± f_c2SL(range), TPs = range × orbTPMult × {1,2,3},
+// H1+H4 bias must align, min-range floor, ADR gate, one shot per day.
+//
+// UNTESTED. Asian sessions carry a fraction of Frankfurt/NY liquidity, so
+// the honest prior is that ranges rarely clear the 5pt floor and that any
+// breakout mean-reverts rather than extends. The min-range filter blocking
+// most signals IS a result — it would mean the setup does not exist here.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Shared exit router for U/V. "Scale 30/75/150" needs the _mtp state machine
+// wired per-signal, so U/V fall through to the single-target exit for it.
+f_c2Exit(string id, float slP, float tp1, float tp2, float tp3, float rng) =>
+    if exitMode == "Trail after TP1"
+        strategy.exit(id + "-X", from_entry=id, stop=slP, trail_price=tp1, trail_offset=math.round(rng / syminfo.mintick))
+    else if exitMode == "Split TP1+TP2"
+        strategy.exit(id + "-X1", from_entry=id, qty_percent=50, stop=slP, limit=tp1)
+        strategy.exit(id + "-X2", from_entry=id, stop=slP, limit=tp2)
+    else
+        strategy.exit(id + "-X", from_entry=id, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+
+// ─── SIGNAL U — Sydney ORB ───────────────────────────────────────────
+if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
+    rngU = syd_hi - syd_lo
+    if rngU >= c2MinRangeASIA
+        if close > syd_hi and (not orbBiasFilter or _orbBiasLong)
+            entryP = syd_hi + rngU * _c2Depth
+            slP    = syd_hi - f_c2SL(rngU)
+            tp1    = syd_hi + rngU * orbTPMult
+            tp2    = syd_hi + rngU * orbTPMult * 2.0
+            tp3    = syd_hi + rngU * orbTPMult * 3.0
+            syd_done := true
+            c2LimUL = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("SYD-L", strategy.long, limit=c2LimUL, comment="sydney-orb · C2 LONG")
+            f_c2Exit("SYD-L", slP, tp1, tp2, tp3, rngU)
+            label.new(bar_index, low, "U↑", style=label.style_label_up,
+                      color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+        else if close < syd_lo and (not orbBiasFilter or _orbBiasShort)
+            entryP = syd_lo - rngU * _c2Depth
+            slP    = syd_lo + f_c2SL(rngU)
+            tp1    = syd_lo - rngU * orbTPMult
+            tp2    = syd_lo - rngU * orbTPMult * 2.0
+            tp3    = syd_lo - rngU * orbTPMult * 3.0
+            syd_done := true
+            c2LimUS = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("SYD-S", strategy.short, limit=c2LimUS, comment="sydney-orb · C2 SHORT")
+            f_c2Exit("SYD-S", slP, tp1, tp2, tp3, rngU)
+            label.new(bar_index, high, "U↓", style=label.style_label_down,
+                      color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+// ─── SIGNAL V — Tokyo ORB ────────────────────────────────────────────
+if modTOK and barstate.isconfirmed and in_tok_trade and tok_locked and not tok_done and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
+    rngV = tok_hi - tok_lo
+    if rngV >= c2MinRangeASIA
+        if close > tok_hi and (not orbBiasFilter or _orbBiasLong)
+            entryP = tok_hi + rngV * _c2Depth
+            slP    = tok_hi - f_c2SL(rngV)
+            tp1    = tok_hi + rngV * orbTPMult
+            tp2    = tok_hi + rngV * orbTPMult * 2.0
+            tp3    = tok_hi + rngV * orbTPMult * 3.0
+            tok_done := true
+            c2LimVL = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("TOK-L", strategy.long, limit=c2LimVL, comment="tokyo-orb · C2 LONG")
+            f_c2Exit("TOK-L", slP, tp1, tp2, tp3, rngV)
+            label.new(bar_index, low, "V↑", style=label.style_label_up,
+                      color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+        else if close < tok_lo and (not orbBiasFilter or _orbBiasShort)
+            entryP = tok_lo - rngV * _c2Depth
+            slP    = tok_lo + f_c2SL(rngV)
+            tp1    = tok_lo - rngV * orbTPMult
+            tp2    = tok_lo - rngV * orbTPMult * 2.0
+            tp3    = tok_lo - rngV * orbTPMult * 3.0
+            tok_done := true
+            c2LimVS = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("TOK-S", strategy.short, limit=c2LimVS, comment="tokyo-orb · C2 SHORT")
+            f_c2Exit("TOK-S", slP, tp1, tp2, tp3, rngV)
+            label.new(bar_index, high, "V↓", style=label.style_label_down,
+                      color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
 // ═══════════════════════════════════════════════════════════════════════

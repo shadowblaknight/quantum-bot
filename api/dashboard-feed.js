@@ -9,6 +9,7 @@ const { fetchAccount, fetchPositions } = require('./broker');
 const { computeDailyPivots } = require('./pivots');
 const { getPendingSetups, getCommentary } = require('./watcher');
 const { getActiveWatched, removeWatchedSetup } = require('./watched-setups');
+const { getTradeSettings, setTradeSettings } = require('./settings-store');
 
 const KNOWN_ASSETS = ['gold','eurusd','gbpusd','usdjpy','nas100','us500','btc'];
 
@@ -237,7 +238,32 @@ async function actionCancelWatched(body) {
   return ok({ removed: body.id });
 }
 
+// ── Live trade settings (risk %, TP in R, BE ladder) ──────────────────────
+// These drive real execution: riskPct is read by webhook.js at placement time,
+// tpR + ladder by manage-trades.js on every tick. Values are clamped in
+// settings-store, so what comes back may differ from what was sent — the UI
+// should render the RESPONSE, not the request, so the user sees what actually
+// took effect.
+async function actionSettings() {
+  const settings = await getTradeSettings();
+  return ok({ settings });
+}
+
+async function actionSetSettings(body) {
+  if (!body || typeof body !== 'object') return err('missing body');
+  const patch = {};
+  if (body.riskPct !== undefined)       patch.riskPct = body.riskPct;
+  if (body.tpR !== undefined)           patch.tpR = body.tpR;
+  if (body.ladderEnabled !== undefined) patch.ladderEnabled = body.ladderEnabled;
+  if (body.ladder !== undefined)        patch.ladder = body.ladder;
+  if (Object.keys(patch).length === 0) return err('no recognised settings in body');
+  const result = await setTradeSettings(patch, body.who || 'control-panel');
+  if (!result.ok) return err(result.error || 'save failed', 500);
+  return ok({ settings: result.settings, saved: true });
+}
+
 const ACTIONS = {
+  'settings': actionSettings, 'set-settings': actionSetSettings,
   'summary': actionSummary, 'rules': actionRules,
   'positions': actionPositions, 'history': actionHistory,
   'pivots': actionPivots, 'activity': actionActivity,
@@ -251,6 +277,7 @@ const ACTIONS = {
 
 const WRITE_ACTIONS = new Set([
   'set-rules','set-instrument','set-mode','set-trading-mode','emergency-stop','cancel-watched',
+  'set-settings',
 ]);
 
 module.exports = async (req, res) => {

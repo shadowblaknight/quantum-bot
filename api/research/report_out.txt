@@ -1,0 +1,58 @@
+pairs with data: 28
+
+================================================================================================
+CONFIG MATRIX  (answers: AND vs OR confluence, 15m vs 1h entry)
+================================================================================================
+  AND 15m  -> trades   174 per_yr   61.6 WR  36.21% PF  0.715 totR    -29.6
+  AND 1h   -> trades   137 per_yr   48.6 WR  31.39% PF  0.885 totR    -10.7
+  OR  15m  -> trades   728 per_yr  251.3 WR  41.07% PF  0.969 totR    -12.1
+  OR  1h   -> trades   483 per_yr  166.7 WR  33.75% PF   0.98 totR     -6.4
+
+================================================================================================
+BEST CONFIG {'entry_tf': '15m', 'confluence': 'OR', 'require_rejection_close': True, 'sl_min_zone_atr': 1.5, 'tp_r': 2.0}
+================================================================================================
+
+--- CURRENCY GROUPS (is the CHF/JPY edge structural?) ---
+                              group  n_pairs  trades  per_yr    WR    PF  totR   expR  maxDD_R
+              CHF crosses (any CHF)        7     215    76.2 49.30 1.364  34.3  0.159    -10.6
+              JPY crosses (any JPY)        7     187    67.2 48.13 1.252  23.6  0.126    -12.9
+                         CHF or JPY       13     358   127.0 49.16 1.343  56.8  0.159    -12.3
+                         USD majors        7     163    56.3 32.52 0.754 -25.0 -0.153    -34.5
+Commodity (AUD/NZD/CAD, no CHF/JPY)       12     296   102.2 33.78 0.700 -54.4 -0.184    -59.1
+                             ALL 28       28     728   251.3 41.07 0.969 -12.1 -0.017    -33.5
+
+--- PER PAIR ---
+  pair     sessions  trades  per_yr    WR    PF  totR   expR  maxDD_R
+CADJPY     asian+ny      17     6.9 58.82 2.416   8.8  0.518     -2.0
+GBPCHF       london      20     7.7 55.00 2.254   8.9  0.444     -3.6
+EURCHF       london      35    12.5 57.14 2.089  14.4  0.412     -2.1
+EURJPY asian+london      34    13.2 55.88 1.879  13.2  0.388     -6.0
+GBPJPY asian+london      37    14.7 51.35 1.367   6.6  0.178     -4.0
+USDCHF    london+ny      24     9.1 45.83 1.336   3.8  0.160     -4.0
+CADCHF    london+ny      29    10.5 44.83 1.325   4.4  0.153     -3.4
+AUDNZD        asian      20     7.3 50.00 1.290   2.9  0.145     -4.9
+AUDCHF asian+london      29    10.3 55.17 1.120   1.3  0.043     -6.5
+AUDJPY        asian      22     8.0 54.55 1.116   1.2  0.053     -3.0
+CHFJPY asian+london      44    17.4 45.45 1.046   1.0  0.023     -6.9
+NZDCHF asian+london      34    12.6 44.12 1.027   0.4  0.013     -9.0
+EURNZD asian+london      27    10.1 44.44 1.008   0.1  0.004     -4.5
+NZDJPY        asian      17     7.0 35.29 0.968  -0.3 -0.019     -5.0
+GBPUSD    london+ny      24     8.8 41.67 0.959  -0.5 -0.022     -5.1
+AUDUSD     asian+ny      33    11.4 36.36 0.934  -1.2 -0.038    -10.0
+NZDCAD     asian+ny      28    10.2 42.86 0.896  -1.6 -0.057     -6.3
+EURCAD    london+ny      29    10.6 31.03 0.836  -3.0 -0.103     -5.8
+EURGBP       london      22     8.0 31.82 0.773  -2.9 -0.132     -7.7
+GBPAUD asian+london      23    10.4 39.13 0.728  -3.5 -0.154     -5.9
+NZDUSD     asian+ny      26    10.0 26.92 0.727  -4.5 -0.174     -6.6
+GBPNZD asian+london      21     9.3 33.33 0.568  -5.4 -0.258     -9.1
+GBPCAD    london+ny      31    12.1 32.26 0.553  -8.2 -0.263    -10.3
+USDCAD           ny      12     5.5 25.00 0.495  -4.5 -0.378     -7.0
+EURUSD    london+ny      28    10.8 21.43 0.475 -11.1 -0.397    -14.2
+USDJPY     asian+ny      16     8.5 25.00 0.427  -6.9 -0.430     -9.9
+EURAUD asian+london      25     9.2 20.00 0.273 -14.3 -0.572    -16.0
+AUDCAD     asian+ny      21     7.5 19.05 0.267 -11.1 -0.528    -10.9
+
+profitable: 13/28 pairs
+   CADJPY, GBPCHF, EURCHF, EURJPY, GBPJPY, USDCHF, CADCHF, AUDNZD, AUDCHF, AUDJPY, CHFJPY, NZDCHF, EURNZD
+
+wrote 728 trades -> all_trades.csv

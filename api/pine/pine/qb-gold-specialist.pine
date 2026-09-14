@@ -51,6 +51,11 @@ c2SLBuf    = input.float(150.0, "SL beyond C2 level (pts)",        group=G_C2, s
               tooltip="Stop loss placed this many pts beyond the C2 structural level — not from the C1 close.\nFor FRB SHORT retest at frb_lo, SL = frb_lo + 8.")
 c2TpMult   = input.float(0.75, "TP = ORB range × (from C2 level)", group=G_C2, step=0.05,
               tooltip="TP measured from the ORB structural level, not from C1 close.\n0.75 matches the confirmed best-config multiple.")
+c2RetestDepth = input.float(0.25, "Partial retest depth (× ORB range)", group=G_C2, minval=0.0, maxval=0.70, step=0.05,
+              tooltip="How far the limit sits from the ORB level, TOWARD current price.\n\n0.00 = limit exactly at the ORB level — needs a FULL retest, so breakouts that run away are never taken.\n0.25 = CONFIRMED BEST on XAUUSD 15m. Limit a quarter-range closer to price, so a shallow bounce fills it.\n\nSL and TP stay anchored to the ORB level — only entry price and fill probability move.\n\nBacktest, XAUUSD 15m 3y (depth 0 -> 0.25):\n  trades 204 -> 230 · losses 5 -> 3 · WR 97.55% -> 98.70%\n  PF 2.699 -> 4.484 · net +3,482 -> +3,930 · maxDD 814 -> 719\nEvery metric improved, and the 0.25 optimum replicated on the 1y window.\n\nWhy it decays past 0.25: reward shrinks as entry approaches TP (at depth = c2TpMult it would be zero), so P&L falls even though WR keeps rising.\n\nNOTE: this is instrument-specific. On SP500 1m, depth 0.25 tested WORSE (1y: identical 56 trades, $167 less profit) because 1m breakouts retest anyway — keep SP500 at 0.")
+
+// Clamped so the limit can never sit at or past its own target.
+_c2Depth = math.min(c2RetestDepth, c2TpMult * 0.9)
 
 G_FILT = "Filters"
 // Per-signal ADR thresholds — each setup has different tolerance for range consumption.
@@ -762,8 +767,10 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
     orb_range_frb = frb_hi - frb_lo
     if orb_range_frb >= 5.0
         if close < frb_lo and h1B == -1 and h4B == -1 and not na(ar_lo_prefrb) and close < ar_lo_prefrb
-            // C2 — SELL LIMIT: retest of broken FRB low (now resistance)
-            entryP  = frb_lo
+            // C2 — SELL LIMIT: retest of broken FRB low (now resistance).
+            // Depth drops the limit toward price so a shallow bounce fills it;
+            // SL/TP stay on the ORB level, so only the entry price moves.
+            entryP  = frb_lo - orb_range_frb * _c2Depth
             slP     = frb_lo + c2SLBuf
             slDist  = slP - entryP
             tp1     = frb_lo - orb_range_frb * c2TpMult
@@ -783,8 +790,9 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
                 f_drawPosBox(entryP, slP, tp3)
 
         else if close > frb_hi and h1B == 1 and h4B == 1 and not na(ar_hi_prefrb) and close > ar_hi_prefrb
-            // C2 — BUY LIMIT: retest of broken FRB high (now support)
-            entryP  = frb_hi
+            // C2 — BUY LIMIT: retest of broken FRB high (now support).
+            // Depth lifts the limit toward price so a shallow pullback fills it.
+            entryP  = frb_hi + orb_range_frb * _c2Depth
             slP     = frb_hi - c2SLBuf
             slDist  = entryP - slP
             tp1     = frb_hi + orb_range_frb * c2TpMult
@@ -815,8 +823,9 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
     orb_range_ny = nyorb_hi - nyorb_lo
     if orb_range_ny >= 5.0
         if close > nyorb_hi and h1B == 1 and h4B == 1
-            // C2 — BUY LIMIT: retest of broken NY ORB high (now support)
-            entryP  = nyorb_hi
+            // C2 — BUY LIMIT: retest of broken NY ORB high (now support).
+            // Depth lifts the limit toward price so a shallow pullback fills it.
+            entryP  = nyorb_hi + orb_range_ny * _c2Depth
             slP     = nyorb_hi - c2SLBuf
             slDist  = entryP - slP
             tp1     = nyorb_hi + orb_range_ny * c2TpMult
@@ -836,8 +845,9 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
                 f_drawPosBox(entryP, slP, tp3)
 
         else if close < nyorb_lo and h1B == -1 and h4B == -1
-            // C2 — SELL LIMIT: retest of broken NY ORB low (now resistance)
-            entryP  = nyorb_lo
+            // C2 — SELL LIMIT: retest of broken NY ORB low (now resistance).
+            // Depth drops the limit toward price so a shallow bounce fills it.
+            entryP  = nyorb_lo - orb_range_ny * _c2Depth
             slP     = nyorb_lo + c2SLBuf
             slDist  = slP - entryP
             tp1     = nyorb_lo - orb_range_ny * c2TpMult

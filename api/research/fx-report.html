@@ -1,0 +1,357 @@
+<title>FX Specialist Findings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#F7F8FA; --surface:#FFFFFF; --surface2:#EFF2F6; --line:#D9DEE7;
+    --ink:#151A21; --ink2:#4A5462; --ink3:#77808F;
+    --pos:#1A7F37; --posBg:rgba(26,127,55,.10);
+    --neg:#C0392B; --negBg:rgba(192,57,43,.09);
+    --warn:#9A6700; --warnBg:rgba(154,103,0,.10);
+    --accent:#0B5FA5;
+    --sans:'IBM Plex Sans',system-ui,-apple-system,Segoe UI,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --r:3px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#0E1116; --surface:#161B22; --surface2:#1C2230; --line:#2A3240;
+      --ink:#E6EDF3; --ink2:#A9B4C0; --ink3:#7C8797;
+      --pos:#3FB950; --posBg:rgba(63,185,80,.13);
+      --neg:#F85149; --negBg:rgba(248,81,73,.13);
+      --warn:#D29922; --warnBg:rgba(210,153,34,.13);
+      --accent:#58A6FF;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0E1116; --surface:#161B22; --surface2:#1C2230; --line:#2A3240;
+    --ink:#E6EDF3; --ink2:#A9B4C0; --ink3:#7C8797;
+    --pos:#3FB950; --posBg:rgba(63,185,80,.13);
+    --neg:#F85149; --negBg:rgba(248,81,73,.13);
+    --warn:#D29922; --warnBg:rgba(210,153,34,.13);
+    --accent:#58A6FF;
+  }
+
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:40px 24px 72px}
+
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;
+           text-transform:uppercase;color:var(--ink3)}
+  h1{font-size:clamp(28px,4.4vw,42px);line-height:1.12;font-weight:700;
+     letter-spacing:-.022em;margin:10px 0 8px;text-wrap:balance}
+  h2{font-size:19px;font-weight:600;letter-spacing:-.01em;margin:0 0 4px;text-wrap:balance}
+  .sub{color:var(--ink2);max-width:64ch}
+
+  header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:32px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .chip{font-family:var(--mono);font-size:11px;padding:4px 9px;border:1px solid var(--line);
+        border-radius:var(--r);color:var(--ink2);background:var(--surface)}
+
+  section{margin:38px 0}
+  .shead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .snum{font-family:var(--mono);font-size:11px;color:var(--ink3);letter-spacing:.1em}
+
+  .verdict{background:var(--surface);border:1px solid var(--line);
+           border-left:3px solid var(--warn);border-radius:var(--r);padding:20px 22px}
+  .verdict .vt{font-family:var(--mono);font-size:12px;letter-spacing:.1em;
+               text-transform:uppercase;color:var(--warn);font-weight:600;margin-bottom:8px}
+  .verdict p{margin:0 0 10px}
+  .verdict p:last-child{margin-bottom:0}
+
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+  .stat .l{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3)}
+  .stat .v{font-family:var(--mono);font-size:25px;font-weight:600;margin-top:6px;
+           font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .stat .s{font-size:12px;color:var(--ink2);margin-top:3px}
+
+  .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+  table{border-collapse:collapse;width:100%;min-width:600px}
+  th,td{padding:9px 13px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+     color:var(--ink3);font-weight:500;background:var(--surface2);position:sticky;top:0}
+  th:first-child,td:first-child{text-align:left}
+  tbody tr:last-child td{border-bottom:none}
+  td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:13px}
+  td.name{font-family:var(--mono);font-size:13px;font-weight:500}
+  tr.tot td{background:var(--surface2);font-weight:600}
+  .pos{color:var(--pos)} .neg{color:var(--neg)} .dim{color:var(--ink3)}
+
+  /* PF bar: break-even at 1.0 is the line everything is judged against */
+  .pfcell{display:flex;align-items:center;gap:9px;justify-content:flex-end}
+  .track{position:relative;width:104px;height:7px;background:var(--surface2);
+         border-radius:99px;overflow:hidden;flex:none}
+  .track::after{content:'';position:absolute;left:40%;top:-2px;bottom:-2px;width:1px;
+                background:var(--ink3);opacity:.55}
+  .fill{position:absolute;top:0;bottom:0;border-radius:99px}
+  .fill.up{background:var(--pos)} .fill.dn{background:var(--neg)}
+  .pfval{font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums;
+         min-width:44px;text-align:right}
+
+  .bullets{margin:0;padding-left:20px}
+  .bullets li{margin-bottom:9px}
+  .bullets li::marker{color:var(--ink3)}
+  code{font-family:var(--mono);font-size:.9em;background:var(--surface2);
+       padding:1px 5px;border-radius:var(--r);color:var(--ink)}
+
+  .qa{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+      padding:16px 18px;margin-bottom:10px}
+  .qa .q{font-weight:600;margin-bottom:6px}
+  .qa .a{color:var(--ink2);font-size:14px}
+  .tag{font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:var(--r);
+       letter-spacing:.06em;text-transform:uppercase;font-weight:600}
+  .tag.ok{background:var(--posBg);color:var(--pos)}
+  .tag.no{background:var(--negBg);color:var(--neg)}
+  .tag.hold{background:var(--warnBg);color:var(--warn)}
+
+  .danger{background:var(--negBg);border:1px solid var(--neg);border-radius:var(--r);padding:18px 20px}
+  .danger .dt{font-family:var(--mono);font-size:12px;letter-spacing:.09em;text-transform:uppercase;
+              color:var(--neg);font-weight:600;margin-bottom:8px}
+
+  footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--line);
+         font-size:12.5px;color:var(--ink3)}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">Quantum Bot · Strategy Research</div>
+  <h1>FX Specialist — 28-Pair Backtest</h1>
+  <p class="sub">HTF support/resistance + Fibonacci golden zone AOI with candlestick rejection confirmation,
+  tested across all 28 combinations of USD·EUR·GBP·CHF·JPY·NZD·CAD·AUD on 3 years of FTMO tick history.</p>
+  <div class="meta">
+    <span class="chip">3y · Sep 2023 → Sep 2026</span>
+    <span class="chip">28 pairs · 15m/1H/4H/1D/1W</span>
+    <span class="chip">2.7M candles · MetaAPI</span>
+    <span class="chip">728 trades simulated</span>
+  </div>
+</header>
+
+<section>
+  <div class="verdict">
+    <div class="vt">Verdict — Conditional</div>
+    <p><strong>The strategy does not work as specified across all 28 pairs</strong> — pooled profit factor
+    <strong>0.969</strong>, a losing system. But it is not uniformly dead: the failure is concentrated
+    and the survivors share a structural trait.</p>
+    <p><strong>CHF and JPY crosses are profitable; USD majors and commodity crosses are not.</strong>
+    All 7 CHF crosses cleared break-even (odds by chance: 0.78%). After realistic FTMO spread the
+    CHF/JPY basket holds <strong>PF 1.207</strong> across 358 trades — a real but modest edge,
+    far weaker than GS1 (2.69) or SP500 (2.14).</p>
+  </div>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">01</span><h2>The decisive test — grouping by currency</h2></div>
+  <p class="sub" style="margin-top:0;margin-bottom:14px">If the edge were noise it would scatter randomly across pairs.
+  Instead it partitions cleanly by which currency the pair contains.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Group</th><th>Pairs</th><th>Trades</th><th>/yr</th><th>Win rate</th><th>Profit factor</th><th>Total R</th><th>Max DD</th></tr></thead>
+      <tbody id="groups"></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">02</span><h2>Why CHF and JPY</h2></div>
+  <div class="grid">
+    <div class="stat"><div class="l">CHF crosses</div><div class="v pos">7/7</div><div class="s">profitable — every one</div></div>
+    <div class="stat"><div class="l">JPY crosses</div><div class="v pos">5/7</div><div class="s">profitable</div></div>
+    <div class="stat"><div class="l">USD pairs</div><div class="v neg">1/7</div><div class="s">profitable</div></div>
+    <div class="stat"><div class="l">By chance</div><div class="v">0.78%</div><div class="s">odds of 7/7 CHF</div></div>
+  </div>
+  <p class="sub" style="max-width:70ch">CHF and JPY are the funding and safe-haven currencies. Their crosses
+  <strong>mean-revert at structural levels</strong> — price taps a zone, gets rejected, returns. USD majors are
+  news-driven and <strong>trend through</strong> the same levels, so a rejection entry is repeatedly run over.
+  The strategy is fundamentally a mean-reversion system, which is why it only pays where mean reversion lives.</p>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">03</span><h2>Your three questions, answered by the data</h2></div>
+
+  <div class="qa">
+    <div class="q">1 · Confluence — require S/R <em>and</em> Fib, or either? <span class="tag ok">OR</span></div>
+    <div class="a">Not close. <code>AND</code> over-filters into noise: PF <strong>0.715</strong> (15m) / 0.885 (1h)
+    on only 174/137 trades. <code>OR</code> reaches PF <strong>0.969</strong> / 0.980 on 728/483 trades.
+    Demanding both confluences cuts trade count 76% and makes results <em>worse</em>, not better.</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">2 · Entry timeframe — 15m or 1H? <span class="tag ok">15m</span></div>
+    <div class="a">Statistically tied on quality (PF 0.969 vs 0.980) but 15m produces <strong>51% more trades</strong>
+    (728 vs 483). With ~10 trades/pair/year already thin, take the frequency. Build TF-agnostic and default to 15m.</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">3 · Build strategy or indicator first? <span class="tag hold">Neither yet</span></div>
+    <div class="a">The premise of the question was that the setup works. It mostly doesn't. Building a 28-pair
+    Pine script now would encode a losing system. See the recommendation below.</div>
+  </div>
+
+  <div class="scroll" style="margin-top:16px">
+    <table>
+      <thead><tr><th>Confluence</th><th>Entry TF</th><th>Trades</th><th>/yr</th><th>Win rate</th><th>Profit factor</th><th>Total R</th></tr></thead>
+      <tbody id="matrix"></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">04</span><h2>Does it survive spread?</h2></div>
+  <p class="sub" style="margin-top:0;margin-bottom:14px">The backtest above is frictionless. CHF crosses carry wide
+  spreads (GBPCHF ~2.8 pips) against ~25-pip stops, so cost matters. Modelled at real FTMO spreads:</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Spread assumption</th><th>Win rate</th><th>Profit factor</th><th>Expectancy /trade</th><th>Total R</th></tr></thead>
+      <tbody id="spread"></tbody>
+    </table>
+  </div>
+  <p class="sub" style="max-width:70ch">The edge survives but thins: PF 1.343 → <strong>1.207</strong> at realistic
+  spread, and 1.087 if fills run 2× wide during news. Expectancy falls from +0.159R to +0.102R per trade.
+  There is little margin for slippage.</p>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">05</span><h2>The problem that decides this</h2></div>
+  <div class="danger">
+    <div class="dt">⛔ Max drawdown breaches FTMO before it earns</div>
+    <p style="margin:0 0 10px">The CHF/JPY basket's worst drawdown is <strong>−12.3R</strong>. At your normal 1% risk
+    that is a <strong>−12.3% account drawdown</strong> — past FTMO's 10% total loss limit. <strong>This system would
+    have blown the account</strong> inside the backtest window.</p>
+    <p style="margin:0">To hold drawdown under ~6% you would run ~0.5% risk, which halves an already-modest
+    +0.102R expectancy. At ~127 trades/year pooled that is roughly <strong>6.5R/year at 0.5% ≈ 3.2% annual return</strong>
+    — against GS1 and SP500 delivering far more at a fraction of the risk.</p>
+  </div>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">06</span><h2>All 28 pairs</h2></div>
+  <p class="sub" style="margin-top:0;margin-bottom:14px">Sorted by profit factor. The line in each bar marks
+  break-even (1.0). CHF/JPY pairs are marked ◆.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Pair</th><th>Sessions</th><th>Trades</th><th>/yr</th><th>Win rate</th><th>Profit factor</th><th>Total R</th><th>Max DD</th></tr></thead>
+      <tbody id="pairs"></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">07</span><h2>Four bugs found while building this</h2></div>
+  <p class="sub" style="margin-top:0;margin-bottom:14px">Each silently produced plausible-looking but wrong results —
+  worth knowing since the same patterns appear in Pine.</p>
+  <ol class="bullets">
+    <li><strong>Structure detection was dead.</strong> <code>ffill().shift(1)</code> compares the previous <em>bar</em>,
+    not the previous <em>pivot</em> — after a forward-fill those are the same value, so HH/HL was never true.
+    Daily bias fired on <strong>0%</strong> of bars.</li>
+    <li><strong>Fibonacci drawn on the wrong leg 51.9% of the time.</strong> A bullish retracement requires the swing
+    low to print <em>before</em> the swing high. Without that check the fib sits on down-legs half the time.</li>
+    <li><strong>Every doji counted as a pin bar.</strong> <code>wick ≥ 2 × max(body, 1e-12)</code> is trivially true
+    when the body is ~0 — <strong>18.5%</strong> of all bars registered as "rejection confirmations."</li>
+    <li><strong>Stops sat inside the noise.</strong> Measured MAE was <strong>3.93 ATR</strong> while stops were ~1 ATR:
+    half of all trades were stopped out before the edge could appear.</li>
+  </ol>
+  <p class="sub" style="max-width:70ch">The diagnostic that exposed this: a <strong>random-entry control beat the
+  strategy</strong> (PF 1.14 vs 0.84). An event study then showed the edge is <em>delayed</em> — price moves against
+  entry ~0.23 ATR for 12 bars, then turns positive (+0.31 ATR, 54.4% up by bar 48).</p>
+</section>
+
+<section>
+  <div class="shead"><span class="snum">08</span><h2>Recommendation</h2></div>
+  <ol class="bullets">
+    <li><strong>Don't build the 28-pair Pine.</strong> Pooled PF 0.969 means encoding a losing system.</li>
+    <li><strong>Don't deploy the CHF/JPY basket to FTMO either</strong> — not because the edge is fake, but because
+    −12.3R drawdown breaches the 10% limit. It fails risk, not logic.</li>
+    <li><strong>If you want to pursue it</strong>, scope to the 7 CHF crosses only, forward-test on the $10k personal
+    account where drawdown rules don't apply, and require a full year before considering prop capital.</li>
+    <li><strong>Higher-value alternative:</strong> your ORB architecture (GS1 2.69, SP500 2.14) already outperforms
+    this by 2×. Porting the proven Frankfurt/NY ORB engine to a currency pair is far more likely to pay than
+    rescuing this one.</li>
+  </ol>
+</section>
+
+<footer>
+  Engine: <code>api/research/backtest_fx.py</code> · Data: <code>api/research/fetch-fx.js</code> (MetaAPI, FTMO-Server4).
+  No-lookahead enforced: pivots confirmed <code>right</code> bars late, HTF joined on close time via
+  <code>merge_asof</code>, exits resolve on later bars only. Same-bar SL+TP counted as a loss.
+  Weekly bars derived from daily — verified bar-exact against MetaAPI's own 1W series.
+</footer>
+</div>
+
+<script>
+const groups=[
+ ["CHF crosses (any CHF)",7,215,76.2,49.30,1.364,34.3,-10.6],
+ ["JPY crosses (any JPY)",7,187,67.2,48.13,1.252,23.6,-12.9],
+ ["CHF or JPY",13,358,127.0,49.16,1.343,56.8,-12.3],
+ ["USD majors",7,163,56.3,32.52,0.754,-25.0,-34.5],
+ ["Commodity (AUD/NZD/CAD)",12,296,102.2,33.78,0.700,-54.4,-59.1],
+ ["ALL 28",28,728,251.3,41.07,0.969,-12.1,-33.5]];
+
+const matrix=[["AND","15m",174,61.6,36.21,0.715,-29.6],
+ ["AND","1h",137,48.6,31.39,0.885,-10.7],
+ ["OR","15m",728,251.3,41.07,0.969,-12.1],
+ ["OR","1h",483,166.7,33.75,0.980,-6.4]];
+
+const spread=[["No spread (raw)",49.2,1.343,0.159,56.8],
+ ["1× real FTMO spread",47.8,1.207,0.102,36.5],
+ ["1.5× spread",47.5,1.145,0.074,26.4],
+ ["2× spread (news fills)",46.4,1.087,0.045,16.2]];
+
+const pairs=[
+ ["CADJPY","asian+ny",17,6.9,58.82,2.416,8.8,-2.0],["GBPCHF","london",20,7.7,55.00,2.254,8.9,-3.6],
+ ["EURCHF","london",35,12.5,57.14,2.089,14.4,-2.1],["EURJPY","asian+london",34,13.2,55.88,1.879,13.2,-6.0],
+ ["GBPJPY","asian+london",37,14.7,51.35,1.367,6.6,-4.0],["USDCHF","london+ny",24,9.1,45.83,1.336,3.8,-4.0],
+ ["CADCHF","london+ny",29,10.5,44.83,1.325,4.4,-3.4],["AUDNZD","asian",20,7.3,50.00,1.290,2.9,-4.9],
+ ["AUDCHF","asian+london",29,10.3,55.17,1.120,1.3,-6.5],["AUDJPY","asian",22,8.0,54.55,1.116,1.2,-3.0],
+ ["CHFJPY","asian+london",44,17.4,45.45,1.046,1.0,-6.9],["NZDCHF","asian+london",34,12.6,44.12,1.027,0.4,-9.0],
+ ["EURNZD","asian+london",27,10.1,44.44,1.008,0.1,-4.5],["NZDJPY","asian",17,7.0,35.29,0.968,-0.3,-5.0],
+ ["GBPUSD","london+ny",24,8.8,41.67,0.959,-0.5,-5.1],["AUDUSD","asian+ny",33,11.4,36.36,0.934,-1.2,-10.0],
+ ["NZDCAD","asian+ny",28,10.2,42.86,0.896,-1.6,-6.3],["EURCAD","london+ny",29,10.6,31.03,0.836,-3.0,-5.8],
+ ["EURGBP","london",22,8.0,31.82,0.773,-2.9,-7.7],["GBPAUD","asian+london",23,10.4,39.13,0.728,-3.5,-5.9],
+ ["NZDUSD","asian+ny",26,10.0,26.92,0.727,-4.5,-6.6],["GBPNZD","asian+london",21,9.3,33.33,0.568,-5.4,-9.1],
+ ["GBPCAD","london+ny",31,12.1,32.26,0.553,-8.2,-10.3],["USDCAD","ny",12,5.5,25.00,0.495,-4.5,-7.0],
+ ["EURUSD","london+ny",28,10.8,21.43,0.475,-11.1,-14.2],["USDJPY","asian+ny",16,8.5,25.00,0.427,-6.9,-9.9],
+ ["EURAUD","asian+london",25,9.2,20.00,0.273,-14.3,-16.0],["AUDCAD","asian+ny",21,7.5,19.05,0.267,-11.1,-10.9]];
+
+const MAX=2.5, ZERO=0.40;                 // 1.0 sits at 40% of the track
+const sgn=v=>v>0?'pos':v<0?'neg':'dim';
+const f1=v=>(v>0?'+':'')+v.toFixed(1);
+
+function pfCell(pf){
+  // Bar grows from the break-even marker: right/green above 1.0, left/red below.
+  const up=pf>=1;
+  const x=Math.min(pf,MAX)*ZERO;          // ZERO = track fraction per 1.0 of PF
+  const lo=up?ZERO:x, hi=up?x:ZERO;
+  return `<div class="pfcell"><div class="track">
+    <div class="fill ${up?'up':'dn'}" style="left:${lo*100}%;width:${Math.max((hi-lo)*100,1.5)}%"></div>
+   </div><span class="pfval ${up?'pos':'neg'}">${pf.toFixed(3)}</span></div>`;
+}
+
+document.getElementById('groups').innerHTML=groups.map(g=>{
+  const tot=g[0]==='ALL 28';
+  return `<tr class="${tot?'tot':''}"><td class="name">${g[0]}</td><td class="num dim">${g[1]}</td>
+  <td class="num">${g[2]}</td><td class="num dim">${g[3].toFixed(1)}</td><td class="num">${g[4].toFixed(2)}%</td>
+  <td>${pfCell(g[5])}</td><td class="num ${sgn(g[6])}">${f1(g[6])}</td>
+  <td class="num neg">${g[7].toFixed(1)}</td></tr>`}).join('');
+
+document.getElementById('matrix').innerHTML=matrix.map(m=>{
+  const best=m[0]==='OR'&&m[1]==='15m';
+  return `<tr class="${best?'tot':''}"><td class="name">${m[0]}</td><td class="name">${m[1]}</td>
+  <td class="num">${m[2]}</td><td class="num dim">${m[3].toFixed(1)}</td><td class="num">${m[4].toFixed(2)}%</td>
+  <td>${pfCell(m[5])}</td><td class="num ${sgn(m[6])}">${f1(m[6])}</td></tr>`}).join('');
+
+document.getElementById('spread').innerHTML=spread.map((s,i)=>
+  `<tr class="${i===1?'tot':''}"><td class="name">${s[0]}</td><td class="num">${s[1].toFixed(1)}%</td>
+  <td>${pfCell(s[2])}</td><td class="num pos">+${s[3].toFixed(3)}R</td>
+  <td class="num pos">${f1(s[4])}</td></tr>`).join('');
+
+document.getElementById('pairs').innerHTML=pairs.map(p=>{
+  const key=p[0].includes('CHF')||p[0].includes('JPY');
+  return `<tr><td class="name">${key?'◆ ':'<span class="dim">— </span>'}${p[0]}</td>
+  <td class="num dim" style="font-size:12px">${p[1]}</td><td class="num">${p[2]}</td>
+  <td class="num dim">${p[3].toFixed(1)}</td><td class="num">${p[4].toFixed(2)}%</td>
+  <td>${pfCell(p[5])}</td><td class="num ${sgn(p[6])}">${f1(p[6])}</td>
+  <td class="num neg">${p[7].toFixed(1)}</td></tr>`}).join('');
+</script>

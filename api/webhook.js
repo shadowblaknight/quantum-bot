@@ -18,6 +18,7 @@ const { templateLabelMap, REACTION_TEMPLATES, SPECIALIST_SIGNALS, LEGACY_TEMPLAT
 const { evaluateReactionMTF, tfSetForMode } = require('./reaction-filter');
 const { evaluateSignalQuality }             = require('./signal-quality');
 const { checkKillZone }                     = require('./kill-zones');
+const { getTradeSettings }                  = require('./settings-store');
 const { notifySpecialistTradePlaced }       = require('./telegram');
 const TEMPLATE_LABELS = templateLabelMap();
 
@@ -500,7 +501,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // Replaces the momentum ±0.1/±0.5 Redis system.
   if (isSpecialist) {
     try {
-      const _RISK_PCT = 0.01;
+      // Risk % comes from the control panel (settings-store), NOT a constant.
+      // This used to be `const _RISK_PCT = 0.01` — which is why setting 2% in
+      // the UI changed nothing. getTradeSettings() clamps to [0.1%, 5%] and
+      // falls back to 1% if Redis is unavailable, so a store failure can only
+      // ever make the position SMALLER, never larger.
+      const _settings = await getTradeSettings();
+      const _RISK_PCT = _settings.riskPct;
       const _LOT_CFG = {
         gold:   { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
         nas100: { minLot: 0.01, maxLot: 50.0, lotStep: 0.01 },
