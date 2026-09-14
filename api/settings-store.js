@@ -25,6 +25,26 @@ const MAX_LADDER_LEN = 6;
 
 const DEFAULTS = {
   riskPct: 0.01,          // fraction of equity risked per trade (0.01 = 1%)
+
+  // 'ratchet'  — NO take-profit is ever placed. The stop ratchets one rung
+  //              behind price, forever: reach rung n, stop moves to rung n-1.
+  //              A runner is never capped; it exits only when the stop catches
+  //              it. Rungs are spaced by the TP spacing the Pine already sends
+  //              (tp2-tp1), extended past TP3 indefinitely.
+  // 'final-tp' — legacy: full position rides to the last TP and closes there.
+  exitMode: 'ratchet',
+
+  // Ratchet trail geometry, both measured in ORB-range units from the ORB
+  // structural level (the same unit tp1/tp2/tp3 use).
+  //   trailArm  — how far price must travel before the trail takes over from
+  //               the original stop. 0.75 = the old TP1 distance.
+  //   trailKeep — fraction of the furthest excursion that is LOCKED. The stop
+  //               sits at trailKeep x reach, so giveback is (1 - trailKeep).
+  //               0.75 means reaching 0.75 range locks ~0.56 range — profit,
+  //               never breakeven-at-entry.
+  trailArm: 0.75,
+  trailKeep: 0.75,
+
   tpR: 3.0,               // final take-profit, in R (R = entry→SL distance)
   ladderEnabled: true,    // master switch for the R-ladder stop management
   // Each rung: when price reaches `trigger` R of profit, move SL to `slAt` R.
@@ -78,6 +98,11 @@ function sanitize(s) {
   ladder = ladder.filter(r => r.trigger < tpR);
   return {
     riskPct: clampNum(base.riskPct, MIN_RISK_PCT, MAX_RISK_PCT, DEFAULTS.riskPct),
+    exitMode: base.exitMode === 'final-tp' ? 'final-tp' : 'ratchet',
+    // trailKeep capped below 1.0 — at 1.0 the stop would sit exactly on the
+    // current extreme and get taken out by the first tick of noise.
+    trailArm:  clampNum(base.trailArm,  0.05, 10.0, DEFAULTS.trailArm),
+    trailKeep: clampNum(base.trailKeep, 0.10, 0.95, DEFAULTS.trailKeep),
     tpR,
     ladderEnabled: base.ladderEnabled !== false,
     ladder,

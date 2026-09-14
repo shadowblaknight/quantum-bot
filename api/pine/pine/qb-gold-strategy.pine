@@ -67,10 +67,21 @@ c2MinRangeASIA = input.float(5.0, "U/V) Min ORB range to trade (pts)", group=G_A
 
 G_STRAT = "Strategy"
 exitMode  = input.string("TP1 · 1R", "Exit target",
-            options=["TP1 · 1R", "TP2 · 2R", "TP3 · 3R", "Split TP1+TP2", "Trail after TP1", "Scale 30/75/150"],
+            options=["TP1 · 1R", "TP2 · 2R", "TP3 · 3R", "Split TP1+TP2", "Trail after TP1", "Scale 30/75/150", "Ratchet (no TP)"],
             tooltip="TP1/TP2/TP3: fixed single-target exits. Split: 50% at TP1 + 50% at TP2. Trail: trail stop after TP1. Scale 30/75/150 (H/M only): 25% at 0.30×range, 50% at 0.75×range, 25% runner at 1.50×range — BE stop on remaining after TP1 hit. Python v4: WR 82.8%, PF 2.030.",
             group=G_STRAT)
 showBoxes      = input.bool(true, "Show position boxes", group=G_STRAT)
+trailArm  = input.float(0.75, "Ratchet: arm trail after (x ORB range)", group=G_STRAT, minval=0.05, maxval=10.0, step=0.05,
+            tooltip="How far price must travel past the ORB level before the trail takes over from the original stop. 0.75 = the old TP1 distance.")
+trailKeep = input.float(0.75, "Ratchet: fraction of reach locked", group=G_STRAT, minval=0.10, maxval=0.95, step=0.05,
+            tooltip="Stop sits at this fraction of the furthest excursion, so it locks PROFIT rather than returning to entry.
+
+  reach 0.75 -> locks 0.56
+  reach 1.00 -> locks 0.75
+  reach 2.00 -> locks 1.50
+  reach 10.0 -> locks 7.50
+
+Giveback is (1 - this). Capped at 0.95 because a stop sitting exactly on the extreme is taken out by the first tick of noise.")
 orbSLMode      = input.string("Wide SL", "H/M) SL mode",
                  options=["Wide SL", "Tight SL + entry TPs", "Tight SL + OR-edge TPs"],
                  tooltip="Wide SL: SL at opposite OR extreme, TPs at OR multiples (baseline). Tight SL + entry TPs: SL at breakout level, TPs scale from entry (1:1 system). Tight SL + OR-edge TPs: tiny SL, original large TPs (asymmetric R:R).",
@@ -872,6 +883,57 @@ if in_tok_window
 if not in_tok_window and in_tok_window[1] and not na(tok_hi)
     tok_locked := true
 
+// ─── RATCHET (NO TP) — unlimited runner, stop-only exit ──────────────
+// No take-profit order at all. The position closes ONLY when the ratcheting
+// stop is hit, so a trade that keeps going keeps going — 10R, 20R, no cap.
+//
+// Rungs are spaced in ORB-RANGE units, NOT R. R here is the 150-pt stop while
+// the ORB range is ~24 pts, so an R-spaced ladder would put its first rung
+// ~112 pts away — 1.5-3 daily ranges — and would essentially never arm. Range
+// units put rung 1 at ~18 pts, where price actually trades.
+//
+//   reach 1 x step  -> stop to ENTRY (true breakeven, accounts for _c2Depth)
+//   reach 2 x step  -> stop to 1 x step beyond the ORB level
+//   reach n x step  -> stop to (n-1) x step        ... unbounded
+//
+// step = orb_range * orbTPMult, i.e. the same spacing as tp1/tp2/tp3.
+var float  _rt_lvl   = na     // ORB structural level the rungs measure from
+var float  _rt_entry = na     // actual fill reference (level +/- _c2Depth)
+var float  _rt_rng   = na     // ORB range captured at signal time
+var int    _rt_dir   = 0      // +1 long, -1 short, 0 idle
+var string _rt_id    = na     // entry order id
+var float  _rt_sl    = na     // current stop
+var float  _rt_reach = 0.0    // furthest excursion reached, in step units
+
+if exitMode == "Ratchet (no TP)" and _rt_dir != 0 and not na(_rt_lvl) and strategy.position_size != 0
+    step = _rt_rng * orbTPMult
+    if step > 0
+        // Excursion beyond the ORB level, in step units (1.0 = one TP step).
+        reach = _rt_dir == 1 ? (high - _rt_lvl) / step : (_rt_lvl - low) / step
+        if reach > _rt_reach
+            _rt_reach := reach
+        if _rt_reach >= trailArm
+            // Stop sits at a FRACTION of the furthest excursion, so it locks
+            // PROFIT rather than returning to entry: reach 0.75 with keep 0.75
+            // locks 0.5625. Never gives back more than (1 - trailKeep).
+            cand = _rt_lvl + _rt_dir * (_rt_reach * trailKeep) * step
+            better = _rt_dir == 1 ? cand > _rt_sl : cand < _rt_sl
+            if better
+                _rt_sl := cand
+        // stop only — no limit arg means no take-profit is ever placed
+        strategy.exit(_rt_id + "-X", from_entry=_rt_id, stop=_rt_sl)
+
+// Clear ratchet state only on an ACTUAL close (was in a position, now flat).
+// Testing position_size == 0 alone would wipe the state of a C2 limit that is
+// armed but not yet filled — every retest entry sits flat before it fills.
+var float _rt_prevSize = 0.0
+if strategy.position_size == 0 and _rt_prevSize != 0
+    _rt_dir  := 0
+    _rt_reach := 0.0
+    _rt_lvl  := na
+    _rt_sl   := na
+_rt_prevSize := strategy.position_size
+
 // ─── SCALE 30/75/150 — BE STOP MANAGEMENT ────────────────────────────
 // Tracks open multi-TP positions (H/M only). When TP1 fires (position
 // shrinks by ≥15%), cancels original X2/X3 and re-issues them with
@@ -925,6 +987,14 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             // the ORB level either way, so only the entry price differs.
             c2LimFL = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("FRB-L", strategy.long, limit=c2LimFL, comment="frankfurt-orb · C2 LONG")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := frb_hi
+                _rt_entry := entryP
+                _rt_rng   := orb_range
+                _rt_dir   := 1
+                _rt_id    := "FRB-L"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -942,6 +1012,8 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
                 _mtp_run := sc3
                 _mtp_id  := "FRB-L"
                 _mtp_be  := false
+            else if exitMode == "Ratchet (no TP)"
+                strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP)
             else
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
@@ -959,6 +1031,14 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             frb_short_today := true
             c2LimFS = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("FRB-S", strategy.short, limit=c2LimFS, comment="frankfurt-orb · C2 SHORT")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := frb_lo
+                _rt_entry := entryP
+                _rt_rng   := orb_range
+                _rt_dir   := -1
+                _rt_id    := "FRB-S"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-S-X", from_entry="FRB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -976,6 +1056,8 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
                 _mtp_run := sc3
                 _mtp_id  := "FRB-S"
                 _mtp_be  := false
+            else if exitMode == "Ratchet (no TP)"
+                strategy.exit("FRB-S-X", from_entry="FRB-S", stop=slP)
             else
                 strategy.exit("FRB-S-X", from_entry="FRB-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
@@ -1085,6 +1167,14 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             nyorb_done := true
             c2LimNL = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("NYORB-L", strategy.long, limit=c2LimNL, comment="ny-orb · C2 LONG")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := nyorb_hi
+                _rt_entry := entryP
+                _rt_rng   := orb_range
+                _rt_dir   := 1
+                _rt_id    := "NYORB-L"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -1102,6 +1192,8 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
                 _mtp_run := sc3
                 _mtp_id  := "NYORB-L"
                 _mtp_be  := false
+            else if exitMode == "Ratchet (no TP)"
+                strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP)
             else
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
@@ -1118,6 +1210,14 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             nyorb_done := true
             c2LimNS = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("NYORB-S", strategy.short, limit=c2LimNS, comment="ny-orb · C2 SHORT")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := nyorb_lo
+                _rt_entry := entryP
+                _rt_rng   := orb_range
+                _rt_dir   := -1
+                _rt_id    := "NYORB-S"
+                _rt_sl    := slP
+                _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
             else if exitMode == "Split TP1+TP2"
@@ -1135,6 +1235,8 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
                 _mtp_run := sc3
                 _mtp_id  := "NYORB-S"
                 _mtp_be  := false
+            else if exitMode == "Ratchet (no TP)"
+                strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP)
             else
                 strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
@@ -1166,6 +1268,8 @@ f_c2Exit(string id, float slP, float tp1, float tp2, float tp3, float rng) =>
     else if exitMode == "Split TP1+TP2"
         strategy.exit(id + "-X1", from_entry=id, qty_percent=50, stop=slP, limit=tp1)
         strategy.exit(id + "-X2", from_entry=id, stop=slP, limit=tp2)
+    else if exitMode == "Ratchet (no TP)"
+        strategy.exit(id + "-X", from_entry=id, stop=slP)
     else
         strategy.exit(id + "-X", from_entry=id, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
 

@@ -253,6 +253,9 @@ async function actionSetSettings(body) {
   if (!body || typeof body !== 'object') return err('missing body');
   const patch = {};
   if (body.riskPct !== undefined)       patch.riskPct = body.riskPct;
+  if (body.exitMode !== undefined)      patch.exitMode = body.exitMode;
+  if (body.trailArm !== undefined)      patch.trailArm = body.trailArm;
+  if (body.trailKeep !== undefined)     patch.trailKeep = body.trailKeep;
   if (body.tpR !== undefined)           patch.tpR = body.tpR;
   if (body.ladderEnabled !== undefined) patch.ladderEnabled = body.ladderEnabled;
   if (body.ladder !== undefined)        patch.ladder = body.ladder;

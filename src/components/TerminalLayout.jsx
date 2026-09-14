@@ -493,6 +493,65 @@ export default function TerminalLayout({
   const [lotInputSP, setLotInputSP] = useState(() => parseFloat(localStorage.getItem('qb_lot_size_sp') || '6.67').toFixed(2));
   const [lotSavedSP, setLotSavedSP] = useState(false);
 
+  // ── Live trade settings (backend: settings-store) ───────────────────────────
+  // risk% used to be hardcoded in THREE places — this display, the save call
+  // (which POSTed to /api/manage, a route that does not exist), and
+  // webhook.js. Setting 2% therefore changed nothing anywhere. This is now the
+  // single source: read on mount, written through dashboard-feed.
+  const [settings, setSettings] = useState(null);
+  const [riskInput, setRiskInput] = useState('1.00');
+  const [riskSaving, setRiskSaving] = useState(false);
+  const [riskSaved, setRiskSaved] = useState(false);
+  const [riskErr, setRiskErr] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/dashboard-feed?action=settings')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!alive || !d || !d.settings) return;
+        setSettings(d.settings);
+        setRiskInput((d.settings.riskPct * 100).toFixed(2));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  // Every setting goes through here. The store clamps on write, so we always
+  // re-render from the RESPONSE — what the bot actually stored, not what was typed.
+  const saveSettings = useCallback(async (patch) => {
+    setRiskSaving(true); setRiskErr(null);
+    try {
+      const res = await fetch('/api/dashboard-feed?action=set-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const d = await res.json();
+      if (!res.ok || !d.ok || !d.settings) throw new Error(d.error || `HTTP ${res.status}`);
+      setSettings(d.settings);
+      setRiskInput((d.settings.riskPct * 100).toFixed(2));
+      setRiskSaved(true);
+      setTimeout(() => setRiskSaved(false), 2500);
+    } catch (e) {
+      setRiskErr(e.message || 'save failed');
+    } finally {
+      setRiskSaving(false);
+    }
+  }, []);
+
+  const saveRisk = useCallback((pctNum) => {
+    if (!Number.isFinite(pctNum) || pctNum <= 0) { setRiskErr('invalid risk %'); return; }
+    saveSettings({ riskPct: pctNum / 100 });
+  }, [saveSettings]);
+
+  // Trail geometry, in ORB-range units measured from the ORB level.
+  const trailArm  = settings?.trailArm  ?? 0.75;
+  const trailKeep = settings?.trailKeep ?? 0.75;
+
+  // Everything downstream sizes off this. Falls back to 1% until the fetch lands.
+  const acctRiskPct = settings?.riskPct ?? 0.01;
+
   // Canvas refs
   const ftmoRef   = useRef(null);
   const equityRef = useRef(null); const equityWrap = useRef(null);
@@ -539,7 +598,7 @@ export default function TerminalLayout({
   const dailyLoss = (ledger||[]).filter(t=>t.closedAt&&new Date(t.closedAt).toISOString().slice(0,10)===today&&(t.finalPnL||0)<0).reduce((s,t)=>s+Math.abs(t.finalPnL||0),0);
   const dailyRemain = Math.max(0, dailyLimit - dailyLoss);
   const budgetPct = (riskAmt / dailyLimit) * 100;
-  const recLot = Math.max(0.01, Math.floor((accEq * 0.01) / (GS1_SL * POINT_VAL) * 100) / 100);
+  const recLot = Math.max(0.01, Math.floor((accEq * acctRiskPct) / (GS1_SL * POINT_VAL) * 100) / 100);
   // Trailing stop EV model: 97.5% reach TP1 (BE trigger)
   // Of those: 35% close BE($0), 40% close at TP1-trail (+$15), 15% at TP2-trail (+$30), 10% runner (+$50 avg)
   const trailEV_price = 0.025*(-GS1_SL) + 0.975*(0.35*0 + 0.40*GS1_TP + 0.15*GS1_TP*2 + 0.10*GS1_TP*3.33);
@@ -560,7 +619,7 @@ export default function TerminalLayout({
   const riskAmtSP    = lotSizeSP * SP500_SL * SP500_POINT_VAL;
   const rewardAmtSP  = lotSizeSP * SP500_TP * SP500_POINT_VAL;
   const riskPctSP    = (riskAmtSP / accEq) * 100;
-  const recLotSP     = Math.max(0.01, Math.floor((accEq * 0.01) / (SP500_SL * SP500_POINT_VAL) * 100) / 100);
+  const recLotSP     = Math.max(0.01, Math.floor((accEq * acctRiskPct) / (SP500_SL * SP500_POINT_VAL) * 100) / 100);
   const budgetPctSP  = (riskAmtSP / dailyLimit) * 100;
   const riskBlockSP  = riskAmtSP >= dailyRemain || riskPctSP >= 4.5;
   const riskWarnSP   = !riskBlockSP && (riskPctSP >= 2 || budgetPctSP >= 40);
@@ -704,8 +763,8 @@ export default function TerminalLayout({
                 </div>
               </div>
               <div className="qc-stitle" style={{marginBottom:5}}>SIZING ENGINE</div>
-              <div className="qc-row"><span className="qc-rl">Risk per trade</span><span className="qc-rv" style={{color:C.gold}}>{equity>0?`$${(equity*0.01).toFixed(0)}`:'—'}</span></div>
-              <div className="qc-row"><span className="qc-rl">Account risk</span><span className="qc-rv">1.00%</span></div>
+              <div className="qc-row"><span className="qc-rl">Risk per trade</span><span className="qc-rv" style={{color:C.gold}}>{equity>0?`$${(equity*acctRiskPct).toFixed(0)}`:'—'}</span></div>
+              <div className="qc-row"><span className="qc-rl">Account risk</span><span className="qc-rv" style={{color:settings?C.green2:C.t3}}>{(acctRiskPct*100).toFixed(2)}%{settings?'':' ·'}</span></div>
               <div className="qc-row"><span className="qc-rl">Lot size</span><span className="qc-rv" style={{color:C.t3}}>—</span></div>
               <div className="qc-row"><span className="qc-rl">Compound mode</span><span className="qc-rv" style={{color:C.ml2}}>ADAPTIVE</span></div>
               <div className="qc-stitle" style={{margin:'8px 0 5px'}}>LAST CLOSED TRADE</div>
@@ -910,6 +969,119 @@ export default function TerminalLayout({
           <div className={`qc-view${activeView==='risk'?' active':''}`} id="qc-view-risk">
             <div style={{padding:'12px 14px',display:'flex',flexDirection:'column',gap:10,height:'100%',overflowY:'auto',boxSizing:'border-box'}}>
 
+              {/* ── ACCOUNT RISK — the value the bot actually sizes with ───── */}
+              <div style={{background:C.s1,border:`1px solid ${settings?C.green2:C.warn2}55`,padding:'10px 14px'}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                  <div style={{fontSize:8,color:C.t3,letterSpacing:1,fontFamily:'JetBrains Mono,monospace'}}>
+                    ACCOUNT RISK PER TRADE · LIVE
+                  </div>
+                  <span style={{fontSize:7,fontFamily:'JetBrains Mono,monospace',
+                                color:!settings?C.warn2:riskErr?C.red2:riskSaved?C.green2:C.t3}}>
+                    {!settings?'LOADING…':riskErr?`ERR: ${riskErr}`:riskSaving?'SAVING…':riskSaved?'✓ SAVED TO BOT':'synced'}
+                  </span>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                  <input type="number" value={riskInput} min="0.1" max="5" step="0.1" disabled={!settings||riskSaving}
+                    onChange={e=>setRiskInput(e.target.value)}
+                    onKeyDown={e=>{if(e.key==='Enter')saveRisk(parseFloat(riskInput));}}
+                    style={{width:78,background:C.bg,border:`1px solid ${C.b2}`,color:C.gold,
+                            fontFamily:'JetBrains Mono,monospace',fontSize:16,textAlign:'center',
+                            padding:'4px 8px',outline:'none',fontWeight:700}}/>
+                  <span style={{fontSize:10,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>% EQUITY</span>
+                  <div style={{display:'flex',gap:4}}>
+                    {[1,1.5,2,3].map(p=>(
+                      <button key={p} disabled={!settings||riskSaving}
+                        onClick={()=>{setRiskInput(p.toFixed(2));saveRisk(p);}}
+                        style={{padding:'4px 10px',background:Math.abs(acctRiskPct*100-p)<0.001?C.b2:'transparent',
+                                border:`1px solid ${Math.abs(acctRiskPct*100-p)<0.001?C.gold:C.b2}`,
+                                color:Math.abs(acctRiskPct*100-p)<0.001?C.gold:C.t2,fontSize:9,
+                                fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{p}%</button>
+                    ))}
+                  </div>
+                  <button disabled={!settings||riskSaving} onClick={()=>saveRisk(parseFloat(riskInput))}
+                    style={{marginLeft:'auto',padding:'5px 16px',background:C.b2,border:`1px solid ${C.green2}`,
+                            color:C.green2,fontSize:9,letterSpacing:1,fontWeight:700,
+                            fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>APPLY</button>
+                </div>
+                <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
+                  Writes to the bot's settings store — <span style={{color:C.t2}}>webhook.js reads this at order placement</span>.
+                  Clamped to 0.1–5%; the box shows what was actually stored.
+                  {equity>0&&<> Current: <span style={{color:C.gold,fontFamily:'JetBrains Mono,monospace'}}>${(equity*acctRiskPct).toFixed(0)}</span> per trade.</>}
+                </div>
+              </div>
+
+              {/* ── BREAKEVEN / TRAIL — what manage-trades does to a live stop ── */}
+              <div style={{background:C.s1,border:`1px solid ${settings?C.blue3:C.warn2}55`,padding:'10px 14px'}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                  <div style={{fontSize:8,color:C.t3,letterSpacing:1,fontFamily:'JetBrains Mono,monospace'}}>
+                    BREAKEVEN / TRAIL · LIVE
+                  </div>
+                  <span style={{fontSize:7,fontFamily:'JetBrains Mono,monospace',
+                                color:settings?.exitMode==='ratchet'?C.green2:C.t3}}>
+                    {!settings?'LOADING…':settings.exitMode==='ratchet'?'RATCHET · NO TP':'FINAL TP · CLOSES AT TP3'}
+                  </span>
+                </div>
+
+                <div style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap',marginBottom:8}}>
+                  <div>
+                    <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>ARM AFTER (× ORB RANGE)</div>
+                    <div style={{display:'flex',gap:4}}>
+                      {[0.5,0.75,1.0].map(v=>(
+                        <button key={v} disabled={!settings||riskSaving}
+                          onClick={()=>saveSettings({trailArm:v})}
+                          style={{padding:'4px 10px',background:Math.abs(trailArm-v)<0.001?C.b2:'transparent',
+                                  border:`1px solid ${Math.abs(trailArm-v)<0.001?C.blue3:C.b2}`,
+                                  color:Math.abs(trailArm-v)<0.001?C.blue3:C.t2,fontSize:9,
+                                  fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>LOCK FRACTION OF REACH</div>
+                    <div style={{display:'flex',gap:4}}>
+                      {[0.5,0.65,0.75,0.85].map(v=>(
+                        <button key={v} disabled={!settings||riskSaving}
+                          onClick={()=>saveSettings({trailKeep:v})}
+                          style={{padding:'4px 10px',background:Math.abs(trailKeep-v)<0.001?C.b2:'transparent',
+                                  border:`1px solid ${Math.abs(trailKeep-v)<0.001?C.gold:C.b2}`,
+                                  color:Math.abs(trailKeep-v)<0.001?C.gold:C.t2,fontSize:9,
+                                  fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <button disabled={!settings||riskSaving}
+                    onClick={()=>saveSettings({exitMode:settings?.exitMode==='ratchet'?'final-tp':'ratchet'})}
+                    style={{marginLeft:'auto',padding:'5px 14px',background:'transparent',
+                            border:`1px solid ${settings?.exitMode==='ratchet'?C.green2:C.t3}`,
+                            color:settings?.exitMode==='ratchet'?C.green2:C.t3,fontSize:8,letterSpacing:.5,
+                            fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                    {settings?.exitMode==='ratchet'?'RATCHET ON':'RATCHET OFF'}
+                  </button>
+                </div>
+
+                {/* Live preview — what the stop actually locks at each excursion */}
+                <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:4}}>
+                  {[0.5,0.75,1.5,3,10].map(r=>{
+                    const armed = r>=trailArm;
+                    const lock  = r*trailKeep;
+                    return (
+                      <div key={r} style={{background:C.bg,border:`1px solid ${armed?C.b2:C.b}`,padding:'5px 6px',textAlign:'center'}}>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>reach {r}×</div>
+                        <div style={{fontSize:11,fontWeight:700,fontFamily:'JetBrains Mono,monospace',
+                                     color:armed?C.green2:C.t3}}>
+                          {armed?`${lock.toFixed(2)}×`:'—'}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
+                  Stop trails at <span style={{color:C.gold}}>{(trailKeep*100).toFixed(0)}%</span> of the furthest move once price clears{' '}
+                  <span style={{color:C.blue3}}>{trailArm.toFixed(2)}×</span> the ORB range — it locks profit, never returns to entry.
+                  Giveback is capped at <span style={{color:C.t2}}>{((1-trailKeep)*100).toFixed(0)}%</span>. No take-profit is placed, so a runner is uncapped.
+                </div>
+              </div>
+
               {/* Header */}
               <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between'}}>
                 <div>
@@ -1024,7 +1196,8 @@ export default function TerminalLayout({
                   localStorage.setItem('qb_lot_size', lotSize.toString());
                   setLotSaved(true);
                   setTimeout(()=>setLotSaved(false), 2500);
-                  fetch('/api/manage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setLotSize',lotSize})}).catch(()=>{});
+                  // No backend call: live lot is computed by webhook.js as
+                  // riskPct / SL-distance. This input is a local preview only.
                 }}
                 style={{
                   marginTop:4,padding:'10px 0',
@@ -1118,7 +1291,7 @@ export default function TerminalLayout({
                     localStorage.setItem('qb_lot_size_sp', lotSizeSP.toString());
                     setLotSavedSP(true);
                     setTimeout(()=>setLotSavedSP(false), 2500);
-                    fetch('/api/manage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setLotSizeSP',lotSize:lotSizeSP})}).catch(()=>{});
+                    // Local preview only — see the gold button above.
                   }}
                   style={{
                     width:'100%',padding:'10px 0',

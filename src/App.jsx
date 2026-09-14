@@ -167,10 +167,16 @@ export default function App() {
   // ── Position actions (BE / partial / close) ───────────────────────────────────
   const handlePositionAction = useCallback(async (action, positionId) => {
     try {
-      await fetch(`/api/manage?action=${action}&positionId=${encodeURIComponent(positionId)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
+      // /api/manage does not exist — these actions live on manage-trades.js.
+      // Every BE / 50% / close click used to 404 silently.
+      const res = await fetch(
+        `/api/manage-trades?action=${action}&positionId=${encodeURIComponent(positionId)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      );
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        console.error(`position ${action} failed:`, d.error || res.status);
+      }
       // Re-fetch positions after 2 s to reflect the change
       setTimeout(fetchPositionsAndCapital, 2000);
     } catch {}

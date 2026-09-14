@@ -37,6 +37,7 @@ const {
   notifySpecialistSLLocked, notifySpecialistSLWarning, notifyOCOFailed,
 } = require('./telegram');
 const { SPECIALIST_SIGNALS } = require('./_templates');
+const { getTradeSettings } = require('./settings-store');
 const { checkAllWatchedSetups } = require('./watched-setups-checker');
 
 // v14: all-or-nothing exits. The full position rides to the FINAL TP (parked as
@@ -402,7 +403,14 @@ async function managePosition(position) {
   const tpLevels = matchedPending.tpLevels || [];
   // v14: the broker TP sits here; SL ratchets toward earlier TPs but the broker
   // TP must stay parked at the final target on every modify (null would clear it).
-  const finalTPPrice = tpLevels.length ? tpLevels[tpLevels.length - 1].price : null;
+  // Ratchet mode parks NO take-profit at all: the position is uncapped and
+  // exits only when the ratcheting stop catches it. modifyPosition receives
+  // null, which clears any TP the order was placed with.
+  const _qbSettings = await getTradeSettings();
+  const RATCHET_MODE = _qbSettings.exitMode === 'ratchet';
+  const finalTPPrice = RATCHET_MODE
+    ? null
+    : (tpLevels.length ? tpLevels[tpLevels.length - 1].price : null);
   if (tpLevels.length === 0) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
@@ -491,7 +499,8 @@ async function managePosition(position) {
 
   // ─── FINAL TP backstop close ─────────────────────────────────────
   const finalName = `TP${finalIdx + 1}`;
-  if (finalTouched && !state.tpsHit.includes(finalName)) {
+  // In ratchet mode the last TP is just another rung — never a close.
+  if (!RATCHET_MODE && finalTouched && !state.tpsHit.includes(finalName)) {
     const tpPrice = tpLevels[finalIdx].price;
     const closeResult = await partialClose(position.id, position.volume);
     if (closeResult.ok) {
@@ -538,7 +547,38 @@ async function managePosition(position) {
   const isSpecialistTrade = !!(matchedPending?.setup && SPECIALIST_SIGNALS.includes(matchedPending.setup.template));
   let chosen = null;
 
-  if (isSpecialistTrade && hitRungs.length > 0) {
+  if (RATCHET_MODE && tpLevels.length >= 2) {
+    // ─── UNBOUNDED RATCHET ───────────────────────────────────────────
+    // tp1/tp2/tp3 arrive equally spaced from the ORB level, so one step is
+    // (tp2 - tp1) and the level sits one step below tp1. That lets us extend
+    // rungs past TP3 forever instead of stopping at the last TP the Pine sent.
+    //
+    //   cleared rung 1 (= tp1) -> SL to ENTRY   (breakeven)
+    //   cleared rung n         -> SL to rung n-1
+    //
+    // Rung is derived from the favourable EXTREME since open, not the live
+    // price, so a spike that ratchets and then retraces keeps its locked level.
+    const step  = Math.abs(tpLevels[1].price - tpLevels[0].price);
+    const level = isLong ? tpLevels[0].price - step : tpLevels[0].price + step;
+    if (step > 0) {
+      // Excursion beyond the ORB level, in range units (1.0 = one TP step).
+      const reach = isLong ? (extreme - level) / step : (level - extreme) / step;
+      // High-water: a retrace can never reduce what has already been locked.
+      state.maxReach = Math.max(state.maxReach || 0, reach);
+
+      if (state.maxReach >= _qbSettings.trailArm) {
+        // Stop sits at a FRACTION of the furthest excursion — locking profit,
+        // not returning to entry. reach 0.75 with keep 0.75 -> 0.5625 locked.
+        const lockUnits = state.maxReach * _qbSettings.trailKeep;
+        const slTarget  = isLong ? level + lockUnits * step : level - lockUnits * step;
+        const valid     = isLong ? slTarget <= currentPrice - stopBuffer : slTarget >= currentPrice + stopBuffer;
+        const improves  = curSL == null ? true : (isLong ? slTarget > curSL : slTarget < curSL);
+        if (valid && improves) {
+          chosen = { name: `trail-${lockUnits.toFixed(2)}x`, price: slTarget };
+        }
+      }
+    }
+  } else if (isSpecialistTrade && hitRungs.length > 0) {
     // ─── SPECIALIST SL CASCADE (gold-specialist / gold-specialist-2 / nas100-specialist) ──────────
     // ICT/SMC risk management: each confirmed TP locks the previous level, not itself.
     //   TP1 hit → SL moves to breakeven (entry)   — trade becomes risk-free
@@ -1334,6 +1374,50 @@ module.exports = async (req, res) => {
   if (applyCors(req, res)) return;
   try {
     const action = (req.query && req.query.action) || '';
+
+    // ── Manual position actions from the dashboard ──────────────────────────
+    // The BE / 50% / ✕ buttons in the positions table were wired in the UI but
+    // POSTed to /api/manage — a route that does not exist, so every click 404'd
+    // silently. These three actions are that missing backend.
+    //
+    // Live money: each requires POST + an explicit positionId, and operates only
+    // on a position the broker currently reports. Nothing is inferred.
+    if (action === 'be' || action === 'partial' || action === 'close') {
+      if (req.method !== 'POST') {
+        return res.status(405).json({ ok: false, error: `${action} requires POST` });
+      }
+      const positionId = String((req.query && req.query.positionId) || (req.body && req.body.positionId) || '');
+      if (!positionId) return res.status(400).json({ ok: false, error: 'missing positionId' });
+
+      const positions = await fetchPositions();
+      const pos = (positions || []).find(p => String(p.id) === positionId);
+      if (!pos) return res.status(404).json({ ok: false, error: 'position not found', positionId });
+
+      if (action === 'close') {
+        const r = await partialClose(positionId, pos.volume);
+        return res.status(r.ok ? 200 : 500).json({ ...r, action, positionId, closedLot: pos.volume });
+      }
+
+      if (action === 'partial') {
+        // Round DOWN to the 0.01 lot step so we can never try to close more
+        // than is open; floor at the broker minimum.
+        const half = Math.max(0.01, Math.floor((pos.volume / 2) * 100) / 100);
+        if (half >= pos.volume) {
+          return res.status(400).json({ ok: false, error: 'position too small to halve', volume: pos.volume });
+        }
+        const r = await partialClose(positionId, half);
+        return res.status(r.ok ? 200 : 500).json({ ...r, action, positionId, closedLot: half });
+      }
+
+      // be — move SL to entry, leave TP untouched
+      const asset = pos.assetId || await resolveAsset(pos.symbol);
+      if (!asset) return res.status(400).json({ ok: false, error: 'cannot resolve asset', symbol: pos.symbol });
+      const entry = pos.openPrice;
+      if (!(entry > 0)) return res.status(400).json({ ok: false, error: 'no open price on position' });
+      const r = await modifyPosition(positionId, entry, pos.takeProfit || null, asset);
+      return res.status(r.ok ? 200 : 500).json({ ...r, action, positionId, newSL: entry });
+    }
+
     if (action === 'today-pnl') {
       return res.status(200).json(await getTodayRealized());
     }
