@@ -33,7 +33,10 @@ const V20_SPECIALIST_MODE = true;
 const SPECIALIST_ALLOWED_ZONES = {
   // GS1 confirmed active: H=NYORB (NY ORB) + M=FRB (Frankfurt Retest Breakout) only.
   // All other sub-signals (FVG, Asian-H/L, SB-FVG, PSYCH, PSYCH-EXT) dropped silently.
-  'gold-specialist':   ['FRB', 'NYORB'],
+  // 'SYD' added 2026-09-16 (Signal U, Sydney ORB). Without it the webhook drops
+  // every U alert silently as specialist-zone-inactive — the same class of miss
+  // that blocked sp500-specialist twice.
+  'gold-specialist':   ['FRB', 'NYORB', 'SYD'],
   // gold-specialist-2 retired — signals get 200 template-disabled from webhook
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
   'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)

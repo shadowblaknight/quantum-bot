@@ -45,6 +45,7 @@ modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_COR
 modPsychExt   = input.bool(true,  "D2) Psych Extended — outside kill zones (2/3 HTF required)", group=G_CORE)
 modFRB        = input.bool(true,  "M) Frankfurt ORB — Both directions, H1+H4 + Asian extreme required", group=G_CORE)
 modNYORB      = input.bool(true,  "H) NY ORB — Both directions, H1+H4 required",                group=G_CORE)
+modSYD        = input.bool(true,  "U) Sydney ORB — Both directions, H1+H4 required (1yr sample only)", group=G_CORE)
 
 G_C2 = "C2 — OCO (Signal M + H)"
 c2SLBuf    = input.float(150.0, "SL beyond C2 level (pts)",        group=G_C2, step=0.5,
@@ -56,6 +57,14 @@ c2RetestDepth = input.float(0.25, "Partial retest depth (× ORB range)", group=G
 
 // Clamped so the limit can never sit at or past its own target.
 _c2Depth = math.min(c2RetestDepth, c2TpMult * 0.9)
+
+G_SYD = "U — Sydney ORB"
+sydOpenHr     = input.int(22, "U) Sydney open (UTC hour)", group=G_SYD, minval=18, maxval=23,
+                tooltip="Sydney is UTC+10 (AEST) / UTC+11 (AEDT), so 07:00 local falls on 21:00 or 22:00 UTC depending on DST. 22 is the backtested default. WARNING: 21:00-22:00 UTC is also the broker rollover on XAUUSD — spreads widen sharply and some brokers reject orders during the daily break. This is the main live risk that no backtest shows.")
+sydOrbMins    = input.int(30, "U) Sydney ORB length (mins)", group=G_SYD, minval=15, maxval=120, step=15)
+sydTradeMins  = input.int(90, "U) Sydney trade window after ORB (mins)", group=G_SYD, minval=30, maxval=300, step=30)
+c2MinRangeSYD = input.float(5.0, "U) Min Sydney ORB range (pts)", group=G_SYD, step=1.0,
+                tooltip="Skip the session if the opening range is thinner than this. Asian liquidity is a fraction of Frankfurt/NY, so this floor blocks most sessions — that is intended. Note it is also why U has almost no history before 2025: the floor only began clearing once gold ran from ~1,900 to ~4,300 and ranges scaled with price.")
 
 G_FILT = "Filters"
 // Per-signal ADR thresholds — each setup has different tolerance for range consumption.
@@ -154,6 +163,19 @@ in_frb_window   = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 450
 in_frb_trade    = timeframe.isintraday and (_minOfDay >= 450 and _minOfDay < 660)  // 07:30-11:00 UTC trade window
 in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)  // 14:00-14:30 UTC range build
 
+// U) Sydney windows. Wrap-safe: a 22:00 UTC open straddles midnight, where
+// _minOfDay resets to 0 while the session is still running, so a plain
+// (>= start and < end) test would evaluate false for the whole second half.
+f_inWin(int startMin, int endMin) =>
+    s = startMin % 1440
+    e = endMin % 1440
+    timeframe.isintraday and (e > s ? (_minOfDay >= s and _minOfDay < e) : (_minOfDay >= s or _minOfDay < e))
+
+_sydOrbStart  = sydOpenHr * 60
+_sydOrbEnd    = _sydOrbStart + sydOrbMins
+in_syd_window = f_inWin(_sydOrbStart, _sydOrbEnd)
+in_syd_trade  = f_inWin(_sydOrbEnd,   _sydOrbEnd + sydTradeMins)
+
 string sess_label = in_sb_win ? "NY_PM" : in_overlap ? "NY_AM" : in_london ? "LONDON" : in_asian ? "ASIAN" : "OFF"
 
 // Per-signal ADR gates — all use _adrConsumed[1] (previous bar) so the trigger
@@ -225,6 +247,30 @@ if in_nyorb_window
 
 if not in_nyorb_window and in_nyorb_window[1] and not na(nyorb_hi)
     nyorb_locked := true
+
+// ─── U) SYDNEY ORB RANGE TRACKING ────────────────────────────────────
+// Reset on the RISING EDGE OF ITS OWN WINDOW, never on _newDay. On XAUUSD the
+// broker day rolls at 21:00/22:00 UTC — exactly when this session opens — so a
+// _newDay reset would wipe the range mid-build or immediately after it locks.
+// Keying the reset to the window makes each Sydney session self-contained no
+// matter where the broker day boundary falls.
+var float syd_hi     = na
+var float syd_lo     = na
+var bool  syd_locked = false
+var bool  syd_done   = false
+
+if in_syd_window and not in_syd_window[1]
+    syd_hi     := na
+    syd_lo     := na
+    syd_locked := false
+    syd_done   := false
+
+if in_syd_window
+    syd_hi := na(syd_hi) ? high : math.max(syd_hi, high)
+    syd_lo := na(syd_lo) ? low  : math.min(syd_lo, low)
+
+if not in_syd_window and in_syd_window[1] and not na(syd_hi)
+    syd_locked := true
 
 // ─── BOS TRACKING ─────────────────────────────────────────────────────
 // Lightweight: a "bullish BOS" = new confirmed swing high above the prior one
@@ -866,6 +912,63 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL U — Sydney ORB  (zoneType: SYD)
+// ─────────────────────────────────────────────────────────────────────
+// Identical C2 architecture to M and H: 30-min opening range at the Sydney
+// open, first close outside it is the breakout, a limit rests back at the
+// level shifted by _c2Depth, SL = level ± c2SLBuf, TPs = range × c2TpMult ×
+// {1,2,3}, H1+H4 must align, min-range floor, ADR gate, one signal per session.
+//
+// EVIDENCE, stated honestly: over 3 years U adds +$242 across 19 trades, and
+// ~18 of those 19 land in the last 12 months (see c2MinRangeSYD tooltip). Its
+// entire 3-year contribution is smaller than one average losing trade. This is
+// a one-year, one-regime sample, not a 3-year validation.
+// ═══════════════════════════════════════════════════════════════════════
+
+if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
+    orb_range_syd = syd_hi - syd_lo
+    // Wrap-safe minutes since the ORB locked (the window can cross midnight).
+    _sydMinsIn    = (_minOfDay - (_sydOrbEnd % 1440) + 1440) % 1440
+    if orb_range_syd >= c2MinRangeSYD
+        if close < syd_lo and h1B == -1 and h4B == -1
+            // C2 — SELL LIMIT: retest of the broken Sydney low (now resistance).
+            entryP  = syd_lo - orb_range_syd * _c2Depth
+            slP     = syd_lo + c2SLBuf
+            tp1     = syd_lo - orb_range_syd * c2TpMult
+            tp2     = syd_lo - orb_range_syd * c2TpMult * 2.0
+            tp3     = syd_lo - orb_range_syd * c2TpMult * 3.0
+            syd_done := true
+            fStr    = "SYD-C2✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                syd_hi, syd_lo, "SYD",
+                                "SYDNEY", "A", "h1+h4", fStr, _sydMinsIn),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, high, "⚡ SYD C2 SHORT",
+                      style=label.style_label_down, color=color.new(color.blue, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
+        else if close > syd_hi and h1B == 1 and h4B == 1
+            // C2 — BUY LIMIT: retest of the broken Sydney high (now support).
+            entryP  = syd_hi + orb_range_syd * _c2Depth
+            slP     = syd_hi - c2SLBuf
+            tp1     = syd_hi + orb_range_syd * c2TpMult
+            tp2     = syd_hi + orb_range_syd * c2TpMult * 2.0
+            tp3     = syd_hi + orb_range_syd * c2TpMult * 3.0
+            syd_done := true
+            fStr    = "SYD-C2✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+                                syd_hi, syd_lo, "SYD",
+                                "SYDNEY", "A", "h1+h4", fStr, _sydMinsIn),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, low, "⚡ SYD C2 LONG",
+                      style=label.style_label_up, color=color.new(color.blue, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
 // Psychological level guide lines — persistent array prevents line count blowout
 var array<line> _psych_lines = array.new<line>()
 if barstate.islast
@@ -885,7 +988,7 @@ var table stTbl = na
 
 if showStatusTbl and barstate.islast
     if na(stTbl)
-        stTbl := table.new(position.top_right, 2, 13,
+        stTbl := table.new(position.top_right, 2, 14,
                            bgcolor=color.new(color.black, 70),
                            border_color=color.new(color.gray, 60), border_width=1,
                            frame_color=color.new(color.gray, 60), frame_width=1)
@@ -956,6 +1059,11 @@ if showStatusTbl and barstate.islast
     nyorbCol = nyorb_done ? color.teal : (nyorb_locked and adr_hard_ok ? color.lime : color.gray)
     table.cell(stTbl, 0, 12, "NY ORB (H)", text_color=color.new(color.gray,15),  text_size=size.tiny, text_halign=text.align_left)
     table.cell(stTbl, 1, 12, nyorbStr,     text_color=color.new(nyorbCol, 0),    text_size=size.tiny, text_halign=text.align_right)
+
+    sydStr = not modSYD ? "off" : syd_done ? "fired" : (syd_locked and in_syd_trade and adr_hard_ok ? "watching" : in_syd_window ? "building" : "idle")
+    sydCol = not modSYD ? color.gray : syd_done ? color.blue : (syd_locked and in_syd_trade and adr_hard_ok ? color.lime : color.gray)
+    table.cell(stTbl, 0, 13, "Sydney (U)", text_color=color.new(color.gray,15),  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(stTbl, 1, 13, sydStr,       text_color=color.new(sydCol, 0),      text_size=size.tiny, text_halign=text.align_right)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
