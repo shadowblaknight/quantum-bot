@@ -47,6 +47,9 @@ const ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mn'];
 // manage-trades fires every 60s so the cache always expires before the next tick.
 const POSITIONS_CACHE_KEY = 'v14:broker:positions:cache';
 const POSITIONS_CACHE_TTL = 30; // seconds
+const ORDERS_CACHE_KEY    = 'v21:broker:orders:cache';
+const ORDERS_CACHE_TTL    = 15; // seconds — shorter than positions: a resting
+// limit can fill or be cancelled at any tick, and this feeds an entry decision.
 
 // Per-TF Redis cache TTLs (seconds). Same as V11.
 const TF_CACHE_TTL = {
@@ -253,6 +256,73 @@ async function fetchPositions() {
 }
 
 // =================================================================
+// PUBLIC API: PENDING ORDERS
+// =================================================================
+// ADDED 2026-09-21. Until now nothing in this codebase ever read /orders, so
+// every "is something already running on this asset?" check was blind to a
+// resting limit that had not filled yet. With C2 retest entries the order can
+// sit unfilled for HOURS, so that blind spot is the normal case, not an edge
+// one: Frankfurt arms a limit at 08:00, London fires at 09:00, the guard sees
+// no POSITION, and both orders end up live.
+//
+// Returns null on any broker error — same contract as fetchPositions, so the
+// caller can tell "broker is unreachable" apart from "no pending orders",
+// which must never be conflated when the answer gates placing a trade.
+async function fetchOrders() {
+  const r = getRedis();
+  if (r) {
+    try {
+      const cached = await r.get(ORDERS_CACHE_KEY).catch(() => null);
+      if (cached) {
+        const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (_) { /* cache miss — fall through to live fetch */ }
+  }
+
+  const url = `${metaapiBase()}/users/current/accounts/${accountId()}/orders`;
+  const { resp, error } = await metaapiFetch(url, 'fetchOrders');
+  if (error) {
+    console.warn(`[broker] fetchOrders failed: ${error}`);
+    return null; // SIGNAL: broker error, NOT a confirmed empty order book
+  }
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    console.warn(`[broker] fetchOrders ${resp.status}: ${txt.slice(0, 200)}`);
+    return null;
+  }
+
+  let orders = [];
+  try {
+    orders = await resp.json();
+  } catch (e) {
+    console.warn(`[broker] fetchOrders parse: ${e.message}`);
+    return null;
+  }
+
+  // Same assetId annotation as positions, same 1.5s cap so a slow resolver can
+  // never hang an entry decision.
+  let result = orders;
+  try {
+    const annotate = Promise.all((orders || []).map(async (o) => {
+      const assetId = await resolveAsset(o.symbol).catch(() => null);
+      return { ...o, assetId };
+    }));
+    const cap = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
+    const annotated = await Promise.race([annotate, cap]);
+    result = annotated || orders;
+  } catch (_) {
+    result = orders;
+  }
+
+  if (r && Array.isArray(result)) {
+    try { await r.set(ORDERS_CACHE_KEY, JSON.stringify(result), { ex: ORDERS_CACHE_TTL }); } catch (_) {}
+  }
+
+  return result;
+}
+
+// =================================================================
 // PUBLIC API: PRICE
 // =================================================================
 
@@ -409,6 +479,7 @@ module.exports = async (req, res) => {
 
 module.exports.fetchAccount   = fetchAccount;
 module.exports.fetchPositions = fetchPositions;
+module.exports.fetchOrders    = fetchOrders;
 module.exports.fetchPrice     = fetchPrice;
 module.exports.fetchCandles   = fetchCandles;
 module.exports.fetchMultiTF   = fetchMultiTF;

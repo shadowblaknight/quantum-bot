@@ -8,7 +8,7 @@
 
 const { getRedis, applyCors, roundToPipSize } = require('./_lib');
 const { resolveSymbol } = require('./symbol-resolver');
-const { fetchAccount, fetchPositions, fetchCandles, fetchPrice } = require('./broker');
+const { fetchAccount, fetchPositions, fetchOrders, fetchCandles, fetchPrice } = require('./broker');
 const { placeLimitOrder, placeMarketOrder } = require('./execute');
 const { notifyTradePlaced, sendOnce } = require('./telegram');
 const { getAssetById } = require('./asset-registry');
@@ -272,8 +272,12 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // ─────────────────────────────────────────────────────────────────────────
 
   // 6. Bounded fetch
-  const [positions, capital] = await Promise.all([
+  const [positions, restingOrders, capital] = await Promise.all([
     withTimeout(fetchPositions(), 1500, []),
+    // Runs in the SAME Promise.all, so it costs no extra wall-clock latency on
+    // the entry path. Needed because a C2 retest limit can rest unfilled for
+    // hours — see the direction-aware guard below.
+    withTimeout(fetchOrders(), 1500, []),
     getCapitalFast(),
   ]);
 
@@ -312,7 +316,133 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
     return _tmplFromComment(pos.comment) === p.template;
   });
-  if (existing) {
+  // ── 7b. DIRECTION-AWARE OVERLAP RULE — gold-specialist ONLY ─────────
+  // The check above reads /positions, which lists FILLED trades only. A C2
+  // retest limit can rest unfilled for hours, so it is invisible there: M arms
+  // a limit at 08:00, G fires at 09:00, the guard sees no position, and both
+  // orders go live. The backtest that produced 99.44% ran pyramiding=0 — one
+  // trade at a time — so two simultaneous fills are a configuration that was
+  // never tested, not a tolerable edge case.
+  //
+  // THE RULE (M 07:30-11:00, G 08:30-11:00 overlap; H at 14:30 can still meet
+  // a morning limit that never expired):
+  //
+  //   SAME DIRECTION  -> ignore the new signal. It is the same idea, and the
+  //     earlier signal entered earlier, so it has more room to its target. The
+  //     later break is confirmation, not a second trade. This is also the only
+  //     genuinely dangerous case: two orders the same way is 2x size on one
+  //     idea, ~$15k of risk at 0.5 lot with 150-pt stops.
+  //
+  //   OPPOSITE DIRECTION -> take it. The new break invalidates the old one.
+  //     Opposing positions net out, so exposure during the overlap goes DOWN,
+  //     not up. Then:
+  //       - blocker is a FILLED position -> the bot never closes trades by
+  //         itself here, so it shouts on Telegram and you close it by hand.
+  //       - blocker is only a RESTING limit -> nothing to close manually, and
+  //         its level is dead the moment price broke the other way. Cancel it,
+  //         otherwise it fills later into an unintended hedge.
+  //
+  // Scoped to gold-specialist deliberately. sp500/nas100/gbpusd/ger40 keep the
+  // original "any specialist position blocks" rule — this logic was measured on
+  // gold's M/G/H overlap and nothing else.
+  const _GOLD_DIR_RULE = p.template === 'gold-specialist';
+  const _dirOf = (x) => {
+    if (!x) return null;
+    if (x.direction === 'LONG' || x.direction === 'SHORT') return x.direction;
+    const t = String(x.type || '');
+    if (/BUY/i.test(t))  return 'LONG';
+    if (/SELL/i.test(t)) return 'SHORT';
+    return null;
+  };
+  const _newDir = p.direction === 'LONG' ? 'LONG' : 'SHORT';
+
+  // NOTE: fetchOrders returns null on broker error (not []), exactly like
+  // fetchPositions. Treating null as "no orders" here matches how the position
+  // check above already behaves — on a broker outage the guard degrades to the
+  // old blind behaviour rather than blocking every trade.
+  const restingOrder = _GOLD_DIR_RULE
+    ? (Array.isArray(restingOrders) ? restingOrders : []).find((o) => {
+        const sameInstrument = (o.assetId === assetId) ||
+          (o.symbol && pineTicker && o.symbol.toUpperCase().includes(pineTicker));
+        return sameInstrument && _tmplFromComment(o.comment) === 'specialist';
+      })
+    : null;
+
+  if (_GOLD_DIR_RULE && (existing || restingOrder)) {
+    const _blockerIsPos = !!existing;
+    const _blocker      = existing || restingOrder;
+    const _blockerDir   = _dirOf(_blocker);
+
+    // Unknown direction is treated as SAME — never place on an ambiguous read.
+    if (!_blockerDir || _blockerDir === _newDir) {
+      return bgSkip({
+        dedupeKey, pineTicker, template: p.template,
+        reason: _blockerIsPos ? 'same-direction-position-open' : 'same-direction-order-resting',
+        extras: {
+          assetId, newDirection: _newDir, blockerDirection: _blockerDir || 'unknown',
+          blockerKind: _blockerIsPos ? 'position' : 'resting-order', blockerId: _blocker.id,
+        },
+        notify: true,
+      });
+    }
+
+    // Opposite direction — the old idea is invalidated.
+    if (_blockerIsPos) {
+      // A position and a resting order CAN both be live: the OCO fade leg sits
+      // on the opposite side until manage-trades cancels it on first fill, and
+      // that cron only runs every 60s. If we place a reversal while that fade
+      // is still armed, the fade can fill too and leave three legs open. Any
+      // resting specialist order is stale the moment a reversal is confirmed,
+      // so clear it before adding a new one.
+      let _staleCxl = null;
+      if (restingOrder) {
+        try {
+          const { cancelBrokerOrder } = require('./watcher');
+          const _r = await cancelBrokerOrder(restingOrder.id).catch((e) => ({ ok: false, error: e?.message }));
+          _staleCxl = _r && _r.ok ? 'cancelled' : `failed: ${(_r && _r.error) || 'unknown'}`;
+        } catch (e) { _staleCxl = `failed: ${e?.message}`; }
+      }
+      await logActivity({
+        type: 'reversal-signal', asset: assetId, template: p.template,
+        direction: _newDir, reason: 'opposite-direction-position-open',
+        blockerId: _blocker.id, blockerDirection: _blockerDir,
+        staleOrderId: restingOrder ? restingOrder.id : null, staleOrderCancel: _staleCxl,
+      });
+      try {
+        await sendOnce(`flip-close:${dedupeKey}`,
+          `🔄 <b>REVERSAL — ${pineTicker}</b>\n\n` +
+          `New <b>${_newDir}</b> signal fired against your open <b>${_blockerDir}</b> position.\n` +
+          `The new trade is being placed.\n\n` +
+          `⚠️ <b>Close the ${_blockerDir} position now</b> — ticket <code>${_blocker.id}</code>.\n` +
+          `The bot does not close it for you.` +
+          (_staleCxl ? `\n\nStale resting order <code>${restingOrder.id}</code>: ${_staleCxl}.` : ''));
+      } catch (_) {}
+    } else {
+      // Resting limit: cancel it. Nothing for you to do by hand.
+      let _cxlOk = false, _cxlErr = null;
+      try {
+        const { cancelBrokerOrder } = require('./watcher');
+        const _res = await cancelBrokerOrder(_blocker.id).catch((e) => ({ ok: false, error: e?.message }));
+        _cxlOk = !!(_res && _res.ok);
+        _cxlErr = _res && _res.error;
+      } catch (e) { _cxlErr = e?.message; }
+      await logActivity({
+        type: 'reversal-signal', asset: assetId, template: p.template,
+        direction: _newDir, reason: 'opposite-direction-order-cancelled',
+        blockerId: _blocker.id, blockerDirection: _blockerDir,
+        cancelOk: _cxlOk, cancelError: _cxlErr || null,
+      });
+      try {
+        await sendOnce(`flip-cancel:${dedupeKey}`,
+          `🔄 <b>REVERSAL — ${pineTicker}</b>\n\n` +
+          `New <b>${_newDir}</b> signal fired against a resting <b>${_blockerDir}</b> limit.\n` +
+          (_cxlOk
+            ? `The stale limit was <b>cancelled</b> automatically. Nothing for you to do.`
+            : `⚠️ <b>Could not cancel</b> the old limit (<code>${_blocker.id}</code>): ${_cxlErr || 'unknown error'}\nCancel it manually or you may end up hedged.`));
+      } catch (_) {}
+    }
+    // fall through — the new trade is placed below
+  } else if (existing) {
     return bgSkip({
       dedupeKey, pineTicker, template: p.template,
       reason: isSpecialist ? 'specialist-already-open' : 'same-template-already-open',
