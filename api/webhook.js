@@ -31,12 +31,25 @@ const V20_SPECIALIST_MODE = true;
 // If zoneType is NOT in this list the signal is silently dropped.
 // Update here when a new confirmed signal is unlocked in a specialist Pine.
 const SPECIALIST_ALLOWED_ZONES = {
-  // GS1 confirmed active: H=NYORB (NY ORB) + M=FRB (Frankfurt Retest Breakout) only.
+  // GS1 active: M=FRB, H=NYORB, U=SYD, G=LORB.
   // All other sub-signals (FVG, Asian-H/L, SB-FVG, PSYCH, PSYCH-EXT) dropped silently.
-  // 'SYD' added 2026-09-16 (Signal U, Sydney ORB). Without it the webhook drops
-  // every U alert silently as specialist-zone-inactive — the same class of miss
-  // that blocked sp500-specialist twice.
-  'gold-specialist':   ['FRB', 'NYORB', 'SYD'],
+  // Without the zone listed here the webhook drops every alert for it silently
+  // as specialist-zone-inactive — the same class of miss that blocked
+  // sp500-specialist twice.
+  //
+  // 'SYD'  added 2026-09-16 (Signal U, Sydney ORB).
+  // 'LORB' added 2026-09-21 (Signal G, London ORB 08:00-08:30). THIS LINE ARMS G
+  //   FOR REAL MONEY — until it existed G fired alerts that were dropped, which
+  //   is how it was watched safely against live price.
+  //
+  //   G MUST NOT SHIP WITHOUT THE OVERLAP GUARD in section 7b. G trades
+  //   08:30-11:00, inside M's 07:30-11:00, and the old guard only saw FILLED
+  //   positions — so an unfilled M limit was invisible and both could rest, then
+  //   both fill, in the same direction. The backtest behind this config ran
+  //   pyramiding=0 (one trade at a time), so two same-way fills is a
+  //   configuration that was never measured. Both changes live in this file, so
+  //   one deploy ships them together; do not cherry-pick this line.
+  'gold-specialist':   ['FRB', 'NYORB', 'SYD', 'LORB'],
   // gold-specialist-2 retired — signals get 200 template-disabled from webhook
   'nas100-specialist': ['AMD-FVG'],        // Session Intel: Asian range → London sweep → ORB BOS → NY FVG entry (14:00–16:00 UTC)
   'gbpusd-specialist': ['SFP-L', 'SFP-H', 'AOI-D', 'AOI-W'], // Alex G: Asian SFP + Daily/Weekly AOI zones (London KZ + NY)

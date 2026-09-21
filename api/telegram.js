@@ -25,9 +25,16 @@ const TEMPLATE_LABELS = templateLabelMap();
 
 // V20 active sub-signal labels only — dead zones removed
 const ZONE_TYPE_LABELS = {
-  // Gold Specialist (GS1) — H+M confirmed only
+  // Gold Specialist (GS1) — M + H + U + G
   'FRB':      'Frankfurt ORB Retest',
   'NYORB':    'NY ORB Retest',
+  // 'SYD' was added to the webhook's allowed zones on 2026-09-16 but never here,
+  // so every Signal U alert since then printed the raw code "SYD" instead of a
+  // name. Fixed 2026-09-21.
+  'SYD':      'Sydney ORB Retest',
+  // Gold's London ORB is 'LORB', NOT 'G' — GER40 already owns 'G' below for a
+  // completely different setup, and these labels share one flat namespace.
+  'LORB':     'London ORB Retest',
   // NAS100 Specialist — AMD-FVG confirmed
   'AMD-FVG':  'Session Intel FVG',
   // GER40 B+G Specialist
