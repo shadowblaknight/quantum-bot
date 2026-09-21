@@ -608,45 +608,117 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     useMarket = false;
     entryType = 'retest';
   } else {
-    // No actualStyle: pre-v15.7 payload. Run geometry probe unchanged.
+    // No actualStyle: pre-v15.7 payload. Run geometry probe.
+    //
+    // RESTRUCTURED 2026-09-21. Probe FIRST, guard SECOND. The previous shape
+    // nested the entire guard inside the success branch of ONE fetch, which left
+    // two holes that both ended the same way -- a blind limit, which is the very
+    // bug the guard exists to prevent:
+    //   1. the retry recovered a price and then never used it. It set the debug
+    //      flag and fell straight out of the block to place an unchecked limit.
+    //   2. a THROWN fetch (require failure, network error) hit the outer catch,
+    //      whose comment cheerfully read "fall through to limit".
+    // Now there is one price variable, one skip path, and no probe outcome that
+    // can bypass the guard.
+    //
+    // SCOPE NOTE: this branch runs only when the payload carries no actualStyle.
+    // The gold indicator sends none (verified 2026-09-21), so gold routes through
+    // here. But `actualStyle: 'retest'` above ALSO ends in a resting limit and is
+    // NOT guarded -- the day gold starts sending it, this protection silently
+    // stops running. Left alone deliberately: widening it would change routing
+    // for sp500 / nas100 / gbpusd / ger40, none of which has been backtested
+    // against a drift guard.
+    let _cur = null, _bar = null;
     try {
       const { fetchCandles: _fcSrc } = require('./candle-source');
-      const _cr = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
-      const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
-      const _cur = _last && _last.close;
-      if (_cur && isFinite(_cur)) {
-        _dbgProbeOk = true; _dbgProbed = _cur;
-        const _tol = Math.max((_last.high - _last.low) * 0.5, pipSz * 5);
-        // A LIMIT is only valid when the entry sits AWAY from price on the correct
-        // side: a LONG buy-limit must be BELOW market, a SHORT sell-limit ABOVE it.
-        // Anything else -- entry at/through the market (immediate), or so close the
-        // broker won't accept it -- must go in as a MARKET order, otherwise MT5
-        // rejects the limit with TRADE_RETCODE_INVALID_PRICE.
-        const _canLimit = isLong ? (rEntry < _cur - _tol) : (rEntry > _cur + _tol);
-        _dbgCanLimit = _canLimit;
-        if (!_canLimit) {
-          const _slDist = Math.abs(rEntry - rSL);
-          const _budget = Math.max(_slDist * 0.25, pipSz * 10); // 25% of stop, min 10 pips
-          // Adverse drift only: skip just when a MARKET fill would be WORSE than the
-          // signalled entry by more than budget (don't chase a runaway). A favorable
-          // gap (market better than entry) still fills.
-          const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
-          _dbgDriftPips = +(_drift / pipSz).toFixed(1);
-          if (_drift > _budget) {
-            await logActivity({ type: 'placement-skipped', asset: assetId, template: p.template, direction: p.direction, reason: 'market-beyond-slippage-budget', signalEntry: rEntry, marketPrice: _cur, driftPips: _dbgDriftPips });
-            try {
-              await sendOnce(`webhook-stale:${dedupeKey}`,
-              `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
-              `Template: ${p.template}\nDirection: ${p.direction}\n` +
-              `Reason: market moved past entry beyond slippage budget \u2014 not chasing`);
-            } catch (_) {}
-            return;
-          }
-          useMarket = true;
-          entryType = 'immediate';
-        }
+      for (let _att = 0; _att < 2 && _cur == null; _att++) {
+        const _cr   = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
+        const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
+        if (_last && isFinite(_last.close)) { _cur = _last.close; _bar = _last; }
       }
-    } catch (_) { /* candle fetch failed -- fall through to limit; broker is final guard */ }
+    } catch (_) { /* _cur stays null -> skipped below, never a blind limit */ }
+
+    // NO PRICE = NO ORDER. An order that cannot fill still consumes the
+    // one-position-per-asset slot, so guessing wrong costs the NEXT signal too.
+    // 4 of 17 gold routings reached this path; 18 Sep 17:15 is the worked example.
+    if (_cur == null) {
+      await logActivity({
+        type: 'placement-skipped', asset: assetId, template: p.template,
+        direction: p.direction, reason: 'price-probe-failed',
+        signalEntry: rEntry, marketPrice: null,
+      });
+      try {
+        await sendOnce(`webhook-noprobe:${dedupeKey}`,
+          `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
+          `Template: ${p.template}\nDirection: ${p.direction}\n` +
+          `No live price available \u2014 not placing a blind limit.`);
+      } catch (_) {}
+      return;
+    }
+
+    _dbgProbeOk = true; _dbgProbed = _cur;
+
+    // Guard the subtraction: a candle missing high/low would make _tol NaN, and
+    // every comparison against NaN is false, which silently forces MARKET on a
+    // trade that should have rested as a limit.
+    const _barRng = (_bar && isFinite(_bar.high) && isFinite(_bar.low)) ? (_bar.high - _bar.low) : 0;
+    const _tol    = Math.max(_barRng * 0.5, pipSz * 5);
+    // A LIMIT is only valid when the entry sits AWAY from price on the correct
+    // side: a LONG buy-limit must be BELOW market, a SHORT sell-limit ABOVE it.
+    // Anything else -- entry at/through the market, or so close the broker won't
+    // accept it -- must go in as MARKET, or MT5 rejects it with INVALID_PRICE.
+    const _canLimit = isLong ? (rEntry < _cur - _tol) : (rEntry > _cur + _tol);
+    _dbgCanLimit = _canLimit;
+
+    // -- RUN-PAST GUARD --------------------------------------------------
+    // This check used to live INSIDE `if (!_canLimit)`, so it could only fire
+    // when the limit was invalid. The runaway case -- price gone far past while
+    // the limit still rests perfectly legally -- never reached it. Live evidence:
+    // 10 Sep drift -25.0 and 28 Aug +17.7 both sailed through as limits and sat
+    // unfilled, while 16 Sep drift +0.33 was forced to market. Exactly backwards.
+    //
+    // The budget was also wrong: 25% of a 150-pt stop is 38 points, but SL and TP
+    // are anchored to the ORB LEVEL, so a filled trade only ever has
+    // (orbTPMult - retestDepth) x range of room -- about 7 points. Drift past TP1
+    // means the target is ALREADY BEHIND price and the trade cannot win at
+    // market, at any size. So the honest budget is the profit room itself.
+    const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
+    _dbgDriftPips = +(_drift / pipSz).toFixed(1);
+    const _room = (finalTP1 != null && isFinite(finalTP1))
+      ? Math.abs(finalTP1 - rEntry) : null;
+    const _budget = _room != null
+      ? Math.max(_room, pipSz * 5)
+      : Math.max(Math.abs(rEntry - rSL) * 0.25, pipSz * 10);
+
+    if (_drift >= _budget) {
+      await logActivity({
+        type: 'placement-skipped', asset: assetId, template: p.template,
+        direction: p.direction, reason: 'ran-past-target',
+        signalEntry: rEntry, marketPrice: _cur,
+        driftPips: _dbgDriftPips, roomPips: _room != null ? +(_room / pipSz).toFixed(1) : null,
+        canLimit: _canLimit,
+      });
+      try {
+        await sendOnce(`webhook-ranpast:${dedupeKey}`,
+          `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
+          `Template: ${p.template}\nDirection: ${p.direction}\n` +
+          `Price ran ${_dbgDriftPips} pips past entry \u2014 TP1 is already behind. Not chasing.`);
+      } catch (_) {}
+      return;
+    }
+
+    if (!_canLimit) {
+      // Entry sits at or through the market and drift is already inside budget,
+      // so this is a genuine fills-now case: send it as MARKET.
+      //
+      // The nested slippage check that used to sit here is REMOVED, not moved.
+      // Its budget was max(25% of stop, 10 pips) ~ 38 pts, five times wider than
+      // the run-past budget above (~7 pts), so the earlier `return` always fired
+      // first and it could never be reached. Dead code that looked like a second
+      // line of defence is worse than no code.
+      useMarket = true;
+      entryType = 'immediate';
+    }
   }
 
   // SB_IMMEDIATE_ONLY: silver-bullet retest (limit) entries are converted to
@@ -815,6 +887,42 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         ].filter((t) => t.price != null),
         template: p.template,
         zoneType: p.zoneType || null,
+        // ── RESEARCH CONTEXT ──────────────────────────────────────────
+        // setup{} was a hand-written whitelist: every field below already
+        // arrived on `p` from the Pine alert and was discarded here. That is
+        // the single reason live trades carry no signal context and the A+
+        // analysis could only ever be run inside Pine, on backtest data.
+        //
+        // NOT captured (the live indicator does not send them): prior-session
+        // pool sweep and the 15m bias. Those exist only in the strategy file.
+        // Adding them means a Pine change and a re-paste — deliberately not
+        // done here, so this lands with zero disruption to the live chart.
+        signal: (() => {
+          const n = (v) => { const f = parseFloat(v); return Number.isFinite(f) ? f : null; };
+          const zU = n(p.zoneUpper), zL = n(p.zoneLower), bc = n(p.barClose);
+          const range = (zU != null && zL != null) ? +(zU - zL).toFixed(5) : null;
+          // Break strength in RANGE UNITS — how far past the broken edge the
+          // signal bar closed. A LONG breaks the upper edge, a SHORT the lower.
+          const edge = p.direction === 'LONG' ? zU : zL;
+          const breakStrength = (bc != null && edge != null && range > 0)
+            ? +(Math.abs(bc - edge) / range).toFixed(4) : null;
+          return {
+            zoneUpper: zU, zoneLower: zL, orbRange: range, breakStrength,
+            barOpen: n(p.barOpen), barHigh: n(p.barHigh), barLow: n(p.barLow), barClose: bc,
+            adrConsumed: n(p.adrConsumed), adrTier: p.adrTier || null,
+            gapAtr: n(p.gapAtr), gapDir: p.gapDir || null,
+            htfBias: p.htfBias || null, htfTier: p.htfTier || null,
+            htfBiasAlign: p.htfBiasAlign != null ? Number(p.htfBiasAlign) : null,
+            htfConfluence: p.htfConfluence || null,
+            cvdSlope: p.cvdSlope || null,
+            cvdConfirms: p.cvdConfirms != null ? !!p.cvdConfirms : null,
+            filters: p.filters || null,
+            hourUtc: n(p.hourUtc), dayOfWeek: n(p.dayOfWeek),
+            minsIntoWindow: p.minsIntoWindow != null ? Number(p.minsIntoWindow) : null,
+            rr1: n(p.rr1), rr2: n(p.rr2), rr3: n(p.rr3),
+            signalTs: p.timestamp != null ? Number(p.timestamp) : null,
+          };
+        })(),
       },
       recognition: { advice: 'neutral', matchCount: 0, wins: 0, losses: 0, confidence: 'none' },
       sizing: { baseLot: finalLot, recommendedLot: finalLot, baseRisk: slDistance * (assetMeta.dollarPerPipPerLot / assetMeta.pipSize) * finalLot },

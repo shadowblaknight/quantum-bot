@@ -426,6 +426,11 @@ async function managePosition(position) {
   const assetMeta = getAssetById(asset);
   let livePrice = (isFinite(position.currentPrice) && position.currentPrice > 0) ? position.currentPrice : null;
   let lastWick = null;
+  // advWick is the OPPOSITE wick of the same in-progress candle. lastWick feeds
+  // the favourable extreme (TP detection); advWick feeds the adverse one (MAE).
+  // Sampling MAE from livePrice alone would miss every intra-minute spike, and
+  // MAE is the metric every A+ finding in the research rests on.
+  let advWick = null;
   try {
     const cr = await fetchCandles(asset, '1m', 2); // only the current poll window
     const cs = (cr && cr.candles) || [];
@@ -433,6 +438,7 @@ async function managePosition(position) {
     if (last) {
       if (livePrice == null && isFinite(last.close)) livePrice = last.close;
       lastWick = isLong ? last.high : last.low; // the in-progress candle's wick only
+      advWick  = isLong ? last.low  : last.high;
     }
   } catch (_) {}
   if (livePrice == null) livePrice = position.openPrice;
@@ -444,6 +450,16 @@ async function managePosition(position) {
     ? Math.max(priorExtreme, livePrice, lastWick != null ? lastWick : -Infinity)
     : Math.min(priorExtreme, livePrice, lastWick != null ? lastWick :  Infinity);
   state.extreme = extreme;
+
+  // MAE — the exact mirror of the block above, ratcheting in the ADVERSE
+  // direction instead. Seeds at the entry and only ever moves against you, so
+  // like state.extreme it is immune to fill timing and pre-fill price action.
+  // Read at close by buildLedgerRecord to give every live trade the same
+  // maximum-adverse-excursion figure the Pine tables use.
+  const priorWorst = (typeof state.worst === 'number' && isFinite(state.worst)) ? state.worst : state.entry;
+  state.worst = isLong
+    ? Math.min(priorWorst, livePrice, advWick != null ? advWick :  Infinity)
+    : Math.max(priorWorst, livePrice, advWick != null ? advWick : -Infinity);
 
   const currentPrice = livePrice;   // used by the trailing block below
   const actions = [];

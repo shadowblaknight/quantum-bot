@@ -27,6 +27,18 @@ strategy("QB Gold Specialist — Strategy", "QB GOLD · STRAT", overlay=true,
 // ═══════════════════════════════════════════════════════════════════════
 
 // ─── INPUTS ──────────────────────────────────────────────────────────
+G_WIN = "0 · Test window"
+// Added 2026-09-21 after a batch of six runs came back on 3 Nov 2023 - 21 Sep 2026
+// while the recorded baseline was measured on 16 Sep 2023 - 16 Sep 2026. TradingView
+// serves however much deep history it feels like on a 15m chart, so the start date
+// MOVES between loads. Two runs compared across that drift are two different
+// populations and part of the trade-count difference is just data supply.
+useTestWin = input.bool(false, "Pin the backtest window (turn ON for any A/B)", group=G_WIN,
+             tooltip="OFF = use every bar TradingView supplies, which is what every run before 2026-09-21 did. The loaded start date drifts between chart loads, so two runs taken on different days are NOT directly comparable - trade counts differ partly because the data supply differed.\n\nON = only bars inside the fixed window below can open a trade. Turn this ON before comparing anything to anything, and leave the dates alone for the whole comparison. Every run in the set then covers identical bars, so a trade-count difference is caused by the change you made and nothing else.\n\nDefaults sit inside the range TradingView reliably serves, so the window stays fully populated even on a short load.")
+twStart    = input.time(timestamp("01 Jan 2024 00:00 +0000"), "  Window start", group=G_WIN)
+twEnd      = input.time(timestamp("01 Sep 2026 00:00 +0000"), "  Window end",   group=G_WIN)
+_testWinOk = not useTestWin or (time >= twStart and time <= twEnd)
+
 G_CORE = "Core"
 modFVG      = input.bool(true,  "A) FVG Signal (gold-fvg)",                        group=G_CORE)
 modJudas    = input.bool(true,  "B) Judas Sweep (judas-swing)",                    group=G_CORE)
@@ -38,6 +50,8 @@ lbBiasFilter  = input.bool(false, "E) Require H1 bias alignment",               
 modNY         = input.bool(false, "F) NY Session Breakout (London range)",           group=G_CORE)
 modORB        = input.bool(false, "G) London ORB — 08:00-08:30 UTC (verified)",     group=G_CORE)
 modNYORB      = input.bool(true,  "H) NY ORB — 14:00-14:30 UTC (verified)",         group=G_CORE)
+modNYORBP     = input.bool(false, "H') NY ORB PRIME — restrict H to a 14:30-16:00 trade window", group=G_CORE,
+              tooltip="LEAVE OFF — TESTED AND REJECTED 2026-09-18. Kept so the negative result stays attached to the code.\n\nMEASURED 3y (16 Sep 2023 - 16 Sep 2026), full baseline H+M+U+V both arms:\n  OFF  218 trades  99.08% WR  PF 6.335  +4148 USD  DD 710  (19.03 per trade)\n  ON   141 trades  99.29% WR  PF 5.906  +2342 USD  DD 787  (16.61 per trade)\n\nThe window removed ~77 trades and 44% of net profit while RAISING drawdown. Win rate barely moved (+0.21pp), so it removed volume, not risk.\n\nTHE LATE BREAKS ARE THE BETTER TRADES. The ~77 trades the window removed accounted for ~1806 USD, about 23.45 each, against 16.61 for the trades it kept. A genuine quality filter lifts per-trade profit; this lowered it. So NY ORB breaks that fire after 16:00 UTC are MORE profitable than the ones inside the opening window, not less. The hypothesis was exactly backwards.\n\n(Path-dependence caveat: blocking H frees the position slot for other signals, so the 141 are not the 218 minus a fixed 77. The per-trade figures are net inferences. The direction is not in doubt.)\n\nWHAT THIS MEANS. Lateness costs FILLS, not edge. A backtest cannot see a fill problem - here a limit either fills or it does not; there is no 'the alert arrived after the move and the order sat unfilled'. Do not block late signals. Fix the entry router so a signal whose price has already run past the limit is taken at market or skipped, instead of resting on an order that cannot fill.\n\nORIGINAL RATIONALE BELOW, kept because the lateness measurement is still correct.\n\nOFF = Signal H exactly as it runs today. ON = H may only fire inside 14:30-16:00 UTC.\n\nWHY THIS EXISTS. Signal M is gated by in_frb_trade (07:30-11:00). Signal H was never given the equivalent, so it waits for the first 15m close outside the 14:00-14:30 range FOR THE REST OF THE DAY. Measured on the live account, every NY ORB signal fired:\n  16 Sep 14:45  +0.3h after the range closed\n  03 Sep 15:00  +0.5h\n  24 Aug 15:30  +1.0h\n  21 Aug 15:45  +1.3h\n  08 Sep 16:15  +1.8h\n  01 Sep 16:30  +2.0h\n  18 Sep 17:15  +2.8h\nMedian 1.3 hours late. By then the ORB level is stale, price has wandered, and when it finally breaks it tends to run without ever retesting — so the C2 limit rests unfilled while the move happens without you.\n\nThis window keeps the first four and blocks the last three.\n\nALSO CHANGES ORDER EXPIRY. When ON, a NYORB limit is cancelled at 16:00 instead of surviving to the daily roll, mirroring how M cancels at the end of its own window. Otherwise a limit armed at 15:55 could still fill hours later against a level that is long dead — the same disease in a different place.\n\nEXPECT FEWER TRADES. This harness is path-dependent: blocking a signal frees the position slot for a later one, so the trade list reshuffles rather than simply shrinking. Judge it on net P&L and trade count, not on win rate alone.")
 modPDHL       = input.bool(false, "I) PDH/PDL Sweep — liquidity grab & reverse",    group=G_CORE)
 modVWAP       = input.bool(false, "J) VWAP Extension Fade — mean reversion",        group=G_CORE)
 modPWHL       = input.bool(false, "K) Prev Week H/L Sweep — weekly liquidity grab", group=G_CORE)
@@ -51,7 +65,8 @@ modR          = input.bool(false, "R) Triple-Bear Rally Fade — D+H4+H1 bear, 4
 modS          = input.bool(false, "S) Pre-NY Triple-Bear Short — D+H4+H1 bear, 13:00-14:30 UTC  [67% WR, PF 1.52]", group=G_CORE)
 modT          = input.bool(false, "T) Frankfurt Triple-Bull Long — D+H4+H1 bull, 07:00-09:00 UTC  [64% WR, PF 1.33]", group=G_CORE)
 modSYD        = input.bool(true,  "U) Sydney ORB — session open, same C2 architecture as M/H  [UNTESTED]", group=G_CORE)
-modTOK        = input.bool(true,  "V) Tokyo ORB — session open, same C2 architecture as M/H  [UNTESTED]",  group=G_CORE)
+modTOK        = input.bool(true,  "V) Tokyo ORB — REJECTED, kept only so the 218-trade baseline reproduces",  group=G_CORE,
+              tooltip="TESTED AND REJECTED ~2026-09-07. Tokyo does not perform like Sydney.\n\nNot live: the indicator has no modTOK input and the webhook's SPECIALIST_ALLOWED_ZONES is ['FRB','NYORB','SYD'], so a V alert would be dropped as specialist-zone-inactive even if one fired.\n\nIt contributed ZERO trades to the 96-trade sample the A+ table measured — Tokyo hours are too thin to clear the 5-pt min-range floor, exactly as predicted. Left ON only because the 218-trade baseline was recorded with it on; since it fires essentially never, that baseline is effectively M+H+U.\n\nDo not re-propose enabling V live.")
 
 G_ASIA = "U/V — Asian session ORBs"
 sydOpenHr   = input.int(22, "U) Sydney open (UTC hour)", group=G_ASIA, minval=18, maxval=23,
@@ -81,8 +96,8 @@ orbSLMode      = input.string("Wide SL", "H/M) SL mode",
                  group=G_STRAT)
 orbBiasFilter  = input.bool(true,  "H/M) HTF bias filter — skip trades against trend", group=G_STRAT)
 orbBiasTF      = input.string("H1+H4", "H/M) Bias timeframe",
-                 options=["H1", "H4", "Daily", "H1+H4", "H1+H4+D"],
-                 tooltip="H4 = current baseline (PF 1.409). H1+H4 = both must align (PF 1.458, 293 trades). H1+H4+D = all three must align (strictest). H1 alone and Daily alone are reference points.",
+                 options=["H1", "H4", "Daily", "H1+H4", "H1+H4+D", "M15", "M15+H1", "M15+H1+H4"],
+                 tooltip="H1+H4 = the 218-trade baseline. H4 alone = older baseline (PF 1.409). H1+H4+D = all three align (strictest).\n\nM15 options added 2026-09-18. The premise: the ORB is a 15m structure, so gating it on H4 may be asking a 4-hour trend to approve a 15-minute decision. M15+H1 keeps the confirmation on timeframes that actually move inside the trade window.\n\nThe 15m bias reads close[1] vs EMA[1], deliberately NOT the signal bar — a bar that closes past the ORB level has almost certainly closed past its own 15m EMA, so scoring the current bar would grade the breakout against itself and produce a filter that looks predictive while measuring nothing.",
                  group=G_STRAT)
 nyorbDirFilter = input.string("Both", "H) Direction filter",  options=["Both", "Long only", "Short only"],
                  tooltip="London Bias study (54yr): the PM fix window (14:00 UTC) has a structural short tailwind. Test 'Short only' to isolate whether H shorts carry the PF.",
@@ -98,7 +113,18 @@ orbTPMult      = input.float(0.75, "H/M) TP1 multiplier",    minval=0.25, maxval
                  tooltip="1.0 = standard 1R (baseline PF 1.145). 0.75 = ¾R — raises WR at cost of smaller wins. Find the WR/PF sweet spot between 0.75 and 1.0.",
                  group=G_STRAT)
 orbNFPFilter   = input.bool(false, "H/M) Skip first-Friday of month (NFP days)", group=G_STRAT)
-orbADRGuard    = input.bool(true,  "H/M) Skip when >90% ADR already consumed",   group=G_STRAT)
+orbADRGuard    = input.bool(true,  "U/V) Skip when >90% ADR already consumed",   group=G_STRAT,
+                 tooltip="Now applies to U and V ONLY. M and H have their own switches below — see why.")
+// SPLIT 2026-09-21. This was ONE toggle gating M, H, U and V through _orbGateOk.
+// Measured: the ADR guard HURTS M and HELPS H. A shared switch therefore had to
+// be wrong for one of them no matter how it was set, and it was set ON — which
+// means every baseline run so far carried a filter that costs Frankfurt money.
+// Both default TRUE so the existing baseline still reproduces; set frbADRGuard
+// OFF to take the measured improvement.
+frbADRGuard    = input.bool(true,  "M) Skip when >90% ADR already consumed",     group=G_STRAT,
+                 tooltip="MEASURED BAD FOR M (2026-09-21). Frankfurt fires at 07:30-11:00, early in the session, when little of the day's range is normally spent — so a >90% ADR reading at that hour is not an exhausted market, it is an unusually violent overnight. Those are exactly the days Frankfurt continuation works. Turn OFF.")
+nyADRGuard     = input.bool(true,  "H) Skip when >90% ADR already consumed",     group=G_STRAT,
+                 tooltip="MEASURED GOOD FOR H (2026-09-21). NY fires at 14:30+, by which point 90% of the average range genuinely is spent, so the guard is reading real exhaustion rather than an early-session anomaly. Keep ON.")
 orbSeasonFilt  = input.bool(false, "H/M) Seasonal bias (Sep=Short only · Jan=Long only)",
                  tooltip="September is 90% bearish over 10yr (gold seasonal). January is 80% bullish. Blocks counter-seasonal trades in these two months only.",
                  group=G_STRAT)
@@ -130,6 +156,44 @@ i_hm_dow_wed = input.bool(false, "H/M   Wed",                group=G_STRAT)
 i_hm_dow_thu = input.bool(false, "H/M   Thu",                group=G_STRAT)
 i_hm_dow_fri = input.bool(false, "H/M   Fri",                group=G_STRAT)
 
+G_LON = "G — London ORB"
+lonUseC2 = input.bool(true, "G) Use C2 retest architecture (same as M/H)", group=G_LON,
+           tooltip="OFF = the legacy Signal G: MARKET entry at the signal bar's close, SL at the OPPOSITE OR extreme, TPs at 1/2/3x the OR width from the broken level.\n\nON = the architecture M and H actually use: a LIMIT resting back at the broken ORB level (shifted by c2RetestDepth), SL = level +/- the C2 stop, TPs = range x orbTPMult x {1,2,3}.\n\nThat is the single biggest difference between G and the two signals that produce the 99% baseline. G has never been given it — this is the A/B.")
+c2MinRangeLON = input.float(5.0, "G) Min London ORB range to trade (pts)", group=G_LON, step=1.0,
+           tooltip="Only applies in C2 mode. Legacy mode keeps its original 0.50 floor. Matches the 5.0 floor M and H use — with a 150-pt stop a 2-pt opening range is not a tradeable structure.")
+lonDirFilter = input.string("Both", "G) Direction filter", options=["Both", "Long only", "Short only"], group=G_LON)
+lonBiasFilter = input.bool(false, "G) Require HTF bias alignment", group=G_LON,
+           tooltip="Uses the same bias timeframe selected for H/M above, so G can be compared against them on equal terms.")
+lonADRGuard = input.bool(false, "G) Skip when >90% ADR already consumed", group=G_LON,
+           tooltip="The M/H ADR guard, given its own switch for G. Reads _adrConsumed[1] so the trigger bar's own wick cannot self-block.")
+lonBreakAsianHi = input.bool(false, "G LONG) Require close above Asian high", group=G_LON,
+           tooltip="The direct analogue of M's orbBreakAsianHi, but measured against the FULL Asian session (00:00-08:00) rather than M's 00:00-07:00 window — because each session's filter should use the Asian range up to ITS OWN open, and London opens an hour after Frankfurt.\n\nNote what this means at 08:30: Frankfurt has already traded 07:00-08:00, so the Asian extreme may have been swept before London even opened. That is a real difference from M and part of what the test measures.")
+lonBreakAsianLo = input.bool(false, "G SHORT) Require close below Asian low", group=G_LON,
+           tooltip="Symmetric to the LONG filter above.")
+lonAsianCascade = input.bool(false, "G) Asian cascade — only trade in the Asian close direction", group=G_LON,
+           tooltip="Blocks G trades opposing the Asian session's own direction (close vs open, 00:00-08:00). T-1 theorem measured London at 61.7%, z=3.63. Independent of the H/M asianBiasFilter so the two can be tested separately.")
+
+G_LIFE = "Order life (limit expiry)"
+// Added 2026-09-21. These windows were HARDCODED, which meant the one number that
+// decides "how long does an unfilled limit stay alive" could not be measured.
+//
+// WHAT AN EXPIRY CAN AND CANNOT DO. It cancels an order that NEVER FILLED. It
+// cannot touch a filled position — once you are in, SL/TP own the trade. So a
+// shorter expiry can never cut a winner short mid-trade. What it CAN do is
+// cancel a limit that would have filled later and won. That is the real cost,
+// and these inputs exist to price it: shorten one, re-run, read the trade count
+// and WR.
+//
+// PATH-DEPENDENCE WARNING: cancelling early also FREES the position slot early,
+// so a shorter expiry can ADD trades from other signals. The trade list
+// reshuffles. Judge on net P&L and WR together, never on count alone.
+frbTradeMins = input.int(210, "M) Frankfurt limit life (mins from 07:30)", group=G_LIFE, minval=15, maxval=600, step=15,
+               tooltip="210 = expires 11:00 UTC, the value used in the 377-trade / 99.47% baseline. Shorten to measure what late Frankfurt fills are worth.")
+lonTradeMins = input.int(150, "G) London limit life (mins from 08:30)",    group=G_LIFE, minval=15, maxval=600, step=15,
+               tooltip="150 = expires 11:00 UTC, the baseline value. G overlaps M's window (M runs 07:30-11:00), so these two compete for the single position slot — shortening one hands trades to the other.")
+nyOrderMins  = input.int(0,   "H) NY limit life (mins from 14:30, 0 = none)", group=G_LIFE, minval=0, maxval=600, step=15,
+               tooltip="0 = the BASELINE behaviour: the NY limit is cancelled only at the daily roll (21:00/22:00 UTC), so it can rest ~7 hours against a level that stopped being the opening range long before. H is the only signal with an effectively unbounded order.\n\nThat unbounded life is part of what produced 99.47%, which is the uncomfortable part — the H' test already showed late NY breaks are the BETTER trades, so a tight expiry here may cost real money. Set a value and measure before assuming shorter is safer.")
+
 G_C2 = "C2 — OCO (Signal M + H)"
 c2SLBuf   = input.float(8.0,  "SL beyond C2 structural level (pts)", group=G_C2, step=0.5,
             tooltip="Tight SL placed this many pts beyond the C2 retest level — not from the C1 close.\nFRB SHORT → SL = frb_lo + 8.  NYORB LONG → SL = nyorb_hi - 8.\nTP targets still use orbTPMult × ORB range measured from the C2 level.")
@@ -143,6 +207,10 @@ c2MinRangeFRB  = input.float(5.0,  "M) Min Frankfurt ORB range to trade (pts)", 
                tooltip="Skip FRB (Signal M) if the 07:00-07:30 UTC ORB range is below this. Frankfurt ranges tend to be tighter than NY — tune separately. Breakeven at SL=8pt, TP mult=0.75: range > 10.67pt.")
 c2MinRangeNY   = input.float(5.0,  "H) Min NY ORB range to trade (pts)",         group=G_C2, step=1.0,
                tooltip="Skip NYORB (Signal H) if the 14:00-14:30 UTC ORB range is below this. NY ranges expand with US session volatility — tune separately. Breakeven at SL=8pt, TP mult=0.75: range > 10.67pt.")
+c2MinBreakStr = input.float(0.0, "C2 min break strength (x ORB range)", group=G_C2, minval=0.0, maxval=1.00, step=0.05,
+               tooltip="Requires the signal bar to close at least this far BEYOND the ORB level, in range units. LEAVE AT 0.00 — TESTED AND REJECTED 2026-09-18. Keep the input only so the negative result stays attached to the code.\n\nMEASURED 3y (16 Sep 2023 - 16 Sep 2026):\n  0.00   218 trades   99.08% WR   PF 6.335   +4148 USD\n  0.10   200 trades   98.50% WR   PF 3.849   +2832 USD\n  0.15   189 trades   97.88% WR   PF 2.585   +2143 USD\nMonotonically worse on every metric. Losses went 2 -> 3 -> 4 and max drawdown rose 710 -> 714 -> 722.\n\nTHE HYPOTHESIS WAS SOUND AND STILL FAILED. The observation was real: among trades actually taken, breaks weaker than 0.10 range stayed under 20 pts of heat only 50.0% of the time vs 83.8% for the rest (z = -3.43, p ~ 0.0006, n=96). Filtering on it made the system worse anyway.\n\nWHY IT DID NOT TRANSFER — two reasons, both structural:\n\n1. THE TRADE LIST IS PATH-DEPENDENT. pyramiding=0 and every entry gated on strategy.position_size == 0, so blocking a signal FREES THE SLOT for a later signal that would otherwise have been skipped. The filtered run is not the baseline minus 18 trades — it is a different, reshuffled population. That is why losses can go UP while trades go DOWN, which is arithmetically impossible under a nested subset. Any MAE study that re-prices the taken list silently assumes the list is fixed. It is not.\n\n2. WEAK BREAKS ARE THE FREE FILLS. At c2RetestDepth 0.25 the long limit rests at level + 0.25 x range. A break of strength 0.05 closes BELOW that limit, so it fills instantly at a favourable price. A break of strength 0.50 closes above it and needs a genuine pullback that may never arrive. So this filter preferentially deletes the cheapest, most certain fills and keeps the ones contingent on a retest.\n\nHEAT IS NOT LOSS. Weak breaks carried more adverse excursion and still won, at 99% WR. Optimising away excursion optimised away profit.")
+c2LiqGrab = input.string("Off", "C2) Liquidity grab required before break", options=["Off", "Sweep own ORB opposite", "Sweep prior session pool", "Either sweep"], group=G_C2,
+               tooltip="Only take the breakout if a pool of resting stops on the OPPOSITE side was run first. A long break wants the downside swept; a short break wants the upside swept.\n\nApplies to M (Frankfurt), H (NY) and U (Sydney). V (Tokyo) is deliberately left alone so it stays identical in both arms of the comparison.\n\nSWEEP OWN ORB OPPOSITE — price traded beyond the far side of this session's own opening range before breaking the near side. The classic ORB fakeout: the first break fails, traps traders, and the second one runs.\n\nSWEEP PRIOR SESSION POOL — price traded beyond the previous session's extreme. M sweeps the ASIAN range (00:00-07:00), H sweeps the LONDON range (08:00-14:00), U sweeps the NY range (14:00 to the Sydney open).\n\nEITHER SWEEP — passes if either pool was run. Keeps the most trades.\n\nTracking starts at each session's ORB window open and resets on the rising edge of that same window, never on the daily roll, because the broker day turns over at 21:00/22:00 UTC — directly on top of the Sydney open and the NY pool window.\n\nThis is distinct from the orbBreakAsianHi/Lo filters above, which demand the break CLOSE BEYOND the prior extreme. That is expansion. This is a sweep and reclaim, which is the opposite shape.")
 c2RetestDepth = input.float(0.0, "C2 partial retest depth (x ORB range)", group=G_C2, minval=0.0, maxval=0.70, step=0.05,
                tooltip="How far the limit sits from the ORB level, TOWARD current price. Only meaningful in Retest (limit) mode.\n\n0.00 = limit exactly at the ORB level (the backtested baseline). Needs a FULL retest, so runaway breakouts are never taken.\n0.25 = limit a quarter-range closer to price — fills on a shallow bounce.\n0.50 = half a range closer. Fills far more often, entry price worse.\n\nSL and TP stay anchored to the ORB level, so trade geometry is unchanged — only fill probability and entry price move. This is the middle ground between a full-retest limit and chasing at market.\n\nWhy it exists: the breakouts a full-retest limit misses are the ones that travel furthest (they never come back). Sweep 0 / 0.25 / 0.50 and look for the knee.\n\nAuto-clamped below the TP multiplier so the entry can never sit past its own target.")
 c2EntryMode = input.string("Retest (limit)", "C2 entry type", options=["Retest (limit)", "Immediate (market)"], group=G_C2,
@@ -173,6 +241,18 @@ f_htfBias(int emaLen, int atrLen) =>
 
 atrVal = ta.atr(atrLength)
 
+// 15m bias — the ORB's OWN timeframe. Computed natively (no request.security);
+// the chart is 15m, so this is just EMA(emaLength) on this series.
+//
+// CRITICAL: it reads close[1] vs ema[1], NOT the current bar. On the signal bar
+// the break condition is `close > frb_hi`, and a bar that closes above the ORB
+// high has almost certainly closed above its own 15m EMA too. Scoring the bias
+// on the current bar would therefore be scoring the breakout against itself —
+// the filter would look predictive while measuring nothing. Reading [1] asks
+// the real question: was the 15m already trending up BEFORE this bar broke?
+_m15ema = ta.ema(close, emaLength)
+m15B    = close[1] > _m15ema[1] ? 1 : close[1] < _m15ema[1] ? -1 : 0
+
 // Partial-retest depth, clamped so the limit can never sit at or past its own
 // TP (which would make the trade nonsensical). At depth >= orbTPMult the entry
 // would be beyond tp1; 0.9x keeps a margin.
@@ -188,8 +268,8 @@ f_c2SL(float rng) =>
     math.max(d, syminfo.mintick)
 
 // Bias check helpers for H/M filter (resolved once per bar)
-_orbBiasLong  = orbBiasTF == "H1" ? h1B >= 0 : orbBiasTF == "Daily" ? hdB >= 0 : orbBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : orbBiasTF == "H1+H4+D" ? (h1B == 1 and h4B == 1 and hdB == 1) : h4B >= 0
-_orbBiasShort = orbBiasTF == "H1" ? h1B <= 0 : orbBiasTF == "Daily" ? hdB <= 0 : orbBiasTF == "H1+H4" ? (h1B == -1 and h4B == -1) : orbBiasTF == "H1+H4+D" ? (h1B == -1 and h4B == -1 and hdB == -1) : h4B <= 0
+_orbBiasLong  = orbBiasTF == "H1" ? h1B >= 0 : orbBiasTF == "Daily" ? hdB >= 0 : orbBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : orbBiasTF == "H1+H4+D" ? (h1B == 1 and h4B == 1 and hdB == 1) : orbBiasTF == "M15" ? m15B == 1 : orbBiasTF == "M15+H1" ? (m15B == 1 and h1B == 1) : orbBiasTF == "M15+H1+H4" ? (m15B == 1 and h1B == 1 and h4B == 1) : h4B >= 0
+_orbBiasShort = orbBiasTF == "H1" ? h1B <= 0 : orbBiasTF == "Daily" ? hdB <= 0 : orbBiasTF == "H1+H4" ? (h1B == -1 and h4B == -1) : orbBiasTF == "H1+H4+D" ? (h1B == -1 and h4B == -1 and hdB == -1) : orbBiasTF == "M15" ? m15B == -1 : orbBiasTF == "M15+H1" ? (m15B == -1 and h1B == -1) : orbBiasTF == "M15+H1+H4" ? (m15B == -1 and h1B == -1 and h4B == -1) : h4B <= 0
 
 // ─── SESSION CONTEXT ──────────────────────────────────────────────────
 _hourUtc  = hour(time, "UTC")
@@ -222,7 +302,10 @@ _ret4bar    = atrVal > 0 ? (close - close[4]) / atrVal : 0.0   // 4-bar momentum
 _mnth       = month(time)
 _orbSeasonL = not orbSeasonFilt or _mnth != 9   // Sep blocks longs (90% bearish)
 _orbSeasonS = not orbSeasonFilt or _mnth != 1   // Jan blocks shorts (80% bullish)
-_orbGateOk  = (not orbADRGuard or _adrConsumed[1] < 0.90) and (not orbNFPFilter or not _isNFP)
+_nfpOk      = (not orbNFPFilter or not _isNFP) and _testWinOk
+_orbGateOk  = (not orbADRGuard or _adrConsumed[1] < 0.90) and _nfpOk   // U / V
+_orbGateFRB = (not frbADRGuard or _adrConsumed[1] < 0.90) and _nfpOk   // M — ADR measured HARMFUL here
+_orbGateNY  = (not nyADRGuard  or _adrConsumed[1] < 0.90) and _nfpOk   // H — ADR measured HELPFUL here
 _hm_dow     = dayofweek(time, "UTC")
 _hm_dow_ok  = not i_hm_useDow or (_hm_dow == dayofweek.monday and i_hm_dow_mon) or (_hm_dow == dayofweek.tuesday and i_hm_dow_tue) or (_hm_dow == dayofweek.wednesday and i_hm_dow_wed) or (_hm_dow == dayofweek.thursday and i_hm_dow_thu) or (_hm_dow == dayofweek.friday and i_hm_dow_fri)
 
@@ -361,10 +444,26 @@ f_drawPosBox(float e, float slP, float tp3) =>
 f_exitLim(float tp1, float tp2, float tp3) =>
     exitMode == "TP1 · 1R" ? tp1 : exitMode == "TP3 · 3R" ? tp3 : exitMode == "Ratchet (no TP)" ? tp1 : tp2
 
+// Shared C2 exit router — used by G, U and V. "Scale 30/75/150" needs the _mtp
+// state machine wired per-signal, so those signals fall through to the
+// single-target exit for it. Defined here (rather than beside U/V, where it
+// used to live) because Signal G sits earlier in the file and Pine requires a
+// function to be defined before every use.
+f_c2Exit(string id, float slP, float tp1, float tp2, float tp3, float rng) =>
+    if exitMode == "Trail after TP1"
+        strategy.exit(id + "-X", from_entry=id, stop=slP, trail_price=tp1, trail_offset=math.round(rng / syminfo.mintick))
+    else if exitMode == "Split TP1+TP2"
+        strategy.exit(id + "-X1", from_entry=id, qty_percent=50, stop=slP, limit=tp1)
+        strategy.exit(id + "-X2", from_entry=id, stop=slP, limit=tp2)
+    else if exitMode == "Ratchet (no TP)"
+        strategy.exit(id + "-X", from_entry=id, stop=slP)
+    else
+        strategy.exit(id + "-X", from_entry=id, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL A — Gold FVG  (gold-fvg)
 // ═══════════════════════════════════════════════════════════════════════
-if modFVG and barstate.isconfirmed and in_kz and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
+if modFVG and barstate.isconfirmed and _testWinOk and in_kz and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
     firedA = false
     for idx = array.size(fU) - 1 to 0
         if firedA or array.get(fFired, idx)
@@ -429,7 +528,7 @@ if not in_london and in_london[1]
     strategy.cancel("JUDAS-S")
     strategy.cancel("JUDAS-L")
 
-if modJudas and barstate.isconfirmed and in_london and ar_locked and adr_judas_ok and adr_hard_ok and not na(ar_hi) and not na(ar_lo) and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
+if modJudas and barstate.isconfirmed and _testWinOk and in_london and ar_locked and adr_judas_ok and adr_hard_ok and not na(ar_hi) and not na(ar_lo) and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
     aRef = nz(atrVal, h1ATR)
 
     // SHORT — swept Asian high, closed back inside → LIMIT at ar_hi (retest entry)
@@ -476,7 +575,7 @@ var bool sb_done = false
 if _newDay
     sb_done := false
 
-if modSB and barstate.isconfirmed and in_sb_win and not sb_done and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
+if modSB and barstate.isconfirmed and _testWinOk and in_sb_win and not sb_done and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
     firedC = false
     for idx = array.size(fU) - 1 to 0
         if firedC or array.get(fFired, idx)
@@ -530,7 +629,7 @@ var bool psych_done = false
 if _newDay
     psych_done := false
 
-if modPsych and barstate.isconfirmed and in_kz and adr_psych_ok and adr_hard_ok and not psych_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
+if modPsych and barstate.isconfirmed and _testWinOk and in_kz and adr_psych_ok and adr_hard_ok and not psych_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
     lvl50     = math.round(close / 50.0)  * 50.0
     lvl100    = math.round(close / 100.0) * 100.0
     nearLevel = math.abs(close - lvl50) <= math.abs(close - lvl100) ? lvl50 : lvl100
@@ -573,7 +672,7 @@ var bool psych_ext_done = false
 if _newDay
     psych_ext_done := false
 
-if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_hard_ok and not psych_ext_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
+if modPsychExt and barstate.isconfirmed and _testWinOk and not in_kz and adr_psych_ok and adr_hard_ok and not psych_ext_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
     nearLevel = math.round(close / 100.0) * 100.0
     tol       = atrVal * 0.25
 
@@ -635,7 +734,7 @@ if not in_london and in_london[1] and not na(lon_hi)
 // ATR-based SL (1.5×ATR) — independent of session range width.
 // ADR gate: skip if day already consumed 80% of its average range.
 // ═══════════════════════════════════════════════════════════════════════
-if modLB and barstate.isconfirmed and in_london and ar_locked and _adrConsumed < 0.80 and not na(ar_hi) and not na(ar_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modLB and barstate.isconfirmed and _testWinOk and in_london and ar_locked and _adrConsumed < 0.80 and not na(ar_hi) and not na(ar_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     ar_range = ar_hi - ar_lo
     if ar_range > atrVal * 0.15
         slAtr = 1.5 * atrVal
@@ -669,7 +768,7 @@ if modLB and barstate.isconfirmed and in_london and ar_locked and _adrConsumed <
 // SIGNAL F — NY Session Breakout (of London range)
 // ATR-based SL. No daily limit — can re-fire after a stop-out.
 // ═══════════════════════════════════════════════════════════════════════
-if modNY and barstate.isconfirmed and in_overlap and lon_locked and _adrConsumed < 0.80 and not na(lon_hi) and not na(lon_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modNY and barstate.isconfirmed and _testWinOk and in_overlap and lon_locked and _adrConsumed < 0.80 and not na(lon_hi) and not na(lon_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     lon_range = lon_hi - lon_lo
     if lon_range > atrVal * 0.15
         slAtr = 1.5 * atrVal
@@ -700,7 +799,7 @@ if modNY and barstate.isconfirmed and in_overlap and lon_locked and _adrConsumed
 // ─── OPENING RANGE TRACKERS ───────────────────────────────────────────
 // Frankfurt ORB: 07:00–07:30 UTC (pre-London institutional open)
 in_frb_window  = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 450)
-in_frb_trade   = timeframe.isintraday and (_minOfDay >= 450 and _minOfDay < 660)
+in_frb_trade   = timeframe.isintraday and (_minOfDay >= 450 and _minOfDay < 450 + frbTradeMins)
 var float frb_hi = na
 var float frb_lo = na
 var bool  frb_locked = false
@@ -717,6 +816,11 @@ var float _asian_sess_close = na
 
 // London ORB: 08:00–08:30 UTC (first 2 bars of London on 15M)
 in_lorb_window = in_london and _minOfDay < 510
+// G trade window: 08:30–11:00 UTC. Previously G was gated on `in_london` alone,
+// which is the whole 08:00–11:00 session; lorb_locked made it behave as 08:30+
+// anyway, but naming it explicitly lets the C2 limit expire at the window edge
+// the way M's does, instead of resting against a dead level all day.
+in_lorb_trade  = timeframe.isintraday and (_minOfDay >= 510 and _minOfDay < 510 + lonTradeMins)
 var float lorb_hi = na
 var float lorb_lo = na
 var bool  lorb_locked = false
@@ -740,6 +844,13 @@ var bool  preny_done   = false
 
 // NY ORB: 14:00–14:30 UTC (first 2 bars of NY on 15M)
 in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)
+// H' trade window: 14:30–16:00 UTC. The direct analogue of in_frb_trade, which
+// Signal H has always been missing. Only consulted when modNYORBP is ON.
+in_nyorb_trade  = timeframe.isintraday and (_minOfDay >= 870 and _minOfDay < 960)
+// Optional NY limit expiry, independent of H'. When nyOrderMins is 0 this stays
+// permanently TRUE, so the falling-edge cancel below can never fire and the
+// baseline (cancel at the daily roll only) is reproduced exactly.
+in_ny_orderlife = nyOrderMins <= 0 or (_minOfDay >= 870 and _minOfDay < 870 + nyOrderMins)
 
 // ─── U/V: ASIAN SESSION ORBs (Sydney + Tokyo) ────────────────────────
 // Same C2 architecture as M (Frankfurt) and H (NY): build a 30-min opening
@@ -882,6 +993,153 @@ if in_tok_window
 if not in_tok_window and in_tok_window[1] and not na(tok_hi)
     tok_locked := true
 
+// ═══════════════════════════════════════════════════════════════════════
+// LIQUIDITY-GRAB TRACKING  (Signals M / H / U)
+// ─────────────────────────────────────────────────────────────────────
+// Gold's most-cited intraday behaviour is the stop run: price pushes through
+// a pool of resting orders, fails to hold, and reverses hard the other way.
+// A breakout that fires AFTER the opposite side has been swept is a different
+// animal from one that fires cold — the fuel (trapped traders on the wrong
+// side, plus the liquidity their stops just provided) is already in place.
+//
+// Two pools tracked per session, from that session's ORB window open onward:
+//
+//   OWN ORB OPPOSITE — price traded beyond the far side of this session's own
+//     opening range before breaking the near side. The classic ORB fakeout.
+//
+//   PRIOR SESSION POOL — price traded beyond the previous session's extreme:
+//     M (Frankfurt) sweeps the ASIAN range   00:00-07:00
+//     H (NY)        sweeps the LONDON range  08:00-14:00
+//     U (Sydney)    sweeps the NY range      14:00 -> Sydney open
+//
+// A LONG break wants the DOWNSIDE pool swept first, and vice versa.
+//
+// NOT applied to V (Tokyo): the request was NY / Frankfurt / Sydney, and
+// leaving V untouched keeps it identical in both arms. That matters here —
+// this harness is path-dependent (see c2MinBreakStr), so anything that is not
+// held fixed between runs contaminates the comparison.
+//
+// Distinct from orbBreakAsianHi/Lo, which require the break to CLOSE BEYOND
+// the prior extreme. That is expansion. This is sweep-and-reclaim — the
+// opposite shape, and never tested before.
+//
+// Every reset rides the rising edge of the session's OWN window, never
+// _newDay: the broker day rolls at 21:00/22:00 UTC, directly on top of both
+// the Sydney open and the NY pool window.
+// ═══════════════════════════════════════════════════════════════════════
+
+// NY session extreme feeding Signal U. Ends where the Sydney ORB begins.
+in_ny_pool = f_inWin(840, _sydOrbStart)
+var float ny_hi_presyd = na
+var float ny_lo_presyd = na
+if in_ny_pool and not in_ny_pool[1]
+    ny_hi_presyd := na
+    ny_lo_presyd := na
+if in_ny_pool
+    ny_hi_presyd := na(ny_hi_presyd) ? high : math.max(ny_hi_presyd, high)
+    ny_lo_presyd := na(ny_lo_presyd) ? low  : math.min(ny_lo_presyd, low)
+
+var bool frb_sw_lo   = false
+var bool frb_sw_hi   = false
+var bool frb_pool_lo = false
+var bool frb_pool_hi = false
+var bool nyo_sw_lo   = false
+var bool nyo_sw_hi   = false
+var bool nyo_pool_lo = false
+var bool nyo_pool_hi = false
+var bool syd_sw_lo   = false
+var bool syd_sw_hi   = false
+var bool syd_pool_lo = false
+var bool syd_pool_hi = false
+
+// M — Frankfurt. Own range can only be pierced after it locks at 07:30; the
+// Asian pool can be pierced from 07:00 onward, so both start at the window open.
+if in_frb_window and not in_frb_window[1]
+    frb_sw_lo   := false
+    frb_sw_hi   := false
+    frb_pool_lo := false
+    frb_pool_hi := false
+if in_frb_window or in_frb_trade
+    if frb_locked and not na(frb_lo) and low < frb_lo
+        frb_sw_lo := true
+    if frb_locked and not na(frb_hi) and high > frb_hi
+        frb_sw_hi := true
+    if not na(ar_lo_prefrb) and low < ar_lo_prefrb
+        frb_pool_lo := true
+    if not na(ar_hi_prefrb) and high > ar_hi_prefrb
+        frb_pool_hi := true
+
+// H — NY. Signal H carries no explicit trade-window gate (it may fire any time
+// after the 14:30 lock), so track from 14:00 to the end of the session day.
+if in_nyorb_window and not in_nyorb_window[1]
+    nyo_sw_lo   := false
+    nyo_sw_hi   := false
+    nyo_pool_lo := false
+    nyo_pool_hi := false
+if timeframe.isintraday and _minOfDay >= 840
+    if nyorb_locked and not na(nyorb_lo) and low < nyorb_lo
+        nyo_sw_lo := true
+    if nyorb_locked and not na(nyorb_hi) and high > nyorb_hi
+        nyo_sw_hi := true
+    if not na(lon_lo_preny) and low < lon_lo_preny
+        nyo_pool_lo := true
+    if not na(lon_hi_preny) and high > lon_hi_preny
+        nyo_pool_hi := true
+
+// U — Sydney.
+if in_syd_window and not in_syd_window[1]
+    syd_sw_lo   := false
+    syd_sw_hi   := false
+    syd_pool_lo := false
+    syd_pool_hi := false
+if in_syd_window or in_syd_trade
+    if syd_locked and not na(syd_lo) and low < syd_lo
+        syd_sw_lo := true
+    if syd_locked and not na(syd_hi) and high > syd_hi
+        syd_sw_hi := true
+    if not na(ny_lo_presyd) and low < ny_lo_presyd
+        syd_pool_lo := true
+    if not na(ny_hi_presyd) and high > ny_hi_presyd
+        syd_pool_hi := true
+
+// V — Tokyo. Tracked for CLASSIFICATION ONLY: the A+ table has to be able to
+// label every ORB trade in the baseline, and V is part of that baseline. The
+// f_liqOk gates below are deliberately NOT extended to V, so turning the
+// filter on still changes exactly the same three signals the two test runs
+// used. Pool = the Sydney session, i.e. Sydney open -> Tokyo open.
+in_tok_pool = f_inWin(_sydOrbStart, _tokOrbStart)
+var float syd_hi_pretok = na
+var float syd_lo_pretok = na
+if in_tok_pool and not in_tok_pool[1]
+    syd_hi_pretok := na
+    syd_lo_pretok := na
+if in_tok_pool
+    syd_hi_pretok := na(syd_hi_pretok) ? high : math.max(syd_hi_pretok, high)
+    syd_lo_pretok := na(syd_lo_pretok) ? low  : math.min(syd_lo_pretok, low)
+
+var bool tok_sw_lo   = false
+var bool tok_sw_hi   = false
+var bool tok_pool_lo = false
+var bool tok_pool_hi = false
+if in_tok_window and not in_tok_window[1]
+    tok_sw_lo   := false
+    tok_sw_hi   := false
+    tok_pool_lo := false
+    tok_pool_hi := false
+if in_tok_window or in_tok_trade
+    if tok_locked and not na(tok_lo) and low < tok_lo
+        tok_sw_lo := true
+    if tok_locked and not na(tok_hi) and high > tok_hi
+        tok_sw_hi := true
+    if not na(syd_lo_pretok) and low < syd_lo_pretok
+        tok_pool_lo := true
+    if not na(syd_hi_pretok) and high > syd_hi_pretok
+        tok_pool_hi := true
+
+// Pure resolver — reads the mode, assigns nothing, so it is safe as a function.
+f_liqOk(bool ownSw, bool poolSw) =>
+    c2LiqGrab == "Off" ? true : c2LiqGrab == "Sweep own ORB opposite" ? ownSw : c2LiqGrab == "Sweep prior session pool" ? poolSw : (ownSw or poolSw)
+
 // ─── RATCHET (NO TP) — unlimited runner, stop-only exit ──────────────
 // No take-profit order at all. The position closes ONLY when the ratcheting
 // stop is hit, so a trade that keeps going keeps going — 10R, 20R, no cap.
@@ -916,6 +1174,12 @@ if not in_tok_window and in_tok_window[1] and not na(tok_hi)
 if not in_frb_trade and in_frb_trade[1]
     strategy.cancel("FRB-L")
     strategy.cancel("FRB-S")
+// G in C2 mode rests a limit, so it needs the same expiry M has — otherwise an
+// ORB-L armed at 10:55 still fills at 19:00 against a level that stopped being
+// the London opening range hours earlier.
+if not in_lorb_trade and in_lorb_trade[1]
+    strategy.cancel("ORB-L")
+    strategy.cancel("ORB-S")
 if not in_syd_trade and in_syd_trade[1]
     strategy.cancel("SYD-L")
     strategy.cancel("SYD-S")
@@ -923,6 +1187,19 @@ if not in_tok_trade and in_tok_trade[1]
     strategy.cancel("TOK-L")
     strategy.cancel("TOK-S")
 if _newDay
+    strategy.cancel("NYORB-L")
+    strategy.cancel("NYORB-S")
+// H' only: expire the NYORB limit at the end of its own window, the way M does.
+// Without this a limit armed at 15:55 still rests all evening against a level
+// that stopped being the opening range hours earlier.
+if modNYORBP and not in_nyorb_trade and in_nyorb_trade[1]
+    strategy.cancel("NYORB-L")
+    strategy.cancel("NYORB-S")
+// Standalone NY expiry (nyOrderMins > 0). Separate from H' on purpose: H' also
+// blocks the SIGNAL to a 14:30-16:00 window and was rejected for that reason,
+// whereas this only bounds how long an already-armed LIMIT may rest. Late NY
+// breaks were measured as the BETTER trades, so the two must be testable apart.
+if not in_ny_orderlife and in_ny_orderlife[1]
     strategy.cancel("NYORB-L")
     strategy.cancel("NYORB-S")
 
@@ -997,11 +1274,11 @@ _mtp_prev := _mtp_cur
 // logic as G and H but fires 1 hour before London, in a completely
 // separate time window so it never conflicts with G or H.
 // ═══════════════════════════════════════════════════════════════════════
-if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
+if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and _orbGateFRB and _hm_dow_ok and strategy.position_size == 0
     orb_range = frb_hi - frb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeFRB
-        if close > frb_hi and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
+        if close > frb_hi and (close - frb_hi) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
             // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it;
             // SL/TP stay on the ORB level, so only entry price and fill odds move.
@@ -1047,7 +1324,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < frb_lo and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
+        else if close < frb_lo and (frb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
             // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             entryP = frb_lo - orb_range * _c2Depth
@@ -1097,27 +1374,62 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
 // After 08:30: trade first bar that closes outside the OR.
 // SL at opposite OR extreme; TP targets are multiples of OR width.
 // ═══════════════════════════════════════════════════════════════════════
-if modORB and barstate.isconfirmed and in_london and lorb_locked and not lorb_done and not na(lorb_hi) and not na(lorb_lo) and strategy.position_size == 0
+// REWORKED 2026-09-21. G was the last ORB still running the ORIGINAL
+// architecture — market entry at the close, SL at the opposite OR extreme, no
+// bias gate, no ADR gate, no min-range floor, no Asian filters. M and H have all
+// of those and produce the 99% baseline; G had none and was left OFF.
+//
+// Now switchable to the identical C2 geometry, with each requested filter on its
+// own toggle so they can be isolated one at a time rather than all at once.
+// Every filter defaults OFF, so turning modORB on alone reproduces C2-G bare.
+if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lorb_done and not na(lorb_hi) and not na(lorb_lo) and (not lonADRGuard or _adrConsumed[1] < 0.90) and _testWinOk and _hm_dow_ok and strategy.position_size == 0
     orb_range = lorb_hi - lorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
-    if orb_range > 0.50
-        if close > lorb_hi
-            entryP = close
-            slP    = lorb_lo - buf
+    if orb_range >= (lonUseC2 ? c2MinRangeLON : 0.50)
+        if close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0)
+            // C2: BUY LIMIT back at lorb_hi (broken ORB high retests as support).
+            // Legacy: market fill at this bar's close, SL at the opposite extreme.
+            entryP = lonUseC2 ? lorb_hi + orb_range * _c2Depth : close
+            slP    = lonUseC2 ? lorb_hi - f_c2SL(orb_range)    : lorb_lo - buf
+            tp1    = lonUseC2 ? lorb_hi + orb_range * orbTPMult       : lorb_hi + orb_range
+            tp2    = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 2.0 : lorb_hi + orb_range * 2.0
+            tp3    = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 3.0 : lorb_hi + orb_range * 3.0
             lorb_done := true
-            strategy.entry("ORB-L", strategy.long, comment="orb · LONG")
-            strategy.exit("ORB-L-X", from_entry="ORB-L", stop=slP,
-                          limit=f_exitLim(lorb_hi + orb_range, lorb_hi + orb_range * 2.0, lorb_hi + orb_range * 3.0))
-            f_drawPosBox(entryP, slP, lorb_hi + orb_range * 3.0)
+            c2LimGL = (lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("ORB-L", strategy.long, limit=c2LimGL, comment="london-orb · LONG")
+            // Ratchet state — without this, f_c2Exit's ratchet branch places a
+            // naked stop with no TP and no trail: a guaranteed full loss. Same
+            // bug U and V carried until it was found.
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := lorb_hi
+                _rt_entry := entryP
+                _rt_rng   := orb_range
+                _rt_dir   := 1
+                _rt_id    := "ORB-L"
+                _rt_sl    := slP
+                _rt_reach := 0.0
+            f_c2Exit("ORB-L", slP, tp1, tp2, tp3, orb_range)
+            f_drawPosBox(entryP, slP, tp3)
 
-        else if close < lorb_lo
-            entryP = close
-            slP    = lorb_hi + buf
+        else if close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0)
+            entryP = lonUseC2 ? lorb_lo - orb_range * _c2Depth : close
+            slP    = lonUseC2 ? lorb_lo + f_c2SL(orb_range)    : lorb_hi + buf
+            tp1    = lonUseC2 ? lorb_lo - orb_range * orbTPMult       : lorb_lo - orb_range
+            tp2    = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 2.0 : lorb_lo - orb_range * 2.0
+            tp3    = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 3.0 : lorb_lo - orb_range * 3.0
             lorb_done := true
-            strategy.entry("ORB-S", strategy.short, comment="orb · SHORT")
-            strategy.exit("ORB-S-X", from_entry="ORB-S", stop=slP,
-                          limit=f_exitLim(lorb_lo - orb_range, lorb_lo - orb_range * 2.0, lorb_lo - orb_range * 3.0))
-            f_drawPosBox(entryP, slP, lorb_lo - orb_range * 3.0)
+            c2LimGS = (lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("ORB-S", strategy.short, limit=c2LimGS, comment="london-orb · SHORT")
+            if exitMode == "Ratchet (no TP)"
+                _rt_lvl   := lorb_lo
+                _rt_entry := entryP
+                _rt_rng   := orb_range
+                _rt_dir   := -1
+                _rt_id    := "ORB-S"
+                _rt_sl    := slP
+                _rt_reach := 0.0
+            f_c2Exit("ORB-S", slP, tp1, tp2, tp3, orb_range)
+            f_drawPosBox(entryP, slP, tp3)
 
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL N — PM Fix ORB (Opening Range 12:00-12:30 UTC)
@@ -1125,7 +1437,7 @@ if modORB and barstate.isconfirmed and in_london and lorb_locked and not lorb_do
 // world — major banks settle positions here.  Price often makes a clean
 // directional break after the fix window closes.  Trade window: 12:30–14:00.
 // ═══════════════════════════════════════════════════════════════════════
-if modPMFix and barstate.isconfirmed and in_pmfix_trade and pmfix_locked and not pmfix_done and not na(pmfix_hi) and not na(pmfix_lo) and strategy.position_size == 0
+if modPMFix and barstate.isconfirmed and _testWinOk and in_pmfix_trade and pmfix_locked and not pmfix_done and not na(pmfix_hi) and not na(pmfix_lo) and strategy.position_size == 0
     orb_range = pmfix_hi - pmfix_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range > 0.50
@@ -1154,7 +1466,7 @@ if modPMFix and barstate.isconfirmed and in_pmfix_trade and pmfix_locked and not
 // hypothesis holds, this should also outperform in-session ORBs.
 // Trade window: 13:30–16:00 UTC.
 // ═══════════════════════════════════════════════════════════════════════
-if modPreNY and barstate.isconfirmed and in_preny_trade and preny_locked and not preny_done and not na(preny_hi) and not na(preny_lo) and strategy.position_size == 0
+if modPreNY and barstate.isconfirmed and _testWinOk and in_preny_trade and preny_locked and not preny_done and not na(preny_hi) and not na(preny_lo) and strategy.position_size == 0
     orb_range = preny_hi - preny_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range > 0.50
@@ -1180,11 +1492,11 @@ if modPreNY and barstate.isconfirmed and in_preny_trade and preny_locked and not
 // SIGNAL H — NY ORB (Opening Range Breakout 14:00-14:30 UTC)
 // Same concept for the NY open — second major institutional opportunity.
 // ═══════════════════════════════════════════════════════════════════════
-if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
+if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok and strategy.position_size == 0
     orb_range = nyorb_hi - nyorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeNY
-        if close > nyorb_hi and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
+        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it.
             entryP = nyorb_hi + orb_range * _c2Depth
@@ -1227,7 +1539,7 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
+        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
             // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             entryP = nyorb_lo - orb_range * _c2Depth
@@ -1289,24 +1601,15 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
 // most signals IS a result — it would mean the setup does not exist here.
 // ═══════════════════════════════════════════════════════════════════════
 
-// Shared exit router for U/V. "Scale 30/75/150" needs the _mtp state machine
-// wired per-signal, so U/V fall through to the single-target exit for it.
-f_c2Exit(string id, float slP, float tp1, float tp2, float tp3, float rng) =>
-    if exitMode == "Trail after TP1"
-        strategy.exit(id + "-X", from_entry=id, stop=slP, trail_price=tp1, trail_offset=math.round(rng / syminfo.mintick))
-    else if exitMode == "Split TP1+TP2"
-        strategy.exit(id + "-X1", from_entry=id, qty_percent=50, stop=slP, limit=tp1)
-        strategy.exit(id + "-X2", from_entry=id, stop=slP, limit=tp2)
-    else if exitMode == "Ratchet (no TP)"
-        strategy.exit(id + "-X", from_entry=id, stop=slP)
-    else
-        strategy.exit(id + "-X", from_entry=id, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
+// f_c2Exit moved UP to just after f_exitLim — Signal G now uses it too, and G
+// sits earlier in the file than this block did. Pine requires a function to be
+// defined before every use.
 
 // ─── SIGNAL U — Sydney ORB ───────────────────────────────────────────
-if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
+if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     rngU = syd_hi - syd_lo
     if rngU >= c2MinRangeASIA
-        if close > syd_hi and (not orbBiasFilter or _orbBiasLong)
+        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong)
             entryP = syd_hi + rngU * _c2Depth
             slP    = syd_hi - f_c2SL(rngU)
             tp1    = syd_hi + rngU * orbTPMult
@@ -1332,7 +1635,7 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < syd_lo and (not orbBiasFilter or _orbBiasShort)
+        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort)
             entryP = syd_lo - rngU * _c2Depth
             slP    = syd_lo + f_c2SL(rngU)
             tp1    = syd_lo - rngU * orbTPMult
@@ -1355,10 +1658,10 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
             f_drawPosBox(entryP, slP, tp3)
 
 // ─── SIGNAL V — Tokyo ORB ────────────────────────────────────────────
-if modTOK and barstate.isconfirmed and in_tok_trade and tok_locked and not tok_done and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
+if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locked and not tok_done and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     rngV = tok_hi - tok_lo
     if rngV >= c2MinRangeASIA
-        if close > tok_hi and (not orbBiasFilter or _orbBiasLong)
+        if close > tok_hi and (close - tok_hi) >= rngV * c2MinBreakStr and (not orbBiasFilter or _orbBiasLong)
             entryP = tok_hi + rngV * _c2Depth
             slP    = tok_hi - f_c2SL(rngV)
             tp1    = tok_hi + rngV * orbTPMult
@@ -1380,7 +1683,7 @@ if modTOK and barstate.isconfirmed and in_tok_trade and tok_locked and not tok_d
                       color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < tok_lo and (not orbBiasFilter or _orbBiasShort)
+        else if close < tok_lo and (tok_lo - close) >= rngV * c2MinBreakStr and (not orbBiasFilter or _orbBiasShort)
             entryP = tok_lo - rngV * _c2Depth
             slP    = tok_lo + f_c2SL(rngV)
             tp1    = tok_lo - rngV * orbTPMult
@@ -1415,7 +1718,7 @@ if _newDay
     pdh_done := false
     pdl_done := false
 
-if modPDHL and barstate.isconfirmed and in_kz and not na(_pdh) and not na(_pdl) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modPDHL and barstate.isconfirmed and _testWinOk and in_kz and not na(_pdh) and not na(_pdl) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     buf = atrVal * 0.15
 
     // Swept above PDH, closed back below → SHORT
@@ -1457,7 +1760,7 @@ if modPDHL and barstate.isconfirmed and in_kz and not na(_pdh) and not na(_pdl) 
 // professional intraday gold traders as a mean-reversion scalp.
 // No daily limit — re-fires after stop-outs while extension persists.
 // ═══════════════════════════════════════════════════════════════════════
-if modVWAP and barstate.isconfirmed and in_kz and not na(vwapVal) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modVWAP and barstate.isconfirmed and _testWinOk and in_kz and not na(vwapVal) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     vwapDist = close - vwapVal
     bearExt  = vwapDist >  atrVal * 1.5 and close < open
     bullExt  = vwapDist < -atrVal * 1.5 and close > open
@@ -1500,7 +1803,7 @@ if _newWeek
     pwh_done := false
     pwl_done := false
 
-if modPWHL and barstate.isconfirmed and in_kz and not na(_pwh) and not na(_pwl) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modPWHL and barstate.isconfirmed and _testWinOk and in_kz and not na(_pwh) and not na(_pwl) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     buf = atrVal * 0.20
 
     if not pwh_done and high > _pwh and close < _pwh and (high - _pwh) >= atrVal * 0.15
@@ -1547,7 +1850,7 @@ if _newDay
     midnight_long_done  := false
     midnight_short_done := false
 
-if modMidnight and barstate.isconfirmed and in_london and not na(_midnightOpen) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modMidnight and barstate.isconfirmed and _testWinOk and in_london and not na(_midnightOpen) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     tol = atrVal * 0.25
 
     bounceLong  = low <= _midnightOpen + tol and low <= _midnightOpen and close > _midnightOpen and close > open
@@ -1600,7 +1903,7 @@ if _newDay
     asfp_hi_done := false
     asfp_lo_done := false
 
-if modASFP and barstate.isconfirmed and in_asfp_win and ar_locked and not na(ar_hi) and not na(ar_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
+if modASFP and barstate.isconfirmed and _testWinOk and in_asfp_win and ar_locked and not na(ar_hi) and not na(ar_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
     asfpBuf = atrVal * 0.20
     // SHORT: swept above Asian high, closed back inside → reverse down
     if not asfp_hi_done and high > ar_hi and close < ar_hi and (high - ar_hi) < atrVal * 1.5
@@ -1644,7 +1947,7 @@ if modASFP and barstate.isconfirmed and in_asfp_win and ar_locked and not na(ar_
 // filters to dip-buy entries within the running trend.
 // SL = 1.0 × ATR below entry.  TP1 = 0.75 × ATR.
 // ═══════════════════════════════════════════════════════════════════════
-if modQ and barstate.isconfirmed and atrVal > 0 and h1B == 1 and h4B == 1 and hdB == 1 and _ret4bar < -0.69 and strategy.position_size == 0
+if modQ and barstate.isconfirmed and _testWinOk and atrVal > 0 and h1B == 1 and h4B == 1 and hdB == 1 and _ret4bar < -0.69 and strategy.position_size == 0
     slQ  = close - 1.0  * atrVal
     tp1Q = close + 0.75 * atrVal
     tp2Q = close + 1.5  * atrVal
@@ -1667,7 +1970,7 @@ if modQ and barstate.isconfirmed and atrVal > 0 and h1B == 1 and h4B == 1 and hd
 // ═══════════════════════════════════════════════════════════════════════
 _inRWin = _minOfDay > 37 and _minOfDay < 607   // 00:37 – 10:07 UTC
 
-if modR and barstate.isconfirmed and atrVal > 0 and h1B == -1 and h4B == -1 and hdB == -1 and _ret4bar > 0.38 and _inRWin and strategy.position_size == 0
+if modR and barstate.isconfirmed and _testWinOk and atrVal > 0 and h1B == -1 and h4B == -1 and hdB == -1 and _ret4bar > 0.38 and _inRWin and strategy.position_size == 0
     slR  = close + 1.0  * atrVal
     tp1R = close - 0.75 * atrVal
     tp2R = close - 1.5  * atrVal
@@ -1696,7 +1999,7 @@ if _newDay
     s_short_done := false
     s_long_done  := false
 
-if modS and barstate.isconfirmed and atrVal > 0 and not s_short_done and _inPreNYS and sDirFilter != "Long only" and h1B == -1 and h4B == -1 and hdB == -1 and close < open and strategy.position_size == 0
+if modS and barstate.isconfirmed and _testWinOk and atrVal > 0 and not s_short_done and _inPreNYS and sDirFilter != "Long only" and h1B == -1 and h4B == -1 and hdB == -1 and close < open and strategy.position_size == 0
     slS  = close + 1.0  * atrVal
     tp1S = close - 0.75 * atrVal
     tp2S = close - 1.5  * atrVal
@@ -1709,7 +2012,7 @@ if modS and barstate.isconfirmed and atrVal > 0 and not s_short_done and _inPreN
                   color=color.new(color.purple, 5), textcolor=color.white, size=size.small)
         f_drawPosBox(close, slS, tp3S)
 
-if modS and barstate.isconfirmed and atrVal > 0 and not s_long_done and _inPreNYS and sDirFilter != "Short only" and h1B == 1 and h4B == 1 and hdB == 1 and close > open and strategy.position_size == 0
+if modS and barstate.isconfirmed and _testWinOk and atrVal > 0 and not s_long_done and _inPreNYS and sDirFilter != "Short only" and h1B == 1 and h4B == 1 and hdB == 1 and close > open and strategy.position_size == 0
     slS  = close - 1.0  * atrVal
     tp1S = close + 0.75 * atrVal
     tp2S = close + 1.5  * atrVal
@@ -1739,7 +2042,7 @@ if _newDay
     t_long_done  := false
     t_short_done := false
 
-if modT and barstate.isconfirmed and atrVal > 0 and not t_long_done and _inFrankT and tDirFilter != "Short only" and h1B == 1 and h4B == 1 and hdB == 1 and close > open and strategy.position_size == 0
+if modT and barstate.isconfirmed and _testWinOk and atrVal > 0 and not t_long_done and _inFrankT and tDirFilter != "Short only" and h1B == 1 and h4B == 1 and hdB == 1 and close > open and strategy.position_size == 0
     slT  = close - 1.0  * atrVal
     tp1T = close + 0.75 * atrVal
     tp2T = close + 1.5  * atrVal
@@ -1752,7 +2055,7 @@ if modT and barstate.isconfirmed and atrVal > 0 and not t_long_done and _inFrank
                   color=color.new(color.lime, 5), textcolor=color.white, size=size.small)
         f_drawPosBox(close, slT, tp3T)
 
-if modT and barstate.isconfirmed and atrVal > 0 and not t_short_done and _inFrankT and tDirFilter != "Long only" and h1B == -1 and h4B == -1 and hdB == -1 and close < open and strategy.position_size == 0
+if modT and barstate.isconfirmed and _testWinOk and atrVal > 0 and not t_short_done and _inFrankT and tDirFilter != "Long only" and h1B == -1 and h4B == -1 and hdB == -1 and close < open and strategy.position_size == 0
     slT  = close + 1.0  * atrVal
     tp1T = close - 0.75 * atrVal
     tp2T = close - 1.5  * atrVal
@@ -1764,6 +2067,644 @@ if modT and barstate.isconfirmed and atrVal > 0 and not t_short_done and _inFran
         label.new(bar_index, high, "T↓", style=label.style_label_down,
                   color=color.new(color.lime, 5), textcolor=color.white, size=size.small)
         f_drawPosBox(close, slT, tp3T)
+
+// ═══════════════════════════════════════════════════════════════════════
+// A+ CONTEXT CAPTURE — recorded at SIGNAL time, not fill time
+// ─────────────────────────────────────────────────────────────────────
+// WHY THIS CHANGED. The previous version captured on the bar a position
+// OPENED, which is blind to any trade that opens and closes inside one bar.
+// That lost 24 of 96 trades, and NOT at random: every one of them had MAE
+// <= 20. The context analysis was running on the harder three quarters of
+// the list, biasing every percentage in it downward.
+//
+// Capturing on the SIGNAL bar fixes the coverage (a signal always precedes
+// or equals its fill) AND unlocks the feature the break-and-retest research
+// points at hardest: RETEST LATENCY, the gap in bars between the break and
+// the limit filling. The literature is consistent that a fast, shallow
+// pullback holding the level is healthy continuation, while a slow drift
+// back into the range is a breakout that already died. Latency is that idea
+// as a number, and it is known by the time the trade fills.
+//
+// Two more features that cost nothing to record:
+//   BREAK STRENGTH — how far beyond the level the signal bar closed, in
+//     range units. A marginal break is a weak break.
+//   DAILY AGREEMENT — the H/M gate requires H1+H4 to align but says nothing
+//     about the Daily, so hdB varies trade to trade and has never been tested.
+//
+// NOT captured: relative volume. The 2026 ORB study found volume does not
+// predict follow-through in either direction, so the "high volume = conviction"
+// heuristic is not worth a column here.
+//
+// Detection rides the rising edge of each signal's own `done` flag, so the
+// eight entry blocks need no edits and cannot drift out of sync with this.
+var array<int>   _ctxBar = array.new<int>(0)   // signal bar index
+var array<float> _ctxRng = array.new<float>(0) // ORB range, points
+var array<float> _ctxStr = array.new<float>(0) // break strength, in range units
+var array<float> _ctxAdr = array.new<float>(0) // ADR consumed at signal
+var array<int>   _ctxAgr = array.new<int>(0)   // 1 = Daily bias agrees with the break
+var array<int>   _ctxSig = array.new<int>(0)   // 0=FRB 1=NYORB 2=SYD 3=TOK
+var array<int>   _ctxPool= array.new<int>(0)   // 1 = prior-session pool swept on the break's far side
+var array<int>   _ctxM15 = array.new<int>(0)   // 1 = 15m bias agrees with the break
+var array<float> _ctxAtr = array.new<float>(0) // entry-TF ATR at signal — the third stop normalizer
+
+// Inlined four times rather than wrapped in a helper: Pine functions may not
+// assign to globals, and mutating a global array from inside one is a rule I
+// would rather not lean on in code that decides real stops.
+if frb_done and not frb_done[1] and not na(frb_hi) and not na(frb_lo) and frb_hi > frb_lo
+    dirF = close > frb_hi ? 1 : -1
+    lvlF = dirF == 1 ? frb_hi : frb_lo
+    rngF = frb_hi - frb_lo
+    array.push(_ctxBar, bar_index)
+    array.push(_ctxRng, rngF)
+    array.push(_ctxStr, math.abs(close - lvlF) / rngF)
+    array.push(_ctxAdr, _adrConsumed)
+    array.push(_ctxAgr, hdB == dirF ? 1 : 0)
+    array.push(_ctxSig, 0)
+    array.push(_ctxPool, (dirF == 1 ? frb_pool_lo : frb_pool_hi) ? 1 : 0)
+    array.push(_ctxM15, m15B == dirF ? 1 : 0)
+    array.push(_ctxAtr, atrVal)
+
+if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) and nyorb_hi > nyorb_lo
+    dirN = close > nyorb_hi ? 1 : -1
+    lvlN = dirN == 1 ? nyorb_hi : nyorb_lo
+    rngN = nyorb_hi - nyorb_lo
+    array.push(_ctxBar, bar_index)
+    array.push(_ctxRng, rngN)
+    array.push(_ctxStr, math.abs(close - lvlN) / rngN)
+    array.push(_ctxAdr, _adrConsumed)
+    array.push(_ctxAgr, hdB == dirN ? 1 : 0)
+    array.push(_ctxSig, 1)
+    array.push(_ctxPool, (dirN == 1 ? nyo_pool_lo : nyo_pool_hi) ? 1 : 0)
+    array.push(_ctxM15, m15B == dirN ? 1 : 0)
+    array.push(_ctxAtr, atrVal)
+
+if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi > syd_lo
+    dirS = close > syd_hi ? 1 : -1
+    lvlS = dirS == 1 ? syd_hi : syd_lo
+    rngS = syd_hi - syd_lo
+    array.push(_ctxBar, bar_index)
+    array.push(_ctxRng, rngS)
+    array.push(_ctxStr, math.abs(close - lvlS) / rngS)
+    array.push(_ctxAdr, _adrConsumed)
+    array.push(_ctxAgr, hdB == dirS ? 1 : 0)
+    array.push(_ctxSig, 2)
+    array.push(_ctxPool, (dirS == 1 ? syd_pool_lo : syd_pool_hi) ? 1 : 0)
+    array.push(_ctxM15, m15B == dirS ? 1 : 0)
+    array.push(_ctxAtr, atrVal)
+
+if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi > tok_lo
+    dirT = close > tok_hi ? 1 : -1
+    lvlT = dirT == 1 ? tok_hi : tok_lo
+    rngT = tok_hi - tok_lo
+    array.push(_ctxBar, bar_index)
+    array.push(_ctxRng, rngT)
+    array.push(_ctxStr, math.abs(close - lvlT) / rngT)
+    array.push(_ctxAdr, _adrConsumed)
+    array.push(_ctxAgr, hdB == dirT ? 1 : 0)
+    array.push(_ctxSig, 3)
+    array.push(_ctxPool, (dirT == 1 ? tok_pool_lo : tok_pool_hi) ? 1 : 0)
+    array.push(_ctxM15, m15B == dirT ? 1 : 0)
+    array.push(_ctxAtr, atrVal)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SL RESEARCH — MAE-driven stop sweep  (answers "how small can c2SLBuf go?")
+// ─────────────────────────────────────────────────────────────────────
+// The 150-pt stop is ~6-19x the ORB range, so a win banks ~0.06R while a loss
+// costs 1R. Live sizing is risk-based, so a smaller stop buys a bigger position
+// for the same dollars: halve the stop and each ~12-pt win pays roughly double.
+// The only thing stopping you is how many winners a tighter stop would kill.
+//
+// This table answers that directly from MAXIMUM ADVERSE EXCURSION — how far
+// each trade went against you before it resolved. For each candidate stop S:
+//   - a winner whose MAE <= S still wins, and banks its actual points
+//   - a winner whose MAE >  S is CONVERTED to a loss of S
+//   - a trade that already lost simply loses S instead of the old stop
+// Net R = net points / S, which is the unit that matters under risk-based
+// sizing (TradingView's dollar P&L is NOT comparable across stop widths).
+//
+// READ IT AS: the smallest S where "Net R" is still climbing is your floor.
+// Below that, converted winners eat the gain from the larger R multiple.
+//
+// IMPORTANT — S is measured from the ENTRY, while c2SLBuf is measured from the
+// ORB LEVEL, and the entry sits c2RetestDepth x range past the level. So set
+//     c2SLBuf  =  S  -  (c2RetestDepth x ORB range)      [~0.25 x range]
+// Then re-run with that c2SLBuf to confirm the real number.
+//
+// CAVEAT: this re-prices the SAME trade list. It cannot show trades a tighter
+// stop would have let you re-enter, and it assumes a converted winner stops at
+// exactly S. Treat it as the shortlist, not the final answer — confirm the
+// winner by actually setting c2SLBuf and re-running.
+// ═══════════════════════════════════════════════════════════════════════
+G_SLR   = "SL research"
+showSLR = input.bool(true, "Show MAE stop-sweep table", group=G_SLR,
+          tooltip="Re-prices every closed trade in this run against a range of candidate stop sizes, using each trade's own maximum adverse excursion. Turn off once you have settled on a stop.")
+
+// Thresholds concentrated in the WR-PRESERVING zone. The first sweep ran
+// 10-40 pts, which trades win rate for R — rejected. What matters is the band
+// just above the worst winner's excursion, where nothing is killed at all.
+var array<float> _slrTh = array.from(50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 150.0)
+var table slrTbl = na
+
+// The table is built whenever showSLR is on, even with zero usable trades, and
+// the bottom row always reports trade count + point value. A table that renders
+// nothing at all is indistinguishable from a script that failed to load, which
+// is exactly the debugging hole this avoids.
+if barstate.islast and showSLR
+    if na(slrTbl)
+        slrTbl := table.new(position.middle_right, 5, 16,
+                   bgcolor=color.new(color.black, 60),
+                   border_color=color.new(color.gray, 60), border_width=1,
+                   frame_color=color.new(color.gray, 60), frame_width=1)
+
+    // syminfo.pointvalue is na or 0 on some feeds. Previously that emptied the
+    // array and the whole table silently disappeared; fall back to 1.0 instead,
+    // which is correct for XAUUSD (1 contract x 1.00 price move = 1 currency).
+    pv = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
+
+    // Pass 1 — pull each closed trade's MAE and P&L into POINTS per contract.
+    // max_drawdown() and profit() are both in currency, so divide by the trade's
+    // own size: percent_of_equity means size differs from trade to trade.
+    mae  = array.new<float>(0)
+    pnl  = array.new<float>(0)
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            sz = math.abs(strategy.closedtrades.size(i))
+            if sz > 0
+                unit = sz * pv
+                array.push(mae, strategy.closedtrades.max_drawdown(i) / unit)
+                array.push(pnl, strategy.closedtrades.profit(i) / unit)
+
+    table.cell(slrTbl, 0, 15, "closed trades: " + str.tostring(strategy.closedtrades) + "  ·  usable: " + str.tostring(array.size(mae)) + "  ·  pointvalue: " + str.tostring(pv, "#.####"),
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+
+    // ─── WINNER-ONLY MAE — the WR-preserving answer ──────────────────
+    // A stop only costs win rate when it sits INSIDE a winner's adverse
+    // excursion. So the smallest stop that changes the win rate by exactly
+    // nothing is (worst winner's MAE + a tick of margin). Everything above
+    // that line is free: same trades, same wins, smaller R denominator.
+    // p99/p95/p90 are there for the next decision — how much WR you would
+    // trade away to shrink the stop further, priced one winner at a time.
+    if array.size(mae) > 0
+        wmae = array.new<float>(0)
+        for j = 0 to array.size(mae) - 1
+            if array.get(pnl, j) > 0
+                array.push(wmae, array.get(mae, j))
+        if array.size(wmae) > 0
+            // percentile_linear_interpolation REQUIRES the array to be sorted
+            // first. Passing an unsorted array returns a meaningless number
+            // with no error and no warning — sort before reading percentiles.
+            array.sort(wmae, order.ascending)
+            wMax  = array.max(wmae)
+            w99   = array.percentile_linear_interpolation(wmae, 99)
+            w95   = array.percentile_linear_interpolation(wmae, 95)
+            w90   = array.percentile_linear_interpolation(wmae, 90)
+            zeroS = math.ceil(wMax) + 2
+            wCol  = color.new(color.aqua, 0)
+            table.cell(slrTbl, 0, 12, "WINNER MAE (n=" + str.tostring(array.size(wmae)) + ")", text_color=wCol, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(slrTbl, 1, 12, "max " + str.tostring(wMax, "#.#"), text_color=color.new(color.white, 15), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 2, 12, "p99 " + str.tostring(w99,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 3, 12, "p95 " + str.tostring(w95,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 4, 12, "p90 " + str.tostring(w90,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+
+            table.cell(slrTbl, 0, 13, "ZERO-WR-COST STOP", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(slrTbl, 1, 13, str.tostring(zeroS, "#") + " pts", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 2, 13, "WR unchanged", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 3, 13, "c2SLBuf ~", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 4, 13, str.tostring(zeroS - 6, "#"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+
+            // Cost of going tighter, priced in winners lost rather than percent.
+            table.cell(slrTbl, 0, 14, "tighter costs:", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(slrTbl, 1, 14, "p99 loses ~1 win", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 2, 14, "p95 ~5%", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 3, 14, "p90 ~10%", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 4, 14, "of wins", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+
+    if array.size(mae) > 0
+        hCol = color.new(#D4A017, 0)
+        table.cell(slrTbl, 0, 0, "Stop (from entry)", text_color=hCol, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(slrTbl, 1, 0, "Wins killed",       text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(slrTbl, 2, 0, "WR %",              text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(slrTbl, 3, 0, "Net pts",           text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(slrTbl, 4, 0, "Net R",             text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+
+        // Pass 2 — re-price the whole trade list against each candidate stop.
+        bestR   = -1e12
+        bestS   = 0.0
+        for ti = 0 to array.size(_slrTh) - 1
+            S       = array.get(_slrTh, ti)
+            netPts  = 0.0
+            wins    = 0
+            losses  = 0
+            killed  = 0
+            for j = 0 to array.size(mae) - 1
+                m = array.get(mae, j)
+                p = array.get(pnl, j)
+                if p > 0
+                    if m > S
+                        killed := killed + 1
+                        losses := losses + 1
+                        netPts := netPts - S
+                    else
+                        wins   := wins + 1
+                        netPts := netPts + p
+                else
+                    losses := losses + 1
+                    netPts := netPts - S
+            tot  = wins + losses
+            wr   = tot > 0 ? wins * 100.0 / tot : 0.0
+            netR = S > 0 ? netPts / S : 0.0
+            if netR > bestR
+                bestR := netR
+                bestS := S
+            rCol = netR > 0 ? color.lime : color.red
+            table.cell(slrTbl, 0, ti + 1, str.tostring(S, "#") + " pts",      text_color=color.new(color.white, 15), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(slrTbl, 1, ti + 1, str.tostring(killed),                text_color=color.new(killed > 0 ? color.orange : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 2, ti + 1, str.tostring(wr, "#.##"),            text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 3, ti + 1, str.tostring(netPts, "#"),           text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(slrTbl, 4, ti + 1, str.tostring(netR, "#.#"),           text_color=color.new(rCol, 0),         text_size=size.tiny, text_halign=text.align_right)
+
+        table.cell(slrTbl, 0, 11, "BEST: " + str.tostring(bestS, "#") + " pts", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(slrTbl, 1, 11, "n=" + str.tostring(array.size(mae)),         text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(slrTbl, 2, 11, "",                                            text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(slrTbl, 3, 11, "max R",                                       text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(slrTbl, 4, 11, str.tostring(bestR, "#.#"),                    text_color=color.new(color.aqua, 0),  text_size=size.tiny, text_halign=text.align_right)
+
+// ═══════════════════════════════════════════════════════════════════════
+// A+ SETUP ANALYSIS — which trades never need a wide stop
+// ─────────────────────────────────────────────────────────────────────
+// The stop sweep answers "one stop for everything". This answers a better
+// question: WHICH setups never go far against you, so those can be sized up
+// on a tight stop while the rest keep the wide one.
+//
+// Three views of the same closed-trade list:
+//   1. MAE BUCKETS — how far each trade went against you before resolving.
+//      "straight to TP" = never went more than 1 pt offside. The cumulative
+//      column is the headline: what share of trades never exceeded 20 pts.
+//   2. BY SIGNAL — the same split per signal and direction. If one signal
+//      supplies most of the low-MAE trades, that is the A+ candidate.
+//   3. BY WEEKDAY — same split per day.
+//
+// avg MFE is how far each bucket ran in your favour. A bucket with low MAE
+// and high MFE is the ideal: little heat, large reach.
+//
+// WHAT THIS CANNOT SEE YET: ORB range and ADR at entry, which are the two
+// most likely real discriminators. They live in bar context at signal time,
+// not in the trade record, so they need separate capture. If the tables below
+// show a signal or day that concentrates the low-MAE trades, that is worth
+// wiring next — a split that shows nothing means the edge is not categorical.
+// ═══════════════════════════════════════════════════════════════════════
+showAplus = input.bool(true, "Show A+ setup analysis", group=G_SLR,
+            tooltip="Buckets every closed trade by how far it went against you, then splits the same trades by signal and by weekday. Use it to find setups that never need a wide stop.")
+
+var array<string> _apbLbl = array.from("straight to TP (<1)", "1 - 5 pts", "5 - 10 pts", "10 - 20 pts", "20 - 40 pts", "40 - 80 pts", "80 + pts")
+var array<string> _apsLbl = array.from("M  FRB-L", "M  FRB-S", "H  NYORB-L", "H  NYORB-S", "U  SYD", "V  TOK")
+var array<string> _apdLbl = array.from("Mon", "Tue", "Wed", "Thu", "Fri")
+var array<string> _aprLbl = array.from("< 10 pts", "10 - 15", "15 - 20", "20 - 30", "30 + pts")
+// A+ CLASSIFICATION — the 2x2 that decides lot size.
+// Ordered so index 3 (both conditions met) is the A+ cell.
+var array<string> _apaLbl = array.from("neither", "M15 only", "pool only", "A+ pool + M15")
+// The pool marginal — "pool + whatever bias this run is gated on".
+var array<string> _appLbl = array.from("NO pool", "POOL + run bias")
+// Daily-bias split dropped: measured p ~ 0.36, null and backwards. Cols 12-14
+// are better spent deciding what the stop should actually be measured against.
+var table apTbl = na
+
+if barstate.islast and showAplus and strategy.closedtrades > 0
+    if na(apTbl)
+        apTbl := table.new(position.middle_left, 15, 16,
+                  bgcolor=color.new(color.black, 60),
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 60), frame_width=1)
+
+    pv2 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
+
+    bN   = array.new<int>(7, 0)
+    bPts = array.new<float>(7, 0.0)
+    bMfe = array.new<float>(7, 0.0)
+    sN   = array.new<int>(6, 0)
+    sLow = array.new<int>(6, 0)
+    sPts = array.new<float>(6, 0.0)
+    sMae = array.new<float>(6, 0.0)
+    dN   = array.new<int>(5, 0)
+    dLow = array.new<int>(5, 0)
+    dPts = array.new<float>(5, 0.0)
+    dMae = array.new<float>(5, 0.0)
+    rN   = array.new<int>(5, 0)
+    rLow = array.new<int>(5, 0)
+    aN   = array.new<int>(4, 0)
+    aWin = array.new<int>(4, 0)
+    aLow = array.new<int>(4, 0)
+    aPts = array.new<float>(4, 0.0)
+    aRng = array.new<float>(4, 0.0)
+    // POOL MARGINAL — index 1 = pool swept, 0 = not. This is the combination
+    // actually tested live (pool + the baseline H1+H4 bias), which the 2x2
+    // above splits across two cells and therefore never names on its own.
+    pN   = array.new<int>(2, 0)
+    pWin = array.new<int>(2, 0)
+    pLow = array.new<int>(2, 0)
+    pPts = array.new<float>(2, 0.0)
+    pRng = array.new<float>(2, 0.0)
+    // WINNER MAE IN RANGE UNITS — the number that sets k for "SL = k x ORB range".
+    // A flat 150-pt stop is a different animal on a 9-pt range than on a 30-pt
+    // one. Expressed per unit of range, the worst winner's excursion tells you
+    // the smallest k that kills no winner at all.
+    // Three normalizers measured side by side on the SAME winners:
+    //   wmp = MAE in points      (flat stop)
+    //   wmr = MAE / ORB range    (SL = k x range)
+    //   wma = MAE / ATR          (SL = k x ATR)
+    // The right basis for a stop is the one whose distribution is TIGHTEST —
+    // lowest max, smallest max-to-p95 spread — because that is the basis on
+    // which heat is actually predictable.
+    wmp  = array.new<float>(0)
+    wmr  = array.new<float>(0)
+    wma  = array.new<float>(0)
+    // Average ATR over matched trades — without it, "k x ATR" is a multiplier
+    // with no way to convert into points, so the three bases cannot be compared
+    // on the one axis that decides R: the actual stop distance.
+    atrSum = 0.0
+    totAll = 0
+    lowAll = 0
+    matched = 0
+    orbTot = 0
+
+    for i = 0 to strategy.closedtrades - 1
+        sz = math.abs(strategy.closedtrades.size(i))
+        if sz > 0
+            unit = sz * pv2
+            m = strategy.closedtrades.max_drawdown(i) / unit
+            p = strategy.closedtrades.profit(i)       / unit
+            f = strategy.closedtrades.max_runup(i)    / unit
+            bi = m < 1.0 ? 0 : m < 5.0 ? 1 : m < 10.0 ? 2 : m < 20.0 ? 3 : m < 40.0 ? 4 : m < 80.0 ? 5 : 6
+            array.set(bN,   bi, array.get(bN,   bi) + 1)
+            array.set(bPts, bi, array.get(bPts, bi) + p)
+            array.set(bMfe, bi, array.get(bMfe, bi) + f)
+            totAll := totAll + 1
+            if m <= 20.0
+                lowAll := lowAll + 1
+
+            // entry_id carries the signal AND direction, so no extra plumbing.
+            // Exact equality rather than a substring helper: these ids are the
+            // literals this script passes to strategy.entry, so == is provably
+            // correct and depends on no string function being available.
+            // Signals A-T map to -1 and are excluded from the per-signal table
+            // (they are still counted in the bucket and weekday sections).
+            id = strategy.closedtrades.entry_id(i)
+            si = id == "FRB-L" ? 0 : id == "FRB-S" ? 1 : id == "NYORB-L" ? 2 : id == "NYORB-S" ? 3 : (id == "SYD-L" or id == "SYD-S") ? 4 : (id == "TOK-L" or id == "TOK-S") ? 5 : -1
+            if si >= 0
+                array.set(sN,   si, array.get(sN,   si) + 1)
+                array.set(sPts, si, array.get(sPts, si) + p)
+                array.set(sMae, si, array.get(sMae, si) + m)
+                if m <= 20.0
+                    array.set(sLow, si, array.get(sLow, si) + 1)
+
+            dw = dayofweek(strategy.closedtrades.entry_time(i), "UTC")
+            di = dw == dayofweek.monday ? 0 : dw == dayofweek.tuesday ? 1 : dw == dayofweek.wednesday ? 2 : dw == dayofweek.thursday ? 3 : dw == dayofweek.friday ? 4 : -1
+            if di >= 0
+                array.set(dN,   di, array.get(dN,   di) + 1)
+                array.set(dPts, di, array.get(dPts, di) + p)
+                array.set(dMae, di, array.get(dMae, di) + m)
+                if m <= 20.0
+                    array.set(dLow, di, array.get(dLow, di) + 1)
+
+            // Match to the last signal OF THIS TRADE'S OWN SIGNAL captured at or
+            // before its entry bar.
+            //
+            // BUG FIX: the previous version matched the last capture from ANY
+            // signal, so a Signal A/B/C/D trade — which records no context at
+            // all — silently inherited whatever ORB fired before it, and every
+            // split below was polluted with another setup's context. Scoping the
+            // scan to _ctxSig makes non-ORB trades match nothing, which is the
+            // correct answer, and makes orbTot the honest denominator.
+            sigGrp = si < 0 ? -1 : si <= 1 ? 0 : si <= 3 ? 1 : si == 4 ? 2 : 3
+            ebi = strategy.closedtrades.entry_bar_index(i)
+            k = -1
+            if sigGrp >= 0
+                orbTot := orbTot + 1
+                for q = array.size(_ctxBar) - 1 to 0
+                    if array.get(_ctxBar, q) <= ebi and array.get(_ctxSig, q) == sigGrp
+                        k := q
+                        break
+            if k >= 0
+                matched := matched + 1
+                rawRng = array.get(_ctxRng, k)
+                agr    = array.get(_ctxAgr, k)
+                pool   = array.get(_ctxPool, k)
+                m15a   = array.get(_ctxM15, k)
+
+                ri = rawRng < 10.0 ? 0 : rawRng < 15.0 ? 1 : rawRng < 20.0 ? 2 : rawRng < 30.0 ? 3 : 4
+                array.set(rN, ri, array.get(rN, ri) + 1)
+                if m <= 20.0
+                    array.set(rLow, ri, array.get(rLow, ri) + 1)
+
+                // THE A+ CELL. Note what is NOT in it: H1+H4. In the baseline the
+                // bias gate is already H1+H4, so every trade here satisfies it and
+                // it discriminates nothing. Within this run the only two free
+                // variables are the pool sweep and the 15m agreement.
+                ai = (pool == 1 ? 2 : 0) + (m15a == 1 ? 1 : 0)
+                array.set(aN, ai, array.get(aN, ai) + 1)
+                if p > 0
+                    array.set(aWin, ai, array.get(aWin, ai) + 1)
+                if m <= 20.0
+                    array.set(aLow, ai, array.get(aLow, ai) + 1)
+                array.set(aPts, ai, array.get(aPts, ai) + p)
+                // Average ORB range per class. THE CONFOUND CHECK: TP1 is
+                // 0.75 x range, so "avg pts" is very nearly a readout of range.
+                // If A+ simply lands on bigger-range days, its extra points are
+                // not an edge from the liquidity sweep at all — they are range,
+                // which is known at signal time and needs none of this
+                // machinery to exploit.
+                array.set(aRng, ai, array.get(aRng, ai) + rawRng)
+
+                // Pool marginal, collapsing the M15 axis.
+                pi = pool == 1 ? 1 : 0
+                array.set(pN, pi, array.get(pN, pi) + 1)
+                if p > 0
+                    array.set(pWin, pi, array.get(pWin, pi) + 1)
+                if m <= 20.0
+                    array.set(pLow, pi, array.get(pLow, pi) + 1)
+                array.set(pPts, pi, array.get(pPts, pi) + p)
+                array.set(pRng, pi, array.get(pRng, pi) + rawRng)
+
+                // Winners only: a stop only costs win rate where it sits inside
+                // a WINNER's excursion. Losers already lost.
+                atrRaw = array.get(_ctxAtr, k)
+                atrSum := atrSum + atrRaw
+                if p > 0
+                    array.push(wmp, m)
+                    if rawRng > 0
+                        array.push(wmr, m / rawRng)
+                    if atrRaw > 0
+                        array.push(wma, m / atrRaw)
+
+    hC = color.new(#D4A017, 0)
+    gC = color.new(color.gray, 10)
+    wC = color.new(color.white, 20)
+
+    table.cell(apTbl, 0, 0, "MAE bucket", text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(apTbl, 1, 0, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 2, 0, "%",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 3, 0, "cum %",      text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 4, 0, "avg pts",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 5, 0, "avg MFE",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+
+    cum = 0
+    for bi = 0 to 6
+        n   = array.get(bN, bi)
+        cum := cum + n
+        pct = totAll > 0 ? n * 100.0 / totAll : 0.0
+        cpc = totAll > 0 ? cum * 100.0 / totAll : 0.0
+        ap  = n > 0 ? array.get(bPts, bi) / n : 0.0
+        af  = n > 0 ? array.get(bMfe, bi) / n : 0.0
+        rowC = bi <= 3 ? color.new(color.lime, 0) : color.new(color.orange, 20)
+        table.cell(apTbl, 0, bi + 1, array.get(_apbLbl, bi), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 1, bi + 1, str.tostring(n),        text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 2, bi + 1, str.tostring(pct, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 3, bi + 1, str.tostring(cpc, "#.#"), text_color=gC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 4, bi + 1, str.tostring(ap,  "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 5, bi + 1, str.tostring(af,  "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+
+    lowPct = totAll > 0 ? lowAll * 100.0 / totAll : 0.0
+    table.cell(apTbl, 0, 8, "NEVER EXCEEDED 20 pts", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(apTbl, 1, 8, str.tostring(lowAll),    text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 2, 8, str.tostring(lowPct, "#.#") + "%", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 3, 8, "of " + str.tostring(totAll), text_color=gC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 4, 8, "", text_color=gC, text_size=size.tiny)
+    table.cell(apTbl, 5, 8, "", text_color=gC, text_size=size.tiny)
+
+    // Five splits sharing one row band: signal (0-2), ORB range (3-5),
+    // retest latency (6-8), break strength (9-11), daily bias (12-14).
+    // Weekday is dropped from the table — already measured at p ~ 0.044 and
+    // the column space is better spent on features never tested.
+    // ADR is dropped outright: p ~ 0.93, as null as a result gets.
+    table.cell(apTbl, 0,  9, "By signal",  text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(apTbl, 1,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 2,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 3,  9, "ORB rng",    text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(apTbl, 4,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 5,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 6,  9, "A+ class",   text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(apTbl, 7,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 8,  9, "WR %",       text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 9,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 10, 9, "avg pts",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 11, 9, "avg rng",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 12, 9, "STOP BASIS", text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(apTbl, 13, 9, "max",        text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(apTbl, 14, 9, "p95",        text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+
+    // Coverage, now measured against ORB trades only. Signals A-T record no
+    // context and are correctly excluded, so the denominator is orbTot, not
+    // totAll. matched < orbTot means an ORB trade filled before its own signal
+    // was recorded, which should be impossible — investigate if it appears.
+    table.cell(apTbl, 6, 8, "ctx matched: " + str.tostring(matched) + " / " + str.tostring(orbTot) + " ORB  (" + str.tostring(totAll) + " total)",
+               text_color=matched < orbTot ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+
+    for si = 0 to 5
+        n = array.get(sN, si)
+        l = array.get(sLow, si)
+        pc = n > 0 ? l * 100.0 / n : 0.0
+        rowC = n == 0 ? gC : pc >= 80.0 ? color.new(color.lime, 0) : wC
+        table.cell(apTbl, 0, si + 10, array.get(_apsLbl, si), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 1, si + 10, str.tostring(n),         text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 2, si + 10, str.tostring(pc, "#.#"), text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
+
+    for rq = 0 to 4
+        n = array.get(rN, rq)
+        l = array.get(rLow, rq)
+        pc = n > 0 ? l * 100.0 / n : 0.0
+        rowC = n == 0 ? gC : pc >= 80.0 ? color.new(color.lime, 0) : wC
+        table.cell(apTbl, 3, rq + 10, array.get(_aprLbl, rq), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 4, rq + 10, str.tostring(n),         text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 5, rq + 10, str.tostring(pc, "#.#"), text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
+
+    // A+ cross-tab, best cell first so the A+ row sits at the top.
+    for aq = 0 to 3
+        idx = 3 - aq
+        n  = array.get(aN,  idx)
+        w  = array.get(aWin, idx)
+        l  = array.get(aLow, idx)
+        wr = n > 0 ? w * 100.0 / n : 0.0
+        pc = n > 0 ? l * 100.0 / n : 0.0
+        ap = n > 0 ? array.get(aPts, idx) / n : 0.0
+        ar = n > 0 ? array.get(aRng, idx) / n : 0.0
+        rowC = n == 0 ? gC : idx == 3 ? color.new(color.aqua, 0) : wC
+        table.cell(apTbl, 6,  aq + 10, array.get(_apaLbl, idx), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 7,  aq + 10, str.tostring(n),          text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 8,  aq + 10, str.tostring(wr, "#.##"), text_color=n > 0 and wr >= 100.0 ? color.new(color.lime, 0) : wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 9,  aq + 10, str.tostring(pc, "#.#"),  text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 10, aq + 10, str.tostring(ap, "#.#"),  text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 11, aq + 10, str.tostring(ar, "#.#"),  text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+
+    // POOL MARGINAL, rows 14-15 — pool-swept first, then everything else, so
+    // the two lines sit next to each other and the comparison is direct.
+    // THIS is the combination that was tested live; the 2x2 above splits it.
+    for pq = 0 to 1
+        pdx = 1 - pq
+        n2  = array.get(pN,  pdx)
+        w2  = array.get(pWin, pdx)
+        l2  = array.get(pLow, pdx)
+        wr2 = n2 > 0 ? w2 * 100.0 / n2 : 0.0
+        pc2 = n2 > 0 ? l2 * 100.0 / n2 : 0.0
+        ap2 = n2 > 0 ? array.get(pPts, pdx) / n2 : 0.0
+        ar2 = n2 > 0 ? array.get(pRng, pdx) / n2 : 0.0
+        rowC2 = n2 == 0 ? gC : pdx == 1 ? color.new(color.aqua, 0) : color.new(color.orange, 20)
+        table.cell(apTbl, 6,  pq + 14, array.get(_appLbl, pdx),   text_color=rowC2, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 7,  pq + 14, str.tostring(n2) + "/" + str.tostring(orbTot), text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 8,  pq + 14, str.tostring(wr2, "#.##"), text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 9,  pq + 14, "L " + str.tostring(n2 - w2), text_color=n2 - w2 == 0 ? color.new(color.lime, 0) : color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 10, pq + 14, str.tostring(ap2, "#.#"),  text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 11, pq + 14, str.tostring(ar2, "#.#"),  text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+
+    // ─── WHAT SHOULD THE STOP BE MEASURED AGAINST? ───────────────────
+    // Rows 10-12 are the winner-MAE distribution under three normalizers.
+    // Rows 13-15 convert each into the setting that kills NO winner.
+    //
+    // Geometry. The stop sits beyond the LEVEL; MAE is measured from the ENTRY;
+    // the entry sits _c2Depth x range past the level. So entry-to-stop is
+    //   flat    : c2SLBuf      + depth x rng
+    //   k x rng : (k + depth)  x rng          -> k_min = max(MAE/rng) - depth   [exact]
+    //   k x ATR : k x ATR      + depth x rng  -> k_min ~ max(MAE/ATR)           [conservative,
+    //                                            it ignores the extra depth room]
+    //
+    // READ IT AS: the basis with the smallest max, and the smallest gap between
+    // max and p95, is the one where heat is predictable. A basis with a long
+    // right tail (max >> p95) forces a wide stop to protect a handful of trades.
+    if array.size(wmp) > 0
+        array.sort(wmp, order.ascending)          // percentile REQUIRES sorted
+        pMax = array.max(wmp)
+        p95p = array.percentile_linear_interpolation(wmp, 95)
+        table.cell(apTbl, 12, 10, "MAE pts (flat)", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 13, 10, str.tostring(pMax, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 14, 10, str.tostring(p95p, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 12, 13, "flat stop pts", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 13, 13, str.tostring(math.ceil(pMax) + 2, "#"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 14, 13, str.tostring(math.ceil(p95p) + 2, "#"), text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+
+    if array.size(wmr) > 0
+        array.sort(wmr, order.ascending)
+        rMax = array.max(wmr)
+        r95  = array.percentile_linear_interpolation(wmr, 95)
+        table.cell(apTbl, 12, 11, "MAE / ORB rng", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 13, 11, str.tostring(rMax, "#.##"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 14, 11, str.tostring(r95, "#.##"),  text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 12, 14, "k x rng", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 13, 14, str.tostring(math.max(0.25, rMax - _c2Depth), "#.##"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 14, 14, str.tostring(math.max(0.25, r95 - _c2Depth), "#.##"), text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+
+    if array.size(wma) > 0
+        array.sort(wma, order.ascending)
+        aMax = array.max(wma)
+        a95  = array.percentile_linear_interpolation(wma, 95)
+        table.cell(apTbl, 12, 12, "MAE / ATR (atr " + str.tostring(matched > 0 ? atrSum / matched : 0.0, "#.#") + ")", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 13, 12, str.tostring(aMax, "#.##"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 14, 12, str.tostring(a95, "#.##"),  text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 12, 15, "k x ATR", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(apTbl, 13, 15, str.tostring(aMax, "#.##"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(apTbl, 14, 15, str.tostring(a95, "#.##"),  text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+
+    // Blank the cells the shorter columns do not reach, so the grid stays square.
+    for cq = 3 to 5
+        table.cell(apTbl, cq, 15, "", text_color=gC, text_size=size.tiny)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")

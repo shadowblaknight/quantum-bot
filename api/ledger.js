@@ -74,6 +74,28 @@ function buildLedgerRecord({ state, matchedPending, positionDeals, positionId, e
 
   const setup = matchedPending && matchedPending.setup ? matchedPending.setup : {};
 
+  // ── MAE / MFE ─────────────────────────────────────────────────────────
+  // manage-trades tracks both extremes forward from the fill on its 1-minute
+  // cron: state.extreme is the furthest FAVOURABLE excursion, state.worst the
+  // furthest ADVERSE one. Both seed at the entry and only ratchet outward, so
+  // neither can be contaminated by pre-fill price action.
+  //
+  // Every A+ finding in the Pine research came out of MAE. Without these on the
+  // live record that analysis cannot be reproduced on real trades — which is
+  // the entire reason they are here. Points are direction-aware and floored at
+  // zero; R uses the initial stop distance, the only denominator comparable
+  // across instruments and stop widths.
+  const _isLongRec = state.direction === 'LONG';
+  const _slForR    = (matchedPending && matchedPending.slPrice != null && actualEntry != null)
+    ? Math.abs(actualEntry - matchedPending.slPrice) : null;
+  const _mfePrice  = (typeof state.extreme === 'number' && isFinite(state.extreme)) ? state.extreme : null;
+  const _maePrice  = (typeof state.worst   === 'number' && isFinite(state.worst))   ? state.worst   : null;
+  const _mfePoints = (_mfePrice != null && actualEntry != null)
+    ? Math.max(0, _isLongRec ? _mfePrice - actualEntry : actualEntry - _mfePrice) : null;
+  const _maePoints = (_maePrice != null && actualEntry != null)
+    ? Math.max(0, _isLongRec ? actualEntry - _maePrice : _maePrice - actualEntry) : null;
+  const _r3 = (v) => v != null ? Math.round(v * 1000) / 1000 : null;
+
   return {
     id:          `trade_${state.asset}_${positionId}`,
     dedupeKey:   matchedPending?.dedupeKey || null,
@@ -98,6 +120,17 @@ function buildLedgerRecord({ state, matchedPending, positionDeals, positionId, e
       (m, n) => Math.max(m, parseInt(String(n).slice(2), 10) || 0), 0
     ),
     htfTier:     matchedPending?.htfTier || null,
+    // Excursion metrics — the basis of all A+ analysis on live trades.
+    mfePrice:  _mfePrice,
+    maePrice:  _maePrice,
+    mfePoints: _r3(_mfePoints),
+    maePoints: _r3(_maePoints),
+    mfeR:      (_mfePoints != null && _slForR > 0) ? _r3(_mfePoints / _slForR) : null,
+    maeR:      (_maePoints != null && _slForR > 0) ? _r3(_maePoints / _slForR) : null,
+    // Signal context captured at alert time in webhook.js (ORB range, break
+    // strength, ADR, HTF bias, session, bar OHLC). Null on trades placed before
+    // this shipped, and on any path with no matched pending setup.
+    signal:    setup.signal || null,
     grossPnl:    r2(grossPnl),
     commission:  r2(commission),
     swap:        r2(swap),
