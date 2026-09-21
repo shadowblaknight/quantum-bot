@@ -171,7 +171,7 @@ lonBreakAsianHi = input.bool(false, "G LONG) Require close above Asian high", gr
 lonBreakAsianLo = input.bool(false, "G SHORT) Require close below Asian low", group=G_LON,
            tooltip="Symmetric to the LONG filter above.")
 lonAsianCascade = input.bool(false, "G) Asian cascade — only trade in the Asian close direction", group=G_LON,
-           tooltip="Blocks G trades opposing the Asian session's own direction (close vs open, 00:00-08:00). T-1 theorem measured London at 61.7%, z=3.63. Independent of the H/M asianBiasFilter so the two can be tested separately.")
+           tooltip="Blocks G trades opposing the Asian session's own direction (close vs open, 00:00-07:00 UTC). T-1 theorem measured London at 61.7%, z=3.63. Independent of the H/M asianBiasFilter so the two can be tested separately.\n\nCORRECTION 2026-09-21: this tooltip previously said 00:00-08:00. It is wrong — _asianBias is accumulated in the `_minOfDay < 420` block, i.e. 00:00-07:00, the same window M uses. The 377-trade baseline was measured with 07:00. Port that, not 08:00.")
 
 G_LIFE = "Order life (limit expiry)"
 // Added 2026-09-21. These windows were HARDCODED, which meant the one number that

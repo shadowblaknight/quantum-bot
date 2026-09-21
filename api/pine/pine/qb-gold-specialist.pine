@@ -43,9 +43,40 @@ modJudas      = input.bool(true,  "B) Judas Sweep — pure sweep, no FVG",  grou
 modSB         = input.bool(true,  "C) Silver Bullet Signal",         group=G_CORE)
 modPsych      = input.bool(true,  "D) Psychological Level Bounce",   group=G_CORE)
 modPsychExt   = input.bool(true,  "D2) Psych Extended — outside kill zones (2/3 HTF required)", group=G_CORE)
+modORB        = input.bool(true,  "G) London ORB — 08:00-08:30 UTC, C2 retest + Asian cascade", group=G_CORE,
+                tooltip="ADDED 2026-09-21, ported from the strategy backtest that produced 356 trades / 99.44% WR / PF 7.081 (Jan 2024 - Sep 2026, pinned window). G was the single biggest contributor to that result.\n\nVISIBLE BUT INERT until the backend is armed. The webhook's SPECIALIST_ALLOWED_ZONES for gold-specialist is ['FRB','NYORB','SYD'] — no London zone — so a G alert is currently DROPPED silently with a 200. You will see the chart label and get the alert; no order is placed. Adding 'LORB' to that list is the deliberate arming step.\n\nThat is on purpose: it lets you watch G fire against live price for a while before it can spend money.")
 modFRB        = input.bool(true,  "M) Frankfurt ORB — Both directions, H1+H4 + Asian extreme required", group=G_CORE)
 modNYORB      = input.bool(true,  "H) NY ORB — Both directions, H1+H4 required",                group=G_CORE)
 modSYD        = input.bool(true,  "U) Sydney ORB — Both directions, H1+H4 required (1yr sample only)", group=G_CORE)
+
+G_ADR = "ADR guards (per signal)"
+// SPLIT 2026-09-21. Every ORB signal previously carried the SAME hardcoded
+// `_adrConsumed[1] < 0.90` with no way to change it. Measured on 3y of data:
+// the guard HURTS M and HELPS H, so one shared value had to be wrong for one of
+// them — and it was ON, which means live Frankfurt has been throwing away its
+// best days. These defaults match the validated baseline.
+frbADRGuard   = input.bool(false, "M) Skip when >90% ADR already consumed", group=G_ADR,
+                tooltip="DEFAULT OFF — this is a live behaviour CHANGE from every previous version of this script.\n\nM fires 07:30-11:00, early in the session, when little of the day's range is normally spent. A >90% ADR reading at that hour is not an exhausted market, it is an unusually violent overnight — and those are exactly the days Frankfurt continuation works.\n\nSet it back to ON if you want the old live behaviour during a challenge.")
+nyADRGuard    = input.bool(true,  "H) Skip when >90% ADR already consumed", group=G_ADR,
+                tooltip="DEFAULT ON — unchanged from previous versions. H fires 14:30+, by which point 90% of the average range genuinely is spent, so the guard reads real exhaustion rather than an early-session anomaly.")
+sydADRGuard   = input.bool(true,  "U) Skip when >90% ADR already consumed", group=G_ADR,
+                tooltip="DEFAULT ON — unchanged. Sydney was never measured separately; it keeps the original shared value until it is.")
+lonADRGuard   = input.bool(false, "G) Skip when >90% ADR already consumed", group=G_ADR,
+                tooltip="DEFAULT OFF — measured useless for G. Of the six filters tested on London ORB, only the Asian cascade helped.")
+
+G_LON = "G — London ORB"
+c2MinRangeLON = input.float(5.0, "G) Min London ORB range (pts)", group=G_LON, step=1.0,
+                tooltip="Same 5-pt floor M and H use. With a 150-pt stop, a 2-pt opening range is not a tradeable structure.")
+lonAsianCascade = input.bool(true, "G) Asian cascade — only trade in the Asian close direction", group=G_LON,
+                tooltip="THE ONLY G FILTER THAT MEASURED USEFUL. Blocks London ORB trades that oppose the Asian session's own direction (close vs open, 00:00-07:00 UTC). T-1 theorem measured London at 61.7%, z=3.63.\n\nThe other five tested on G — HTF bias, ADR, Asian high/low break, direction filter — all did nothing and are not ported.")
+
+G_THM = "H — theorem filters"
+// Ported 2026-09-21. These did NOT exist live: Signal H has been firing without
+// them, taking trades the validated baseline rejects.
+orbNYLonHiFilter = input.bool(true, "H LONG)  Require close above London session HIGH", group=G_THM,
+                tooltip="NY ORB LONG only fires when the breakout bar ALSO closes above the London session high (08:00-14:00 UTC). Mirrors the Asian-extreme gate M already had.\n\nNOTE: an earlier test (2026-09-04) recorded these as 'tested and failed' and they were left off. They measure POSITIVE in the current configuration. Both results are real — a filter's value depends on what else is running alongside it.")
+orbNYLonLoFilter = input.bool(true, "H SHORT) Require close below London session LOW", group=G_THM,
+                tooltip="Symmetric to the LONG filter above.")
 
 G_C2 = "C2 — OCO (Signal M + H)"
 c2SLBuf    = input.float(150.0, "SL beyond C2 level (pts)",        group=G_C2, step=0.5,
@@ -161,6 +192,8 @@ in_sb_win       = timeframe.isintraday and (_minOfDay >= 900  and _minOfDay < 96
 in_kz           = in_london or in_overlap
 in_frb_window   = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 450)  // 07:00-07:30 UTC range build
 in_frb_trade    = timeframe.isintraday and (_minOfDay >= 450 and _minOfDay < 660)  // 07:30-11:00 UTC trade window
+in_lorb_window  = timeframe.isintraday and (_minOfDay >= 480 and _minOfDay < 510)  // 08:00-08:30 UTC range build (G)
+in_lorb_trade   = timeframe.isintraday and (_minOfDay >= 510 and _minOfDay < 660)  // 08:30-11:00 UTC trade window (G)
 in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)  // 14:00-14:30 UTC range build
 
 // U) Sydney windows. Wrap-safe: a 22:00 UTC open straddles midnight, where
@@ -218,6 +251,19 @@ var float nyorb_lo     = na
 var bool  nyorb_locked = false
 var bool  nyorb_done   = false
 
+// ─── G) LONDON ORB + Asian direction + pre-NY London extreme ─────────
+// All three added 2026-09-21 as part of the strategy port.
+var float lorb_hi      = na
+var float lorb_lo      = na
+var bool  lorb_locked  = false
+var bool  lorb_done    = false
+var float _asian_sess_open  = na
+var float _asian_sess_close = na
+// London + overlap extreme accumulated BEFORE the NY ORB window (08:00-14:00),
+// which is what the H theorem filters measure the breakout close against.
+var float lon_hi_preny = na
+var float lon_lo_preny = na
+
 if _newDay
     ar_lo_prefrb := na
     ar_hi_prefrb := na
@@ -229,10 +275,24 @@ if _newDay
     nyorb_lo     := na
     nyorb_locked := false
     nyorb_done   := false
+    lorb_hi      := na
+    lorb_lo      := na
+    lorb_locked  := false
+    lorb_done    := false
+    _asian_sess_open  := na
+    _asian_sess_close := na
+    lon_hi_preny := na
+    lon_lo_preny := na
 
 if _minOfDay >= 0 and _minOfDay < 420
     ar_lo_prefrb := na(ar_lo_prefrb) ? low  : math.min(ar_lo_prefrb, low)
     ar_hi_prefrb := na(ar_hi_prefrb) ? high : math.max(ar_hi_prefrb, high)
+    // Asian session direction for the G cascade filter. Deliberately the SAME
+    // 00:00-07:00 window M uses, because that is what the backtest measured —
+    // not 00:00-08:00, despite London opening at 08:00.
+    if na(_asian_sess_open)
+        _asian_sess_open := open
+    _asian_sess_close := close
 
 if in_frb_window
     frb_hi := na(frb_hi) ? high : math.max(frb_hi, high)
@@ -247,6 +307,22 @@ if in_nyorb_window
 
 if not in_nyorb_window and in_nyorb_window[1] and not na(nyorb_hi)
     nyorb_locked := true
+
+// G) London opening range, 08:00-08:30.
+if in_lorb_window
+    lorb_hi := na(lorb_hi) ? high : math.max(lorb_hi, high)
+    lorb_lo := na(lorb_lo) ? low  : math.min(lorb_lo, low)
+
+if not in_lorb_window and in_lorb_window[1] and not na(lorb_hi)
+    lorb_locked := true
+
+// London + overlap extreme up to the NY ORB open — feeds the H theorem filters.
+if _minOfDay >= 480 and _minOfDay < 840
+    lon_hi_preny := na(lon_hi_preny) ? high : math.max(lon_hi_preny, high)
+    lon_lo_preny := na(lon_lo_preny) ? low  : math.min(lon_lo_preny, low)
+
+// Asian close direction: +1 up, -1 down, 0 flat/unknown. Drives the G cascade.
+_asianBias = na(_asian_sess_open) or na(_asian_sess_close) ? 0 : _asian_sess_close > _asian_sess_open ? 1 : _asian_sess_close < _asian_sess_open ? -1 : 0
 
 // ─── U) SYDNEY ORB RANGE TRACKING ────────────────────────────────────
 // Reset on the RISING EDGE OF ITS OWN WINDOW, never on _newDay. On XAUUSD the
@@ -809,7 +885,7 @@ if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_h
 // One signal per day.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
+if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and (not frbADRGuard or _adrConsumed[1] < 0.90)
     orb_range_frb = frb_hi - frb_lo
     if orb_range_frb >= 5.0
         if close < frb_lo and h1B == -1 and h4B == -1 and not na(ar_lo_prefrb) and close < ar_lo_prefrb
@@ -858,6 +934,73 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
                 f_drawPosBox(entryP, slP, tp3)
 
 // ═══════════════════════════════════════════════════════════════════════
+// SIGNAL G — London ORB  (zoneType: LORB)
+// ─────────────────────────────────────────────────────────────────────
+// ADDED 2026-09-21, ported from the strategy backtest. Identical C2 geometry
+// to M and H: 30-min opening range 08:00-08:30, first 15m close outside it is
+// the breakout, LIMIT rests back at the level shifted by _c2Depth, SL = level
+// ± c2SLBuf, TPs = range × c2TpMult × {1,2,3}. One signal per day.
+//
+// FILTERS: Asian cascade ONLY. Six were tested on G — HTF bias, ADR guard,
+// Asian high/low break, direction filter, min-range, cascade — and the cascade
+// was the only one that helped. G deliberately does NOT require H1+H4, which is
+// the one real difference from M and H, so the alert reports the true bias tier
+// rather than hardcoding "A" the way M and H can.
+//
+// OVERLAPS SIGNAL M. M trades 07:30-11:00, G trades 08:30-11:00. The backtest
+// resolves that with one-position-at-a-time; the live bot must do the same or
+// you can end up holding two gold positions at once. Verify before arming.
+//
+// INERT UNTIL ARMED: the webhook's SPECIALIST_ALLOWED_ZONES has no 'LORB', so
+// these alerts are dropped with a silent 200. Chart labels still draw.
+// ═══════════════════════════════════════════════════════════════════════
+
+if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lorb_done and not na(lorb_hi) and not na(lorb_lo) and adr_hard_ok and (not lonADRGuard or _adrConsumed[1] < 0.90)
+    orb_range_lon = lorb_hi - lorb_lo
+    if orb_range_lon >= c2MinRangeLON
+        if close > lorb_hi and (not lonAsianCascade or _asianBias >= 0)
+            // C2 — BUY LIMIT: retest of the broken London ORB high (now support).
+            entryP  = lorb_hi + orb_range_lon * _c2Depth
+            slP     = lorb_hi - c2SLBuf
+            tp1     = lorb_hi + orb_range_lon * c2TpMult
+            tp2     = lorb_hi + orb_range_lon * c2TpMult * 2.0
+            tp3     = lorb_hi + orb_range_lon * c2TpMult * 3.0
+            lorb_done := true
+            gTierL  = h1B == 1 and h4B == 1 ? "A" : "B"
+            fStr    = "LORB-C2✓ CASCADE:" + (lonAsianCascade ? "ON" : "off") + " ASIAN-DIR:" + str.tostring(_asianBias) + " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
+                                lorb_hi, lorb_lo, "LORB",
+                                sess_label, gTierL, "asian-cascade", fStr,
+                                math.max(0, _minOfDay - 510)),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, low, "⚡ LORB C2 LONG",
+                      style=label.style_label_up, color=color.new(color.orange, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
+        else if close < lorb_lo and (not lonAsianCascade or _asianBias <= 0)
+            // C2 — SELL LIMIT: retest of the broken London ORB low (now resistance).
+            entryP  = lorb_lo - orb_range_lon * _c2Depth
+            slP     = lorb_lo + c2SLBuf
+            tp1     = lorb_lo - orb_range_lon * c2TpMult
+            tp2     = lorb_lo - orb_range_lon * c2TpMult * 2.0
+            tp3     = lorb_lo - orb_range_lon * c2TpMult * 3.0
+            lorb_done := true
+            gTierS  = h1B == -1 and h4B == -1 ? "A" : "B"
+            fStr    = "LORB-C2✓ CASCADE:" + (lonAsianCascade ? "ON" : "off") + " ASIAN-DIR:" + str.tostring(_asianBias) + " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
+                                lorb_hi, lorb_lo, "LORB",
+                                sess_label, gTierS, "asian-cascade", fStr,
+                                math.max(0, _minOfDay - 510)),
+                  alert.freq_once_per_bar)
+            label.new(bar_index, high, "⚡ LORB C2 SHORT",
+                      style=label.style_label_down, color=color.new(color.orange, 5),
+                      textcolor=color.white, size=size.small)
+            if showPosBox
+                f_drawPosBox(entryP, slP, tp3)
+
+// ═══════════════════════════════════════════════════════════════════════
 // SIGNAL H — NY ORB  (template: ny-orb)
 // ─────────────────────────────────────────────────────────────────────
 // Best config locked in: both directions, H1+H4 must align with trade.
@@ -865,10 +1008,10 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
 // One signal per day.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
+if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok and (not nyADRGuard or _adrConsumed[1] < 0.90)
     orb_range_ny = nyorb_hi - nyorb_lo
     if orb_range_ny >= 5.0
-        if close > nyorb_hi and h1B == 1 and h4B == 1
+        if close > nyorb_hi and h1B == 1 and h4B == 1 and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny))
             // C2 — BUY LIMIT: retest of broken NY ORB high (now support).
             // Depth lifts the limit toward price so a shallow pullback fills it.
             entryP  = nyorb_hi + orb_range_ny * _c2Depth
@@ -890,7 +1033,7 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and h1B == -1 and h4B == -1
+        else if close < nyorb_lo and h1B == -1 and h4B == -1 and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny))
             // C2 — SELL LIMIT: retest of broken NY ORB low (now resistance).
             // Depth drops the limit toward price so a shallow bounce fills it.
             entryP  = nyorb_lo - orb_range_ny * _c2Depth
@@ -926,7 +1069,7 @@ if modNYORB and barstate.isconfirmed and nyorb_locked and not nyorb_done and not
 // a one-year, one-regime sample, not a 3-year validation.
 // ═══════════════════════════════════════════════════════════════════════
 
-if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and adr_hard_ok and _adrConsumed[1] < 0.90
+if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and adr_hard_ok and (not sydADRGuard or _adrConsumed[1] < 0.90)
     orb_range_syd = syd_hi - syd_lo
     // Wrap-safe minutes since the ORB locked (the window can cross midnight).
     _sydMinsIn    = (_minOfDay - (_sydOrbEnd % 1440) + 1440) % 1440
