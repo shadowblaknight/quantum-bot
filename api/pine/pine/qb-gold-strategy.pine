@@ -3127,6 +3127,149 @@ f_drawAnchorTable(table t) =>
             table.cell(t, 7, tq + 9, tdx == 0 ? "" : (safe ? "worst heat fits inside the stop" : "worst heat EXCEEDS the stop — tier not earned"),
                        text_color=rowT, text_size=size.tiny, text_halign=text.align_left)
 
+// ═══════════════════════════════════════════════════════════════════════
+// CONDITION STUDY — grade the baseline, do not try to beat it
+// ─────────────────────────────────────────────────────────────────────
+// Added 2026-09-22 on the user's reframe, which is the right one: THE
+// BASELINE IS THE A+ SETUP. Six attempts to beat it have failed (break
+// strength, liquidity grab, range-scaled stops, H-prime, Tokyo, and the
+// tight-stop A+ tier). Stop trying to beat it. Grade it instead.
+//
+// This table breaks ONE signal at a time into its condition buckets, because
+// the signals do not share conditions — already proven: the ADR guard HELPS H
+// and HURTS M. A study that pools them averages that away and finds nothing.
+//
+// WHAT IT IS FOR: a RISK LADDER. Rank the buckets by win rate and heat, then
+// set risk percent per grade. The LOT follows from risk / stopDist, so the same
+// ladder produces 0.5 lots on a 100k account and 2.0 on a 400k one with no
+// change to the rule.
+//
+// WHY GRADING IS SAFE WHERE FILTERING IS NOT: changing the SIZE of a trade does
+// not change WHICH trades fire, so the trade list is identical and the buckets
+// are an honest split. Blocking a signal frees the position slot and reshuffles
+// everything downstream - which is exactly why every filter above failed.
+//
+// READ IT AS: a bucket earns a higher rung only if BOTH its win rate holds AND
+// its heat stays low. A bucket with a great win rate and high heat is a bucket
+// that survived by luck on a wide stop, and it will not survive being sized up.
+// ═══════════════════════════════════════════════════════════════════════
+G_COND = "Condition study (per signal)"
+condSig = input.string("ALL", "Signal to break down", options=["ALL", "M  Frankfurt", "H  NY", "G  London", "U  Sydney"], group=G_COND,
+          tooltip="Study ONE signal at a time. Conditions are not shared between signals - the ADR guard is measured GOOD for H and BAD for M - so pooling them averages the real effects away.\n\nRun this four times, once per signal, and write down the buckets that hold both a high win rate AND low heat. Those are the rungs of the risk ladder.")
+showCond = input.bool(true, "Show condition study", group=G_COND)
+
+var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break weak  < .10", "break mid  .10-.25", "break strong > .25")
+var table cdTbl = na
+
+f_drawCondTable(table t) =>
+    pv4 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
+    // 20 buckets, five families. Parallel arrays keep it flat and readable.
+    cN   = array.new<int>(20, 0)
+    cWin = array.new<int>(20, 0)
+    cLow = array.new<int>(20, 0)
+    cMae = array.new<float>(20, 0.0)
+    cPts = array.new<float>(20, 0.0)
+    seen = 0
+    // Pre-allocated ONCE. Building this with array.from() inside the trade loop
+    // would allocate a fresh array per trade and can hit Pine's object ceiling
+    // on a long backtest; reusing seven slots costs nothing.
+    bIdx = array.new<int>(7, 0)
+
+    // Which _ctxSig this run is studying. -1 = pool everything.
+    want = condSig == "M  Frankfurt" ? 0 : condSig == "H  NY" ? 1 : condSig == "U  Sydney" ? 2 : condSig == "G  London" ? 4 : -1
+
+    for i = 0 to strategy.closedtrades - 1
+        sz4 = math.abs(strategy.closedtrades.size(i))
+        if sz4 > 0
+            u4  = sz4 * pv4
+            m4  = strategy.closedtrades.max_drawdown(i) / u4
+            p4  = strategy.closedtrades.profit(i)       / u4
+            id4 = strategy.closedtrades.entry_id(i)
+            s4  = id4 == "FRB-L" ? 0 : id4 == "FRB-S" ? 1 : id4 == "NYORB-L" ? 2 : id4 == "NYORB-S" ? 3 : (id4 == "SYD-L" or id4 == "SYD-S") ? 4 : (id4 == "TOK-L" or id4 == "TOK-S") ? 5 : (id4 == "ORB-L" or id4 == "ORB-S") ? 6 : -1
+            g4  = s4 < 0 ? -1 : s4 <= 1 ? 0 : s4 <= 3 ? 1 : s4 == 4 ? 2 : s4 == 5 ? 3 : 4
+            if g4 >= 0 and (want < 0 or g4 == want)
+                eb4 = strategy.closedtrades.entry_bar_index(i)
+                k4 = -1
+                for q = array.size(_ctxBar) - 1 to 0
+                    if array.get(_ctxBar, q) <= eb4 and array.get(_ctxSig, q) == g4
+                        k4 := q
+                        break
+                if k4 >= 0
+                    seen := seen + 1
+                    rg = array.get(_ctxRng, k4)
+                    ad = array.get(_ctxAdr, k4)
+                    st = array.get(_ctxStr, k4)
+                    // Direction comes from the entry id, not the context - the
+                    // id is the literal this script passed to strategy.entry.
+                    isLong4 = id4 == "FRB-L" or id4 == "NYORB-L" or id4 == "SYD-L" or id4 == "TOK-L" or id4 == "ORB-L"
+                    // Bucket ids, one per family. -1 never happens; the ranges
+                    // are exhaustive by construction.
+                    bRng = rg < 10.0 ? 0 : rg < 15.0 ? 1 : rg < 20.0 ? 2 : rg < 30.0 ? 3 : 4
+                    bAdr = ad < 0.50 ? 5 : ad < 0.75 ? 6 : ad < 0.90 ? 7 : 8
+                    bDir = isLong4 ? 9 : 10
+                    bAgr = array.get(_ctxAgr, k4) == 1 ? 11 : 12
+                    bM15 = array.get(_ctxM15, k4) == 1 ? 13 : 14
+                    bPul = array.get(_ctxPool, k4) == 1 ? 15 : 16
+                    bStr = st < 0.10 ? 17 : st < 0.25 ? 18 : 19
+                    // Each trade lands in exactly one bucket per family, so it
+                    // is counted seven times across seven independent splits.
+                    array.set(bIdx, 0, bRng)
+                    array.set(bIdx, 1, bAdr)
+                    array.set(bIdx, 2, bDir)
+                    array.set(bIdx, 3, bAgr)
+                    array.set(bIdx, 4, bM15)
+                    array.set(bIdx, 5, bPul)
+                    array.set(bIdx, 6, bStr)
+                    for bi7 = 0 to 6
+                        b = array.get(bIdx, bi7)
+                        array.set(cN,   b, array.get(cN,   b) + 1)
+                        array.set(cWin, b, array.get(cWin, b) + (p4 > 0 ? 1 : 0))
+                        array.set(cMae, b, array.get(cMae, b) + m4)
+                        array.set(cPts, b, array.get(cPts, b) + p4)
+                        if m4 <= 20.0
+                            array.set(cLow, b, array.get(cLow, b) + 1)
+
+    hD = color.new(#D4A017, 0)
+    gD = color.new(color.gray, 10)
+    wD = color.new(color.white, 20)
+    table.cell(t, 0, 0, "CONDITION  ·  " + condSig, text_color=hD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 0, "N",       text_color=hD, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 0, "WR %",    text_color=hD, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 0, "avgMAE",  text_color=hD, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 0, "<=20 %",  text_color=hD, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 0, "avg pts", text_color=hD, text_size=size.tiny, text_halign=text.align_right)
+
+    for b = 0 to 19
+        n5 = array.get(cN, b)
+        wr5  = n5 > 0 ? 100.0 * array.get(cWin, b) / n5 : 0.0
+        mae5 = n5 > 0 ? array.get(cMae, b) / n5 : 0.0
+        low5 = n5 > 0 ? 100.0 * array.get(cLow, b) / n5 : 0.0
+        pts5 = n5 > 0 ? array.get(cPts, b) / n5 : 0.0
+        // A bucket earns a higher rung only if the win rate holds AND heat is
+        // low. High WR with high heat means it survived on stop width, not on
+        // quality, and it will not survive being sized up.
+        good = n5 >= 10 and wr5 >= 97.0 and low5 >= 80.0
+        thin = n5 < 10
+        rowD = thin ? gD : good ? color.new(color.aqua, 0) : wD
+        table.cell(t, 0, b + 1, array.get(_cdLbl, b),      text_color=rowD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, b + 1, str.tostring(n5),           text_color=thin ? color.new(color.orange, 0) : wD, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, b + 1, str.tostring(wr5,  "#.##"), text_color=rowD, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, b + 1, str.tostring(mae5, "#.#"),  text_color=rowD, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, b + 1, str.tostring(low5, "#.#"),  text_color=rowD, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, b + 1, str.tostring(pts5, "#.#"),  text_color=wD,   text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(t, 0, 21, "n=" + str.tostring(seen) + " trades in this signal   ·   AQUA = n>=10, WR>=97%, heat<=20 on 80%+   ·   ORANGE n = too thin to read",
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+
+if barstate.islast and showCond and strategy.closedtrades > 0
+    if na(cdTbl)
+        cdTbl := table.new(position.bottom_left, 6, 22,
+                  bgcolor=color.new(color.black, 60),
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 60), frame_width=1)
+
+    f_drawCondTable(cdTbl)
+
 if barstate.islast and showAnchors and strategy.closedtrades > 0
     if na(ancTbl)
         ancTbl := table.new(position.top_center, 12, 11,
