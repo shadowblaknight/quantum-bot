@@ -1136,6 +1136,70 @@ if in_tok_window or in_tok_trade
     if not na(syd_hi_pretok) and high > syd_hi_pretok
         tok_pool_hi := true
 
+// ═══════════════════════════════════════════════════════════════════════
+// STRUCTURAL ANCHOR TRACKING  (instrumentation only — places no stop)
+// ─────────────────────────────────────────────────────────────────────
+// Added 2026-09-22. Every stop this system has ever used is a FITTED NUMBER:
+// 150 because it worked, then 80 because it worked better. Neither describes
+// anything about the market. A structural stop is different in kind — it sits
+// where the trade thesis is falsified, so it survives a regime change that
+// kills a constant.
+//
+// It also solves sizing for free. Risk-based lot = riskDollars / slDist, so a
+// structurally TIGHT setup automatically gets a BIGGER position at identical
+// dollar risk. That is the A+ mechanism arising from the geometry instead of
+// being bolted on as a tag-and-multiply rule.
+//
+// THIS BLOCK CHANGES NO TRADE. It records, per signal, how far each candidate
+// anchor sits from the entry, so the distributions can be read before anything
+// is wired to a real stop. Building placement first would mean a full re-run
+// per anchor (path dependence), and most anchors can be killed for free.
+//
+// The session extreme below does double duty: it is the SWEEP WICK (the low of
+// the move that ran the liquidity) and the session's own extreme so far. The
+// sweep BOOLEANS above were built for the liquidity-grab filter, which was
+// rejected. But there are two different questions here: do-not-trade-unless-
+// liquidity-was-swept, and put-the-stop-below-the-wick-that-swept-it. Only the
+// first one has been answered.
+var float frb_ext_lo  = na
+var float frb_ext_hi  = na
+var float nyo_ext_lo  = na
+var float nyo_ext_hi  = na
+var float syd_ext_lo  = na
+var float syd_ext_hi  = na
+var float lorb_ext_lo = na
+var float lorb_ext_hi = na
+
+// Each resets on the rising edge of its OWN window, never _newDay — the broker
+// day rolls at 21:00/22:00 UTC, directly on top of the Sydney open.
+if in_frb_window and not in_frb_window[1]
+    frb_ext_lo := na
+    frb_ext_hi := na
+if in_frb_window or in_frb_trade
+    frb_ext_lo := na(frb_ext_lo) ? low  : math.min(frb_ext_lo, low)
+    frb_ext_hi := na(frb_ext_hi) ? high : math.max(frb_ext_hi, high)
+
+if in_nyorb_window and not in_nyorb_window[1]
+    nyo_ext_lo := na
+    nyo_ext_hi := na
+if timeframe.isintraday and _minOfDay >= 840
+    nyo_ext_lo := na(nyo_ext_lo) ? low  : math.min(nyo_ext_lo, low)
+    nyo_ext_hi := na(nyo_ext_hi) ? high : math.max(nyo_ext_hi, high)
+
+if in_syd_window and not in_syd_window[1]
+    syd_ext_lo := na
+    syd_ext_hi := na
+if in_syd_window or in_syd_trade
+    syd_ext_lo := na(syd_ext_lo) ? low  : math.min(syd_ext_lo, low)
+    syd_ext_hi := na(syd_ext_hi) ? high : math.max(syd_ext_hi, high)
+
+if in_lorb_window and not in_lorb_window[1]
+    lorb_ext_lo := na
+    lorb_ext_hi := na
+if in_lorb_window or in_lorb_trade
+    lorb_ext_lo := na(lorb_ext_lo) ? low  : math.min(lorb_ext_lo, low)
+    lorb_ext_hi := na(lorb_ext_hi) ? high : math.max(lorb_ext_hi, high)
+
 // Pure resolver — reads the mode, assigns nothing, so it is safe as a function.
 f_liqOk(bool ownSw, bool poolSw) =>
     c2LiqGrab == "Off" ? true : c2LiqGrab == "Sweep own ORB opposite" ? ownSw : c2LiqGrab == "Sweep prior session pool" ? poolSw : (ownSw or poolSw)
@@ -2107,7 +2171,33 @@ var array<int>   _ctxPool= array.new<int>(0)   // 1 = prior-session pool swept o
 var array<int>   _ctxM15 = array.new<int>(0)   // 1 = 15m bias agrees with the break
 var array<float> _ctxAtr = array.new<float>(0) // entry-TF ATR at signal — the third stop normalizer
 
-// Inlined four times rather than wrapped in a helper: Pine functions may not
+// ─── STRUCTURAL ANCHOR DISTANCES (points from ENTRY, added 2026-09-22) ──
+// All four measure entry -> the level where the thesis is falsified, on the
+// LOSING side of the trade. na = that anchor did not exist for this signal, or
+// sat on the wrong side of entry (which is itself a finding: an anchor that is
+// routinely unusable is dead regardless of how well it performs when present).
+//
+// Recorded at SIGNAL time from data known at signal time. _prev_sl/_prev_sh use
+// ta.pivotlow/high(3,3), so they were confirmed three bars ago — stale, but not
+// lookahead.
+var array<float> _ancOrb   = array.new<float>(0) // opposite ORB extreme  (the dead orbSLMode "Wide SL")
+var array<float> _ancSwing = array.new<float>(0) // last confirmed pivot against the trade
+var array<float> _ancSess  = array.new<float>(0) // session extreme so far = the sweep wick
+var array<float> _ancPrior = array.new<float>(0) // prior session's extreme (Asian for M/G, London for H, NY for U)
+
+// Anchor distance, entry -> falsification level, in points. PURE: it reads and
+// returns, assigns no global, so it is safe as a function (unlike the array
+// pushes below, which must stay inline).
+//
+// Returns na when the anchor is missing OR sits on the wrong side of entry. A
+// wrong-side anchor is not a small stop, it is a NONSENSE stop — the thesis
+// would already be falsified at entry — so it must be excluded, not clamped.
+// How often that happens is itself a result.
+f_ancDist(int dir, float entryPx, float anchorPx) =>
+    float d = na(anchorPx) ? na : dir * (entryPx - anchorPx)
+    na(d) or d <= 0 ? na : d
+
+// Inlined per signal rather than wrapped in a helper: Pine functions may not
 // assign to globals, and mutating a global array from inside one is a rule I
 // would rather not lean on in code that decides real stops.
 if frb_done and not frb_done[1] and not na(frb_hi) and not na(frb_lo) and frb_hi > frb_lo
@@ -2123,6 +2213,11 @@ if frb_done and not frb_done[1] and not na(frb_hi) and not na(frb_lo) and frb_hi
     array.push(_ctxPool, (dirF == 1 ? frb_pool_lo : frb_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirF ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    entF = lvlF + dirF * rngF * _c2Depth
+    array.push(_ancOrb,   f_ancDist(dirF, entF, dirF == 1 ? frb_lo : frb_hi))
+    array.push(_ancSwing, f_ancDist(dirF, entF, dirF == 1 ? _prev_sl : _prev_sh))
+    array.push(_ancSess,  f_ancDist(dirF, entF, dirF == 1 ? frb_ext_lo : frb_ext_hi))
+    array.push(_ancPrior, f_ancDist(dirF, entF, dirF == 1 ? ar_lo_prefrb : ar_hi_prefrb))
 
 if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) and nyorb_hi > nyorb_lo
     dirN = close > nyorb_hi ? 1 : -1
@@ -2137,6 +2232,11 @@ if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) an
     array.push(_ctxPool, (dirN == 1 ? nyo_pool_lo : nyo_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirN ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    entN = lvlN + dirN * rngN * _c2Depth
+    array.push(_ancOrb,   f_ancDist(dirN, entN, dirN == 1 ? nyorb_lo : nyorb_hi))
+    array.push(_ancSwing, f_ancDist(dirN, entN, dirN == 1 ? _prev_sl : _prev_sh))
+    array.push(_ancSess,  f_ancDist(dirN, entN, dirN == 1 ? nyo_ext_lo : nyo_ext_hi))
+    array.push(_ancPrior, f_ancDist(dirN, entN, dirN == 1 ? lon_lo_preny : lon_hi_preny))
 
 if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi > syd_lo
     dirS = close > syd_hi ? 1 : -1
@@ -2151,6 +2251,11 @@ if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi
     array.push(_ctxPool, (dirS == 1 ? syd_pool_lo : syd_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirS ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    entS = lvlS + dirS * rngS * _c2Depth
+    array.push(_ancOrb,   f_ancDist(dirS, entS, dirS == 1 ? syd_lo : syd_hi))
+    array.push(_ancSwing, f_ancDist(dirS, entS, dirS == 1 ? _prev_sl : _prev_sh))
+    array.push(_ancSess,  f_ancDist(dirS, entS, dirS == 1 ? syd_ext_lo : syd_ext_hi))
+    array.push(_ancPrior, f_ancDist(dirS, entS, dirS == 1 ? ny_lo_presyd : ny_hi_presyd))
 
 if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi > tok_lo
     dirT = close > tok_hi ? 1 : -1
@@ -2165,6 +2270,40 @@ if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi
     array.push(_ctxPool, (dirT == 1 ? tok_pool_lo : tok_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirT ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    entT = lvlT + dirT * rngT * _c2Depth
+    array.push(_ancOrb,   f_ancDist(dirT, entT, dirT == 1 ? tok_lo : tok_hi))
+    array.push(_ancSwing, f_ancDist(dirT, entT, dirT == 1 ? _prev_sl : _prev_sh))
+    array.push(_ancSess,  f_ancDist(dirT, entT, dirT == 1 ? tok_lo : tok_hi))
+    array.push(_ancPrior, f_ancDist(dirT, entT, dirT == 1 ? syd_lo_pretok : syd_hi_pretok))
+
+// SIGNAL G — was missing entirely. Without this block every London ORB trade is
+// invisible to the A+ table: ctxSig has no code for it, so the matcher below
+// finds nothing and G is silently dropped from every split. Since G is now the
+// biggest contributor to the baseline, that gap would have hidden exactly the
+// signal this study most needs to see.
+if lorb_done and not lorb_done[1] and not na(lorb_hi) and not na(lorb_lo) and lorb_hi > lorb_lo
+    dirG = close > lorb_hi ? 1 : -1
+    lvlG = dirG == 1 ? lorb_hi : lorb_lo
+    rngG = lorb_hi - lorb_lo
+    array.push(_ctxBar, bar_index)
+    array.push(_ctxRng, rngG)
+    array.push(_ctxStr, math.abs(close - lvlG) / rngG)
+    array.push(_ctxAdr, _adrConsumed)
+    array.push(_ctxAgr, hdB == dirG ? 1 : 0)
+    array.push(_ctxSig, 4)
+    // G has no pool tracking of its own — the liquidity-grab filter was never
+    // extended to it. Recorded as 0 rather than left out, so the array lengths
+    // stay locked together; read the POOL rows as M/H/U only.
+    array.push(_ctxPool, 0)
+    array.push(_ctxM15, m15B == dirG ? 1 : 0)
+    array.push(_ctxAtr, atrVal)
+    entG = lvlG + dirG * rngG * _c2Depth
+    array.push(_ancOrb,   f_ancDist(dirG, entG, dirG == 1 ? lorb_lo : lorb_hi))
+    array.push(_ancSwing, f_ancDist(dirG, entG, dirG == 1 ? _prev_sl : _prev_sh))
+    array.push(_ancSess,  f_ancDist(dirG, entG, dirG == 1 ? lorb_ext_lo : lorb_ext_hi))
+    // G's prior pool is the Asian session, same as M — London opens an hour later
+    // but the Asian range is still the liquidity sitting under it.
+    array.push(_ancPrior, f_ancDist(dirG, entG, dirG == 1 ? ar_lo_prefrb : ar_hi_prefrb))
 
 // ═══════════════════════════════════════════════════════════════════════
 // SL RESEARCH — MAE-driven stop sweep  (answers "how small can c2SLBuf go?")
@@ -2357,7 +2496,7 @@ showAplus = input.bool(true, "Show A+ setup analysis", group=G_SLR,
             tooltip="Buckets every closed trade by how far it went against you, then splits the same trades by signal and by weekday. Use it to find setups that never need a wide stop.")
 
 var array<string> _apbLbl = array.from("straight to TP (<1)", "1 - 5 pts", "5 - 10 pts", "10 - 20 pts", "20 - 40 pts", "40 - 80 pts", "80 + pts")
-var array<string> _apsLbl = array.from("M  FRB-L", "M  FRB-S", "H  NYORB-L", "H  NYORB-S", "U  SYD", "V  TOK")
+var array<string> _apsLbl = array.from("M  FRB-L", "M  FRB-S", "H  NYORB-L", "H  NYORB-S", "U  SYD", "V  TOK", "G  LORB")
 var array<string> _apdLbl = array.from("Mon", "Tue", "Wed", "Thu", "Fri")
 var array<string> _aprLbl = array.from("< 10 pts", "10 - 15", "15 - 20", "20 - 30", "30 + pts")
 // A+ CLASSIFICATION — the 2x2 that decides lot size.
@@ -2371,7 +2510,7 @@ var table apTbl = na
 
 if barstate.islast and showAplus and strategy.closedtrades > 0
     if na(apTbl)
-        apTbl := table.new(position.middle_left, 15, 16,
+        apTbl := table.new(position.middle_left, 15, 17,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
@@ -2381,10 +2520,10 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
     bN   = array.new<int>(7, 0)
     bPts = array.new<float>(7, 0.0)
     bMfe = array.new<float>(7, 0.0)
-    sN   = array.new<int>(6, 0)
-    sLow = array.new<int>(6, 0)
-    sPts = array.new<float>(6, 0.0)
-    sMae = array.new<float>(6, 0.0)
+    sN   = array.new<int>(7, 0)
+    sLow = array.new<int>(7, 0)
+    sPts = array.new<float>(7, 0.0)
+    sMae = array.new<float>(7, 0.0)
     dN   = array.new<int>(5, 0)
     dLow = array.new<int>(5, 0)
     dPts = array.new<float>(5, 0.0)
@@ -2449,7 +2588,7 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
             // Signals A-T map to -1 and are excluded from the per-signal table
             // (they are still counted in the bucket and weekday sections).
             id = strategy.closedtrades.entry_id(i)
-            si = id == "FRB-L" ? 0 : id == "FRB-S" ? 1 : id == "NYORB-L" ? 2 : id == "NYORB-S" ? 3 : (id == "SYD-L" or id == "SYD-S") ? 4 : (id == "TOK-L" or id == "TOK-S") ? 5 : -1
+            si = id == "FRB-L" ? 0 : id == "FRB-S" ? 1 : id == "NYORB-L" ? 2 : id == "NYORB-S" ? 3 : (id == "SYD-L" or id == "SYD-S") ? 4 : (id == "TOK-L" or id == "TOK-S") ? 5 : (id == "ORB-L" or id == "ORB-S") ? 6 : -1
             if si >= 0
                 array.set(sN,   si, array.get(sN,   si) + 1)
                 array.set(sPts, si, array.get(sPts, si) + p)
@@ -2475,7 +2614,7 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
             // split below was polluted with another setup's context. Scoping the
             // scan to _ctxSig makes non-ORB trades match nothing, which is the
             // correct answer, and makes orbTot the honest denominator.
-            sigGrp = si < 0 ? -1 : si <= 1 ? 0 : si <= 3 ? 1 : si == 4 ? 2 : 3
+            sigGrp = si < 0 ? -1 : si <= 1 ? 0 : si <= 3 ? 1 : si == 4 ? 2 : si == 5 ? 3 : 4
             ebi = strategy.closedtrades.entry_bar_index(i)
             k = -1
             if sigGrp >= 0
@@ -2599,7 +2738,7 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
     table.cell(apTbl, 6, 8, "ctx matched: " + str.tostring(matched) + " / " + str.tostring(orbTot) + " ORB  (" + str.tostring(totAll) + " total)",
                text_color=matched < orbTot ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
 
-    for si = 0 to 5
+    for si = 0 to 6
         n = array.get(sN, si)
         l = array.get(sLow, si)
         pc = n > 0 ? l * 100.0 / n : 0.0
@@ -2705,6 +2844,177 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
     // Blank the cells the shorter columns do not reach, so the grid stays square.
     for cq = 3 to 5
         table.cell(apTbl, cq, 15, "", text_color=gC, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════
+// STRUCTURAL ANCHOR STUDY — is a thesis-based stop viable, and is tight
+// structure the A+ setup?
+// ─────────────────────────────────────────────────────────────────────
+// CHANGES NO TRADE. It reports what four candidate stops WOULD have been, so
+// the dead ones can be eliminated without a re-run each.
+//
+// HOW TO READ EACH COLUMN
+//   valid%    how often the anchor existed AND sat on the correct side of
+//             entry. An anchor that is missing a third of the time is
+//             unusable no matter how well it scores elsewhere — you cannot
+//             place a stop at a level that is not there.
+//   p5/med/p95/max   the distance distribution in points. This is the number
+//             that sets LOT SIZE: risk-based sizing means lot = risk / dist,
+//             so p5 tells you the biggest position this anchor would ever
+//             hand you, and max tells you the smallest. A p5 near zero is a
+//             blow-up risk, not an opportunity.
+//   survive%  share of WINNERS whose MAE never reached the anchor, i.e. the
+//             stop would not have killed them.
+//   tight/wide  trades split at the anchor's own MEDIAN distance. THIS IS THE
+//             A+ TEST: if structurally tight setups really are the good ones,
+//             tight WR > wide WR and tight MAE < wide MAE. If the two halves
+//             look the same, tight structure carries no information and the
+//             whole idea collapses to "a smaller stop lets you size bigger",
+//             which is just leverage, not edge.
+//
+// THE CAVEAT, THIRD TIME: survive% re-prices the CURRENT trade list. A real
+// structural stop changes exit timing, which frees the position slot at a
+// different moment, which changes which later signals are taken. So this
+// SCREENS anchors — it cannot crown one. Only a full re-run can.
+// ═══════════════════════════════════════════════════════════════════════
+showAnchors = input.bool(true, "Show structural anchor study", group=G_SLR,
+              tooltip="Records, for every matched ORB trade, how far four structural stop levels sat from the entry. Changes nothing about the trades — it only measures what a thesis-based stop would have looked like, including whether tight structure predicts quality.")
+
+var array<string> _ancLbl = array.from("Opposite ORB extreme", "Prior swing (pivot 3/3)", "Session extreme (sweep wick)", "Prior session extreme")
+var table ancTbl = na
+
+if barstate.islast and showAnchors and strategy.closedtrades > 0
+    if na(ancTbl)
+        ancTbl := table.new(position.top_center, 12, 8,
+                   bgcolor=color.new(color.black, 60),
+                   border_color=color.new(color.gray, 60), border_width=1,
+                   frame_color=color.new(color.gray, 60), frame_width=1)
+
+    pv3 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
+
+    // Flat collection: one row per (anchor, trade) pair, tagged with the anchor
+    // index. Four parallel arrays instead of twelve.
+    aIdx = array.new<int>(0)
+    aDst = array.new<float>(0)
+    aMae = array.new<float>(0)
+    aWin = array.new<int>(0)
+    orbSeen = 0
+
+    for i = 0 to strategy.closedtrades - 1
+        sz = math.abs(strategy.closedtrades.size(i))
+        if sz > 0
+            unit3 = sz * pv3
+            m3 = strategy.closedtrades.max_drawdown(i) / unit3
+            p3 = strategy.closedtrades.profit(i)       / unit3
+            id3 = strategy.closedtrades.entry_id(i)
+            si3 = id3 == "FRB-L" ? 0 : id3 == "FRB-S" ? 1 : id3 == "NYORB-L" ? 2 : id3 == "NYORB-S" ? 3 : (id3 == "SYD-L" or id3 == "SYD-S") ? 4 : (id3 == "TOK-L" or id3 == "TOK-S") ? 5 : (id3 == "ORB-L" or id3 == "ORB-S") ? 6 : -1
+            grp3 = si3 < 0 ? -1 : si3 <= 1 ? 0 : si3 <= 3 ? 1 : si3 == 4 ? 2 : si3 == 5 ? 3 : 4
+            ebi3 = strategy.closedtrades.entry_bar_index(i)
+            k3 = -1
+            if grp3 >= 0
+                orbSeen := orbSeen + 1
+                for q = array.size(_ctxBar) - 1 to 0
+                    if array.get(_ctxBar, q) <= ebi3 and array.get(_ctxSig, q) == grp3
+                        k3 := q
+                        break
+            if k3 >= 0
+                for a = 0 to 3
+                    d = a == 0 ? array.get(_ancOrb, k3) : a == 1 ? array.get(_ancSwing, k3) : a == 2 ? array.get(_ancSess, k3) : array.get(_ancPrior, k3)
+                    if not na(d)
+                        array.push(aIdx, a)
+                        array.push(aDst, d)
+                        array.push(aMae, m3)
+                        array.push(aWin, p3 > 0 ? 1 : 0)
+
+    hA = color.new(#D4A017, 0)
+    gA = color.new(color.gray, 10)
+    wA = color.new(color.white, 20)
+    table.cell(ancTbl, 0, 0, "STRUCTURAL ANCHOR", text_color=hA, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(ancTbl, 1, 0, "N",        text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 2, 0, "valid%",   text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 3, 0, "p5",       text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 4, 0, "med",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 5, 0, "p95",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 6, 0, "max",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 7, 0, "survive%", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 8, 0, "tight WR", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 9, 0, "wide WR",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 10, 0, "tightMAE", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(ancTbl, 11, 0, "wideMAE",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+
+    for a = 0 to 3
+        // Pull this anchor's distances out, sorted, for the percentiles.
+        dd = array.new<float>(0)
+        for j = 0 to array.size(aIdx) - 1
+            if array.get(aIdx, j) == a
+                array.push(dd, array.get(aDst, j))
+        nA = array.size(dd)
+        if nA > 0
+            array.sort(dd, order.ascending)   // percentile REQUIRES sorted
+            p5A  = array.percentile_linear_interpolation(dd, 5)
+            medA = array.percentile_linear_interpolation(dd, 50)
+            p95A = array.percentile_linear_interpolation(dd, 95)
+            maxA = array.max(dd)
+
+            // survive% over WINNERS only — a stop can only cost win rate where
+            // it sits inside a winner's excursion. Losers already lost.
+            wTot = 0
+            wSurv = 0
+            tN = 0
+            tW = 0
+            wN = 0
+            wW = 0
+            tMaeSum = 0.0
+            wMaeSum = 0.0
+            for j = 0 to array.size(aIdx) - 1
+                if array.get(aIdx, j) == a
+                    dj = array.get(aDst, j)
+                    mj = array.get(aMae, j)
+                    wj = array.get(aWin, j)
+                    if wj == 1
+                        wTot := wTot + 1
+                        if mj < dj
+                            wSurv := wSurv + 1
+                    if dj <= medA
+                        tN := tN + 1
+                        tW := tW + wj
+                        tMaeSum := tMaeSum + mj
+                    else
+                        wN := wN + 1
+                        wW := wW + wj
+                        wMaeSum := wMaeSum + mj
+
+            survPct = wTot > 0 ? 100.0 * wSurv / wTot : 0.0
+            validPct = orbSeen > 0 ? 100.0 * nA / orbSeen : 0.0
+            tWR = tN > 0 ? 100.0 * tW / tN : 0.0
+            wWR = wN > 0 ? 100.0 * wW / wN : 0.0
+            tMae = tN > 0 ? tMaeSum / tN : 0.0
+            wMae = wN > 0 ? wMaeSum / wN : 0.0
+            // Green when the A+ hypothesis holds for this anchor: the tight half
+            // wins MORE and bleeds LESS than the wide half.
+            aPlus = tWR >= wWR and tMae <= wMae
+            rowA  = validPct < 80.0 ? color.new(color.orange, 20) : aPlus ? color.new(color.aqua, 0) : wA
+
+            table.cell(ancTbl, 0, a + 1, array.get(_ancLbl, a),        text_color=rowA, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(ancTbl, 1, a + 1, str.tostring(nA),             text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 2, a + 1, str.tostring(validPct, "#.#"), text_color=validPct < 80.0 ? color.new(color.orange, 0) : wA, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 3, a + 1, str.tostring(p5A,  "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 4, a + 1, str.tostring(medA, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 5, a + 1, str.tostring(p95A, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 6, a + 1, str.tostring(maxA, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 7, a + 1, str.tostring(survPct, "#.#"), text_color=survPct >= 97.0 ? color.new(color.lime, 0) : color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 8, a + 1, str.tostring(tWR, "#.##"),    text_color=rowA, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 9, a + 1, str.tostring(wWR, "#.##"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 10, a + 1, str.tostring(tMae, "#.#"),   text_color=rowA, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(ancTbl, 11, a + 1, str.tostring(wMae, "#.#"),   text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+        else
+            table.cell(ancTbl, 0, a + 1, array.get(_ancLbl, a) + "  — never valid", text_color=color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_left)
+
+    table.cell(ancTbl, 0, 5, "matched ORB trades: " + str.tostring(orbSeen) + "   ·   current flat stop for reference: " + str.tostring(c2SLBuf, "#") + " pts from level, " + str.tostring(c2SLBuf + 22.0 * _c2Depth, "#.#") + " from entry",
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(ancTbl, 0, 6, "AQUA row = tight half wins more AND bleeds less (A+ hypothesis holds).  ORANGE valid% = anchor too often missing to use.",
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(ancTbl, 0, 7, "survive% re-prices THIS trade list — it screens anchors, it cannot pick one. Confirm any winner with a full re-run.",
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
