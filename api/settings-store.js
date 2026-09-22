@@ -70,6 +70,33 @@ function clampNum(v, lo, hi, fallback) {
   return Math.min(hi, Math.max(lo, n));
 }
 
+// RISK_PCT ENV OVERRIDE - added 2026-09-22.
+//
+// The control panel is the intended way to set risk, but it is not usable on
+// this deployment, which leaves whatever is sitting in Redis in charge with no
+// way to see or change it. This gives a lever that does not need the panel:
+// set RISK_PCT in the Vercel dashboard and it wins over the stored value.
+//
+// PRECEDENCE: env  >  Redis  >  DEFAULTS.
+//
+// THE TRAP: while this is set, saving risk from a control panel APPEARS to
+// work (setTradeSettings writes Redis and echoes the new number back) but does
+// NOT change live sizing, because every read re-applies the env value on top.
+// getTradeSettings reports riskPctSource:'env' so that is at least visible.
+// If a working panel ever arrives, UNSET THIS VAR.
+//
+// Accepts either a fraction (0.04) or a percent (4). Anything >= 1 is read as
+// a percent, because 4 meaning 400% risk is never what anyone intended. Still
+// clamped to [0.1%, 5%], so a typo here cannot widen risk past the ceiling.
+function envRiskPct() {
+  const raw = process.env.RISK_PCT;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  let n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n >= 1) n = n / 100;
+  return clampNum(n, MIN_RISK_PCT, MAX_RISK_PCT, null);
+}
+
 // A ladder is only usable if it is strictly ascending by trigger and every rung
 // locks LESS than it triggers at (slAt < trigger) — otherwise the stop would sit
 // at or beyond the price that armed it and fill instantly.
@@ -118,15 +145,22 @@ function sanitize(s) {
 }
 
 async function getTradeSettings() {
+  // Applied on EVERY path, including the Redis-unavailable fallbacks, so the
+  // override holds even when the store is down.
+  const envPct = envRiskPct();
+  const withEnv = (s) => envPct === null
+    ? { ...s, riskPctSource: s.updatedAt ? 'redis' : 'default' }
+    : { ...s, riskPct: envPct, riskPctSource: 'env' };
+
   const r = getRedis();
-  if (!r) return { ...DEFAULTS };
+  if (!r) return withEnv({ ...DEFAULTS });
   try {
     const raw = await r.get(SETTINGS_KEY);
     const parsed = safeParse(raw);
-    if (!parsed) return { ...DEFAULTS };
-    return sanitize(parsed);
+    if (!parsed) return withEnv({ ...DEFAULTS });
+    return withEnv(sanitize(parsed));
   } catch (_) {
-    return { ...DEFAULTS };
+    return withEnv({ ...DEFAULTS });
   }
 }
 
