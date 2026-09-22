@@ -499,7 +499,7 @@ export default function TerminalLayout({
   // webhook.js. Setting 2% therefore changed nothing anywhere. This is now the
   // single source: read on mount, written through dashboard-feed.
   const [settings, setSettings] = useState(null);
-  const [riskInput, setRiskInput] = useState('1.00');
+  const [riskInput, setRiskInput] = useState('4.00');
   const [riskSaving, setRiskSaving] = useState(false);
   const [riskSaved, setRiskSaved] = useState(false);
   const [riskErr, setRiskErr] = useState(null);
@@ -549,8 +549,15 @@ export default function TerminalLayout({
   const trailArm  = settings?.trailArm  ?? 0.75;
   const trailKeep = settings?.trailKeep ?? 0.75;
 
-  // Everything downstream sizes off this. Falls back to 1% until the fetch lands.
-  const acctRiskPct = settings?.riskPct ?? 0.01;
+  // Everything downstream sizes off this. Falls back to the store default (4%)
+  // until the fetch lands, so the panel does not flash a stale 1%.
+  const acctRiskPct = settings?.riskPct ?? 0.04;
+
+  // If RISK_PCT is set in the environment it beats the stored value on every
+  // read, so a save here writes Redis, echoes the new number back, and changes
+  // NOTHING about live sizing. Showing 'SAVED TO BOT' in that state would be a
+  // lie, so the control locks instead and says who is actually in charge.
+  const riskLockedByEnv = settings?.riskPctSource === 'env';
 
   // Canvas refs
   const ftmoRef   = useRef(null);
@@ -585,9 +592,14 @@ export default function TerminalLayout({
 
   // ── Risk Station calculations ─────────────────────────────────────────────────
   // XAUUSD: 1 standard lot = 100 oz. $1 price move × 100 oz = $100 per lot.
-  // GS1 SL = 150 price-unit dollars (structural, placed $150 from ORB edge).
-  // GS1 TP1 ≈ 0.75 × avg ORB range ≈ 0.75 × $20 = $15 typical price move.
-  const GS1_SL = 150, GS1_TP = 15, POINT_VAL = 100;
+  // GS1 entry->SL = c2SLBuf (76) + the retest depth the entry sits at
+  // (c2RetestDepth 0.25 x avg ORB range ~15) = ~80 points. UPDATED 2026-09-22:
+  // was 150, the old stop. That number is what the lot is solved from, so a
+  // stale one here recommends HALF the real position at the same risk %.
+  // GS1 entry->TP1 = 0.75 x range measured from the ORB level, minus the 0.25 x
+  // range the entry already sits inside it = 0.5 x range ~= 7.5 points. The old
+  // 15 forgot to subtract the retest depth.
+  const GS1_SL = 80, GS1_TP = 7.5, POINT_VAL = 100;
   const accEq = equity || capital || 100000;
   const riskAmt = lotSize * GS1_SL * POINT_VAL;
   const rewardAmt = lotSize * GS1_TP * POINT_VAL;
@@ -976,12 +988,12 @@ export default function TerminalLayout({
                     ACCOUNT RISK PER TRADE · LIVE
                   </div>
                   <span style={{fontSize:7,fontFamily:'JetBrains Mono,monospace',
-                                color:!settings?C.warn2:riskErr?C.red2:riskSaved?C.green2:C.t3}}>
-                    {!settings?'LOADING…':riskErr?`ERR: ${riskErr}`:riskSaving?'SAVING…':riskSaved?'✓ SAVED TO BOT':'synced'}
+                                color:!settings?C.warn2:riskLockedByEnv?C.warn2:riskErr?C.red2:riskSaved?C.green2:C.t3}}>
+                    {!settings?'LOADING…':riskLockedByEnv?'LOCKED BY RISK_PCT ENV':riskErr?`ERR: ${riskErr}`:riskSaving?'SAVING…':riskSaved?'✓ SAVED TO BOT':'synced'}
                   </span>
                 </div>
                 <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-                  <input type="number" value={riskInput} min="0.1" max="5" step="0.1" disabled={!settings||riskSaving}
+                  <input type="number" value={riskInput} min="0.1" max="5" step="0.1" disabled={!settings||riskSaving||riskLockedByEnv}
                     onChange={e=>setRiskInput(e.target.value)}
                     onKeyDown={e=>{if(e.key==='Enter')saveRisk(parseFloat(riskInput));}}
                     style={{width:78,background:C.bg,border:`1px solid ${C.b2}`,color:C.gold,
@@ -989,8 +1001,8 @@ export default function TerminalLayout({
                             padding:'4px 8px',outline:'none',fontWeight:700}}/>
                   <span style={{fontSize:10,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>% EQUITY</span>
                   <div style={{display:'flex',gap:4}}>
-                    {[1,1.5,2,3].map(p=>(
-                      <button key={p} disabled={!settings||riskSaving}
+                    {[1,2,3,4].map(p=>(
+                      <button key={p} disabled={!settings||riskSaving||riskLockedByEnv}
                         onClick={()=>{setRiskInput(p.toFixed(2));saveRisk(p);}}
                         style={{padding:'4px 10px',background:Math.abs(acctRiskPct*100-p)<0.001?C.b2:'transparent',
                                 border:`1px solid ${Math.abs(acctRiskPct*100-p)<0.001?C.gold:C.b2}`,
@@ -998,13 +1010,17 @@ export default function TerminalLayout({
                                 fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{p}%</button>
                     ))}
                   </div>
-                  <button disabled={!settings||riskSaving} onClick={()=>saveRisk(parseFloat(riskInput))}
+                  <button disabled={!settings||riskSaving||riskLockedByEnv} onClick={()=>saveRisk(parseFloat(riskInput))}
                     style={{marginLeft:'auto',padding:'5px 16px',background:C.b2,border:`1px solid ${C.green2}`,
                             color:C.green2,fontSize:9,letterSpacing:1,fontWeight:700,
                             fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>APPLY</button>
                 </div>
                 <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
-                  Writes to the bot's settings store — <span style={{color:C.t2}}>webhook.js reads this at order placement</span>.
+                  {riskLockedByEnv
+                    ? <>Risk is pinned by the <span style={{color:C.warn2,fontFamily:'JetBrains Mono,monospace'}}>RISK_PCT</span> environment variable,
+                      which wins over anything saved here. Unset it in the Vercel dashboard to control risk from this panel.</>
+                    : <>Writes to the bot's settings store — <span style={{color:C.t2}}>webhook.js reads this at order placement</span>.
+                      Clamped to 0.1–5%; the box shows what was actually stored.</>}
                   Clamped to 0.1–5%; the box shows what was actually stored.
                   {equity>0&&<> Current: <span style={{color:C.gold,fontFamily:'JetBrains Mono,monospace'}}>${(equity*acctRiskPct).toFixed(0)}</span> per trade.</>}
                 </div>
