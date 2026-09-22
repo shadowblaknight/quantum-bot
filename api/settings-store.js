@@ -24,7 +24,13 @@ const MIN_TP_R       = 0.1;
 const MAX_LADDER_LEN = 6;
 
 const DEFAULTS = {
-  riskPct: 0.01,          // fraction of equity risked per trade (0.01 = 1%)
+  riskPct: 0.04,          // fraction of equity risked per trade (0.04 = 4%)
+  // 4% since 2026-09-22, paired with the gold specialist's 76-pt stop:
+  // entry->SL is ~80 pts, so 4% of ~$100k buys exactly 0.50 lots. The two
+  // numbers are a matched pair — moving either one moves the live lot.
+  // NOTE this is GLOBAL: it sizes sp500-specialist too, not just gold.
+  // NOTE this is only the FALLBACK. getTradeSettings() reads Redis first,
+  // so a value saved from the control panel overrides this.
 
   // 'ratchet'  — NO take-profit is ever placed. The stop ratchets one rung
   //              behind price, forever: reach rung n, stop moves to rung n-1.
