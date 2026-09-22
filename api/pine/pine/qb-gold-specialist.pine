@@ -80,22 +80,7 @@ orbNYLonLoFilter = input.bool(true, "H SHORT) Require close below London session
 
 G_C2 = "C2 — OCO (Signal M + H)"
 c2SLBuf    = input.float(76.0, "SL beyond C2 level (pts)",         group=G_C2, step=0.5,
-              tooltip="Stop loss placed this many pts beyond the C2 structural level — not from the C1 close.
-For FRB SHORT retest at frb_lo, SL = frb_lo + 76.
-
-76 IS A SIZING DECISION, 2026-09-22. The live lot is risk-based:
-  lot = (capital x riskPct) / (entry->SL distance x $100/pt)
-Entry sits 0.25 x range inside the level, so entry->SL is 76 + ~4 = ~80 pts.
-At 4% of ~$100k that is $4,004 / (80 x 100) = 0.50 lots exactly.
-CHANGING THIS NUMBER CHANGES THE LIVE LOT SIZE. Not a free parameter.
-
-Measured stop sweep (3yr, full system):
-   40 pts -> WR 89.28%  PF 1.343
-   56 pts -> WR 93.76%  PF 1.817
-   60 pts -> WR 94.19%  PF 1.823
-   80 pts -> WR 97.94%  PF 4.412   <-- here (best NET/DD)
-  150 pts -> WR 99.44%  PF 7.081   <-- previous default
-Trades ~1.5 pts of win rate for a 1.9x bigger position.")
+              tooltip="Stop loss placed this many pts beyond the C2 structural level, not from the C1 close.\nFor FRB SHORT retest at frb_lo, SL = frb_lo + 76.\n\n76 IS A SIZING DECISION, 2026-09-22. The live lot is risk-based:\n  lot = (capital x riskPct) / (entry-SL distance x $100/pt)\nEntry sits 0.25 x range inside the level, so entry-to-SL is 76 + ~4 = ~80 pts.\nAt 4% of ~$100k that is $4,004 / (80 x 100) = 0.50 lots exactly.\nCHANGING THIS NUMBER CHANGES THE LIVE LOT SIZE. It is not a free parameter.\n\nMeasured stop sweep (3yr, full system):\n   40 pts: WR 89.28%  PF 1.343\n   56 pts: WR 93.76%  PF 1.817\n   60 pts: WR 94.19%  PF 1.823\n   80 pts: WR 97.94%  PF 4.412  <- here, best NET/DD\n  150 pts: WR 99.44%  PF 7.081  <- previous default\nTrades ~1.5 pts of win rate for a 1.9x bigger position.")
 c2TpMult   = input.float(0.75, "TP = ORB range × (from C2 level)", group=G_C2, step=0.05,
               tooltip="TP measured from the ORB structural level, not from C1 close.\n0.75 matches the confirmed best-config multiple.")
 c2RetestDepth = input.float(0.25, "Partial retest depth (× ORB range)", group=G_C2, minval=0.0, maxval=0.70, step=0.05,
