@@ -2348,13 +2348,12 @@ var table slrTbl = na
 // the bottom row always reports trade count + point value. A table that renders
 // nothing at all is indistinguishable from a script that failed to load, which
 // is exactly the debugging hole this avoids.
-if barstate.islast and showSLR
-    if na(slrTbl)
-        slrTbl := table.new(position.middle_right, 5, 16,
-                   bgcolor=color.new(color.black, 60),
-                   border_color=color.new(color.gray, 60), border_width=1,
-                   frame_color=color.new(color.gray, 60), frame_width=1)
-
+// Hoisted into a function 2026-09-22: TradingView rejected the script
+// with "main body of the script is too long". Pine compiles function
+// bodies separately from the main body, so moving the render here buys
+// back the headroom. The table object is PASSED IN because a Pine
+// function may not assign to a global - creation stays at the call site.
+f_drawSlrTable(table t) =>
     // syminfo.pointvalue is na or 0 on some feeds. Previously that emptied the
     // array and the whole table silently disappeared; fall back to 1.0 instead,
     // which is correct for XAUUSD (1 contract x 1.00 price move = 1 currency).
@@ -2373,7 +2372,7 @@ if barstate.islast and showSLR
                 array.push(mae, strategy.closedtrades.max_drawdown(i) / unit)
                 array.push(pnl, strategy.closedtrades.profit(i) / unit)
 
-    table.cell(slrTbl, 0, 15, "closed trades: " + str.tostring(strategy.closedtrades) + "  ·  usable: " + str.tostring(array.size(mae)) + "  ·  pointvalue: " + str.tostring(pv, "#.####"),
+    table.cell(t, 0, 15, "closed trades: " + str.tostring(strategy.closedtrades) + "  ·  usable: " + str.tostring(array.size(mae)) + "  ·  pointvalue: " + str.tostring(pv, "#.####"),
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
     // ─── WINNER-ONLY MAE — the WR-preserving answer ──────────────────
@@ -2399,32 +2398,32 @@ if barstate.islast and showSLR
             w90   = array.percentile_linear_interpolation(wmae, 90)
             zeroS = math.ceil(wMax) + 2
             wCol  = color.new(color.aqua, 0)
-            table.cell(slrTbl, 0, 12, "WINNER MAE (n=" + str.tostring(array.size(wmae)) + ")", text_color=wCol, text_size=size.tiny, text_halign=text.align_left)
-            table.cell(slrTbl, 1, 12, "max " + str.tostring(wMax, "#.#"), text_color=color.new(color.white, 15), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 2, 12, "p99 " + str.tostring(w99,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 3, 12, "p95 " + str.tostring(w95,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 4, 12, "p90 " + str.tostring(w90,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 0, 12, "WINNER MAE (n=" + str.tostring(array.size(wmae)) + ")", text_color=wCol, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 1, 12, "max " + str.tostring(wMax, "#.#"), text_color=color.new(color.white, 15), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 2, 12, "p99 " + str.tostring(w99,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 3, 12, "p95 " + str.tostring(w95,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 4, 12, "p90 " + str.tostring(w90,  "#.#"), text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
 
-            table.cell(slrTbl, 0, 13, "ZERO-WR-COST STOP", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
-            table.cell(slrTbl, 1, 13, str.tostring(zeroS, "#") + " pts", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 2, 13, "WR unchanged", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 3, 13, "c2SLBuf ~", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 4, 13, str.tostring(zeroS - 6, "#"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 0, 13, "ZERO-WR-COST STOP", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 1, 13, str.tostring(zeroS, "#") + " pts", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 2, 13, "WR unchanged", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 3, 13, "c2SLBuf ~", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 4, 13, str.tostring(zeroS - 6, "#"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
 
             // Cost of going tighter, priced in winners lost rather than percent.
-            table.cell(slrTbl, 0, 14, "tighter costs:", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_left)
-            table.cell(slrTbl, 1, 14, "p99 loses ~1 win", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 2, 14, "p95 ~5%", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 3, 14, "p90 ~10%", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 4, 14, "of wins", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 0, 14, "tighter costs:", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 1, 14, "p99 loses ~1 win", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 2, 14, "p95 ~5%", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 3, 14, "p90 ~10%", text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 4, 14, "of wins", text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
 
     if array.size(mae) > 0
         hCol = color.new(#D4A017, 0)
-        table.cell(slrTbl, 0, 0, "Stop (from entry)", text_color=hCol, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(slrTbl, 1, 0, "Wins killed",       text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(slrTbl, 2, 0, "WR %",              text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(slrTbl, 3, 0, "Net pts",           text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(slrTbl, 4, 0, "Net R",             text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 0, 0, "Stop (from entry)", text_color=hCol, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, 0, "Wins killed",       text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, 0, "WR %",              text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, 0, "Net pts",           text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, 0, "Net R",             text_color=hCol, text_size=size.tiny, text_halign=text.align_right)
 
         // Pass 2 — re-price the whole trade list against each candidate stop.
         bestR   = -1e12
@@ -2456,19 +2455,29 @@ if barstate.islast and showSLR
                 bestR := netR
                 bestS := S
             rCol = netR > 0 ? color.lime : color.red
-            table.cell(slrTbl, 0, ti + 1, str.tostring(S, "#") + " pts",      text_color=color.new(color.white, 15), text_size=size.tiny, text_halign=text.align_left)
-            table.cell(slrTbl, 1, ti + 1, str.tostring(killed),                text_color=color.new(killed > 0 ? color.orange : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 2, ti + 1, str.tostring(wr, "#.##"),            text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 3, ti + 1, str.tostring(netPts, "#"),           text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(slrTbl, 4, ti + 1, str.tostring(netR, "#.#"),           text_color=color.new(rCol, 0),         text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 0, ti + 1, str.tostring(S, "#") + " pts",      text_color=color.new(color.white, 15), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 1, ti + 1, str.tostring(killed),                text_color=color.new(killed > 0 ? color.orange : color.gray, 0), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 2, ti + 1, str.tostring(wr, "#.##"),            text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 3, ti + 1, str.tostring(netPts, "#"),           text_color=color.new(color.white, 25), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 4, ti + 1, str.tostring(netR, "#.#"),           text_color=color.new(rCol, 0),         text_size=size.tiny, text_halign=text.align_right)
 
-        table.cell(slrTbl, 0, 11, "BEST: " + str.tostring(bestS, "#") + " pts", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
-        table.cell(slrTbl, 1, 11, "n=" + str.tostring(array.size(mae)),         text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(slrTbl, 2, 11, "",                                            text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(slrTbl, 3, 11, "max R",                                       text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(slrTbl, 4, 11, str.tostring(bestR, "#.#"),                    text_color=color.new(color.aqua, 0),  text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 0, 11, "BEST: " + str.tostring(bestS, "#") + " pts", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, 11, "n=" + str.tostring(array.size(mae)),         text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, 11, "",                                            text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, 11, "max R",                                       text_color=color.new(color.gray, 10), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, 11, str.tostring(bestR, "#.#"),                    text_color=color.new(color.aqua, 0),  text_size=size.tiny, text_halign=text.align_right)
 
 // ═══════════════════════════════════════════════════════════════════════
+
+if barstate.islast and showSLR
+    if na(slrTbl)
+        slrTbl := table.new(position.middle_right, 5, 16,
+                   bgcolor=color.new(color.black, 60),
+                   border_color=color.new(color.gray, 60), border_width=1,
+                   frame_color=color.new(color.gray, 60), frame_width=1)
+
+    f_drawSlrTable(slrTbl)
+
 // A+ SETUP ANALYSIS — which trades never need a wide stop
 // ─────────────────────────────────────────────────────────────────────
 // The stop sweep answers "one stop for everything". This answers a better
@@ -2508,13 +2517,12 @@ var array<string> _appLbl = array.from("NO pool", "POOL + run bias")
 // are better spent deciding what the stop should actually be measured against.
 var table apTbl = na
 
-if barstate.islast and showAplus and strategy.closedtrades > 0
-    if na(apTbl)
-        apTbl := table.new(position.middle_left, 15, 17,
-                  bgcolor=color.new(color.black, 60),
-                  border_color=color.new(color.gray, 60), border_width=1,
-                  frame_color=color.new(color.gray, 60), frame_width=1)
-
+// Hoisted into a function 2026-09-22: TradingView rejected the script
+// with "main body of the script is too long". Pine compiles function
+// bodies separately from the main body, so moving the render here buys
+// back the headroom. The table object is PASSED IN because a Pine
+// function may not assign to a global - creation stays at the call site.
+f_drawAplusTable(table t) =>
     pv2 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
 
     bN   = array.new<int>(7, 0)
@@ -2679,12 +2687,12 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
     gC = color.new(color.gray, 10)
     wC = color.new(color.white, 20)
 
-    table.cell(apTbl, 0, 0, "MAE bucket", text_color=hC, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(apTbl, 1, 0, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 2, 0, "%",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 3, 0, "cum %",      text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 4, 0, "avg pts",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 5, 0, "avg MFE",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 0, 0, "MAE bucket", text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 0, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 0, "%",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 0, "cum %",      text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 0, "avg pts",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 0, "avg MFE",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
 
     cum = 0
     for bi = 0 to 6
@@ -2695,47 +2703,47 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
         ap  = n > 0 ? array.get(bPts, bi) / n : 0.0
         af  = n > 0 ? array.get(bMfe, bi) / n : 0.0
         rowC = bi <= 3 ? color.new(color.lime, 0) : color.new(color.orange, 20)
-        table.cell(apTbl, 0, bi + 1, array.get(_apbLbl, bi), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 1, bi + 1, str.tostring(n),        text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 2, bi + 1, str.tostring(pct, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 3, bi + 1, str.tostring(cpc, "#.#"), text_color=gC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 4, bi + 1, str.tostring(ap,  "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 5, bi + 1, str.tostring(af,  "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 0, bi + 1, array.get(_apbLbl, bi), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, bi + 1, str.tostring(n),        text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, bi + 1, str.tostring(pct, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, bi + 1, str.tostring(cpc, "#.#"), text_color=gC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, bi + 1, str.tostring(ap,  "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, bi + 1, str.tostring(af,  "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
 
     lowPct = totAll > 0 ? lowAll * 100.0 / totAll : 0.0
-    table.cell(apTbl, 0, 8, "NEVER EXCEEDED 20 pts", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(apTbl, 1, 8, str.tostring(lowAll),    text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 2, 8, str.tostring(lowPct, "#.#") + "%", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 3, 8, "of " + str.tostring(totAll), text_color=gC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 4, 8, "", text_color=gC, text_size=size.tiny)
-    table.cell(apTbl, 5, 8, "", text_color=gC, text_size=size.tiny)
+    table.cell(t, 0, 8, "NEVER EXCEEDED 20 pts", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 8, str.tostring(lowAll),    text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 8, str.tostring(lowPct, "#.#") + "%", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 8, "of " + str.tostring(totAll), text_color=gC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 8, "", text_color=gC, text_size=size.tiny)
+    table.cell(t, 5, 8, "", text_color=gC, text_size=size.tiny)
 
     // Five splits sharing one row band: signal (0-2), ORB range (3-5),
     // retest latency (6-8), break strength (9-11), daily bias (12-14).
     // Weekday is dropped from the table — already measured at p ~ 0.044 and
     // the column space is better spent on features never tested.
     // ADR is dropped outright: p ~ 0.93, as null as a result gets.
-    table.cell(apTbl, 0,  9, "By signal",  text_color=hC, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(apTbl, 1,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 2,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 3,  9, "ORB rng",    text_color=hC, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(apTbl, 4,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 5,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 6,  9, "A+ class",   text_color=hC, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(apTbl, 7,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 8,  9, "WR %",       text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 9,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 10, 9, "avg pts",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 11, 9, "avg rng",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 12, 9, "STOP BASIS", text_color=hC, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(apTbl, 13, 9, "max",        text_color=hC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(apTbl, 14, 9, "p95",        text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 0,  9, "By signal",  text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3,  9, "ORB rng",    text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 4,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6,  9, "A+ class",   text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 7,  9, "N",          text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 8,  9, "WR %",       text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 9,  9, "<=20 %",     text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 10, 9, "avg pts",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 11, 9, "avg rng",    text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 12, 9, "STOP BASIS", text_color=hC, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 13, 9, "max",        text_color=hC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 14, 9, "p95",        text_color=hC, text_size=size.tiny, text_halign=text.align_right)
 
     // Coverage, now measured against ORB trades only. Signals A-T record no
     // context and are correctly excluded, so the denominator is orbTot, not
     // totAll. matched < orbTot means an ORB trade filled before its own signal
     // was recorded, which should be impossible — investigate if it appears.
-    table.cell(apTbl, 6, 8, "ctx matched: " + str.tostring(matched) + " / " + str.tostring(orbTot) + " ORB  (" + str.tostring(totAll) + " total)",
+    table.cell(t, 6, 8, "ctx matched: " + str.tostring(matched) + " / " + str.tostring(orbTot) + " ORB  (" + str.tostring(totAll) + " total)",
                text_color=matched < orbTot ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
 
     for si = 0 to 6
@@ -2743,18 +2751,18 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
         l = array.get(sLow, si)
         pc = n > 0 ? l * 100.0 / n : 0.0
         rowC = n == 0 ? gC : pc >= 80.0 ? color.new(color.lime, 0) : wC
-        table.cell(apTbl, 0, si + 10, array.get(_apsLbl, si), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 1, si + 10, str.tostring(n),         text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 2, si + 10, str.tostring(pc, "#.#"), text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 0, si + 10, array.get(_apsLbl, si), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, si + 10, str.tostring(n),         text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, si + 10, str.tostring(pc, "#.#"), text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
 
     for rq = 0 to 4
         n = array.get(rN, rq)
         l = array.get(rLow, rq)
         pc = n > 0 ? l * 100.0 / n : 0.0
         rowC = n == 0 ? gC : pc >= 80.0 ? color.new(color.lime, 0) : wC
-        table.cell(apTbl, 3, rq + 10, array.get(_aprLbl, rq), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 4, rq + 10, str.tostring(n),         text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 5, rq + 10, str.tostring(pc, "#.#"), text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, rq + 10, array.get(_aprLbl, rq), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 4, rq + 10, str.tostring(n),         text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, rq + 10, str.tostring(pc, "#.#"), text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
 
     // A+ cross-tab, best cell first so the A+ row sits at the top.
     for aq = 0 to 3
@@ -2767,12 +2775,12 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
         ap = n > 0 ? array.get(aPts, idx) / n : 0.0
         ar = n > 0 ? array.get(aRng, idx) / n : 0.0
         rowC = n == 0 ? gC : idx == 3 ? color.new(color.aqua, 0) : wC
-        table.cell(apTbl, 6,  aq + 10, array.get(_apaLbl, idx), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 7,  aq + 10, str.tostring(n),          text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 8,  aq + 10, str.tostring(wr, "#.##"), text_color=n > 0 and wr >= 100.0 ? color.new(color.lime, 0) : wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 9,  aq + 10, str.tostring(pc, "#.#"),  text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 10, aq + 10, str.tostring(ap, "#.#"),  text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 11, aq + 10, str.tostring(ar, "#.#"),  text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 6,  aq + 10, array.get(_apaLbl, idx), text_color=rowC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 7,  aq + 10, str.tostring(n),          text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 8,  aq + 10, str.tostring(wr, "#.##"), text_color=n > 0 and wr >= 100.0 ? color.new(color.lime, 0) : wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 9,  aq + 10, str.tostring(pc, "#.#"),  text_color=rowC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 10, aq + 10, str.tostring(ap, "#.#"),  text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 11, aq + 10, str.tostring(ar, "#.#"),  text_color=wC,   text_size=size.tiny, text_halign=text.align_right)
 
     // POOL MARGINAL, rows 14-15 — pool-swept first, then everything else, so
     // the two lines sit next to each other and the comparison is direct.
@@ -2787,12 +2795,12 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
         ap2 = n2 > 0 ? array.get(pPts, pdx) / n2 : 0.0
         ar2 = n2 > 0 ? array.get(pRng, pdx) / n2 : 0.0
         rowC2 = n2 == 0 ? gC : pdx == 1 ? color.new(color.aqua, 0) : color.new(color.orange, 20)
-        table.cell(apTbl, 6,  pq + 14, array.get(_appLbl, pdx),   text_color=rowC2, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 7,  pq + 14, str.tostring(n2) + "/" + str.tostring(orbTot), text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 8,  pq + 14, str.tostring(wr2, "#.##"), text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 9,  pq + 14, "L " + str.tostring(n2 - w2), text_color=n2 - w2 == 0 ? color.new(color.lime, 0) : color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 10, pq + 14, str.tostring(ap2, "#.#"),  text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 11, pq + 14, str.tostring(ar2, "#.#"),  text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 6,  pq + 14, array.get(_appLbl, pdx),   text_color=rowC2, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 7,  pq + 14, str.tostring(n2) + "/" + str.tostring(orbTot), text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 8,  pq + 14, str.tostring(wr2, "#.##"), text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 9,  pq + 14, "L " + str.tostring(n2 - w2), text_color=n2 - w2 == 0 ? color.new(color.lime, 0) : color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 10, pq + 14, str.tostring(ap2, "#.#"),  text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 11, pq + 14, str.tostring(ar2, "#.#"),  text_color=rowC2, text_size=size.tiny, text_halign=text.align_right)
 
     // ─── WHAT SHOULD THE STOP BE MEASURED AGAINST? ───────────────────
     // Rows 10-12 are the winner-MAE distribution under three normalizers.
@@ -2812,40 +2820,50 @@ if barstate.islast and showAplus and strategy.closedtrades > 0
         array.sort(wmp, order.ascending)          // percentile REQUIRES sorted
         pMax = array.max(wmp)
         p95p = array.percentile_linear_interpolation(wmp, 95)
-        table.cell(apTbl, 12, 10, "MAE pts (flat)", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 13, 10, str.tostring(pMax, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 14, 10, str.tostring(p95p, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 12, 13, "flat stop pts", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 13, 13, str.tostring(math.ceil(pMax) + 2, "#"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 14, 13, str.tostring(math.ceil(p95p) + 2, "#"), text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 12, 10, "MAE pts (flat)", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 13, 10, str.tostring(pMax, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 14, 10, str.tostring(p95p, "#.#"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 12, 13, "flat stop pts", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 13, 13, str.tostring(math.ceil(pMax) + 2, "#"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 14, 13, str.tostring(math.ceil(p95p) + 2, "#"), text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
 
     if array.size(wmr) > 0
         array.sort(wmr, order.ascending)
         rMax = array.max(wmr)
         r95  = array.percentile_linear_interpolation(wmr, 95)
-        table.cell(apTbl, 12, 11, "MAE / ORB rng", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 13, 11, str.tostring(rMax, "#.##"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 14, 11, str.tostring(r95, "#.##"),  text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 12, 14, "k x rng", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 13, 14, str.tostring(math.max(0.25, rMax - _c2Depth), "#.##"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 14, 14, str.tostring(math.max(0.25, r95 - _c2Depth), "#.##"), text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 12, 11, "MAE / ORB rng", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 13, 11, str.tostring(rMax, "#.##"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 14, 11, str.tostring(r95, "#.##"),  text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 12, 14, "k x rng", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 13, 14, str.tostring(math.max(0.25, rMax - _c2Depth), "#.##"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 14, 14, str.tostring(math.max(0.25, r95 - _c2Depth), "#.##"), text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
 
     if array.size(wma) > 0
         array.sort(wma, order.ascending)
         aMax = array.max(wma)
         a95  = array.percentile_linear_interpolation(wma, 95)
-        table.cell(apTbl, 12, 12, "MAE / ATR (atr " + str.tostring(matched > 0 ? atrSum / matched : 0.0, "#.#") + ")", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 13, 12, str.tostring(aMax, "#.##"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 14, 12, str.tostring(a95, "#.##"),  text_color=wC, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 12, 15, "k x ATR", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
-        table.cell(apTbl, 13, 15, str.tostring(aMax, "#.##"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
-        table.cell(apTbl, 14, 15, str.tostring(a95, "#.##"),  text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 12, 12, "MAE / ATR (atr " + str.tostring(matched > 0 ? atrSum / matched : 0.0, "#.#") + ")", text_color=wC, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 13, 12, str.tostring(aMax, "#.##"), text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 14, 12, str.tostring(a95, "#.##"),  text_color=wC, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 12, 15, "k x ATR", text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 13, 15, str.tostring(aMax, "#.##"), text_color=color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 14, 15, str.tostring(a95, "#.##"),  text_color=color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
 
     // Blank the cells the shorter columns do not reach, so the grid stays square.
     for cq = 3 to 5
-        table.cell(apTbl, cq, 15, "", text_color=gC, text_size=size.tiny)
+        table.cell(t, cq, 15, "", text_color=gC, text_size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════════════
+
+if barstate.islast and showAplus and strategy.closedtrades > 0
+    if na(apTbl)
+        apTbl := table.new(position.middle_left, 15, 17,
+                  bgcolor=color.new(color.black, 60),
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 60), frame_width=1)
+
+    f_drawAplusTable(apTbl)
+
 // STRUCTURAL ANCHOR STUDY — is a thesis-based stop viable, and is tight
 // structure the A+ setup?
 // ─────────────────────────────────────────────────────────────────────
@@ -2882,13 +2900,12 @@ showAnchors = input.bool(true, "Show structural anchor study", group=G_SLR,
 var array<string> _ancLbl = array.from("Opposite ORB extreme", "Prior swing (pivot 3/3)", "Session extreme (sweep wick)", "Prior session extreme")
 var table ancTbl = na
 
-if barstate.islast and showAnchors and strategy.closedtrades > 0
-    if na(ancTbl)
-        ancTbl := table.new(position.top_center, 12, 8,
-                   bgcolor=color.new(color.black, 60),
-                   border_color=color.new(color.gray, 60), border_width=1,
-                   frame_color=color.new(color.gray, 60), frame_width=1)
-
+// Hoisted into a function 2026-09-22: TradingView rejected the script
+// with "main body of the script is too long". Pine compiles function
+// bodies separately from the main body, so moving the render here buys
+// back the headroom. The table object is PASSED IN because a Pine
+// function may not assign to a global - creation stays at the call site.
+f_drawAnchorTable(table t) =>
     pv3 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
 
     // Flat collection: one row per (anchor, trade) pair, tagged with the anchor
@@ -2928,18 +2945,18 @@ if barstate.islast and showAnchors and strategy.closedtrades > 0
     hA = color.new(#D4A017, 0)
     gA = color.new(color.gray, 10)
     wA = color.new(color.white, 20)
-    table.cell(ancTbl, 0, 0, "STRUCTURAL ANCHOR", text_color=hA, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(ancTbl, 1, 0, "N",        text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 2, 0, "valid%",   text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 3, 0, "p5",       text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 4, 0, "med",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 5, 0, "p95",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 6, 0, "max",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 7, 0, "survive%", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 8, 0, "tight WR", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 9, 0, "wide WR",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 10, 0, "tightMAE", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(ancTbl, 11, 0, "wideMAE",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 0, 0, "STRUCTURAL ANCHOR", text_color=hA, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 0, "N",        text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 0, "valid%",   text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 0, "p5",       text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 0, "med",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 0, "p95",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 0, "max",      text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 0, "survive%", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 8, 0, "tight WR", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 9, 0, "wide WR",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 10, 0, "tightMAE", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 11, 0, "wideMAE",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
 
     for a = 0 to 3
         // Pull this anchor's distances out, sorted, for the percentiles.
@@ -2994,27 +3011,36 @@ if barstate.islast and showAnchors and strategy.closedtrades > 0
             aPlus = tWR >= wWR and tMae <= wMae
             rowA  = validPct < 80.0 ? color.new(color.orange, 20) : aPlus ? color.new(color.aqua, 0) : wA
 
-            table.cell(ancTbl, 0, a + 1, array.get(_ancLbl, a),        text_color=rowA, text_size=size.tiny, text_halign=text.align_left)
-            table.cell(ancTbl, 1, a + 1, str.tostring(nA),             text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 2, a + 1, str.tostring(validPct, "#.#"), text_color=validPct < 80.0 ? color.new(color.orange, 0) : wA, text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 3, a + 1, str.tostring(p5A,  "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 4, a + 1, str.tostring(medA, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 5, a + 1, str.tostring(p95A, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 6, a + 1, str.tostring(maxA, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 7, a + 1, str.tostring(survPct, "#.#"), text_color=survPct >= 97.0 ? color.new(color.lime, 0) : color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 8, a + 1, str.tostring(tWR, "#.##"),    text_color=rowA, text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 9, a + 1, str.tostring(wWR, "#.##"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 10, a + 1, str.tostring(tMae, "#.#"),   text_color=rowA, text_size=size.tiny, text_halign=text.align_right)
-            table.cell(ancTbl, 11, a + 1, str.tostring(wMae, "#.#"),   text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 0, a + 1, array.get(_ancLbl, a),        text_color=rowA, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 1, a + 1, str.tostring(nA),             text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 2, a + 1, str.tostring(validPct, "#.#"), text_color=validPct < 80.0 ? color.new(color.orange, 0) : wA, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 3, a + 1, str.tostring(p5A,  "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 4, a + 1, str.tostring(medA, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 5, a + 1, str.tostring(p95A, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 6, a + 1, str.tostring(maxA, "#.#"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 7, a + 1, str.tostring(survPct, "#.#"), text_color=survPct >= 97.0 ? color.new(color.lime, 0) : color.new(color.orange, 20), text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 8, a + 1, str.tostring(tWR, "#.##"),    text_color=rowA, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 9, a + 1, str.tostring(wWR, "#.##"),    text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 10, a + 1, str.tostring(tMae, "#.#"),   text_color=rowA, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 11, a + 1, str.tostring(wMae, "#.#"),   text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
         else
-            table.cell(ancTbl, 0, a + 1, array.get(_ancLbl, a) + "  — never valid", text_color=color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 0, a + 1, array.get(_ancLbl, a) + "  — never valid", text_color=color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_left)
 
-    table.cell(ancTbl, 0, 5, "matched ORB trades: " + str.tostring(orbSeen) + "   ·   current flat stop for reference: " + str.tostring(c2SLBuf, "#") + " pts from level, " + str.tostring(c2SLBuf + 22.0 * _c2Depth, "#.#") + " from entry",
+    table.cell(t, 0, 5, "matched ORB trades: " + str.tostring(orbSeen) + "   ·   current flat stop for reference: " + str.tostring(c2SLBuf, "#") + " pts from level, " + str.tostring(c2SLBuf + 22.0 * _c2Depth, "#.#") + " from entry",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(ancTbl, 0, 6, "AQUA row = tight half wins more AND bleeds less (A+ hypothesis holds).  ORANGE valid% = anchor too often missing to use.",
+    table.cell(t, 0, 6, "AQUA row = tight half wins more AND bleeds less (A+ hypothesis holds).  ORANGE valid% = anchor too often missing to use.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(ancTbl, 0, 7, "survive% re-prices THIS trade list — it screens anchors, it cannot pick one. Confirm any winner with a full re-run.",
+    table.cell(t, 0, 7, "survive% re-prices THIS trade list — it screens anchors, it cannot pick one. Confirm any winner with a full re-run.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+
+if barstate.islast and showAnchors and strategy.closedtrades > 0
+    if na(ancTbl)
+        ancTbl := table.new(position.top_center, 12, 8,
+                   bgcolor=color.new(color.black, 60),
+                   border_color=color.new(color.gray, 60), border_width=1,
+                   frame_color=color.new(color.gray, 60), frame_width=1)
+
+    f_drawAnchorTable(ancTbl)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
