@@ -216,6 +216,37 @@ c2RetestDepth = input.float(0.0, "C2 partial retest depth (x ORB range)", group=
 c2EntryMode = input.string("Retest (limit)", "C2 entry type", options=["Retest (limit)", "Immediate (market)"], group=G_C2,
                tooltip="A/B test for signals M + H.\n\nRETEST (limit) — the backtested baseline. Order rests AT the ORB level; fills only if price returns to it. Breakouts that run away are never taken.\n\nIMMEDIATE (market) — fills at the signal bar close, which is ALREADY past the level. Takes every signal, including runaways, but entry is worse: SL and TP stay anchored to the ORB level, so each win banks less and each loss costs more.\n\nBreakeven WR rises from ~90.9% to ~92.7% at 1:10 R:R. Baseline runs 97.5% — verify the blended WR stays above ~95% before switching live.")
 
+G_APLUS = "A+ tier (sub-baseline — sizing only)"
+// Added 2026-09-22. THE BASELINE IS NOT TOUCHED. This is a second tier that
+// rides on top of it: the same signals, the same entries, the same trade list.
+// Only the STOP changes, and only on the setups that have earned it.
+//
+// WHY THIS IS SAFE WHERE FILTERING WAS NOT. Every filter tried on this system
+// failed because blocking a signal frees the position slot and reshuffles the
+// whole downstream population. Sizing does not block anything — the trade list
+// is identical — so an A+ tier can be measured honestly where a filter could
+// not. That is the entire reason to build it this way round.
+//
+// WHAT A+ MEANS: a SMALL opening range. Measured across 172 trades, an ORB
+// under 10 pts stayed inside 20 pts of heat 89.7% of the time; over 30 pts,
+// only 46.7%. Straight line between. A quiet opening range is a market that
+// goes where it is going without shaking you out first.
+//
+// HOW IT BECOMES SIZE: live sizing is risk-based, lot = riskDollars / stopDist.
+// So a tighter stop buys a bigger position at IDENTICAL dollar risk — no A+ lot
+// multiplier is needed anywhere, and none should be added. On $100,100 at 4.27%:
+//     normal  85.5 pt stop -> 0.50 lots
+//     A+      28.5 pt stop -> 1.50 lots
+// Same money at risk on both. The lot moves only because the stop moved.
+//
+// DEFAULT OFF so the baseline reproduces byte-for-byte until this is measured.
+aplusTightSL  = input.bool(false, "A+) Tighter stop when the ORB range is small", group=G_APLUS,
+                tooltip="OFF = every trade uses the normal stop; the baseline is unchanged.\n\nON = trades whose opening range is at or below the A+ threshold get aplusSLBuf instead of c2SLBuf. Nothing else changes: same signals, same entries, same trade count. Only the stop distance on the small-range subset.\n\nWHAT TO WATCH: the win rate on the A+ subset. If it holds, the tier is real and the bigger lot is earned. If it drops, the tight stop is sitting inside the noise and the answer is no — a losing A+ trade costs 3x a normal one.")
+aplusMaxRange = input.float(15.0, "A+) Max ORB range to qualify (pts)", group=G_APLUS, step=1.0,
+                tooltip="At or below this range = A+. 15 is the first guess, taken from where the heat data stops improving: <10 pts held 89.7% under 20 pts of heat, 10-15 held 70.8%, and everything above 15 sits flat around 68% until it collapses to 46.7% past 30.\n\nSweep 10 / 12 / 15 / 20 and read the A+ subset's win rate, not the headline.")
+aplusSLBuf    = input.float(25.0, "A+) Stop beyond the level on A+ trades (pts)", group=G_APLUS, step=1.0,
+                tooltip="25 pts from the LEVEL, which is ~28 from the entry once the retest offset is added — the distance that turns 4.27% risk into 1.5 lots.\n\nJustified by heat, not by the lot size it produces: small-range trades stayed inside 20 pts of heat ~90% of the time, so a 28-pt stop should clear most of them. That is the claim this run tests.\n\nNOTE the asymmetry it creates. An A+ loss is 1.5 lots x 28.5 pts = the same dollars as a normal loss, by construction. But three A+ losses in a row is 12.8% of the account, versus 12.8% for three normal ones — identical. The danger is not the size, it is being wrong about which trades are quiet.")
+
 G_FILT = "Filters"
 adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
 adrJudasMax   = input.float(0.90, "Judas max ADR consumed",        group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
@@ -263,8 +294,12 @@ _c2Depth = math.min(c2RetestDepth, orbTPMult * 0.9)
 // two different strategies. Range/ATR modes derive the stop from the
 // instrument's own volatility instead.
 // Floored at one tick so a degenerate range can never produce SL == entry.
+// A+ TIER hooks in HERE, at the single point every signal already asks for its
+// stop — M, H, U, V and G all call this, so the tier reaches all of them with
+// no per-signal edits and no chance of one drifting out of sync.
 f_c2SL(float rng) =>
-    d = c2SLMode == "x ORB range" ? rng * c2SLRangeMult : c2SLMode == "x ATR" ? atrVal * c2SLAtrMult : c2SLBuf
+    base = c2SLMode == "x ORB range" ? rng * c2SLRangeMult : c2SLMode == "x ATR" ? atrVal * c2SLAtrMult : c2SLBuf
+    d    = (aplusTightSL and rng <= aplusMaxRange) ? aplusSLBuf : base
     math.max(d, syminfo.mintick)
 
 // Bias check helpers for H/M filter (resolved once per bar)
@@ -2916,6 +2951,16 @@ f_drawAnchorTable(table t) =>
     aWin = array.new<int>(0)
     orbSeen = 0
 
+    // A+ TIER SPLIT — index 1 = A+ (small range), 0 = normal. This is the whole
+    // decision: does the small-range subset still win once its stop is tight?
+    // Reported whether or not aplusTightSL is on, so the subset can be sized up
+    // only after it has been watched at the normal stop first.
+    apN   = array.new<int>(2, 0)
+    apWin = array.new<int>(2, 0)
+    apMae = array.new<float>(2, 0.0)
+    apMax = array.new<float>(2, 0.0)
+    apRng = array.new<float>(2, 0.0)
+
     for i = 0 to strategy.closedtrades - 1
         sz = math.abs(strategy.closedtrades.size(i))
         if sz > 0
@@ -2941,6 +2986,14 @@ f_drawAnchorTable(table t) =>
                         array.push(aDst, d)
                         array.push(aMae, m3)
                         array.push(aWin, p3 > 0 ? 1 : 0)
+                rng3 = array.get(_ctxRng, k3)
+                ti3  = rng3 <= aplusMaxRange ? 1 : 0
+                array.set(apN,   ti3, array.get(apN,   ti3) + 1)
+                array.set(apWin, ti3, array.get(apWin, ti3) + (p3 > 0 ? 1 : 0))
+                array.set(apMae, ti3, array.get(apMae, ti3) + m3)
+                array.set(apRng, ti3, array.get(apRng, ti3) + rng3)
+                if m3 > array.get(apMax, ti3)
+                    array.set(apMax, ti3, m3)
 
     hA = color.new(#D4A017, 0)
     gA = color.new(color.gray, 10)
@@ -3033,9 +3086,50 @@ f_drawAnchorTable(table t) =>
     table.cell(t, 0, 7, "survive% re-prices THIS trade list — it screens anchors, it cannot pick one. Confirm any winner with a full re-run.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
+    // ─── A+ TIER — the sizing decision, stated plainly ───────────────
+    // Unlike everything above, this is NOT re-priced: it splits the trades this
+    // run actually took. Sizing changes no trade, so the split is honest.
+    //
+    // maxMAE is the column that decides it. If the A+ subset's worst heat is
+    // below the A+ stop distance, the tight stop kills nothing and the bigger
+    // lot is free. If it is above, the tight stop converts winners into losses
+    // at THREE TIMES the size, which is the one way this tier can hurt you.
+    table.cell(t, 0, 8, "A+ TIER  (rng <= " + str.tostring(aplusMaxRange, "#") + ")", text_color=hA, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 8, "N",       text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 8, "WR %",    text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 8, "avg rng", text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 8, "avgMAE",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 8, "maxMAE",  text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 8, "stop",    text_color=hA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 8, "verdict", text_color=hA, text_size=size.tiny, text_halign=text.align_left)
+
+    for tq = 0 to 1
+        tdx  = 1 - tq                       // A+ row first
+        nT   = array.get(apN, tdx)
+        if nT > 0
+            wrT   = 100.0 * array.get(apWin, tdx) / nT
+            maeT  = array.get(apMae, tdx) / nT
+            mxT   = array.get(apMax, tdx)
+            rngT  = array.get(apRng, tdx) / nT
+            // Entry-to-stop, which is what MAE is measured against and what
+            // divides into the risk dollars to give the lot.
+            bufT  = (tdx == 1 and aplusTightSL) ? aplusSLBuf : c2SLBuf
+            stopT = bufT + rngT * _c2Depth
+            safe  = mxT <= stopT
+            rowT  = tdx == 1 ? (safe ? color.new(color.aqua, 0) : color.new(color.red, 0)) : wA
+            table.cell(t, 0, tq + 9, tdx == 1 ? "A+  small range" : "normal", text_color=rowT, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(t, 1, tq + 9, str.tostring(nT),            text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 2, tq + 9, str.tostring(wrT,  "#.##"),  text_color=rowT, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 3, tq + 9, str.tostring(rngT, "#.#"),   text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 4, tq + 9, str.tostring(maeT, "#.#"),   text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 5, tq + 9, str.tostring(mxT,  "#.#"),   text_color=rowT, text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 6, tq + 9, str.tostring(stopT, "#.#"),  text_color=wA,   text_size=size.tiny, text_halign=text.align_right)
+            table.cell(t, 7, tq + 9, tdx == 0 ? "" : (safe ? "worst heat fits inside the stop" : "worst heat EXCEEDS the stop — tier not earned"),
+                       text_color=rowT, text_size=size.tiny, text_halign=text.align_left)
+
 if barstate.islast and showAnchors and strategy.closedtrades > 0
     if na(ancTbl)
-        ancTbl := table.new(position.top_center, 12, 8,
+        ancTbl := table.new(position.top_center, 12, 11,
                    bgcolor=color.new(color.black, 60),
                    border_color=color.new(color.gray, 60), border_width=1,
                    frame_color=color.new(color.gray, 60), frame_width=1)
