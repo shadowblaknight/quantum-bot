@@ -3438,12 +3438,21 @@ f_drawSigTable(table t) =>
     sigA = array.from(sigM, sigH, sigG, sigU, sigV)
     trdA = array.from(trdM, trdH, trdG, trdU, trdV)
     filA = array.new<int>(5, 0)
+    // DIAGNOSTIC 2026-09-23. `filled` totalled 174 while the Tester showed 390
+    // trades. Rather than argue about which number is wrong, record what the
+    // unmatched trades are actually CALLED - that settles it in one run.
+    unm  = 0
+    uids = ""
     if strategy.closedtrades > 0
         for i = 0 to strategy.closedtrades - 1
             idf = strategy.closedtrades.entry_id(i)
             fi = (idf == "FRB-L" or idf == "FRB-S") ? 0 : (idf == "NYORB-L" or idf == "NYORB-S") ? 1 : (idf == "ORB-L" or idf == "ORB-S") ? 2 : (idf == "SYD-L" or idf == "SYD-S") ? 3 : (idf == "TOK-L" or idf == "TOK-S") ? 4 : -1
             if fi >= 0
                 array.set(filA, fi, array.get(filA, fi) + 1)
+            else
+                unm := unm + 1
+                if str.length(uids) < 70 and not str.contains(uids, idf)
+                    uids := uids + idf + "  "
 
     hS = color.new(#D4A017, 0)
     gS = color.new(color.gray, 10)
@@ -3487,12 +3496,14 @@ f_drawSigTable(table t) =>
 
     table.cell(t, 0, 7, "signals = conditions met, position gate IGNORED. Should NOT change when only the exit mode changes.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 8, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
+    table.cell(t, 0, 9, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
+    table.cell(t, 0, 8, "closedtrades " + str.tostring(strategy.closedtrades) + "  ·  ORB-matched " + str.tostring(tF) + "  ·  UNMATCHED " + str.tostring(unm) + (unm > 0 ? "  ->  " + uids : "  (none - every trade is an ORB trade)"),
+               text_color=unm > 0 ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showSigCnt
     if na(sfTbl)
-        sfTbl := table.new(position.bottom_right, 6, 9,
+        sfTbl := table.new(position.bottom_right, 6, 10,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
