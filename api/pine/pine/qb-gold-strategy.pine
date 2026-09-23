@@ -1308,6 +1308,7 @@ var float  _rt_rng   = na     // ORB range captured at signal time
 var int    _rt_dir   = 0      // +1 long, -1 short, 0 idle
 var string _rt_id    = na     // entry order id
 var float  _rt_sl    = na     // current stop
+var float  _rt_sl0   = na     // INITIAL stop, kept for the stop-buffer calc
 var float  _rt_reach = 0.0    // furthest excursion reached, in step units
 
 if exitMode == "Ratchet (no TP)" and _rt_dir != 0 and not na(_rt_lvl) and strategy.position_size != 0
@@ -1322,8 +1323,24 @@ if exitMode == "Ratchet (no TP)" and _rt_dir != 0 and not na(_rt_lvl) and strate
             // PROFIT rather than returning to entry: reach 0.75 with keep 0.75
             // locks 0.5625. Never gives back more than (1 - trailKeep).
             cand = _rt_lvl + _rt_dir * (_rt_reach * trailKeep) * step
+            // FIDELITY FIX 2026-09-23. manage-trades.js applies TWO tests, not
+            // one: the stop must improve AND it must still sit a buffer away
+            // from current price -
+            //   valid = isLong ? slTarget <= price - buf : slTarget >= price + buf
+            // Pine only had the improve test, so it would happily place a stop
+            // the bar has ALREADY passed. That fills instantly, which made the
+            // backtested ratchet exit EARLIER than the live one and would have
+            // biased this whole sweep against the ratchet.
+            //
+            // buf there is min(max(R x 0.25, pipSize x 2), pipSize x 8). Gold's
+            // pipSize is 0.1, so the x8 cap binds at 0.8 points for any real
+            // stop. Computed the same way here rather than hardcoded, so the
+            // formula stays honest if the stop ever gets small.
+            _rtR   = math.abs(_rt_entry - _rt_sl0)
+            _rtBuf = math.min(math.max(_rtR * 0.25, 0.2), 0.8)
+            valid  = _rt_dir == 1 ? cand <= close - _rtBuf : cand >= close + _rtBuf
             better = _rt_dir == 1 ? cand > _rt_sl : cand < _rt_sl
-            if better
+            if valid and better
                 _rt_sl := cand
         // stop only — no limit arg means no take-profit is ever placed
         strategy.exit(_rt_id + "-X", from_entry=_rt_id, stop=_rt_sl)
@@ -1337,6 +1354,7 @@ if strategy.position_size == 0 and _rt_prevSize != 0
     _rt_reach := 0.0
     _rt_lvl  := na
     _rt_sl   := na
+    _rt_sl0  := na
 _rt_prevSize := strategy.position_size
 
 // ─── SCALE 30/75/150 — BE STOP MANAGEMENT ────────────────────────────
@@ -1399,6 +1417,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
                 _rt_dir   := 1
                 _rt_id    := "FRB-L"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
@@ -1443,6 +1462,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
                 _rt_dir   := -1
                 _rt_id    := "FRB-S"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("FRB-S-X", from_entry="FRB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
@@ -1506,6 +1526,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
                 _rt_dir   := 1
                 _rt_id    := "ORB-L"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             f_c2Exit("ORB-L", slP, tp1, tp2, tp3, orb_range)
             f_drawPosBox(entryP, slP, tp3)
@@ -1526,6 +1547,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
                 _rt_dir   := -1
                 _rt_id    := "ORB-S"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             f_c2Exit("ORB-S", slP, tp1, tp2, tp3, orb_range)
             f_drawPosBox(entryP, slP, tp3)
@@ -1614,6 +1636,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
                 _rt_dir   := 1
                 _rt_id    := "NYORB-L"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
@@ -1657,6 +1680,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
                 _rt_dir   := -1
                 _rt_id    := "NYORB-S"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             if exitMode == "Trail after TP1"
                 strategy.exit("NYORB-S-X", from_entry="NYORB-S", stop=slP, trail_price=tp1, trail_offset=math.round(orb_range / syminfo.mintick))
@@ -1728,6 +1752,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                 _rt_dir   := 1
                 _rt_id    := "SYD-L"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             f_c2Exit("SYD-L", slP, tp1, tp2, tp3, rngU)
             label.new(bar_index, low, "U↑", style=label.style_label_up,
@@ -1750,6 +1775,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                 _rt_dir   := -1
                 _rt_id    := "SYD-S"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             f_c2Exit("SYD-S", slP, tp1, tp2, tp3, rngU)
             label.new(bar_index, high, "U↓", style=label.style_label_down,
@@ -1776,6 +1802,7 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
                 _rt_dir   := 1
                 _rt_id    := "TOK-L"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             f_c2Exit("TOK-L", slP, tp1, tp2, tp3, rngV)
             label.new(bar_index, low, "V↑", style=label.style_label_up,
@@ -1798,6 +1825,7 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
                 _rt_dir   := -1
                 _rt_id    := "TOK-S"
                 _rt_sl    := slP
+                _rt_sl0   := slP
                 _rt_reach := 0.0
             f_c2Exit("TOK-S", slP, tp1, tp2, tp3, rngV)
             label.new(bar_index, high, "V↓", style=label.style_label_down,
