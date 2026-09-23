@@ -2217,6 +2217,19 @@ if modT and barstate.isconfirmed and _testWinOk and atrVal > 0 and not t_short_d
 // rewriting those blocks could change which trades fire, and a wrong counter
 // costs an analysis while a broken entry costs money. Keep them in sync by
 // hand if an entry filter ever changes.
+// BAR-RANGE DIAGNOSTIC 2026-09-23. strategy.closedtrades came back 174 while
+// the Tester reported 390 - the same 42-45% gap recorded as the open
+// 417-vs-176 puzzle. If the script is only RUNNING on part of the range the
+// Tester evaluates (Deep Backtest / PROFOND computes server-side over more
+// history than the chart holds), every table in this file is reading a subset
+// and none of their percentages describe the headline result.
+//
+// This records the first and last bar the SCRIPT saw. Compare against the
+// Tester's date range: if they differ, that is the whole answer.
+var int _firstBarT = na
+if na(_firstBarT)
+    _firstBarT := time
+
 var int  sigM   = 0
 var int  sigH   = 0
 var int  sigG   = 0
@@ -3500,10 +3513,12 @@ f_drawSigTable(table t) =>
                text_color=unm > 0 ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 0, 9, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 10, "SCRIPT SAW  bars " + str.tostring(bar_index + 1) + "   from " + str.format("{0,date,yyyy-MM-dd}", _firstBarT) + "  to " + str.format("{0,date,yyyy-MM-dd}", time) + "   <- compare with the Tester date range above",
+               text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showSigCnt
     if na(sfTbl)
-        sfTbl := table.new(position.bottom_right, 6, 10,
+        sfTbl := table.new(position.bottom_right, 6, 11,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
