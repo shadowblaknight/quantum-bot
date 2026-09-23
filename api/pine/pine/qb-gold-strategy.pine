@@ -2195,6 +2195,112 @@ if modT and barstate.isconfirmed and _testWinOk and atrVal > 0 and not t_short_d
                   color=color.new(color.lime, 5), textcolor=color.white, size=size.small)
         f_drawPosBox(close, slT, tp3T)
 
+
+// SIGNAL COUNTER - setups that FIRED vs setups that were TAKEN
+// -------------------------------------------------------------------
+// Added 2026-09-23 on a fair objection: the entry conditions are identical
+// between exit modes, so the SETUP count cannot change. Only the TAKEN count
+// can. That was asserted rather than measured; this measures it.
+//
+// Every entry block is gated on `strategy.position_size == 0`. The ratchet
+// holds a position far longer than a fixed TP does, so a signal that fires
+// while a trade is still open is simply not taken - the setup existed, the
+// slot did not.
+//
+// THIS BLOCK PLACES NO ORDER. It re-evaluates each signal's conditions with
+// the position gate removed and counts them, so both numbers can be read
+// side by side.
+//
+// THE CONDITIONS BELOW ARE A DELIBERATE COPY of each entry gate, minus
+// `strategy.position_size == 0` and minus the real `_done` flag (each shadow
+// carries its own). They are NOT hoisted out of the entry blocks on purpose:
+// rewriting those blocks could change which trades fire, and a wrong counter
+// costs an analysis while a broken entry costs money. Keep them in sync by
+// hand if an entry filter ever changes.
+var int  sigM   = 0
+var int  sigH   = 0
+var int  sigG   = 0
+var int  sigU   = 0
+var int  sigV   = 0
+var int  trdM   = 0
+var int  trdH   = 0
+var int  trdG   = 0
+var int  trdU   = 0
+var int  trdV   = 0
+var bool smDone = false
+var bool shDone = false
+var bool sgDone = false
+var bool suDone = false
+var bool svDone = false
+
+// Shadow done-flags reset exactly where the real ones do.
+if _newDay
+    smDone := false
+    shDone := false
+    sgDone := false
+if in_syd_window and not in_syd_window[1]
+    suDone := false
+if in_tok_window and not in_tok_window[1]
+    svDone := false
+
+if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locked and not smDone and not na(frb_hi) and not na(frb_lo) and _orbGateFRB and _hm_dow_ok
+    rM = frb_hi - frb_lo
+    if rM >= c2MinRangeFRB
+        okML = close > frb_hi and (close - frb_hi) >= rM * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
+        okMS = close < frb_lo and (frb_lo - close) >= rM * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
+        if okML or okMS
+            sigM   := sigM + 1
+            smDone := true
+
+if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
+    rH = nyorb_hi - nyorb_lo
+    if rH >= c2MinRangeNY
+        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
+        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
+        if okHL or okHS
+            sigH   := sigH + 1
+            shDone := true
+
+if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgDone and not na(lorb_hi) and not na(lorb_lo) and (not lonADRGuard or _adrConsumed[1] < 0.90) and _testWinOk and _hm_dow_ok
+    rG = lorb_hi - lorb_lo
+    if rG >= (lonUseC2 ? c2MinRangeLON : 0.50)
+        okGL = close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0)
+        okGS = close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0)
+        if okGL or okGS
+            sigG   := sigG + 1
+            sgDone := true
+
+if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
+    rU2 = syd_hi - syd_lo
+    if rU2 >= c2MinRangeASIA
+        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong)
+        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort)
+        if okUL or okUS
+            sigU   := sigU + 1
+            suDone := true
+
+if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locked and not svDone and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok
+    rV2 = tok_hi - tok_lo
+    if rV2 >= c2MinRangeASIA
+        okVL = close > tok_hi and (close - tok_hi) >= rV2 * c2MinBreakStr and (not orbBiasFilter or _orbBiasLong)
+        okVS = close < tok_lo and (tok_lo - close) >= rV2 * c2MinBreakStr and (not orbBiasFilter or _orbBiasShort)
+        if okVL or okVS
+            sigV   := sigV + 1
+            svDone := true
+
+// TAKEN counters - the rising edge of each real done-flag IS the moment an
+// order was placed, so these need no copied conditions and cannot drift.
+if frb_done   and not frb_done[1]
+    trdM := trdM + 1
+if nyorb_done and not nyorb_done[1]
+    trdH := trdH + 1
+if lorb_done  and not lorb_done[1]
+    trdG := trdG + 1
+if syd_done   and not syd_done[1]
+    trdU := trdU + 1
+if tok_done   and not tok_done[1]
+    trdV := trdV + 1
+
 // ═══════════════════════════════════════════════════════════════════════
 // A+ CONTEXT CAPTURE — recorded at SIGNAL time, not fill time
 // ─────────────────────────────────────────────────────────────────────
@@ -3306,6 +3412,93 @@ if barstate.islast and showAnchors and strategy.closedtrades > 0
                    frame_color=color.new(color.gray, 60), frame_width=1)
 
     f_drawAnchorTable(ancTbl)
+
+// SIGNAL FUNNEL TABLE - signals -> orders -> fills
+// -------------------------------------------------------------------
+// Three numbers per signal, and the gap between each pair has a different
+// cause:
+//   SIGNALS  conditions met. Independent of exit mode - this is the number
+//            that must NOT move when only the exit changes.
+//   ORDERED  strategy.entry actually called. signals - ordered = blocked by
+//            `strategy.position_size == 0`, i.e. a trade was still open.
+//   FILLED   the resting C2 limit actually filled and the trade closed.
+//            ordered - filled = limits that expired at the session edge
+//            without price coming back.
+//
+// If SIGNALS holds steady across exit modes while ORDERED collapses, the
+// position slot is the whole story. If SIGNALS moves too, something else is
+// going on and the explanation is wrong.
+showSigCnt = input.bool(true, "Show signal funnel (signals -> orders -> fills)", group=G_SLR,
+             tooltip="Counts every setup whose conditions were met, whether or not the position slot was free. Places no orders - it cannot change a single trade. Use it to separate 'the setup did not happen' from 'the setup happened and we could not take it'.")
+
+var array<string> _sfLbl = array.from("M  Frankfurt", "H  NY", "G  London", "U  Sydney", "V  Tokyo")
+var table sfTbl = na
+
+f_drawSigTable(table t) =>
+    sigA = array.from(sigM, sigH, sigG, sigU, sigV)
+    trdA = array.from(trdM, trdH, trdG, trdU, trdV)
+    filA = array.new<int>(5, 0)
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            idf = strategy.closedtrades.entry_id(i)
+            fi = (idf == "FRB-L" or idf == "FRB-S") ? 0 : (idf == "NYORB-L" or idf == "NYORB-S") ? 1 : (idf == "ORB-L" or idf == "ORB-S") ? 2 : (idf == "SYD-L" or idf == "SYD-S") ? 3 : (idf == "TOK-L" or idf == "TOK-S") ? 4 : -1
+            if fi >= 0
+                array.set(filA, fi, array.get(filA, fi) + 1)
+
+    hS = color.new(#D4A017, 0)
+    gS = color.new(color.gray, 10)
+    wS = color.new(color.white, 20)
+    table.cell(t, 0, 0, "SIGNAL FUNNEL", text_color=hS, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 0, "signals",   text_color=hS, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 0, "ordered",   text_color=hS, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 0, "filled",    text_color=hS, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 0, "blocked",   text_color=hS, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 0, "blocked%",  text_color=hS, text_size=size.tiny, text_halign=text.align_right)
+
+    tS = 0
+    tO = 0
+    tF = 0
+    for q = 0 to 4
+        sq = array.get(sigA, q)
+        oq = array.get(trdA, q)
+        fq = array.get(filA, q)
+        bq = sq - oq
+        bp = sq > 0 ? 100.0 * bq / sq : 0.0
+        tS := tS + sq
+        tO := tO + oq
+        tF := tF + fq
+        rowS = sq == 0 ? gS : bp >= 50.0 ? color.new(color.orange, 0) : wS
+        table.cell(t, 0, q + 1, array.get(_sfLbl, q), text_color=rowS, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, q + 1, str.tostring(sq),      text_color=wS,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, q + 1, str.tostring(oq),      text_color=wS,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, q + 1, str.tostring(fq),      text_color=wS,   text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, q + 1, str.tostring(bq),      text_color=rowS, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, q + 1, str.tostring(bp, "#.#"), text_color=rowS, text_size=size.tiny, text_halign=text.align_right)
+
+    tB  = tS - tO
+    tBp = tS > 0 ? 100.0 * tB / tS : 0.0
+    cA  = color.new(color.aqua, 0)
+    table.cell(t, 0, 6, "TOTAL",             text_color=cA, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 6, str.tostring(tS),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 6, str.tostring(tO),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 6, str.tostring(tF),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 6, str.tostring(tB),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 6, str.tostring(tBp, "#.#"), text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(t, 0, 7, "signals = conditions met, position gate IGNORED. Should NOT change when only the exit mode changes.",
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 8, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
+               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+
+if barstate.islast and showSigCnt
+    if na(sfTbl)
+        sfTbl := table.new(position.bottom_right, 6, 9,
+                  bgcolor=color.new(color.black, 60),
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 60), frame_width=1)
+    f_drawSigTable(sfTbl)
+
+
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
