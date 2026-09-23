@@ -3496,9 +3496,9 @@ f_drawSigTable(table t) =>
 
     table.cell(t, 0, 7, "signals = conditions met, position gate IGNORED. Should NOT change when only the exit mode changes.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 9, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
     table.cell(t, 0, 8, "closedtrades " + str.tostring(strategy.closedtrades) + "  ·  ORB-matched " + str.tostring(tF) + "  ·  UNMATCHED " + str.tostring(unm) + (unm > 0 ? "  ->  " + uids : "  (none - every trade is an ORB trade)"),
                text_color=unm > 0 ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 9, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showSigCnt
