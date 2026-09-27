@@ -2352,6 +2352,12 @@ var array<int>   _ctxSig = array.new<int>(0)   // 0=FRB 1=NYORB 2=SYD 3=TOK
 var array<int>   _ctxPool= array.new<int>(0)   // 1 = prior-session pool swept on the break's far side
 var array<int>   _ctxM15 = array.new<int>(0)   // 1 = 15m bias agrees with the break
 var array<float> _ctxAtr = array.new<float>(0) // entry-TF ATR at signal — the third stop normalizer
+// Added 2026-09-27 for the LOSS AUTOPSY table. Signal-bar time, and the NFP
+// flag read AT SIGNAL TIME so the column matches exactly what orbNFPFilter
+// would have gated on. Deriving NFP from entry_time instead would mislabel
+// Signal U, whose 22:00 UTC window can carry the fill into the next day.
+var array<int>   _ctxTime = array.new<int>(0)   // signal bar time (ms)
+var array<int>   _ctxNFP  = array.new<int>(0)   // 1 = first-Friday NFP day
 
 // ─── STRUCTURAL ANCHOR DISTANCES (points from ENTRY, added 2026-09-22) ──
 // All four measure entry -> the level where the thesis is falsified, on the
@@ -2395,6 +2401,8 @@ if frb_done and not frb_done[1] and not na(frb_hi) and not na(frb_lo) and frb_hi
     array.push(_ctxPool, (dirF == 1 ? frb_pool_lo : frb_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirF ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    array.push(_ctxTime, time)
+    array.push(_ctxNFP, _isNFP ? 1 : 0)
     entF = lvlF + dirF * rngF * _c2Depth
     array.push(_ancOrb,   f_ancDist(dirF, entF, dirF == 1 ? frb_lo : frb_hi))
     array.push(_ancSwing, f_ancDist(dirF, entF, dirF == 1 ? _prev_sl : _prev_sh))
@@ -2414,6 +2422,8 @@ if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) an
     array.push(_ctxPool, (dirN == 1 ? nyo_pool_lo : nyo_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirN ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    array.push(_ctxTime, time)
+    array.push(_ctxNFP, _isNFP ? 1 : 0)
     entN = lvlN + dirN * rngN * _c2Depth
     array.push(_ancOrb,   f_ancDist(dirN, entN, dirN == 1 ? nyorb_lo : nyorb_hi))
     array.push(_ancSwing, f_ancDist(dirN, entN, dirN == 1 ? _prev_sl : _prev_sh))
@@ -2433,6 +2443,8 @@ if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi
     array.push(_ctxPool, (dirS == 1 ? syd_pool_lo : syd_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirS ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    array.push(_ctxTime, time)
+    array.push(_ctxNFP, _isNFP ? 1 : 0)
     entS = lvlS + dirS * rngS * _c2Depth
     array.push(_ancOrb,   f_ancDist(dirS, entS, dirS == 1 ? syd_lo : syd_hi))
     array.push(_ancSwing, f_ancDist(dirS, entS, dirS == 1 ? _prev_sl : _prev_sh))
@@ -2452,6 +2464,8 @@ if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi
     array.push(_ctxPool, (dirT == 1 ? tok_pool_lo : tok_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirT ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    array.push(_ctxTime, time)
+    array.push(_ctxNFP, _isNFP ? 1 : 0)
     entT = lvlT + dirT * rngT * _c2Depth
     array.push(_ancOrb,   f_ancDist(dirT, entT, dirT == 1 ? tok_lo : tok_hi))
     array.push(_ancSwing, f_ancDist(dirT, entT, dirT == 1 ? _prev_sl : _prev_sh))
@@ -2479,6 +2493,8 @@ if lorb_done and not lorb_done[1] and not na(lorb_hi) and not na(lorb_lo) and lo
     array.push(_ctxPool, 0)
     array.push(_ctxM15, m15B == dirG ? 1 : 0)
     array.push(_ctxAtr, atrVal)
+    array.push(_ctxTime, time)
+    array.push(_ctxNFP, _isNFP ? 1 : 0)
     entG = lvlG + dirG * rngG * _c2Depth
     array.push(_ancOrb,   f_ancDist(dirG, entG, dirG == 1 ? lorb_lo : lorb_hi))
     array.push(_ancSwing, f_ancDist(dirG, entG, dirG == 1 ? _prev_sl : _prev_sh))
@@ -3524,6 +3540,188 @@ if barstate.islast and showSigCnt
                   frame_color=color.new(color.gray, 60), frame_width=1)
     f_drawSigTable(sfTbl)
 
+
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// LOSS AUTOPSY — one row per losing trade
+// ═══════════════════════════════════════════════════════════════════════
+// WHY THIS EXISTS. PF = (wins/losses) x (avgWin/avgLoss). The avgWin half
+// was tested to destruction on 2026-09-27: at an IDENTICAL 76-pt stop and
+// the same ratchet, TP1 ran 390 trades / 9 losses / PF 4.176, TP2 ran
+// 326 / 32 / PF 2.074 and TP3 ran 277 / 47 / PF 1.576. Pushing the target
+// multiplies avgWin by 2.3x and costs 23 losses to buy it. That closes the
+// avgWin route and leaves the LOSS COUNT as the only lever left on PF.
+//
+// Nine losses is a readable sample. This prints all of them with the
+// conditions they carried, so a filter can be aimed at something MEASURED
+// instead of guessed. If five of the nine share a condition, PF 10 is
+// real. If they are scattered over four signals and three years, it is
+// not — and one run says which.
+//
+// READS NOTHING FROM THE FUTURE and places no orders. It cannot change a
+// single trade.
+//
+// NOT SUBJECT TO THE PROFOND GAP the way the percentage tables are. Those
+// report proportions over a biased ~45% slice. This one either finds a
+// losing trade or it does not, and FOUND at the bottom tells you directly
+// whether it saw them all — compare it against the Tester's own losing
+// count (total trades minus profitable trades).
+G_LOSS   = "Loss autopsy"
+showLoss = input.bool(true, "Show loss autopsy (every losing trade, one row)", group=G_LOSS,
+           tooltip="One row per losing trade, with the setup conditions recorded at SIGNAL time. Places no orders and reads no future data.\n\nCheck FOUND against the Tester's losing-trade count before trusting any pattern in the rows. If FOUND is short, the script is not seeing every trade and the sample is partial.")
+lossMax  = input.int(30, "Max rows to print", group=G_LOSS, minval=5, maxval=60,
+           tooltip="Rows print in trade order. FOUND still counts every loss even when more exist than are shown, so the summary block stays complete.")
+
+var table lsTbl = na
+
+f_drawLossTable(table t) =>
+    pvL = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
+    hdrC = color.new(color.silver, 0)
+    nFound = 0
+    nShown = 0
+    nNFP = 0
+    nM = 0
+    nH = 0
+    nG = 0
+    nU = 0
+    nV = 0
+    nLong = 0
+    nAdr75 = 0
+    nBiasOpp = 0
+    nUnmatched = 0
+    sumRng = 0.0
+    sumMae = 0.0
+    sumLoss = 0.0
+    dowN = array.new<int>(8, 0)
+
+    table.cell(t, 0, 0, "#", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 1, 0, "SIGNAL", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 2, 0, "DIR", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 3, 0, "DATE", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 4, 0, "DOW", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 5, 0, "NFP", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 6, 0, "ORB rng", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 7, 0, "ADR%", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 8, 0, "brk", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 9, 0, "D-bias", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 10, 0, "MAE pts", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 11, 0, "LOSS pts", text_color=hdrC, text_size=size.tiny)
+
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            szL = math.abs(strategy.closedtrades.size(i))
+            if szL > 0
+                uL = szL * pvL
+                pL = strategy.closedtrades.profit(i) / uL
+                if pL < 0
+                    nFound := nFound + 1
+                    idL = strategy.closedtrades.entry_id(i)
+                    // NYORB must be tested BEFORE ORB - "NYORB-L" contains "ORB".
+                    sL = str.contains(idL, "FRB") ? 0 : str.contains(idL, "NYORB") ? 1 : str.contains(idL, "SYD") ? 2 : str.contains(idL, "TOK") ? 3 : str.contains(idL, "ORB") ? 4 : -1
+                    dL = str.contains(idL, "-L") ? 1 : -1
+                    ebL = strategy.closedtrades.entry_bar_index(i)
+                    kL = -1
+                    if sL >= 0 and array.size(_ctxBar) > 0
+                        for q = array.size(_ctxBar) - 1 to 0
+                            if array.get(_ctxBar, q) <= ebL and array.get(_ctxSig, q) == sL
+                                kL := q
+                                break
+                    rngL = kL >= 0 ? array.get(_ctxRng, kL) : na
+                    adrL = kL >= 0 ? array.get(_ctxAdr, kL) : na
+                    strL = kL >= 0 ? array.get(_ctxStr, kL) : na
+                    agrL = kL >= 0 ? array.get(_ctxAgr, kL) : -1
+                    nfpL = kL >= 0 ? array.get(_ctxNFP, kL) : 0
+                    tL = kL >= 0 ? array.get(_ctxTime, kL) : strategy.closedtrades.entry_time(i)
+                    maeL = strategy.closedtrades.max_drawdown(i) / uL
+                    dwL = dayofweek(tL, syminfo.timezone)
+                    if kL < 0
+                        nUnmatched := nUnmatched + 1
+                    if nfpL == 1
+                        nNFP := nNFP + 1
+                    if dL == 1
+                        nLong := nLong + 1
+                    if not na(adrL) and adrL >= 0.75
+                        nAdr75 := nAdr75 + 1
+                    if agrL == 0
+                        nBiasOpp := nBiasOpp + 1
+                    if sL == 0
+                        nM := nM + 1
+                    if sL == 1
+                        nH := nH + 1
+                    if sL == 2
+                        nU := nU + 1
+                    if sL == 3
+                        nV := nV + 1
+                    if sL == 4
+                        nG := nG + 1
+                    array.set(dowN, dwL, array.get(dowN, dwL) + 1)
+                    sumRng := sumRng + (na(rngL) ? 0.0 : rngL)
+                    sumMae := sumMae + maeL
+                    sumLoss := sumLoss + math.abs(pL)
+                    if nShown < lossMax
+                        nShown := nShown + 1
+                        rw = nShown
+                        sigNm = sL == 0 ? "M FRB" : sL == 1 ? "H NY" : sL == 2 ? "U SYD" : sL == 3 ? "V TOK" : sL == 4 ? "G LON" : "? " + idL
+                        dowNm = dwL == 2 ? "Mon" : dwL == 3 ? "Tue" : dwL == 4 ? "Wed" : dwL == 5 ? "Thu" : dwL == 6 ? "Fri" : dwL == 7 ? "Sat" : "Sun"
+                        rwC = nfpL == 1 ? color.new(color.orange, 0) : color.new(color.white, 0)
+                        table.cell(t, 0, rw, str.tostring(rw), text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 1, rw, sigNm, text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 2, rw, dL == 1 ? "LONG" : "SHORT", text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 3, rw, str.format("{0,date,yyyy-MM-dd}", tL), text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 4, rw, dowNm, text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 5, rw, nfpL == 1 ? "YES" : "-", text_color=nfpL == 1 ? color.new(color.orange, 0) : color.new(color.gray, 0), text_size=size.tiny)
+                        table.cell(t, 6, rw, na(rngL) ? "?" : str.tostring(rngL, "#.#"), text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 7, rw, na(adrL) ? "?" : str.tostring(adrL * 100, "#") + "%", text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 8, rw, na(strL) ? "?" : str.tostring(strL, "0.##"), text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 9, rw, agrL < 0 ? "?" : agrL == 1 ? "agree" : "OPPOSED", text_color=agrL == 0 ? color.new(color.orange, 0) : rwC, text_size=size.tiny)
+                        table.cell(t, 10, rw, str.tostring(maeL, "#.#"), text_color=rwC, text_size=size.tiny)
+                        table.cell(t, 11, rw, str.tostring(math.abs(pL), "#.#"), text_color=color.new(color.red, 0), text_size=size.tiny)
+
+    bs = nShown + 2
+    okC = nUnmatched == 0 and nFound > 0 ? color.new(color.lime, 0) : color.new(color.orange, 0)
+    table.cell(t, 0, bs, "FOUND", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 1, bs, str.tostring(nFound) + " losses", text_color=okC, text_size=size.tiny)
+    table.cell(t, 3, bs, "shown " + str.tostring(nShown), text_color=color.new(color.gray, 0), text_size=size.tiny)
+    table.cell(t, 5, bs, "unmatched " + str.tostring(nUnmatched), text_color=okC, text_size=size.tiny)
+    table.cell(t, 8, bs, "compare FOUND with the Tester's losing count", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+
+    table.cell(t, 0, bs + 1, "SIGNAL", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 1, bs + 1, "M " + str.tostring(nM), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 2, bs + 1, "H " + str.tostring(nH), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 3, bs + 1, "G " + str.tostring(nG), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 4, bs + 1, "U " + str.tostring(nU), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 5, bs + 1, "V " + str.tostring(nV), text_color=color.new(color.white, 0), text_size=size.tiny)
+
+    table.cell(t, 0, bs + 2, "DAY", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 1, bs + 2, "Mon " + str.tostring(array.get(dowN, 2)), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 2, bs + 2, "Tue " + str.tostring(array.get(dowN, 3)), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 3, bs + 2, "Wed " + str.tostring(array.get(dowN, 4)), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 4, bs + 2, "Thu " + str.tostring(array.get(dowN, 5)), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 5, bs + 2, "Fri " + str.tostring(array.get(dowN, 6)), text_color=color.new(color.white, 0), text_size=size.tiny)
+
+    table.cell(t, 0, bs + 3, "FLAGS", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 1, bs + 3, "NFP " + str.tostring(nNFP), text_color=nNFP > 0 ? color.new(color.orange, 0) : color.new(color.gray, 0), text_size=size.tiny)
+    table.cell(t, 2, bs + 3, "LONG " + str.tostring(nLong), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 3, bs + 3, "SHORT " + str.tostring(nFound - nLong), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 4, bs + 3, "ADR>=75% " + str.tostring(nAdr75), text_color=color.new(color.white, 0), text_size=size.tiny)
+    table.cell(t, 5, bs + 3, "bias opp " + str.tostring(nBiasOpp), text_color=color.new(color.white, 0), text_size=size.tiny)
+
+    avgN = nFound > 0 ? nFound : 1
+    table.cell(t, 0, bs + 4, "AVG", text_color=hdrC, text_size=size.tiny)
+    table.cell(t, 6, bs + 4, str.tostring(sumRng / avgN, "#.#"), text_color=color.new(color.gray, 0), text_size=size.tiny)
+    table.cell(t, 10, bs + 4, str.tostring(sumMae / avgN, "#.#"), text_color=color.new(color.gray, 0), text_size=size.tiny)
+    table.cell(t, 11, bs + 4, str.tostring(sumLoss / avgN, "#.#"), text_color=color.new(color.gray, 0), text_size=size.tiny)
+
+    table.cell(t, 0, bs + 5, "A condition shared by most rows is a filter candidate. A condition spread evenly is noise - confirm by RUNNING the filter, never by re-pricing this list.", text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+
+if barstate.islast and showLoss
+    if na(lsTbl)
+        lsTbl := table.new(position.top_left, 12, lossMax + 8,
+                  bgcolor=color.new(color.black, 60),
+                  border_color=color.new(color.gray, 60), border_width=1,
+                  frame_color=color.new(color.gray, 60), frame_width=1)
+    f_drawLossTable(lsTbl)
 
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
