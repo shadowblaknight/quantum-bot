@@ -3007,7 +3007,7 @@ if barstate.islast and showSigCnt
 // count (total trades minus profitable trades).
 G_LOSS   = "Loss autopsy"
 showLoss = input.bool(true, "Show loss autopsy (every losing trade, one row)", group=G_LOSS,
-           tooltip="One row per losing trade, with the setup conditions recorded at SIGNAL time. Places no orders and reads no future data.\n\nCheck FOUND against the Tester's losing-trade count before trusting any pattern in the rows. If FOUND is short, the script is not seeing every trade and the sample is partial.")
+           tooltip="One row per losing trade, with the setup conditions recorded at SIGNAL time. Places no orders and reads no future data.\n\nCheck FOUND against the Tester's losing-trade count before trusting any pattern in the rows. If FOUND is short, the script is not seeing every trade and the sample is partial.\n\nA condition shared by most rows is a filter CANDIDATE. A condition spread evenly is noise. Confirm by RUNNING the filter, never by subtracting these rows from the trade list - this harness is path-dependent, so blocking a signal frees the slot and reshuffles everything downstream.")
 lossMax  = input.int(30, "Max rows to print", group=G_LOSS, minval=5, maxval=60,
            tooltip="Rows print in trade order. FOUND still counts every loss even when more exist than are shown, so the summary block stays complete.")
 
@@ -3122,7 +3122,7 @@ f_drawLossTable(table t) =>
     table.cell(t, 1, bs, str.tostring(nFound) + " losses", text_color=okC, text_size=size.tiny)
     table.cell(t, 3, bs, "shown " + str.tostring(nShown), text_color=color.new(color.gray, 0), text_size=size.tiny)
     table.cell(t, 5, bs, "unmatched " + str.tostring(nUnmatched), text_color=okC, text_size=size.tiny)
-    table.cell(t, 8, bs, "compare FOUND with the Tester's losing count", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 8, bs, "vs Tester", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
 
     table.cell(t, 0, bs + 1, "SIGNAL", text_color=hdrC, text_size=size.tiny)
     table.cell(t, 1, bs + 1, "M " + str.tostring(nM), text_color=color.new(color.white, 0), text_size=size.tiny)
@@ -3151,7 +3151,6 @@ f_drawLossTable(table t) =>
     table.cell(t, 10, bs + 4, str.tostring(sumMae / avgN, "#.#"), text_color=color.new(color.gray, 0), text_size=size.tiny)
     table.cell(t, 11, bs + 4, str.tostring(sumLoss / avgN, "#.#"), text_color=color.new(color.gray, 0), text_size=size.tiny)
 
-    table.cell(t, 0, bs + 5, "A condition shared by most rows is a filter candidate. A condition spread evenly is noise - confirm by RUNNING the filter, never by re-pricing this list.", text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showLoss
     if na(lsTbl)
@@ -3166,31 +3165,33 @@ if barstate.islast and showLoss
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL CONTRIBUTION — which signal actually earns the points
 // ═══════════════════════════════════════════════════════════════════════
-// The A+ table already accumulates per-signal points (sPts) and never
-// prints them; the condition study can only show one signal per run. This
-// answers the question directly: of M / H / G / U, which one carries the
-// system, and which is along for the ride.
+// Of M / H / G / U, which one carries the system and which is along for
+// the ride. The A+ table accumulates per-signal points and never prints
+// them; the condition study can only show one signal per run.
 //
-// WHY IT MATTERS BEYOND CURIOSITY. Every signal costs you the position
-// slot while it is open (pyramiding=0), so a signal that contributes few
-// points is not neutral — it is actively blocking the others. A signal
-// earning 5% of the net while consuming 25% of the slots is a net
-// negative even with a perfect win rate.
+// THE COLUMN THAT DECIDES IS slot% vs NET%. Every signal holds the single
+// position slot while it is open (pyramiding=0), so a signal returning a
+// smaller share of the NET than it consumes of the SLOT is blocking the
+// others — a net negative even at a perfect win rate. Those rows print
+// ORANGE; the biggest net contributor gets an aqua star.
 //
-// UNITS ARE POINTS, the same unit as c2SLBuf and the ORB ranges. On gold
-// pipSize is 0.1, so 1 point = 10 pips. Points are normalised per
-// contract (profit / size / pointvalue), so percent_of_equity sizing
-// cannot distort the comparison between signals.
+// pts/trade is the efficiency number. A signal with few trades and a high
+// pts/trade is worth MORE slot, not less.
 //
-// SELF-DIAGNOSING like the loss autopsy: the TOTAL row prints
-// strategy.closedtrades beside the trades it actually classified. If the
-// total is short of the Tester's trade count, the script is not seeing
-// every trade (the PROFOND gap) and the shares below describe a subset.
+// UNITS ARE POINTS (1 point = 10 pips on gold), normalised per contract
+// (profit / size / pointvalue) so percent_of_equity sizing cannot distort
+// the comparison between signals.
+//
+// LAYOUT NOTE 2026-09-27: trimmed from 12 columns to 9 and the two long
+// footer sentences removed. Both lived in column 0, which forced that
+// column as wide as the sentence and pushed the whole table left into the
+// loss autopsy at top_left. Gross+/gross- are derivable from NET and L,
+// and heat already has a column in the A+ table.
 G_CONTRIB   = "Signal contribution"
 showContrib = input.bool(true, "Show per-signal point contribution", group=G_CONTRIB,
-              tooltip="Net points earned per signal, so you can see which one carries the system. Places no orders and reads no future data.\n\nCheck the TOTAL row against the Tester's trade count before trusting the shares. Units are POINTS (1 point = 10 pips on gold).")
+              tooltip="Net points earned per signal, so you can see which one carries the system. Places no orders and reads no future data.\n\nAQUA star = biggest net contributor. ORANGE = the signal takes a bigger share of the position SLOT than it returns in points, which is the one shape that makes a signal worth removing even at a high win rate.\n\nCheck the TRADES row against the Tester's trade count before trusting the shares. Units are POINTS (1 point = 10 pips on gold).")
 
-var array<string> _pcLbl = array.from("M  Frankfurt", "H  NY", "G  London", "U  Sydney", "V  Tokyo")
+var array<string> _pcLbl = array.from("M Frankfurt", "H NY", "G London", "U Sydney", "V Tokyo")
 var table pcTbl = na
 
 f_drawContribTable(table t) =>
@@ -3200,10 +3201,8 @@ f_drawContribTable(table t) =>
     cL = array.new<int>(5, 0)
     cPos = array.new<float>(5, 0.0)
     cNeg = array.new<float>(5, 0.0)
-    cMae = array.new<float>(5, 0.0)
     seenC = 0
     otherN = 0
-    otherNet = 0.0
 
     if strategy.closedtrades > 0
         for i = 0 to strategy.closedtrades - 1
@@ -3211,14 +3210,12 @@ f_drawContribTable(table t) =>
             if szC > 0
                 uC = szC * pvC
                 pC = strategy.closedtrades.profit(i) / uC
-                mC = strategy.closedtrades.max_drawdown(i) / uC
                 idC = strategy.closedtrades.entry_id(i)
                 // NYORB must be tested BEFORE ORB - "NYORB-L" contains "ORB".
                 sC = str.contains(idC, "FRB") ? 0 : str.contains(idC, "NYORB") ? 1 : str.contains(idC, "ORB") ? 2 : str.contains(idC, "SYD") ? 3 : str.contains(idC, "TOK") ? 4 : -1
                 if sC >= 0
                     seenC := seenC + 1
                     array.set(cN, sC, array.get(cN, sC) + 1)
-                    array.set(cMae, sC, array.get(cMae, sC) + mC)
                     if pC > 0
                         array.set(cW, sC, array.get(cW, sC) + 1)
                         array.set(cPos, sC, array.get(cPos, sC) + pC)
@@ -3227,9 +3224,7 @@ f_drawContribTable(table t) =>
                         array.set(cNeg, sC, array.get(cNeg, sC) + math.abs(pC))
                 else
                     otherN := otherN + 1
-                    otherNet := otherNet + pC
 
-    // Net points per signal, and which one leads.
     netTot = 0.0
     bestI = -1
     bestV = -1e12
@@ -3249,64 +3244,56 @@ f_drawContribTable(table t) =>
     table.cell(t, 3, 0, "W", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 4, 0, "L", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 0, "WR%", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 0, "gross+", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 7, 0, "gross-", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 8, 0, "NET pts", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 9, 0, "pts/trade", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 10, 0, "NET%", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 11, 0, "avgMAE", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 0, "NET", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 0, "pts/tr", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 8, 0, "NET%", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
 
     for q = 0 to 4
         nq = array.get(cN, q)
-        wq = array.get(cW, q)
-        lq = array.get(cL, q)
-        posq = array.get(cPos, q)
-        negq = array.get(cNeg, q)
-        netq = posq - negq
-        wrq = nq > 0 ? 100.0 * wq / nq : 0.0
+        netq = array.get(cPos, q) - array.get(cNeg, q)
+        wrq = nq > 0 ? 100.0 * array.get(cW, q) / nq : 0.0
         ptq = nq > 0 ? netq / nq : 0.0
         slotq = seenC > 0 ? 100.0 * nq / seenC : 0.0
         shq = netTot != 0 ? 100.0 * netq / netTot : 0.0
-        maeq = nq > 0 ? array.get(cMae, q) / nq : 0.0
-        // AQUA = biggest net contributor. ORANGE = eats more of the position
-        // slot than it returns in points, which is the one shape that makes a
-        // signal worth removing even at a high win rate.
         drag = nq > 0 and shq < slotq - 5.0
         rowP = nq == 0 ? gP : q == bestI ? color.new(color.aqua, 0) : drag ? color.new(color.orange, 0) : wP
-        nameq = (q == bestI and nq > 0 ? "★ " : "   ") + array.get(_pcLbl, q)
+        nameq = (q == bestI and nq > 0 ? "★ " : "  ") + array.get(_pcLbl, q)
         table.cell(t, 0, q + 1, nameq, text_color=rowP, text_size=size.tiny, text_halign=text.align_left)
         table.cell(t, 1, q + 1, str.tostring(nq), text_color=wP, text_size=size.tiny, text_halign=text.align_right)
         table.cell(t, 2, q + 1, str.tostring(slotq, "#.#"), text_color=drag ? color.new(color.orange, 0) : gP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 3, q + 1, str.tostring(wq), text_color=wP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 4, q + 1, str.tostring(lq), text_color=lq > 0 ? color.new(color.red, 0) : gP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 5, q + 1, nq > 0 ? str.tostring(wrq, "#.##") : "-", text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 6, q + 1, str.tostring(posq, "#"), text_color=wP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 7, q + 1, str.tostring(negq, "#"), text_color=negq > 0 ? color.new(color.red, 0) : gP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 8, q + 1, str.tostring(netq, "#"), text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 9, q + 1, nq > 0 ? str.tostring(ptq, "#.#") : "-", text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 10, q + 1, str.tostring(shq, "#.#"), text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 11, q + 1, nq > 0 ? str.tostring(maeq, "#.#") : "-", text_color=wP, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, q + 1, str.tostring(array.get(cW, q)), text_color=wP, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, q + 1, str.tostring(array.get(cL, q)), text_color=array.get(cL, q) > 0 ? color.new(color.red, 0) : gP, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, q + 1, nq > 0 ? str.tostring(wrq, "#.#") : "-", text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 6, q + 1, str.tostring(netq, "#"), text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 7, q + 1, nq > 0 ? str.tostring(ptq, "#.#") : "-", text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 8, q + 1, str.tostring(shq, "#.#"), text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
 
     cAq = color.new(color.aqua, 0)
-    table.cell(t, 0, 6, "TOTAL (ORB)", text_color=cAq, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 6, "TOTAL", text_color=cAq, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 6, str.tostring(seenC), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 8, 6, str.tostring(netTot, "#"), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 9, 6, seenC > 0 ? str.tostring(netTot / seenC, "#.#") : "-", text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 6, str.tostring(netTot, "#"), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 6, seenC > 0 ? str.tostring(netTot / seenC, "#.#") : "-", text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
 
-    covOk = seenC + otherN == strategy.closedtrades
-    table.cell(t, 0, 7, "closedtrades " + str.tostring(strategy.closedtrades) + "  ·  ORB-classified " + str.tostring(seenC) + "  ·  non-ORB " + str.tostring(otherN) + "   <- compare with the Tester's trade count",
-               text_color=covOk ? color.new(color.lime, 0) : color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 8, "AQUA star = biggest net contributor.  ORANGE = takes a bigger share of the position SLOT than it returns in points.",
-               text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
+    // Coverage split across cells instead of one long sentence in column 0 -
+    // a wide string there sets the column width and shoves the table sideways
+    // into whatever else is on screen.
+    covOk = otherN == 0 and seenC == strategy.closedtrades
+    covC = covOk ? color.new(color.lime, 0) : color.new(color.orange, 0)
+    table.cell(t, 0, 7, "trades", text_color=gP, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 7, str.tostring(strategy.closedtrades), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 7, "ORB", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 7, str.tostring(seenC), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 7, "other", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 7, str.tostring(otherN), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 7, "vs Tester", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
 
 if barstate.islast and showContrib and strategy.closedtrades > 0
     if na(pcTbl)
-        pcTbl := table.new(position.top_right, 12, 9,
+        pcTbl := table.new(position.top_right, 9, 8,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
     f_drawContribTable(pcTbl)
-
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
