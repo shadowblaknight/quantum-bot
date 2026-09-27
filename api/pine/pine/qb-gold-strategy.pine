@@ -45,25 +45,11 @@ modJudas    = input.bool(true,  "B) Judas Sweep (judas-swing)",                 
 modSB       = input.bool(true,  "C) Silver Bullet (gold-sb)",                      group=G_CORE)
 modPsych    = input.bool(true,  "D) Psych Level Bounce (reaction)",                group=G_CORE)
 modPsychExt = input.bool(true,  "D2) Psych Extended / outside KZ (reaction-ext)", group=G_CORE)
-modLB         = input.bool(false, "E) London Range Breakout",                        group=G_CORE)
-lbBiasFilter  = input.bool(false, "E) Require H1 bias alignment",                   group=G_CORE)
-modNY         = input.bool(false, "F) NY Session Breakout (London range)",           group=G_CORE)
 modORB        = input.bool(false, "G) London ORB — 08:00-08:30 UTC (verified)",     group=G_CORE)
 modNYORB      = input.bool(true,  "H) NY ORB — 14:00-14:30 UTC (verified)",         group=G_CORE)
 modNYORBP     = input.bool(false, "H') NY ORB PRIME — restrict H to a 14:30-16:00 trade window", group=G_CORE,
               tooltip="LEAVE OFF — TESTED AND REJECTED 2026-09-18. Kept so the negative result stays attached to the code.\n\nMEASURED 3y (16 Sep 2023 - 16 Sep 2026), full baseline H+M+U+V both arms:\n  OFF  218 trades  99.08% WR  PF 6.335  +4148 USD  DD 710  (19.03 per trade)\n  ON   141 trades  99.29% WR  PF 5.906  +2342 USD  DD 787  (16.61 per trade)\n\nThe window removed ~77 trades and 44% of net profit while RAISING drawdown. Win rate barely moved (+0.21pp), so it removed volume, not risk.\n\nTHE LATE BREAKS ARE THE BETTER TRADES. The ~77 trades the window removed accounted for ~1806 USD, about 23.45 each, against 16.61 for the trades it kept. A genuine quality filter lifts per-trade profit; this lowered it. So NY ORB breaks that fire after 16:00 UTC are MORE profitable than the ones inside the opening window, not less. The hypothesis was exactly backwards.\n\n(Path-dependence caveat: blocking H frees the position slot for other signals, so the 141 are not the 218 minus a fixed 77. The per-trade figures are net inferences. The direction is not in doubt.)\n\nWHAT THIS MEANS. Lateness costs FILLS, not edge. A backtest cannot see a fill problem - here a limit either fills or it does not; there is no 'the alert arrived after the move and the order sat unfilled'. Do not block late signals. Fix the entry router so a signal whose price has already run past the limit is taken at market or skipped, instead of resting on an order that cannot fill.\n\nORIGINAL RATIONALE BELOW, kept because the lateness measurement is still correct.\n\nOFF = Signal H exactly as it runs today. ON = H may only fire inside 14:30-16:00 UTC.\n\nWHY THIS EXISTS. Signal M is gated by in_frb_trade (07:30-11:00). Signal H was never given the equivalent, so it waits for the first 15m close outside the 14:00-14:30 range FOR THE REST OF THE DAY. Measured on the live account, every NY ORB signal fired:\n  16 Sep 14:45  +0.3h after the range closed\n  03 Sep 15:00  +0.5h\n  24 Aug 15:30  +1.0h\n  21 Aug 15:45  +1.3h\n  08 Sep 16:15  +1.8h\n  01 Sep 16:30  +2.0h\n  18 Sep 17:15  +2.8h\nMedian 1.3 hours late. By then the ORB level is stale, price has wandered, and when it finally breaks it tends to run without ever retesting — so the C2 limit rests unfilled while the move happens without you.\n\nThis window keeps the first four and blocks the last three.\n\nALSO CHANGES ORDER EXPIRY. When ON, a NYORB limit is cancelled at 16:00 instead of surviving to the daily roll, mirroring how M cancels at the end of its own window. Otherwise a limit armed at 15:55 could still fill hours later against a level that is long dead — the same disease in a different place.\n\nEXPECT FEWER TRADES. This harness is path-dependent: blocking a signal frees the position slot for a later one, so the trade list reshuffles rather than simply shrinking. Judge it on net P&L and trade count, not on win rate alone.")
-modPDHL       = input.bool(false, "I) PDH/PDL Sweep — liquidity grab & reverse",    group=G_CORE)
-modVWAP       = input.bool(false, "J) VWAP Extension Fade — mean reversion",        group=G_CORE)
-modPWHL       = input.bool(false, "K) Prev Week H/L Sweep — weekly liquidity grab", group=G_CORE)
-modMidnight   = input.bool(false, "L) Midnight Open (00:00 UTC) Bounce",             group=G_CORE)
 modFRB        = input.bool(true,  "M) Frankfurt ORB — 07:00-07:30 UTC (pre-London)", group=G_CORE)
-modPMFix      = input.bool(false, "N) PM Fix ORB — 12:00-12:30 UTC (gold fix)",     group=G_CORE)
-modPreNY      = input.bool(false, "O) Pre-NY ORB — 13:00-13:30 UTC (pre-NY open)",  group=G_CORE)
-modASFP       = input.bool(false, "P) Asian SFP — sweep+reverse (07:00-09:00 UTC)", group=G_CORE)
-modQ          = input.bool(false, "Q) Triple-Bull Pullback Long — D+H4+H1 bull, 4-bar dip ≥0.69 ATR  [83% WR]", group=G_CORE)
-modR          = input.bool(false, "R) Triple-Bear Rally Fade — D+H4+H1 bear, 4-bar bounce ≥0.38 ATR  [68% WR]", group=G_CORE)
-modS          = input.bool(false, "S) Pre-NY Triple-Bear Short — D+H4+H1 bear, 13:00-14:30 UTC  [67% WR, PF 1.52]", group=G_CORE)
-modT          = input.bool(false, "T) Frankfurt Triple-Bull Long — D+H4+H1 bull, 07:00-09:00 UTC  [64% WR, PF 1.33]", group=G_CORE)
 modSYD        = input.bool(true,  "U) Sydney ORB — session open, same C2 architecture as M/H  [UNTESTED]", group=G_CORE)
 modTOK        = input.bool(true,  "V) Tokyo ORB — REJECTED, kept only so the 218-trade baseline reproduces",  group=G_CORE,
               tooltip="TESTED AND REJECTED ~2026-09-07. Tokyo does not perform like Sydney.\n\nNot live: the indicator has no modTOK input and the webhook's SPECIALIST_ALLOWED_ZONES is ['FRB','NYORB','SYD'], so a V alert would be dropped as specialist-zone-inactive even if one fired.\n\nIt contributed ZERO trades to the 96-trade sample the A+ table measured — Tokyo hours are too thin to clear the 5-pt min-range floor, exactly as predicted. Left ON only because the 218-trade baseline was recorded with it on; since it fires essentially never, that baseline is effectively M+H+U.\n\nDo not re-propose enabling V live.")
@@ -103,12 +89,6 @@ nyorbDirFilter = input.string("Both", "H) Direction filter",  options=["Both", "
                  tooltip="London Bias study (54yr): the PM fix window (14:00 UTC) has a structural short tailwind. Test 'Short only' to isolate whether H shorts carry the PF.",
                  group=G_STRAT)
 frbDirFilter   = input.string("Both", "M) Direction filter",  options=["Both", "Long only", "Short only"], group=G_STRAT)
-sDirFilter     = input.string("Short only", "S) Direction filter", options=["Both", "Long only", "Short only"],
-                 tooltip="Short only = Pre-NY triple-bear (67% WR, PF 1.52 — the proven setup). Long only = Pre-NY triple-bull (untested inverse). Both = fire whichever side aligns.",
-                 group=G_STRAT)
-tDirFilter     = input.string("Long only",  "T) Direction filter", options=["Both", "Long only", "Short only"],
-                 tooltip="Long only = Frankfurt triple-bull (64% WR, PF 1.33 — the proven setup). Short only = Frankfurt triple-bear (untested inverse). Both = fire whichever side aligns.",
-                 group=G_STRAT)
 orbTPMult      = input.float(0.75, "H/M) TP1 multiplier",    minval=0.25, maxval=2.0, step=0.25,
                  tooltip="1.0 = standard 1R (baseline PF 1.145). 0.75 = ¾R — raises WR at cost of smaller wins. Find the WR/PF sweet spot between 0.75 and 1.0.",
                  group=G_STRAT)
@@ -316,16 +296,7 @@ _todayHigh  = request.security(syminfo.tickerid, "D", high)
 _todayLow   = request.security(syminfo.tickerid, "D", low)
 _todayOpen  = request.security(syminfo.tickerid, "D", open)
 _priorClose = request.security(syminfo.tickerid, "D", close[1])
-_pdh         = request.security(syminfo.tickerid, "D", high[1])
-_pdl         = request.security(syminfo.tickerid, "D", low[1])
-_pwh         = request.security(syminfo.tickerid, "W", high[1])
-_pwl         = request.security(syminfo.tickerid, "W", low[1])
-_newWeek     = ta.change(time("W")) != 0
-vwapVal      = ta.vwap(hlc3)
 
-var float _midnightOpen = na
-if _newDay
-    _midnightOpen := open
 
 _adrConsumed   = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
 _adrQuiet      = _adrConsumed < 0.75
@@ -333,7 +304,6 @@ _adrRemainTo75 = math.max(0.0, _atr14d * 0.75 - (_todayHigh - _todayLow))
 
 // H/M research gate helpers (placed here — needs _adrConsumed defined first)
 _isNFP      = dayofweek == dayofweek.friday and dayofmonth <= 7
-_ret4bar    = atrVal > 0 ? (close - close[4]) / atrVal : 0.0   // 4-bar momentum in ATR units
 _mnth       = month(time)
 _orbSeasonL = not orbSeasonFilt or _mnth != 9   // Sep blocks longs (90% bearish)
 _orbSeasonS = not orbSeasonFilt or _mnth != 1   // Jan blocks shorts (80% bullish)
@@ -746,91 +716,6 @@ if modPsychExt and barstate.isconfirmed and _testWinOk and not in_kz and adr_psy
                               color=color.new(color.orange, 10), textcolor=color.white, size=size.tiny)
                     f_drawPosBox(entryP, slP, tp3)
 
-// ─── LONDON SESSION RANGE (for Signal F) ─────────────────────────────
-var float lon_hi     = na
-var float lon_lo     = na
-var bool  lon_locked = false
-
-if _newDay
-    lon_hi     := na
-    lon_lo     := na
-    lon_locked := false
-
-if in_london
-    lon_hi := na(lon_hi) ? high : math.max(lon_hi, high)
-    lon_lo := na(lon_lo) ? low  : math.min(lon_lo, low)
-
-if not in_london and in_london[1] and not na(lon_hi)
-    lon_locked := true
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL E — London Range Breakout
-// No daily limit — can re-fire after a stop-out while still in London.
-// ATR-based SL (1.5×ATR) — independent of session range width.
-// ADR gate: skip if day already consumed 80% of its average range.
-// ═══════════════════════════════════════════════════════════════════════
-if modLB and barstate.isconfirmed and _testWinOk and in_london and ar_locked and _adrConsumed < 0.80 and not na(ar_hi) and not na(ar_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    ar_range = ar_hi - ar_lo
-    if ar_range > atrVal * 0.15
-        slAtr = 1.5 * atrVal
-        // LONG — bar closed above Asian high
-        if close > ar_hi and (not lbBiasFilter or h1B == 1)
-            entryP = close
-            slP    = entryP - slAtr
-            tp1    = entryP + slAtr
-            tp2    = entryP + slAtr * 2.0
-            tp3    = entryP + slAtr * 3.0
-            strategy.entry("LB-L", strategy.long, comment="london-breakout · LONG")
-            strategy.exit("LB-L-X", from_entry="LB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, low, "LB L", style=label.style_label_up,
-                      color=color.new(color.green, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-        // SHORT — bar closed below Asian low
-        else if close < ar_lo and (not lbBiasFilter or h1B == -1)
-            entryP = close
-            slP    = entryP + slAtr
-            tp1    = entryP - slAtr
-            tp2    = entryP - slAtr * 2.0
-            tp3    = entryP - slAtr * 3.0
-            strategy.entry("LB-S", strategy.short, comment="london-breakout · SHORT")
-            strategy.exit("LB-S-X", from_entry="LB-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, high, "LB S", style=label.style_label_down,
-                      color=color.new(color.red, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL F — NY Session Breakout (of London range)
-// ATR-based SL. No daily limit — can re-fire after a stop-out.
-// ═══════════════════════════════════════════════════════════════════════
-if modNY and barstate.isconfirmed and _testWinOk and in_overlap and lon_locked and _adrConsumed < 0.80 and not na(lon_hi) and not na(lon_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    lon_range = lon_hi - lon_lo
-    if lon_range > atrVal * 0.15
-        slAtr = 1.5 * atrVal
-        if close > lon_hi
-            entryP = close
-            slP    = entryP - slAtr
-            tp1    = entryP + slAtr
-            tp2    = entryP + slAtr * 2.0
-            tp3    = entryP + slAtr * 3.0
-            strategy.entry("NY-L", strategy.long, comment="ny-breakout · LONG")
-            strategy.exit("NY-L-X", from_entry="NY-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, low, "NY L", style=label.style_label_up,
-                      color=color.new(color.lime, 5), textcolor=color.black, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-        else if close < lon_lo
-            entryP = close
-            slP    = entryP + slAtr
-            tp1    = entryP - slAtr
-            tp2    = entryP - slAtr * 2.0
-            tp3    = entryP - slAtr * 3.0
-            strategy.entry("NY-S", strategy.short, comment="ny-breakout · SHORT")
-            strategy.exit("NY-S-X", from_entry="NY-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, high, "NY S", style=label.style_label_down,
-                      color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
 // ─── OPENING RANGE TRACKERS ───────────────────────────────────────────
 // Frankfurt ORB: 07:00–07:30 UTC (pre-London institutional open)
 in_frb_window  = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 450)
@@ -860,22 +745,6 @@ var float lorb_hi = na
 var float lorb_lo = na
 var bool  lorb_locked = false
 var bool  lorb_done   = false
-
-// PM Fix ORB: 12:00–12:30 UTC (London PM gold fix window)
-in_pmfix_window = timeframe.isintraday and (_minOfDay >= 720 and _minOfDay < 750)
-in_pmfix_trade  = timeframe.isintraday and (_minOfDay >= 750 and _minOfDay < 840)
-var float pmfix_hi = na
-var float pmfix_lo = na
-var bool  pmfix_locked = false
-var bool  pmfix_done   = false
-
-// Pre-NY ORB: 13:00–13:30 UTC (pre-NY quiet window; breakout amplified by NY open at 14:00)
-in_preny_window = timeframe.isintraday and (_minOfDay >= 780 and _minOfDay < 810)
-in_preny_trade  = timeframe.isintraday and (_minOfDay >= 810 and _minOfDay < 960)
-var float preny_hi = na
-var float preny_lo = na
-var bool  preny_locked = false
-var bool  preny_done   = false
 
 // NY ORB: 14:00–14:30 UTC (first 2 bars of NY on 15M)
 in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)
@@ -941,14 +810,6 @@ if _newDay
     lorb_lo     := na
     lorb_locked := false
     lorb_done   := false
-    pmfix_hi     := na
-    pmfix_lo     := na
-    pmfix_locked := false
-    pmfix_done   := false
-    preny_hi     := na
-    preny_lo     := na
-    preny_locked := false
-    preny_done   := false
     nyorb_hi     := na
     nyorb_lo     := na
     nyorb_locked := false
@@ -988,20 +849,6 @@ if in_lorb_window
 
 if not in_lorb_window and in_lorb_window[1] and not na(lorb_hi)
     lorb_locked := true
-
-if in_pmfix_window
-    pmfix_hi := na(pmfix_hi) ? high : math.max(pmfix_hi, high)
-    pmfix_lo := na(pmfix_lo) ? low  : math.min(pmfix_lo, low)
-
-if not in_pmfix_window and in_pmfix_window[1] and not na(pmfix_hi)
-    pmfix_locked := true
-
-if in_preny_window
-    preny_hi := na(preny_hi) ? high : math.max(preny_hi, high)
-    preny_lo := na(preny_lo) ? low  : math.min(preny_lo, low)
-
-if not in_preny_window and in_preny_window[1] and not na(preny_hi)
-    preny_locked := true
 
 if in_nyorb_window
     nyorb_hi := na(nyorb_hi) ? high : math.max(nyorb_hi, high)
@@ -1552,62 +1399,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             f_c2Exit("ORB-S", slP, tp1, tp2, tp3, orb_range)
             f_drawPosBox(entryP, slP, tp3)
 
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL N — PM Fix ORB (Opening Range 12:00-12:30 UTC)
-// The London PM Gold Fix is the most important gold benchmark in the
-// world — major banks settle positions here.  Price often makes a clean
-// directional break after the fix window closes.  Trade window: 12:30–14:00.
-// ═══════════════════════════════════════════════════════════════════════
-if modPMFix and barstate.isconfirmed and _testWinOk and in_pmfix_trade and pmfix_locked and not pmfix_done and not na(pmfix_hi) and not na(pmfix_lo) and strategy.position_size == 0
-    orb_range = pmfix_hi - pmfix_lo
-    buf       = math.max(atrVal * 0.10, 0.50)
-    if orb_range > 0.50
-        if close > pmfix_hi
-            entryP = close
-            slP    = pmfix_lo - buf
-            pmfix_done := true
-            strategy.entry("PMF-L", strategy.long, comment="pm-fix · LONG")
-            strategy.exit("PMF-L-X", from_entry="PMF-L", stop=slP,
-                          limit=f_exitLim(pmfix_hi + orb_range, pmfix_hi + orb_range * 2.0, pmfix_hi + orb_range * 3.0))
-            f_drawPosBox(entryP, slP, pmfix_hi + orb_range * 3.0)
 
-        else if close < pmfix_lo
-            entryP = close
-            slP    = pmfix_hi + buf
-            pmfix_done := true
-            strategy.entry("PMF-S", strategy.short, comment="pm-fix · SHORT")
-            strategy.exit("PMF-S-X", from_entry="PMF-S", stop=slP,
-                          limit=f_exitLim(pmfix_lo - orb_range, pmfix_lo - orb_range * 2.0, pmfix_lo - orb_range * 3.0))
-            f_drawPosBox(entryP, slP, pmfix_lo - orb_range * 3.0)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL O — Pre-NY ORB (Opening Range 13:00-13:30 UTC)
-// Mirror of Signal M: quiet pre-NY window (13:00-13:30) followed by
-// the NY open momentum burst at 14:00.  If the Frankfurt-pre-London
-// hypothesis holds, this should also outperform in-session ORBs.
-// Trade window: 13:30–16:00 UTC.
-// ═══════════════════════════════════════════════════════════════════════
-if modPreNY and barstate.isconfirmed and _testWinOk and in_preny_trade and preny_locked and not preny_done and not na(preny_hi) and not na(preny_lo) and strategy.position_size == 0
-    orb_range = preny_hi - preny_lo
-    buf       = math.max(atrVal * 0.10, 0.50)
-    if orb_range > 0.50
-        if close > preny_hi
-            entryP = close
-            slP    = preny_lo - buf
-            preny_done := true
-            strategy.entry("PRENY-L", strategy.long, comment="pre-ny-orb · LONG")
-            strategy.exit("PRENY-L-X", from_entry="PRENY-L", stop=slP,
-                          limit=f_exitLim(preny_hi + orb_range, preny_hi + orb_range * 2.0, preny_hi + orb_range * 3.0))
-            f_drawPosBox(entryP, slP, preny_hi + orb_range * 3.0)
-
-        else if close < preny_lo
-            entryP = close
-            slP    = preny_hi + buf
-            preny_done := true
-            strategy.entry("PRENY-S", strategy.short, comment="pre-ny-orb · SHORT")
-            strategy.exit("PRENY-S-X", from_entry="PRENY-S", stop=slP,
-                          limit=f_exitLim(preny_lo - orb_range, preny_lo - orb_range * 2.0, preny_lo - orb_range * 3.0))
-            f_drawPosBox(entryP, slP, preny_lo - orb_range * 3.0)
 
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL H — NY ORB (Opening Range Breakout 14:00-14:30 UTC)
@@ -1832,368 +1624,14 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
                       color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL I — Previous Day High/Low Sweep  (pdh-sweep / pdl-sweep)
-// Gold sweeps PDH or PDL to grab resting liquidity, then reverses hard.
-// Documented by Linda Raschke (Turtle Soup), Larry Williams, ICT.
-// Fires at most once per level per day, during kill zones only.
-// ═══════════════════════════════════════════════════════════════════════
-var bool pdh_done = false
-var bool pdl_done = false
 
-if _newDay
-    pdh_done := false
-    pdl_done := false
 
-if modPDHL and barstate.isconfirmed and _testWinOk and in_kz and not na(_pdh) and not na(_pdl) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    buf = atrVal * 0.15
 
-    // Swept above PDH, closed back below → SHORT
-    if not pdh_done and high > _pdh and close < _pdh and (high - _pdh) >= atrVal * 0.10
-        entryP = close
-        slP    = high + buf
-        slDist = slP - entryP
-        if slDist > 0
-            tp1 = entryP - slDist
-            tp2 = entryP - slDist * 2.0
-            tp3 = entryP - slDist * 3.0
-            pdh_done := true
-            strategy.entry("PDH-S", strategy.short, comment="pdh-sweep · SHORT")
-            strategy.exit("PDH-S-X", from_entry="PDH-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, high, "PDH ↓", style=label.style_label_down,
-                      color=color.new(color.maroon, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
 
-    // Swept below PDL, closed back above → LONG
-    if not pdl_done and low < _pdl and close > _pdl and (_pdl - low) >= atrVal * 0.10 and strategy.position_size == 0
-        entryP = close
-        slP    = low - buf
-        slDist = entryP - slP
-        if slDist > 0
-            tp1 = entryP + slDist
-            tp2 = entryP + slDist * 2.0
-            tp3 = entryP + slDist * 3.0
-            pdl_done := true
-            strategy.entry("PDL-L", strategy.long, comment="pdl-sweep · LONG")
-            strategy.exit("PDL-L-X", from_entry="PDL-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, low, "PDL ↑", style=label.style_label_up,
-                      color=color.new(color.teal, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
 
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL J — VWAP Extension Fade  (vwap-fade)
-// When gold extends > 1.5×ATR from session VWAP and prints a reversal bar
-// (bearish above / bullish below), it tends to snap back.  Used by
-// professional intraday gold traders as a mean-reversion scalp.
-// No daily limit — re-fires after stop-outs while extension persists.
-// ═══════════════════════════════════════════════════════════════════════
-if modVWAP and barstate.isconfirmed and _testWinOk and in_kz and not na(vwapVal) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    vwapDist = close - vwapVal
-    bearExt  = vwapDist >  atrVal * 1.5 and close < open
-    bullExt  = vwapDist < -atrVal * 1.5 and close > open
 
-    if bearExt
-        entryP = close
-        slP    = high + atrVal * 0.15
-        slDist = slP - entryP
-        if slDist > 0
-            tp1 = entryP - slDist
-            tp2 = entryP - slDist * 2.0
-            tp3 = entryP - slDist * 3.0
-            strategy.entry("VWAP-S", strategy.short, comment="vwap-fade · SHORT")
-            strategy.exit("VWAP-S-X", from_entry="VWAP-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            f_drawPosBox(entryP, slP, tp3)
 
-    else if bullExt
-        entryP = close
-        slP    = low - atrVal * 0.15
-        slDist = entryP - slP
-        if slDist > 0
-            tp1 = entryP + slDist
-            tp2 = entryP + slDist * 2.0
-            tp3 = entryP + slDist * 3.0
-            strategy.entry("VWAP-L", strategy.long, comment="vwap-fade · LONG")
-            strategy.exit("VWAP-L-X", from_entry="VWAP-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            f_drawPosBox(entryP, slP, tp3)
 
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL K — Previous Week High/Low Sweep  (pwh-sweep / pwl-sweep)
-// Same turtle-soup concept as Signal I but at the weekly timeframe.
-// Weekly extremes hold 5× more resting liquidity than daily levels —
-// the reversal after a sweep is typically stronger and higher-probability.
-// Fires at most once per level per week, during kill zones only.
-// ═══════════════════════════════════════════════════════════════════════
-var bool pwh_done = false
-var bool pwl_done = false
-
-if _newWeek
-    pwh_done := false
-    pwl_done := false
-
-if modPWHL and barstate.isconfirmed and _testWinOk and in_kz and not na(_pwh) and not na(_pwl) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    buf = atrVal * 0.20
-
-    if not pwh_done and high > _pwh and close < _pwh and (high - _pwh) >= atrVal * 0.15
-        entryP = close
-        slP    = high + buf
-        slDist = slP - entryP
-        if slDist > 0
-            tp1 = entryP - slDist
-            tp2 = entryP - slDist * 2.0
-            tp3 = entryP - slDist * 3.0
-            pwh_done := true
-            strategy.entry("PWH-S", strategy.short, comment="pwh-sweep · SHORT")
-            strategy.exit("PWH-S-X", from_entry="PWH-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, high, "PWH ↓", style=label.style_label_down,
-                      color=color.new(color.purple, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-    if not pwl_done and low < _pwl and close > _pwl and (_pwl - low) >= atrVal * 0.15 and strategy.position_size == 0
-        entryP = close
-        slP    = low - buf
-        slDist = entryP - slP
-        if slDist > 0
-            tp1 = entryP + slDist
-            tp2 = entryP + slDist * 2.0
-            tp3 = entryP + slDist * 3.0
-            pwl_done := true
-            strategy.entry("PWL-L", strategy.long, comment="pwl-sweep · LONG")
-            strategy.exit("PWL-L-X", from_entry="PWL-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, low, "PWL ↑", style=label.style_label_up,
-                      color=color.new(color.purple, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL L — Midnight Open (00:00 UTC) Bounce
-// ICT's primary gold reference level: the 00:00 UTC daily open price.
-// During London session, price retesting this level and showing a
-// confirmed reversal bar is a high-conviction institutional entry.
-// Fires at most once per direction per day, London session only.
-// ═══════════════════════════════════════════════════════════════════════
-var bool midnight_long_done  = false
-var bool midnight_short_done = false
-
-if _newDay
-    midnight_long_done  := false
-    midnight_short_done := false
-
-if modMidnight and barstate.isconfirmed and _testWinOk and in_london and not na(_midnightOpen) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    tol = atrVal * 0.25
-
-    bounceLong  = low <= _midnightOpen + tol and low <= _midnightOpen and close > _midnightOpen and close > open
-    bounceShort = high >= _midnightOpen - tol and high >= _midnightOpen and close < _midnightOpen and close < open
-
-    if not midnight_long_done and bounceLong and not bounceShort
-        wick   = low
-        entryP = close
-        buf    = atrVal * 0.15
-        slP    = wick - buf
-        slDist = entryP - slP
-        if slDist > 0 and slP < entryP
-            tp1 = entryP + slDist
-            tp2 = entryP + slDist * 2.0
-            tp3 = entryP + slDist * 3.0
-            midnight_long_done := true
-            strategy.entry("MID-L", strategy.long, comment="midnight-open · LONG")
-            strategy.exit("MID-L-X", from_entry="MID-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            f_drawPosBox(entryP, slP, tp3)
-
-    if not midnight_short_done and bounceShort and not bounceLong
-        wick   = high
-        entryP = close
-        buf    = atrVal * 0.15
-        slP    = wick + buf
-        slDist = slP - entryP
-        if slDist > 0 and slP > entryP
-            tp1 = entryP - slDist
-            tp2 = entryP - slDist * 2.0
-            tp3 = entryP - slDist * 3.0
-            midnight_short_done := true
-            strategy.entry("MID-S", strategy.short, comment="midnight-open · SHORT")
-            strategy.exit("MID-S-X", from_entry="MID-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL P — Asian SFP (Swing Failure Pattern on Asian Range)
-// Asian session (00:00-07:00 UTC) builds a range. At the Frankfurt/London
-// open (07:00-09:00 UTC), institutions sweep one boundary to grab resting
-// liquidity then reverse hard. Price pierces the Asian high or low but
-// closes back inside — classic SFP. Enter at bar close in the reversal
-// direction, target the opposite Asian boundary.
-// Research source: 70%+ of trading days London sweeps one Asian extreme.
-// ═══════════════════════════════════════════════════════════════════════
-in_asfp_win = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 540)
-var bool asfp_hi_done = false
-var bool asfp_lo_done = false
-
-if _newDay
-    asfp_hi_done := false
-    asfp_lo_done := false
-
-if modASFP and barstate.isconfirmed and _testWinOk and in_asfp_win and ar_locked and not na(ar_hi) and not na(ar_lo) and not na(atrVal) and atrVal > 0 and strategy.position_size == 0
-    asfpBuf = atrVal * 0.20
-    // SHORT: swept above Asian high, closed back inside → reverse down
-    if not asfp_hi_done and high > ar_hi and close < ar_hi and (high - ar_hi) < atrVal * 1.5
-        entryP  = close
-        slP     = high + asfpBuf
-        slDist  = slP - entryP
-        tgtDist = math.max(entryP - ar_lo, slDist)   // at least 1R, ideally opposite boundary
-        if slDist > 0 and entryP > ar_lo
-            tp1 = entryP - tgtDist
-            tp2 = entryP - tgtDist * 1.5
-            tp3 = entryP - tgtDist * 2.0
-            asfp_hi_done := true
-            strategy.entry("ASFP-S", strategy.short, comment="asian-sfp · SHORT")
-            strategy.exit("ASFP-S-X", from_entry="ASFP-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, high, "P↓", style=label.style_label_down,
-                      color=color.new(color.red, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-    // LONG: swept below Asian low, closed back inside → reverse up
-    if not asfp_lo_done and low < ar_lo and close > ar_lo and (ar_lo - low) < atrVal * 1.5 and strategy.position_size == 0
-        entryP  = close
-        slP     = low - asfpBuf
-        slDist  = entryP - slP
-        tgtDist = math.max(ar_hi - entryP, slDist)   // at least 1R, ideally opposite boundary
-        if slDist > 0 and entryP < ar_hi
-            tp1 = entryP + tgtDist
-            tp2 = entryP + tgtDist * 1.5
-            tp3 = entryP + tgtDist * 2.0
-            asfp_lo_done := true
-            strategy.entry("ASFP-L", strategy.long, comment="asian-sfp · LONG")
-            strategy.exit("ASFP-L-X", from_entry="ASFP-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, low, "P↑", style=label.style_label_up,
-                      color=color.new(color.teal, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL Q — Triple-Bull Trend Pullback Long
-// ─────────────────────────────────────────────────────────────────────
-// Source: 128K-bar global structure analysis — D↑H4↑H1↑ + 4-bar dip ≥0.69 ATR
-// Triple alignment (D+H4+H1 all bull) confirmed as the dominant long state
-// (62.5% WR, PF 1.252 over 5.5 years, N=44,487). The 4-bar pullback threshold
-// filters to dip-buy entries within the running trend.
-// SL = 1.0 × ATR below entry.  TP1 = 0.75 × ATR.
-// ═══════════════════════════════════════════════════════════════════════
-if modQ and barstate.isconfirmed and _testWinOk and atrVal > 0 and h1B == 1 and h4B == 1 and hdB == 1 and _ret4bar < -0.69 and strategy.position_size == 0
-    slQ  = close - 1.0  * atrVal
-    tp1Q = close + 0.75 * atrVal
-    tp2Q = close + 1.5  * atrVal
-    tp3Q = close + 2.0  * atrVal
-    if tp1Q > close and slQ < close
-        strategy.entry("Q-L", strategy.long, comment="Q · pullback · LONG")
-        strategy.exit("Q-L-X", from_entry="Q-L", stop=slQ, limit=f_exitLim(tp1Q, tp2Q, tp3Q))
-        label.new(bar_index, low, "Q↑", style=label.style_label_up,
-                  color=color.new(color.teal, 5), textcolor=color.white, size=size.small)
-        f_drawPosBox(close, slQ, tp3Q)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL R — Triple-Bear Rally Fade Short
-// ─────────────────────────────────────────────────────────────────────
-// Source: 128K-bar global structure analysis — D↓H4↓H1↓ + 4-bar bounce ≥0.38 ATR
-// Triple bear (D+H4+H1 all bearish) = 62.3% short WR, PF 1.239, N=30,066 bars.
-// The 4-bar bounce filter times entry to fading counter-trend pops.
-// Upgraded from H1-only to triple alignment to remove low-confidence states.
-// SL = 1.0 × ATR above entry.  TP1 = 0.75 × ATR below.
-// ═══════════════════════════════════════════════════════════════════════
-_inRWin = _minOfDay > 37 and _minOfDay < 607   // 00:37 – 10:07 UTC
-
-if modR and barstate.isconfirmed and _testWinOk and atrVal > 0 and h1B == -1 and h4B == -1 and hdB == -1 and _ret4bar > 0.38 and _inRWin and strategy.position_size == 0
-    slR  = close + 1.0  * atrVal
-    tp1R = close - 0.75 * atrVal
-    tp2R = close - 1.5  * atrVal
-    tp3R = close - 2.0  * atrVal
-    if tp1R < close and slR > close
-        strategy.entry("R-S", strategy.short, comment="R · bear-rally · SHORT")
-        strategy.exit("R-S-X", from_entry="R-S", stop=slR, limit=f_exitLim(tp1R, tp2R, tp3R))
-        label.new(bar_index, high, "R↓", style=label.style_label_down,
-                  color=color.new(color.red, 5), textcolor=color.white, size=size.small)
-        f_drawPosBox(close, slR, tp3R)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL S — Pre-NY Triple-Alignment
-// ─────────────────────────────────────────────────────────────────────
-// Source: 128K-bar global structure analysis — #1 ranked single combination
-// SHORT: D↓ H4↓ H1↓ + Pre-NY (13:00-14:30 UTC) → 67% WR, PF 1.52 ★★★
-// LONG:  D↑ H4↑ H1↑ + Pre-NY (13:00-14:30 UTC) → untested inverse
-// Five and a half years of data, consistent across every year 2020-2025.
-// Fires on the first qualifying bar (close < open for short, close > open for long) once per day.
-// SL = 1.0 × ATR from entry.  TP1 = 0.75 × ATR.
-// ═══════════════════════════════════════════════════════════════════════
-_inPreNYS = timeframe.isintraday and (_minOfDay >= 780 and _minOfDay < 870)   // 13:00 – 14:30 UTC
-var bool s_short_done = false
-var bool s_long_done  = false
-if _newDay
-    s_short_done := false
-    s_long_done  := false
-
-if modS and barstate.isconfirmed and _testWinOk and atrVal > 0 and not s_short_done and _inPreNYS and sDirFilter != "Long only" and h1B == -1 and h4B == -1 and hdB == -1 and close < open and strategy.position_size == 0
-    slS  = close + 1.0  * atrVal
-    tp1S = close - 0.75 * atrVal
-    tp2S = close - 1.5  * atrVal
-    tp3S = close - 2.0  * atrVal
-    if tp1S < close and slS > close
-        s_short_done := true
-        strategy.entry("S-S", strategy.short, comment="S · pre-ny-bear · SHORT")
-        strategy.exit("S-S-X", from_entry="S-S", stop=slS, limit=f_exitLim(tp1S, tp2S, tp3S))
-        label.new(bar_index, high, "S↓", style=label.style_label_down,
-                  color=color.new(color.purple, 5), textcolor=color.white, size=size.small)
-        f_drawPosBox(close, slS, tp3S)
-
-if modS and barstate.isconfirmed and _testWinOk and atrVal > 0 and not s_long_done and _inPreNYS and sDirFilter != "Short only" and h1B == 1 and h4B == 1 and hdB == 1 and close > open and strategy.position_size == 0
-    slS  = close - 1.0  * atrVal
-    tp1S = close + 0.75 * atrVal
-    tp2S = close + 1.5  * atrVal
-    tp3S = close + 2.0  * atrVal
-    if tp1S > close and slS < close
-        s_long_done := true
-        strategy.entry("S-L", strategy.long, comment="S · pre-ny-bull · LONG")
-        strategy.exit("S-L-X", from_entry="S-L", stop=slS, limit=f_exitLim(tp1S, tp2S, tp3S))
-        label.new(bar_index, low, "S↑", style=label.style_label_up,
-                  color=color.new(color.purple, 5), textcolor=color.white, size=size.small)
-        f_drawPosBox(close, slS, tp3S)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL T — Frankfurt Triple-Alignment
-// ─────────────────────────────────────────────────────────────────────
-// Source: 128K-bar global structure analysis — #2 ranked single combination
-// LONG:  D↑ H4↑ H1↑ + Frankfurt/London (07:00-09:00 UTC) → 64% WR, PF 1.33 ★★
-// SHORT: D↓ H4↓ H1↓ + Frankfurt/London (07:00-09:00 UTC) → untested inverse
-// European banks open their gold programs into this window. Triple alignment
-// confirms structural momentum. Fires on the first qualifying bar once per day.
-// SL = 1.0 × ATR from entry.  TP1 = 0.75 × ATR.
-// ═══════════════════════════════════════════════════════════════════════
-_inFrankT = timeframe.isintraday and (_minOfDay >= 420 and _minOfDay < 540)   // 07:00 – 09:00 UTC
-var bool t_long_done  = false
-var bool t_short_done = false
-if _newDay
-    t_long_done  := false
-    t_short_done := false
-
-if modT and barstate.isconfirmed and _testWinOk and atrVal > 0 and not t_long_done and _inFrankT and tDirFilter != "Short only" and h1B == 1 and h4B == 1 and hdB == 1 and close > open and strategy.position_size == 0
-    slT  = close - 1.0  * atrVal
-    tp1T = close + 0.75 * atrVal
-    tp2T = close + 1.5  * atrVal
-    tp3T = close + 2.0  * atrVal
-    if tp1T > close and slT < close
-        t_long_done := true
-        strategy.entry("T-L", strategy.long, comment="T · frank-bull · LONG")
-        strategy.exit("T-L-X", from_entry="T-L", stop=slT, limit=f_exitLim(tp1T, tp2T, tp3T))
-        label.new(bar_index, low, "T↑", style=label.style_label_up,
-                  color=color.new(color.lime, 5), textcolor=color.white, size=size.small)
-        f_drawPosBox(close, slT, tp3T)
-
-if modT and barstate.isconfirmed and _testWinOk and atrVal > 0 and not t_short_done and _inFrankT and tDirFilter != "Long only" and h1B == -1 and h4B == -1 and hdB == -1 and close < open and strategy.position_size == 0
-    slT  = close + 1.0  * atrVal
-    tp1T = close - 0.75 * atrVal
-    tp2T = close - 1.5  * atrVal
-    tp3T = close - 2.0  * atrVal
-    if tp1T < close and slT > close
-        t_short_done := true
-        strategy.entry("T-S", strategy.short, comment="T · frank-bear · SHORT")
-        strategy.exit("T-S-X", from_entry="T-S", stop=slT, limit=f_exitLim(tp1T, tp2T, tp3T))
-        label.new(bar_index, high, "T↓", style=label.style_label_down,
-                  color=color.new(color.lime, 5), textcolor=color.white, size=size.small)
-        f_drawPosBox(close, slT, tp3T)
 
 
 // SIGNAL COUNTER - setups that FIRED vs setups that were TAKEN
