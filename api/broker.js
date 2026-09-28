@@ -103,6 +103,8 @@ async function metaapiFetch(url, label) {
         await sleep(BROKER_BACKOFF_MS * attempt);
         continue;
       }
+      // Record 404s before handing the response back. See recordNotFound.
+      if (resp.status === 404) await recordNotFound(url, label, resp);
       return { resp }; // non-retryable non-OK (e.g. 401/404) — let caller read it
     } catch (e) {
       clearTimeout(timer);
@@ -117,6 +119,69 @@ async function metaapiFetch(url, label) {
     }
   }
   return { error: lastErr ? (lastErr.message || 'unknown') : 'exhausted' };
+}
+
+// =================================================================
+// NotFoundError RECORDER  (added 2026-09-28 — logging only)
+// =================================================================
+// WHY THIS EXISTS. MetaAPI throttles a TOKEN, not an account, once it sees too
+// many 404s against unexisting or undeployed accounts. Its 429 body says
+// literally: "check your application logs for occurrences of NotFoundError".
+//
+// On 2026-09-28 a live gold SHORT was rejected by exactly that throttle, and
+// there was nothing to check. Two reasons, both structural:
+//   1. A rejected order never reaches stdout. execute.js has ONE console line
+//      in the whole file and it is about a positions fetch, so the broker
+//      error only ever went to Redis + Telegram.
+//   2. Vercel runtime log retention on this plan is ~50 MINUTES (measured:
+//      asked for 7 days, got 15:13-16:03). A console line would have expired
+//      hours before anyone looked.
+// So a console.error here would have been useless. This writes to the Redis
+// activity log instead — 200 entries, 7-day TTL — which is the same place the
+// 429 itself was still readable from days later.
+//
+// DEDUPED to one entry per endpoint-shape per 10 minutes. The activity log is
+// capped at 200 entries and is the source of truth for trades; a 404 on the
+// every-minute manage-trades cron would otherwise flush the entire trade
+// history out of it in about three hours.
+//
+// THIS CANNOT TOUCH A TRADE. It reads a cloned response, writes one log entry,
+// and swallows every error it can raise.
+const NF_DEDUPE_SEC = 600;
+
+async function recordNotFound(url, label, resp) {
+  try {
+    const acct = accountId() || '(unset)';
+    // Endpoint shape with the account id substituted out, so the dedupe key
+    // groups calls to the same endpoint no matter which account they named.
+    let path;
+    try { path = new URL(url).pathname.split(acct).join('{account}'); }
+    catch (_) { path = label || 'unknown'; }
+
+    const r = getRedis();
+    if (r) {
+      // set-if-absent is atomic, so two lambdas hitting the same 404 in the
+      // same window cannot both write.
+      const fresh = await r.set(`v13:nf:${path}`, 1, { nx: true, ex: NF_DEDUPE_SEC });
+      if (!fresh) return;
+    }
+
+    // CLONE. The caller still has to read this body — consuming the stream
+    // here would hand them an empty one and break every 404 error message.
+    const body = await resp.clone().text().catch(() => '');
+
+    // Lazy require: rules-store does not import broker today, but this keeps
+    // the choke point free of a load-order dependency either way.
+    const { logActivity } = require('./rules-store');
+    await logActivity({
+      type: 'metaapi-404',
+      label: label || null,
+      accountId: acct,
+      path,
+      body: body.slice(0, 300),
+      note: `deduped 1 per ${NF_DEDUPE_SEC / 60}min`,
+    });
+  } catch (_) { /* logging must never break a broker call */ }
 }
 
 // =================================================================
