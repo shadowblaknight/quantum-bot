@@ -227,6 +227,34 @@ aplusMaxRange = input.float(15.0, "A+) Max ORB range to qualify (pts)", group=G_
 aplusSLBuf    = input.float(25.0, "A+) Stop beyond the level on A+ trades (pts)", group=G_APLUS, step=1.0,
                 tooltip="25 pts from the LEVEL, which is ~28 from the entry once the retest offset is added — the distance that turns 4.27% risk into 1.5 lots.\n\nJustified by heat, not by the lot size it produces: small-range trades stayed inside 20 pts of heat ~90% of the time, so a 28-pt stop should clear most of them. That is the claim this run tests.\n\nNOTE the asymmetry it creates. An A+ loss is 1.5 lots x 28.5 pts = the same dollars as a normal loss, by construction. But three A+ losses in a row is 12.8% of the account, versus 12.8% for three normal ones — identical. The danger is not the size, it is being wrong about which trades are quiet.")
 
+G_REV = "Reverse (research)"
+// Added 2026-09-29. Takes the OPPOSITE side of a signal, to test whether the
+// edge is inverted. Per-signal so they can be isolated.
+//
+// WHAT REVERSE DOES: the TRIGGER is untouched. An upward break of the ORB high
+// still fires; it simply opens a SHORT instead of a LONG. Stop and target keep
+// the SAME DISTANCES as the original trade, mirrored around the fill, so R:R is
+// identical and direction is the only variable.
+//
+// WHY THE ENTRY BECOMES A MARKET FILL. The C2 entry is a LIMIT resting for a
+// pullback: on an upward break the buy limit sits at level + depth x range,
+// BELOW current price. Flip the trade to a sell and that same price is still
+// below the market, which makes it a STOP order, not a limit. The retest
+// mechanic cannot survive inversion, so a reversed trade fills at the signal
+// bar close. c2EntryMode is ignored for reversed signals.
+//
+// READ RESULTS WITH THAT IN MIND: the reversed arm pays a worse entry than the
+// original's retest, so a small edge either way is inside that difference.
+// Only a large, consistent gap means anything.
+//
+// ENTRY IDS STAY TIED TO THE TRIGGER. With revM on, "FRB-L" is a SHORT. Signal
+// attribution in the contribution and loss tables stays correct; the DIR column
+// shows the TRIGGER direction, not the trade.
+revM = input.bool(false, "M) Reverse Frankfurt ORB", group=G_REV)
+revG = input.bool(false, "G) Reverse London ORB",    group=G_REV)
+revH = input.bool(false, "H) Reverse NY ORB (H' too)", group=G_REV)
+revU = input.bool(false, "U) Reverse Sydney ORB",    group=G_REV)
+
 G_FILT = "Filters"
 adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
 adrJudasMax   = input.float(0.90, "Judas max ADR consumed",        group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
@@ -281,6 +309,7 @@ f_c2SL(float rng) =>
     base = c2SLMode == "x ORB range" ? rng * c2SLRangeMult : c2SLMode == "x ATR" ? atrVal * c2SLAtrMult : c2SLBuf
     d    = (aplusTightSL and rng <= aplusMaxRange) ? aplusSLBuf : base
     math.max(d, syminfo.mintick)
+
 
 // Bias check helpers for H/M filter (resolved once per bar)
 _orbBiasLong  = orbBiasTF == "H1" ? h1B >= 0 : orbBiasTF == "Daily" ? hdB >= 0 : orbBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : orbBiasTF == "H1+H4+D" ? (h1B == 1 and h4B == 1 and hdB == 1) : orbBiasTF == "M15" ? m15B == 1 : orbBiasTF == "M15+H1" ? (m15B == 1 and h1B == 1) : orbBiasTF == "M15+H1+H4" ? (m15B == 1 and h1B == 1 and h4B == 1) : h4B >= 0
@@ -1246,22 +1275,28 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
             // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it;
             // SL/TP stay on the ORB level, so only entry price and fill odds move.
-            entryP = frb_hi + orb_range * _c2Depth
-            slP    = frb_hi - f_c2SL(orb_range)
+            _mlE = frb_hi + orb_range * _c2Depth
+            _mlS = frb_hi - f_c2SL(orb_range)
+            _mlA = frb_hi + orb_range * orbTPMult
+            _mlB = frb_hi + orb_range * orbTPMult * 2.0
+            _mlC = frb_hi + orb_range * orbTPMult * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revM ? close : _mlE
+            slP    = revM ? close + math.abs(_mlE - _mlS) : _mlS
             slDist = math.abs(entryP - slP)
-            tp1    = frb_hi + orb_range * orbTPMult
-            tp2    = frb_hi + orb_range * orbTPMult * 2.0
-            tp3    = frb_hi + orb_range * orbTPMult * 3.0
+            tp1    = revM ? close - math.abs(_mlE - _mlA) : _mlA
+            tp2    = revM ? close - math.abs(_mlE - _mlB) : _mlB
+            tp3    = revM ? close - math.abs(_mlE - _mlC) : _mlC
             frb_done := true
             // limit=na → market fill at this bar's close. SL/TP stay anchored to
             // the ORB level either way, so only the entry price differs.
-            c2LimFL = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("FRB-L", strategy.long, limit=c2LimFL, comment="frankfurt-orb · C2 LONG")
+            c2LimFL = (not revM and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("FRB-L", revM ? strategy.short : strategy.long, limit=c2LimFL, comment="frankfurt-orb · C2 LONG")
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := frb_hi
+                _rt_lvl   := revM ? entryP : frb_hi
                 _rt_entry := entryP
                 _rt_rng   := orb_range
-                _rt_dir   := 1
+                _rt_dir   := revM ? -1 : 1
                 _rt_id    := "FRB-L"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1292,21 +1327,27 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
         else if close < frb_lo and (frb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
             // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
-            entryP = frb_lo - orb_range * _c2Depth
-            slP    = frb_lo + f_c2SL(orb_range)
+            _msE = frb_lo - orb_range * _c2Depth
+            _msS = frb_lo + f_c2SL(orb_range)
+            _msA = frb_lo - orb_range * orbTPMult
+            _msB = frb_lo - orb_range * orbTPMult * 2.0
+            _msC = frb_lo - orb_range * orbTPMult * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revM ? close : _msE
+            slP    = revM ? close - math.abs(_msE - _msS) : _msS
             slDist = math.abs(slP - entryP)
-            tp1    = frb_lo - orb_range * orbTPMult
-            tp2    = frb_lo - orb_range * orbTPMult * 2.0
-            tp3    = frb_lo - orb_range * orbTPMult * 3.0
+            tp1    = revM ? close + math.abs(_msE - _msA) : _msA
+            tp2    = revM ? close + math.abs(_msE - _msB) : _msB
+            tp3    = revM ? close + math.abs(_msE - _msC) : _msC
             frb_done       := true
             frb_short_today := true
-            c2LimFS = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("FRB-S", strategy.short, limit=c2LimFS, comment="frankfurt-orb · C2 SHORT")
+            c2LimFS = (not revM and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("FRB-S", revM ? strategy.long : strategy.short, limit=c2LimFS, comment="frankfurt-orb · C2 SHORT")
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := frb_lo
+                _rt_lvl   := revM ? entryP : frb_lo
                 _rt_entry := entryP
                 _rt_rng   := orb_range
-                _rt_dir   := -1
+                _rt_dir   := revM ? 1 : -1
                 _rt_id    := "FRB-S"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1355,22 +1396,28 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
         if close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0)
             // C2: BUY LIMIT back at lorb_hi (broken ORB high retests as support).
             // Legacy: market fill at this bar's close, SL at the opposite extreme.
-            entryP = lonUseC2 ? lorb_hi + orb_range * _c2Depth : close
-            slP    = lonUseC2 ? lorb_hi - f_c2SL(orb_range)    : lorb_lo - buf
-            tp1    = lonUseC2 ? lorb_hi + orb_range * orbTPMult       : lorb_hi + orb_range
-            tp2    = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 2.0 : lorb_hi + orb_range * 2.0
-            tp3    = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 3.0 : lorb_hi + orb_range * 3.0
+            _glE = lonUseC2 ? lorb_hi + orb_range * _c2Depth : close
+            _glS = lonUseC2 ? lorb_hi - f_c2SL(orb_range)    : lorb_lo - buf
+            _glA = lonUseC2 ? lorb_hi + orb_range * orbTPMult       : lorb_hi + orb_range
+            _glB = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 2.0 : lorb_hi + orb_range * 2.0
+            _glC = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 3.0 : lorb_hi + orb_range * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revG ? close : _glE
+            slP    = revG ? close + math.abs(_glE - _glS) : _glS
+            tp1    = revG ? close - math.abs(_glE - _glA) : _glA
+            tp2    = revG ? close - math.abs(_glE - _glB) : _glB
+            tp3    = revG ? close - math.abs(_glE - _glC) : _glC
             lorb_done := true
-            c2LimGL = (lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
-            strategy.entry("ORB-L", strategy.long, limit=c2LimGL, comment="london-orb · LONG")
+            c2LimGL = (not revG and lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("ORB-L", revG ? strategy.short : strategy.long, limit=c2LimGL, comment="london-orb · LONG")
             // Ratchet state — without this, f_c2Exit's ratchet branch places a
             // naked stop with no TP and no trail: a guaranteed full loss. Same
             // bug U and V carried until it was found.
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := lorb_hi
+                _rt_lvl   := revG ? entryP : lorb_hi
                 _rt_entry := entryP
                 _rt_rng   := orb_range
-                _rt_dir   := 1
+                _rt_dir   := revG ? -1 : 1
                 _rt_id    := "ORB-L"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1379,19 +1426,25 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             f_drawPosBox(entryP, slP, tp3)
 
         else if close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0)
-            entryP = lonUseC2 ? lorb_lo - orb_range * _c2Depth : close
-            slP    = lonUseC2 ? lorb_lo + f_c2SL(orb_range)    : lorb_hi + buf
-            tp1    = lonUseC2 ? lorb_lo - orb_range * orbTPMult       : lorb_lo - orb_range
-            tp2    = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 2.0 : lorb_lo - orb_range * 2.0
-            tp3    = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 3.0 : lorb_lo - orb_range * 3.0
+            _gsE = lonUseC2 ? lorb_lo - orb_range * _c2Depth : close
+            _gsS = lonUseC2 ? lorb_lo + f_c2SL(orb_range)    : lorb_hi + buf
+            _gsA = lonUseC2 ? lorb_lo - orb_range * orbTPMult       : lorb_lo - orb_range
+            _gsB = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 2.0 : lorb_lo - orb_range * 2.0
+            _gsC = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 3.0 : lorb_lo - orb_range * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revG ? close : _gsE
+            slP    = revG ? close - math.abs(_gsE - _gsS) : _gsS
+            tp1    = revG ? close + math.abs(_gsE - _gsA) : _gsA
+            tp2    = revG ? close + math.abs(_gsE - _gsB) : _gsB
+            tp3    = revG ? close + math.abs(_gsE - _gsC) : _gsC
             lorb_done := true
-            c2LimGS = (lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
-            strategy.entry("ORB-S", strategy.short, limit=c2LimGS, comment="london-orb · SHORT")
+            c2LimGS = (not revG and lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("ORB-S", revG ? strategy.long : strategy.short, limit=c2LimGS, comment="london-orb · SHORT")
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := lorb_lo
+                _rt_lvl   := revG ? entryP : lorb_lo
                 _rt_entry := entryP
                 _rt_rng   := orb_range
-                _rt_dir   := -1
+                _rt_dir   := revG ? 1 : -1
                 _rt_id    := "ORB-S"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1412,20 +1465,26 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
         if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it.
-            entryP = nyorb_hi + orb_range * _c2Depth
-            slP    = nyorb_hi - f_c2SL(orb_range)
+            _hlE = nyorb_hi + orb_range * _c2Depth
+            _hlS = nyorb_hi - f_c2SL(orb_range)
+            _hlA = nyorb_hi + orb_range * orbTPMult
+            _hlB = nyorb_hi + orb_range * orbTPMult * 2.0
+            _hlC = nyorb_hi + orb_range * orbTPMult * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revH ? close : _hlE
+            slP    = revH ? close + math.abs(_hlE - _hlS) : _hlS
             slDist = math.abs(entryP - slP)
-            tp1    = nyorb_hi + orb_range * orbTPMult
-            tp2    = nyorb_hi + orb_range * orbTPMult * 2.0
-            tp3    = nyorb_hi + orb_range * orbTPMult * 3.0
+            tp1    = revH ? close - math.abs(_hlE - _hlA) : _hlA
+            tp2    = revH ? close - math.abs(_hlE - _hlB) : _hlB
+            tp3    = revH ? close - math.abs(_hlE - _hlC) : _hlC
             nyorb_done := true
-            c2LimNL = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("NYORB-L", strategy.long, limit=c2LimNL, comment="ny-orb · C2 LONG")
+            c2LimNL = (not revH and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("NYORB-L", revH ? strategy.short : strategy.long, limit=c2LimNL, comment="ny-orb · C2 LONG")
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := nyorb_hi
+                _rt_lvl   := revH ? entryP : nyorb_hi
                 _rt_entry := entryP
                 _rt_rng   := orb_range
-                _rt_dir   := 1
+                _rt_dir   := revH ? -1 : 1
                 _rt_id    := "NYORB-L"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1456,20 +1515,26 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
         else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
             // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
-            entryP = nyorb_lo - orb_range * _c2Depth
-            slP    = nyorb_lo + f_c2SL(orb_range)
+            _hsE = nyorb_lo - orb_range * _c2Depth
+            _hsS = nyorb_lo + f_c2SL(orb_range)
+            _hsA = nyorb_lo - orb_range * orbTPMult
+            _hsB = nyorb_lo - orb_range * orbTPMult * 2.0
+            _hsC = nyorb_lo - orb_range * orbTPMult * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revH ? close : _hsE
+            slP    = revH ? close - math.abs(_hsE - _hsS) : _hsS
             slDist = math.abs(slP - entryP)
-            tp1    = nyorb_lo - orb_range * orbTPMult
-            tp2    = nyorb_lo - orb_range * orbTPMult * 2.0
-            tp3    = nyorb_lo - orb_range * orbTPMult * 3.0
+            tp1    = revH ? close + math.abs(_hsE - _hsA) : _hsA
+            tp2    = revH ? close + math.abs(_hsE - _hsB) : _hsB
+            tp3    = revH ? close + math.abs(_hsE - _hsC) : _hsC
             nyorb_done := true
-            c2LimNS = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("NYORB-S", strategy.short, limit=c2LimNS, comment="ny-orb · C2 SHORT")
+            c2LimNS = (not revH and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("NYORB-S", revH ? strategy.long : strategy.short, limit=c2LimNS, comment="ny-orb · C2 SHORT")
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := nyorb_lo
+                _rt_lvl   := revH ? entryP : nyorb_lo
                 _rt_entry := entryP
                 _rt_rng   := orb_range
-                _rt_dir   := -1
+                _rt_dir   := revH ? 1 : -1
                 _rt_id    := "NYORB-S"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1525,23 +1590,29 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
     rngU = syd_hi - syd_lo
     if rngU >= c2MinRangeASIA
         if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong)
-            entryP = syd_hi + rngU * _c2Depth
-            slP    = syd_hi - f_c2SL(rngU)
-            tp1    = syd_hi + rngU * orbTPMult
-            tp2    = syd_hi + rngU * orbTPMult * 2.0
-            tp3    = syd_hi + rngU * orbTPMult * 3.0
+            _ulE = syd_hi + rngU * _c2Depth
+            _ulS = syd_hi - f_c2SL(rngU)
+            _ulA = syd_hi + rngU * orbTPMult
+            _ulB = syd_hi + rngU * orbTPMult * 2.0
+            _ulC = syd_hi + rngU * orbTPMult * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revU ? close : _ulE
+            slP    = revU ? close + math.abs(_ulE - _ulS) : _ulS
+            tp1    = revU ? close - math.abs(_ulE - _ulA) : _ulA
+            tp2    = revU ? close - math.abs(_ulE - _ulB) : _ulB
+            tp3    = revU ? close - math.abs(_ulE - _ulC) : _ulC
             syd_done := true
-            c2LimUL = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("SYD-L", strategy.long, limit=c2LimUL, comment="sydney-orb · C2 LONG")
+            c2LimUL = (not revU and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("SYD-L", revU ? strategy.short : strategy.long, limit=c2LimUL, comment="sydney-orb · C2 LONG")
             // BUG FIX: U/V never registered ratchet state, so f_c2Exit's ratchet
             // branch placed a NAKED stop with no TP and no trail. Every filled
             // Sydney/Tokyo trade could then only ever exit at its original stop —
             // a guaranteed full loss, 100% of the time.
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := syd_hi
+                _rt_lvl   := revU ? entryP : syd_hi
                 _rt_entry := entryP
                 _rt_rng   := rngU
-                _rt_dir   := 1
+                _rt_dir   := revU ? -1 : 1
                 _rt_id    := "SYD-L"
                 _rt_sl    := slP
                 _rt_sl0   := slP
@@ -1552,19 +1623,25 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
             f_drawPosBox(entryP, slP, tp3)
 
         else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort)
-            entryP = syd_lo - rngU * _c2Depth
-            slP    = syd_lo + f_c2SL(rngU)
-            tp1    = syd_lo - rngU * orbTPMult
-            tp2    = syd_lo - rngU * orbTPMult * 2.0
-            tp3    = syd_lo - rngU * orbTPMult * 3.0
+            _usE = syd_lo - rngU * _c2Depth
+            _usS = syd_lo + f_c2SL(rngU)
+            _usA = syd_lo - rngU * orbTPMult
+            _usB = syd_lo - rngU * orbTPMult * 2.0
+            _usC = syd_lo - rngU * orbTPMult * 3.0
+            // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
+            entryP = revU ? close : _usE
+            slP    = revU ? close - math.abs(_usE - _usS) : _usS
+            tp1    = revU ? close + math.abs(_usE - _usA) : _usA
+            tp2    = revU ? close + math.abs(_usE - _usB) : _usB
+            tp3    = revU ? close + math.abs(_usE - _usC) : _usC
             syd_done := true
-            c2LimUS = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("SYD-S", strategy.short, limit=c2LimUS, comment="sydney-orb · C2 SHORT")
+            c2LimUS = (not revU and c2EntryMode == "Retest (limit)") ? entryP : na
+            strategy.entry("SYD-S", revU ? strategy.long : strategy.short, limit=c2LimUS, comment="sydney-orb · C2 SHORT")
             if exitMode == "Ratchet (no TP)"
-                _rt_lvl   := syd_lo
+                _rt_lvl   := revU ? entryP : syd_lo
                 _rt_entry := entryP
                 _rt_rng   := rngU
-                _rt_dir   := -1
+                _rt_dir   := revU ? 1 : -1
                 _rt_id    := "SYD-S"
                 _rt_sl    := slP
                 _rt_sl0   := slP
