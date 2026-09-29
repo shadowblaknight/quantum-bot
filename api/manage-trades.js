@@ -24,7 +24,7 @@
 const { getRedis, safeParse, applyCors, atr, getCurrentSession, roundToPipSize } = require('./_lib');
 const { getAssetById } = require('./asset-registry');
 const { resolveSymbol, resolveAsset } = require('./symbol-resolver');
-const { fetchPositions, fetchCandles } = require('./broker');
+const { fetchPositions, fetchCandles, refreshBalanceCache } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
@@ -1155,12 +1155,23 @@ async function runManageTick() {
     return { ts: Date.now(), tradingEnabled: false };
   }
 
+  // Keep the balance cache warm so sizing can never fall back to the
+  // hardcoded 10000 in webhook.js getCapitalFast(). Self-rate-limited to
+  // once per 15 min inside refreshBalanceCache().
+  //
+  // This sits ABOVE the hasAnyWork() gate on purpose: the gap it closes
+  // happens precisely when we are flat and nothing else contacts MetaAPI.
+  // It is placed BELOW isTradingEnabled() so the kill switch still means
+  // "no broker contact at all".
+  let heartbeat = 'error';
+  try { heartbeat = await refreshBalanceCache(); } catch (_) {}
+
   // Skip MetaAPI entirely when Redis confirms nothing is open or pending.
   const r = getRedis();
   if (r) {
     const hasWork = await hasAnyWork(r);
     if (!hasWork) {
-      return { ts: Date.now(), tradingEnabled: true, skipped: 'no-active-positions' };
+      return { ts: Date.now(), tradingEnabled: true, skipped: 'no-active-positions', heartbeat };
     }
   }
 

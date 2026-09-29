@@ -542,6 +542,68 @@ module.exports = async (req, res) => {
   }
 };
 
+// =================================================================
+// BALANCE HEARTBEAT  (added 2026-09-29)
+// =================================================================
+// WHY. webhook.js getCapitalFast() sizes every trade from, in order:
+//   1. a live fetchAccount()    (2s budget)
+//   2. the Redis balance cache  (24h TTL)
+//   3. a hardcoded 10000
+// On 2026-09-29 (1) failed and (2) had expired, so a live gold LONG was
+// sized off the fabricated 10000 and went on at 0.05 lots instead of 0.51.
+//
+// The cache is written ONLY by getCapitalFast, which only runs when a
+// signal arrives - so it is refreshed by trading activity alone, and a
+// quiet day is enough to let it lapse. Until 2026-09-28 the dashboard
+// masked that: its pollers called fetchAccount every 20-60s. But a
+// safeguard that depends on a browser tab being open is not a safeguard.
+//
+// This refreshes the same cache from the manage-trades cron instead, so
+// it stays warm with no browser open and no trading activity.
+//
+// LOAD: ONE account-information call per 15 MINUTES (96/day). The
+// dashboard made ~4,300/day when open, so this is ~2% of what it
+// replaces. It deliberately sits OUTSIDE manage-trades' hasAnyWork()
+// gate - the gap it closes happens precisely when we are flat - but its
+// own rate limit keeps it far below anything MetaAPI throttles.
+//
+// IT CANNOT AFFECT A TRADE except by making sizing MORE correct. It only
+// ever writes a real broker balance into the slot that otherwise decays
+// to the hardcoded 10000, and getCapitalFast still prefers a live read
+// over this cache. Every failure path returns a string and throws nothing.
+const BALANCE_CACHE_KEY    = 'v13:account:balance'; // MUST match webhook.js:144
+const HEARTBEAT_LOCK_KEY   = 'v13:account:balance:hb';
+const HEARTBEAT_EVERY_SEC  = 900;   // 15 min
+const HEARTBEAT_TIMEOUT_MS = 10000; // bounded so it cannot eat the 30s tick budget
+
+async function refreshBalanceCache() {
+  const r = getRedis();
+  if (!r) return 'no-redis';
+
+  // Atomic set-if-absent doubles as the rate limit: the first caller in each
+  // 15-min window takes the slot, every other tick returns immediately.
+  // The slot is claimed BEFORE the fetch on purpose - if MetaAPI is refusing
+  // us, retrying every minute would pile load onto something already failing.
+  // The cache TTL is 24h, so ~96 attempts a day is enormous headroom.
+  let due;
+  try { due = await r.set(HEARTBEAT_LOCK_KEY, 1, { nx: true, ex: HEARTBEAT_EVERY_SEC }); }
+  catch (_) { return 'redis-error'; }
+  if (!due) return 'not-due';
+
+  try {
+    const account = await Promise.race([
+      fetchAccount(),
+      new Promise((res) => setTimeout(() => res(null), HEARTBEAT_TIMEOUT_MS)),
+    ]);
+    const bal = account && (account.balance || account.equity);
+    if (!bal) return 'fetch-failed';
+    await r.set(BALANCE_CACHE_KEY, String(bal), { ex: 86400 });
+    return 'refreshed';
+  } catch (_) {
+    return 'error';
+  }
+}
+
 module.exports.fetchAccount   = fetchAccount;
 module.exports.fetchPositions = fetchPositions;
 module.exports.fetchOrders    = fetchOrders;
@@ -550,3 +612,4 @@ module.exports.fetchCandles   = fetchCandles;
 module.exports.fetchMultiTF   = fetchMultiTF;
 module.exports.toBrokerSymbol = toBrokerSymbol;
 module.exports.ALL_TFS        = ALL_TFS;
+module.exports.refreshBalanceCache = refreshBalanceCache;
