@@ -721,7 +721,14 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // position rides there. SL ratchets to TP1/TP2 in manage-trades (no partials).
   const _bTP2 = isSpecialist ? tp2 : (decision.finalTP2 != null ? decision.finalTP2 : tp2);
   const _bTP3 = isSpecialist ? tp3 : (decision.finalTP3 != null ? decision.finalTP3 : tp3);
-  const brokerTP = _bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1);
+  // EXIT MODE decides which rung the broker TP parks on. Default and any
+  // unreadable-store case is the historical TP3 behaviour, so a Redis failure
+  // can only ever leave the order where it already was.
+  let _exitMode = 'ratchet';
+  try { _exitMode = (await getTradeSettings()).exitMode; } catch (_) {}
+  const brokerTP = _exitMode === 'tp1'
+    ? (finalTP1 != null ? finalTP1 : (_bTP2 != null ? _bTP2 : _bTP3))
+    : (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1));
   // V20 specialists use QB-V20-{asset}-{signalType}; legacy stays QB-V13-{template}-{window}
   // gold-specialist-2 uses QB-V20-GS2-* prefix so its positions don't block gold-specialist
   // (15m) trades — each specialist has its own 1-per-asset slot.

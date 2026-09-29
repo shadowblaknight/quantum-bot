@@ -1033,8 +1033,8 @@ export default function TerminalLayout({
                     BREAKEVEN / TRAIL · LIVE
                   </div>
                   <span style={{fontSize:7,fontFamily:'JetBrains Mono,monospace',
-                                color:settings?.exitMode==='ratchet'?C.green2:C.t3}}>
-                    {!settings?'LOADING…':settings.exitMode==='ratchet'?'RATCHET · NO TP':'FINAL TP · CLOSES AT TP3'}
+                                color:settings?.exitMode==='ratchet'?C.green2:settings?.exitMode==='tp1'?C.gold:C.t3}}>
+                    {!settings?'LOADING…':settings.exitMode==='ratchet'?'RATCHET · NO TP':settings.exitMode==='tp1'?'TP1 · CLOSES AT TP1':'FINAL TP · CLOSES AT TP3'}
                   </span>
                 </div>
 
@@ -1066,12 +1066,12 @@ export default function TerminalLayout({
                     </div>
                   </div>
                   <button disabled={!settings||riskSaving}
-                    onClick={()=>saveSettings({exitMode:settings?.exitMode==='ratchet'?'final-tp':'ratchet'})}
+                    onClick={()=>saveSettings({exitMode:settings?.exitMode==='ratchet'?'final-tp':settings?.exitMode==='final-tp'?'tp1':'ratchet'})}
                     style={{marginLeft:'auto',padding:'5px 14px',background:'transparent',
-                            border:`1px solid ${settings?.exitMode==='ratchet'?C.green2:C.t3}`,
-                            color:settings?.exitMode==='ratchet'?C.green2:C.t3,fontSize:8,letterSpacing:.5,
+                            border:`1px solid ${settings?.exitMode==='ratchet'?C.green2:settings?.exitMode==='tp1'?C.gold:C.t3}`,
+                            color:settings?.exitMode==='ratchet'?C.green2:settings?.exitMode==='tp1'?C.gold:C.t3,fontSize:8,letterSpacing:.5,
                             fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
-                    {settings?.exitMode==='ratchet'?'RATCHET ON':'RATCHET OFF'}
+                    {settings?.exitMode==='ratchet'?'RATCHET':settings?.exitMode==='tp1'?'TP1':'FINAL TP'} ▸
                   </button>
                 </div>
 

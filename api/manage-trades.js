@@ -408,9 +408,14 @@ async function managePosition(position) {
   // null, which clears any TP the order was placed with.
   const _qbSettings = await getTradeSettings();
   const RATCHET_MODE = _qbSettings.exitMode === 'ratchet';
+  // TP1 MODE: the broker TP parks on the FIRST target instead of the last, so
+  // the position closes at TP1 and never rides to TP3. The SL cascade below is
+  // then inert by construction - there is no rung above the exit to cascade to.
+  const TP1_MODE = _qbSettings.exitMode === 'tp1';
+  const _tpIdx = TP1_MODE ? 0 : tpLevels.length - 1;
   const finalTPPrice = RATCHET_MODE
     ? null
-    : (tpLevels.length ? tpLevels[tpLevels.length - 1].price : null);
+    : (tpLevels.length ? tpLevels[_tpIdx].price : null);
   if (tpLevels.length === 0) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
@@ -465,7 +470,9 @@ async function managePosition(position) {
   const actions = [];
 
   const initialSLForR = Math.abs(state.entry - matchedPending.slPrice) || 1;
-  const finalIdx = tpLevels.length - 1;
+  // Which rung counts as FINAL - the one that closes the position. In TP1 mode
+  // that is index 0, so the backstop close and the broker TP agree.
+  const finalIdx = _tpIdx;
 
   // Trade style: ORB template → scalp (target TP1, exit ≤30min, lock to break-even after TP1).
   // All other templates → day (ride to TP2/TP3, lock SL at TP price after each rung).

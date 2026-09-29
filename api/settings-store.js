@@ -131,7 +131,16 @@ function sanitize(s) {
   ladder = ladder.filter(r => r.trigger < tpR);
   return {
     riskPct: clampNum(base.riskPct, MIN_RISK_PCT, MAX_RISK_PCT, DEFAULTS.riskPct),
-    exitMode: base.exitMode === 'final-tp' ? 'final-tp' : 'ratchet',
+    // 'tp1' added 2026-09-30. Measured on the G+H+M+U baseline, 3y, same
+    // config, only the exit changed:
+    //   TP1  288 trades   4 losses   PF 7.047   net 4990   maxDD  547
+    //   TP2  241 trades  18 losses   PF 2.770   net 6864   maxDD  792
+    //   TP3  203 trades  28 losses   PF 2.016   net 6509   maxDD 1002
+    // TP1 wins net/DD (9.13) and carries 4 losses in three years, which is
+    // the number that decides whether 4% risk survives a losing streak.
+    // Anything unrecognised still falls back to 'ratchet', so a bad write
+    // can never invent a mode.
+    exitMode: ['final-tp', 'tp1'].includes(base.exitMode) ? base.exitMode : 'ratchet',
     // trailKeep capped below 1.0 — at 1.0 the stop would sit exactly on the
     // current extreme and get taken out by the first tick of noise.
     trailArm:  clampNum(base.trailArm,  0.05, 10.0, DEFAULTS.trailArm),
