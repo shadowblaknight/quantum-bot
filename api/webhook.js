@@ -142,9 +142,38 @@ function withTimeout(promise, ms, fallback) {
 }
 
 const BALANCE_CACHE_KEY = 'v13:account:balance';
+
+// 2000ms here was the cause of the 2026-09-29 0.05-lot trade.
+//
+// broker.js already learned this exact lesson once - see its RESILIENCE CONFIG
+// comment: a short timeout "aborts slow-but-ALIVE MetaAPI responses early", and
+// it was raised to 14s because "MetaAPI has been observed taking >8s during
+// low-activity hours". That fix never reached this caller, which kept racing
+// the same call at 2s - TIGHTER than the 3.5s already proven too short.
+//
+// So any balance read slower than 2s was discarded, sizing fell through to the
+// cache and then to the hardcoded 10000. Worse, withTimeout does not cancel the
+// underlying fetch: a good balance arriving at 3s was thrown away AND never
+// written to the cache, which made the NEXT trade more likely to fail the same
+// way. That is what turned one slow response into a self-perpetuating failure.
+//
+// 10s sits above the >8s MetaAPI has been seen taking, inside broker.js's own
+// 14s abort, and leaves ~20s of webhook.js's 30s maxDuration for placement.
+const BALANCE_FETCH_MS = parseInt(process.env.BALANCE_FETCH_MS, 10) || 10000;
+
 async function getCapitalFast() {
   const r = getRedis();
-  const account = await withTimeout(fetchAccount(), 2000, null);
+  const live = fetchAccount();
+
+  // Late-arrival catcher. If the read beats the race we cache it below as
+  // usual; if it arrives AFTER, this still warms the cache for next time.
+  // Discarding a slow-but-good balance is what made the failure compound.
+  live.then((a) => {
+    const b = a && (a.balance || a.equity);
+    if (b && r) { try { r.set(BALANCE_CACHE_KEY, String(b), { ex: 86400 }).catch(() => {}); } catch (_) {} }
+  }).catch(() => {});
+
+  const account = await withTimeout(live, BALANCE_FETCH_MS, null);
   if (account && (account.balance || account.equity)) {
     const bal = account.balance || account.equity;
     if (r) { try { await r.set(BALANCE_CACHE_KEY, String(bal), { ex: 86400 }); } catch (_) {} }
