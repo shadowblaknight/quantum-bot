@@ -1743,6 +1743,136 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
 
 
 
+// ═══════════════════════════════════════════════════════════════════════
+// EXIT-MODE SHADOW COMPARISON — five exits over the SAME signal list
+// ═══════════════════════════════════════════════════════════════════════
+// WHY THIS EXISTS. pyramiding=0 means a signal that fires while a trade is
+// open is never taken, and an exit that holds longer blocks more of them.
+// That is why TP1 came back 288 trades and final-tp 266: not a bug, but it
+// makes the two runs different POPULATIONS, so no column can be read across
+// them. Part of the gap is the exit and part is which signals got a slot.
+//
+// This block resolves FIVE exits over EVERY signal, with NO position limit
+// at all. Same entries, same stops, same targets, one shared list. Whatever
+// separates the rows is the exit and nothing else.
+//
+// IT PLACES NO ORDERS. strategy.* is never called here, so the Strategy
+// Tester still reports the real, slot-limited system. Read THIS table for
+// the exit ranking and the TESTER for what the account would have done.
+//
+// FILL MODEL, identical on all five rows:
+//   · the C2 limit fills the first time price trades back to it, and is
+//     cancelled when its own order life ends — M and G at their window
+//     edge, U and V at theirs, H at the daily roll. The same lives the real
+//     strategy.cancel calls give them.
+//   · "Immediate (market)" fills at the signal bar close, as live does.
+//   · when one bar touches BOTH the stop and the target, the STOP is taken.
+//     Pessimistic, and applied to every row, so it cannot favour one.
+//   · stops move at BAR CLOSE and are live from the NEXT bar, mirroring
+//     manage-trades.js — including its price buffer and improve-only test.
+//
+// WHAT IT CANNOT SHOW: drawdown. That needs an equity curve and these five
+// runs interleave. Rank on NET and PF here, then read DD off a Tester run
+// of whichever row wins.
+//
+// IT ALWAYS MODELS THE UN-REVERSED C2 TRADE. The footer flags it when a
+// reverse toggle is on or G is in legacy mode, because then it is lying.
+G_XCMP   = "Exit comparison"
+showXcmp = input.bool(true, "Show exit-mode comparison (every signal, no slot limit)", group=G_XCMP,
+           tooltip="Resolves TP1, TP2, TP3, the ratchet and the final-tp BE cascade over the SAME list of signals, ignoring the position slot entirely. Places no orders and changes no trade in the Strategy Tester.\n\nUse it to RANK the exits. Use the Tester for what the account would actually have made, because the slot is real and a longer hold genuinely costs trades live.\n\nThe ratchet row uses whatever trailArm / trailKeep are set to and prints them in its own label — set 1.00 / 0.85 to match the account.")
+
+// One row per live shadow trade:
+//  0 lvl · 1 entry · 2 dir · 3 step · 4 initial stop · 5 signal (0=M 1=H 2=G 3=U 4=V)
+//  6 filled · 7 reach high-water · 8 ratchet stop · 9 final-tp stop · 10 fixed progress
+// na in col 8 or 9 = that mode has already resolved for this trade.
+var matrix<float> xM = matrix.new<float>(0, 11, 0.0)
+var array<int>   xN  = array.new<int>(5, 0)      // resolved trades per mode
+var array<int>   xW  = array.new<int>(5, 0)      // wins per mode
+var array<float> xGP = array.new<float>(5, 0.0)  // gross profit, points
+var array<float> xGL = array.new<float>(5, 0.0)  // gross loss, points
+var int xSig = 0                                 // signals captured
+var int xExp = 0                                 // limits that expired unfilled
+
+if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
+    for i = matrix.rows(xM) - 1 to 0
+        xd = matrix.get(xM, i, 2)
+        xe = matrix.get(xM, i, 1)
+        if matrix.get(xM, i, 6) < 0.5
+            if xd == 1 ? low <= xe : high >= xe
+                matrix.set(xM, i, 6, 1.0)
+            else
+                xg = matrix.get(xM, i, 5)
+                if not (xg == 0 ? in_frb_trade : xg == 1 ? not _newDay : xg == 2 ? in_lorb_trade : xg == 3 ? in_syd_trade : in_tok_trade)
+                    xExp := xExp + 1
+                    matrix.remove_row(xM, i)
+                continue
+        xl  = matrix.get(xM, i, 0)
+        xst = matrix.get(xM, i, 3)
+        xs0 = matrix.get(xM, i, 4)
+        // ── RESOLVE, against the stops this bar OPENED with ─────────────
+        // TP1/TP2/TP3 share one stop and differ only in target, and those
+        // targets are ordered, so a single progress counter covers all
+        // three: 0-3 = how many have already banked.
+        fx = int(matrix.get(xM, i, 10))
+        if fx < 3
+            if xd == 1 ? low <= xs0 : high >= xs0
+                for m = fx to 2
+                    array.set(xN,  m, array.get(xN,  m) + 1)
+                    array.set(xGL, m, array.get(xGL, m) + math.abs(xe - xs0))
+                fx := 3
+            else
+                for m = fx to 2
+                    tg = xl + xd * xst * (m + 1)
+                    if xd == 1 ? high >= tg : low <= tg
+                        array.set(xN,  m, array.get(xN,  m) + 1)
+                        array.set(xW,  m, array.get(xW,  m) + 1)
+                        array.set(xGP, m, array.get(xGP, m) + math.abs(tg - xe))
+                        fx := m + 1
+                    else
+                        break
+            matrix.set(xM, i, 10, fx)
+        xr = matrix.get(xM, i, 8)
+        if not na(xr) and (xd == 1 ? low <= xr : high >= xr)
+            pr = xd * (xr - xe)
+            array.set(xN, 3, array.get(xN, 3) + 1)
+            if pr > 0
+                array.set(xW,  3, array.get(xW,  3) + 1)
+                array.set(xGP, 3, array.get(xGP, 3) + pr)
+            else
+                array.set(xGL, 3, array.get(xGL, 3) - pr)
+            matrix.set(xM, i, 8, na)
+            xr := na
+        xf = matrix.get(xM, i, 9)
+        if not na(xf)
+            t3 = xl + xd * xst * 3.0
+            hs = xd == 1 ? low <= xf : high >= xf
+            if hs or (xd == 1 ? high >= t3 : low <= t3)
+                pf = xd * ((hs ? xf : t3) - xe)
+                array.set(xN, 4, array.get(xN, 4) + 1)
+                if pf > 0
+                    array.set(xW,  4, array.get(xW,  4) + 1)
+                    array.set(xGP, 4, array.get(xGP, 4) + pf)
+                else
+                    array.set(xGL, 4, array.get(xGL, 4) - pf)
+                matrix.set(xM, i, 9, na)
+                xf := na
+        // ── ADVANCE the moving stops. Live from the NEXT bar, never this
+        // one, which is exactly why this sits AFTER the resolution above.
+        if not na(xr) or not na(xf)
+            rc = math.max(matrix.get(xM, i, 7), xd == 1 ? (high - xl) / xst : (xl - low) / xst)
+            matrix.set(xM, i, 7, rc)
+            bf = math.min(math.max(math.abs(xe - xs0) * 0.25, 0.2), 0.8)
+            if not na(xr) and rc >= trailArm
+                cd = xl + xd * (rc * trailKeep) * xst
+                if xd == 1 ? (cd <= close - bf and cd > xr) : (cd >= close + bf and cd < xr)
+                    matrix.set(xM, i, 8, cd)
+            if not na(xf)
+                cf = rc >= 2.0 ? xl + xd * xst : rc >= 1.0 ? xe : na
+                if not na(cf) and (xd == 1 ? (cf <= close - bf and cf > xf) : (cf >= close + bf and cf < xf))
+                    matrix.set(xM, i, 9, cf)
+        if matrix.get(xM, i, 10) >= 3 and na(matrix.get(xM, i, 8)) and na(matrix.get(xM, i, 9))
+            matrix.remove_row(xM, i)
+
 // SIGNAL COUNTER - setups that FIRED vs setups that were TAKEN
 // -------------------------------------------------------------------
 // Added 2026-09-23 on a fair objection: the entry conditions are identical
@@ -1811,6 +1941,13 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
         if okML or okMS
             sigM   := sigM + 1
             smDone := true
+            if showXcmp
+                xdz = okML ? 1.0 : -1.0
+                xlz = okML ? frb_hi : frb_lo
+                xsz = xlz - xdz * f_c2SL(rM)
+                xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rM * _c2Depth : close
+                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rM * orbTPMult, xsz, 0.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0))
+                xSig := xSig + 1
 
 if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
     rH = nyorb_hi - nyorb_lo
@@ -1820,6 +1957,13 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
         if okHL or okHS
             sigH   := sigH + 1
             shDone := true
+            if showXcmp
+                xdz = okHL ? 1.0 : -1.0
+                xlz = okHL ? nyorb_hi : nyorb_lo
+                xsz = xlz - xdz * f_c2SL(rH)
+                xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rH * _c2Depth : close
+                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rH * orbTPMult, xsz, 1.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0))
+                xSig := xSig + 1
 
 if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgDone and not na(lorb_hi) and not na(lorb_lo) and (not lonADRGuard or _adrConsumed[1] < 0.90) and _testWinOk and _hm_dow_ok
     rG = lorb_hi - lorb_lo
@@ -1829,6 +1973,13 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgD
         if okGL or okGS
             sigG   := sigG + 1
             sgDone := true
+            if showXcmp
+                xdz = okGL ? 1.0 : -1.0
+                xlz = okGL ? lorb_hi : lorb_lo
+                xsz = xlz - xdz * f_c2SL(rG)
+                xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rG * _c2Depth : close
+                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rG * orbTPMult, xsz, 2.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0))
+                xSig := xSig + 1
 
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
     rU2 = syd_hi - syd_lo
@@ -1838,6 +1989,13 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
         if okUL or okUS
             sigU   := sigU + 1
             suDone := true
+            if showXcmp
+                xdz = okUL ? 1.0 : -1.0
+                xlz = okUL ? syd_hi : syd_lo
+                xsz = xlz - xdz * f_c2SL(rU2)
+                xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rU2 * _c2Depth : close
+                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rU2 * orbTPMult, xsz, 3.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0))
+                xSig := xSig + 1
 
 if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locked and not svDone and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok
     rV2 = tok_hi - tok_lo
@@ -1847,6 +2005,13 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
         if okVL or okVS
             sigV   := sigV + 1
             svDone := true
+            if showXcmp
+                xdz = okVL ? 1.0 : -1.0
+                xlz = okVL ? tok_hi : tok_lo
+                xsz = xlz - xdz * f_c2SL(rV2)
+                xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rV2 * _c2Depth : close
+                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rV2 * orbTPMult, xsz, 4.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0))
+                xSig := xSig + 1
 
 // TAKEN counters - the rising edge of each real done-flag IS the moment an
 // order was placed, so these need no copied conditions and cannot drift.
@@ -2726,6 +2891,86 @@ if barstate.islast and showContrib and strategy.closedtrades > 0
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
     f_drawContribTable(pcTbl)
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// EXIT-MODE COMPARISON TABLE — the ranking, on one shared trade list
+// ═══════════════════════════════════════════════════════════════════════
+// READ THE N COLUMN FIRST. All five rows resolve the SAME signals, so N
+// should be near-identical across them. Any gap is trades still running
+// when the data ended — the ratchet holds longest, so it trails the others
+// by a few. If N differs by more than a handful, something is wrong.
+//
+// NET is in POINTS per contract (1 point = 10 pips on gold), so it is
+// directly comparable between rows. It is NOT the Tester's dollar figure:
+// the Tester sizes by percent_of_equity and drops every signal the slot
+// blocked, which is the whole reason this table exists.
+var array<string> _xcLbl = array.from("TP1 · 1R", "TP2 · 2R", "TP3 · 3R", "Ratchet", "Final-TP + BE")
+var table xcTbl = na
+
+f_drawXcmpTable(table t) =>
+    hX = color.new(#D4A017, 0)
+    gX = color.new(color.gray, 10)
+    wX = color.new(color.white, 20)
+    table.cell(t, 0, 0, "EXIT MODE", text_color=hX, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 0, "N",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 0, "W",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 0, "L",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 0, "WR%",     text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 0, "NET pts", text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 0, "pts/tr",  text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 0, "PF",      text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+
+    bI = -1
+    bV = -1e12
+    for q = 0 to 4
+        nv = array.get(xGP, q) - array.get(xGL, q)
+        if array.get(xN, q) > 0 and nv > bV
+            bV := nv
+            bI := q
+
+    for q = 0 to 4
+        nq  = array.get(xN, q)
+        wq  = array.get(xW, q)
+        gpq = array.get(xGP, q)
+        glq = array.get(xGL, q)
+        nvq = gpq - glq
+        lbq = q == 3 ? "Ratchet " + str.tostring(trailArm, "0.00") + " / " + str.tostring(trailKeep, "0.00") : array.get(_xcLbl, q)
+        rwq = nq == 0 ? gX : q == bI ? color.new(color.aqua, 0) : wX
+        table.cell(t, 0, q + 1, (q == bI and nq > 0 ? "★ " : "   ") + lbq, text_color=rwq, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(t, 1, q + 1, str.tostring(nq), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 2, q + 1, str.tostring(wq), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, q + 1, str.tostring(nq - wq), text_color=nq - wq > 0 ? color.new(color.red, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, q + 1, nq > 0 ? str.tostring(100.0 * wq / nq, "#.##") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, q + 1, str.tostring(nvq, "#"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 6, q + 1, nq > 0 ? str.tostring(nvq / nq, "#.#") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 7, q + 1, glq > 0 ? str.tostring(gpq / glq, "#.###") : (gpq > 0 ? "no loss" : "-"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(t, 0, 6, "signals captured", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 6, str.tostring(xSig), text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 6, "expired", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 6, str.tostring(xExp), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 6, "open at end", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 6, str.tostring(matrix.rows(xM)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 6, "Tester N", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 6, str.tostring(strategy.closedtrades), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+
+    // The one way this table can quietly lie: it always models the plain
+    // un-reversed C2 trade, so a reverse toggle or legacy-G makes the rows
+    // describe a trade the strategy is no longer taking.
+    bad = revM or revG or revH or revU or not lonUseC2
+    table.cell(t, 0, 7, bad ? "MISMATCH — table models the un-reversed C2 trade only" : "expired = limit never retested before its order life ran out",
+               text_color=bad ? color.new(color.red, 0) : gX, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 8, "N should match across rows; a gap is trades still running when the data ended. NET is POINTS per contract, not the Tester's dollars.",
+               text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+
+if barstate.islast and showXcmp
+    if na(xcTbl)
+        xcTbl := table.new(position.middle_center, 8, 9,
+                  bgcolor=color.new(color.black, 30),
+                  border_color=color.new(color.gray, 40), border_width=1,
+                  frame_color=color.new(#D4A017, 40), frame_width=2)
+    f_drawXcmpTable(xcTbl)
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
