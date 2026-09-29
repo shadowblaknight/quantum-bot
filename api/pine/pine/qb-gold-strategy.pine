@@ -1790,8 +1790,16 @@ var array<int>   xN  = array.new<int>(5, 0)      // resolved trades per mode
 var array<int>   xW  = array.new<int>(5, 0)      // wins per mode
 var array<float> xGP = array.new<float>(5, 0.0)  // gross profit, points
 var array<float> xGL = array.new<float>(5, 0.0)  // gross loss, points
+var array<int>   xBE = array.new<int>(5, 0)      // BREAKEVEN exits, neither win nor loss
+var int xDone = 0                                // shadows fully resolved on all five modes
 var int xSig = 0                                 // signals captured
 var int xExp = 0                                 // limits that expired unfilled
+
+// A BE exit lands within a tick of the entry. Wider than a tick and it is a
+// real outcome; inside it, the trade neither won nor lost and belongs in
+// neither bucket - counting it as a loss is what produced a 43% win rate
+// on a mode whose gross loss was identical to TP1's.
+xEps = syminfo.mintick * 5
 
 if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
     for i = matrix.rows(xM) - 1 to 0
@@ -1835,7 +1843,9 @@ if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
         if not na(xr) and (xd == 1 ? low <= xr : high >= xr)
             pr = xd * (xr - xe)
             array.set(xN, 3, array.get(xN, 3) + 1)
-            if pr > 0
+            if math.abs(pr) < xEps
+                array.set(xBE, 3, array.get(xBE, 3) + 1)
+            else if pr > 0
                 array.set(xW,  3, array.get(xW,  3) + 1)
                 array.set(xGP, 3, array.get(xGP, 3) + pr)
             else
@@ -1849,7 +1859,9 @@ if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
             if hs or (xd == 1 ? high >= t3 : low <= t3)
                 pf = xd * ((hs ? xf : t3) - xe)
                 array.set(xN, 4, array.get(xN, 4) + 1)
-                if pf > 0
+                if math.abs(pf) < xEps
+                    array.set(xBE, 4, array.get(xBE, 4) + 1)
+                else if pf > 0
                     array.set(xW,  4, array.get(xW,  4) + 1)
                     array.set(xGP, 4, array.get(xGP, 4) + pf)
                 else
@@ -1871,6 +1883,7 @@ if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
                 if not na(cf) and (xd == 1 ? (cf <= close - bf and cf > xf) : (cf >= close + bf and cf < xf))
                     matrix.set(xM, i, 9, cf)
         if matrix.get(xM, i, 10) >= 3 and na(matrix.get(xM, i, 8)) and na(matrix.get(xM, i, 9))
+            xDone := xDone + 1
             matrix.remove_row(xM, i)
 
 // SIGNAL COUNTER - setups that FIRED vs setups that were TAKEN
@@ -2915,11 +2928,12 @@ f_drawXcmpTable(table t) =>
     table.cell(t, 0, 0, "EXIT MODE", text_color=hX, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 0, "N",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 2, 0, "W",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 3, 0, "L",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 4, 0, "WR%",     text_color=hX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 5, 0, "NET pts", text_color=hX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 0, "pts/tr",  text_color=hX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 7, 0, "PF",      text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 0, "BE",      text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 0, "L",       text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 0, "WR%",     text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 0, "NET pts", text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 0, "pts/tr",  text_color=hX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 8, 0, "PF",      text_color=hX, text_size=size.tiny, text_halign=text.align_right)
 
     bI = -1
     bV = -1e12
@@ -2932,6 +2946,8 @@ f_drawXcmpTable(table t) =>
     for q = 0 to 4
         nq  = array.get(xN, q)
         wq  = array.get(xW, q)
+        beq = array.get(xBE, q)
+        lq  = nq - wq - beq
         gpq = array.get(xGP, q)
         glq = array.get(xGL, q)
         nvq = gpq - glq
@@ -2940,20 +2956,23 @@ f_drawXcmpTable(table t) =>
         table.cell(t, 0, q + 1, (q == bI and nq > 0 ? "★ " : "   ") + lbq, text_color=rwq, text_size=size.tiny, text_halign=text.align_left)
         table.cell(t, 1, q + 1, str.tostring(nq), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
         table.cell(t, 2, q + 1, str.tostring(wq), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 3, q + 1, str.tostring(nq - wq), text_color=nq - wq > 0 ? color.new(color.red, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 4, q + 1, nq > 0 ? str.tostring(100.0 * wq / nq, "#.##") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 5, q + 1, str.tostring(nvq, "#"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 6, q + 1, nq > 0 ? str.tostring(nvq / nq, "#.#") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
-        table.cell(t, 7, q + 1, glq > 0 ? str.tostring(gpq / glq, "#.###") : (gpq > 0 ? "no loss" : "-"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 3, q + 1, str.tostring(beq), text_color=beq > 0 ? color.new(color.orange, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 4, q + 1, str.tostring(lq), text_color=lq > 0 ? color.new(color.red, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 5, q + 1, wq + lq > 0 ? str.tostring(100.0 * wq / (wq + lq), "#.##") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 6, q + 1, str.tostring(nvq, "#"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 7, q + 1, nq > 0 ? str.tostring(nvq / nq, "#.#") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(t, 8, q + 1, glq > 0 ? str.tostring(gpq / glq, "#.###") : (gpq > 0 ? "no loss" : "-"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
 
-    table.cell(t, 0, 6, "signals captured", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+    bal = xSig - xDone - xExp - matrix.rows(xM)
+    table.cell(t, 0, 6, "signals", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 6, str.tostring(xSig), text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 2, 6, "expired", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 3, 6, str.tostring(xExp), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 4, 6, "open at end", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 5, 6, str.tostring(matrix.rows(xM)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 6, "Tester N", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 7, 6, str.tostring(strategy.closedtrades), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 6, "filled", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 6, str.tostring(xDone), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 6, "never retested", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 6, str.tostring(xExp), text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 6, "open", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 6, str.tostring(matrix.rows(xM)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 8, 6, bal == 0 ? "balances" : "LOST " + str.tostring(bal), text_color=bal == 0 ? color.new(color.lime, 0) : color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_right)
 
     // The one way this table can quietly lie: it always models the plain
     // un-reversed C2 trade, so a reverse toggle or legacy-G makes the rows
@@ -2961,12 +2980,12 @@ f_drawXcmpTable(table t) =>
     bad = revM or revG or revH or revU or not lonUseC2
     table.cell(t, 0, 7, bad ? "MISMATCH — table models the un-reversed C2 trade only" : "expired = limit never retested before its order life ran out",
                text_color=bad ? color.new(color.red, 0) : gX, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 8, "N should match across rows; a gap is trades still running when the data ended. NET is POINTS per contract, not the Tester's dollars.",
+    table.cell(t, 0, 8, "BE = stop had cascaded to entry; it is neither a win nor a loss, and it is EXCLUDED from WR% and PF. Script saw " + str.tostring(strategy.closedtrades) + " Tester trades - if the Tester panel says more, this table covers only that slice.",
                text_color=gX, text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showXcmp
     if na(xcTbl)
-        xcTbl := table.new(position.middle_center, 8, 9,
+        xcTbl := table.new(position.middle_center, 9, 9,
                   bgcolor=color.new(color.black, 30),
                   border_color=color.new(color.gray, 40), border_width=1,
                   frame_color=color.new(#D4A017, 40), frame_width=2)
