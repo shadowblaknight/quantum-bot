@@ -68,8 +68,8 @@ c2MinRangeASIA = input.float(5.0, "U/V) Min ORB range to trade (pts)", group=G_A
 
 G_STRAT = "Strategy"
 exitMode  = input.string("TP1 · 1R", "Exit target",
-            options=["TP1 · 1R", "TP2 · 2R", "TP3 · 3R", "Split TP1+TP2", "Trail after TP1", "Scale 30/75/150", "Ratchet (no TP)"],
-            tooltip="TP1/TP2/TP3: fixed single-target exits. Split: 50% at TP1 + 50% at TP2. Trail: trail stop after TP1. Scale 30/75/150 (H/M only): 25% at 0.30×range, 50% at 0.75×range, 25% runner at 1.50×range — BE stop on remaining after TP1 hit. Python v4: WR 82.8%, PF 2.030.",
+            options=["TP1 · 1R", "TP2 · 2R", "TP3 · 3R", "Split TP1+TP2", "Trail after TP1", "Scale 30/75/150", "Ratchet (no TP)", "Live final-tp (BE cascade)"],
+            tooltip="TP1/TP2/TP3: fixed single-target exits. Split: 50% at TP1 + 50% at TP2. Trail: trail stop after TP1. Scale 30/75/150 (H/M only): 25% at 0.30×range, 50% at 0.75×range, 25% runner at 1.50×range — BE stop on remaining after TP1 hit. Python v4: WR 82.8%, PF 2.030.\n\nLIVE FINAL-TP (BE CASCADE) - added 2026-09-29. The mode the ACCOUNT is actually running (dashboard exitMode=final-tp), which had never been backtested. It is NOT the same as "TP3 - 3R": the full position rides to TP3, but the stop CASCADES underneath it exactly as manage-trades.js does - TP1 touched moves the stop to breakeven, TP2 touched moves it to TP1. So most trades that reach TP1 and then fail are scratches, not full losses, which is precisely what the fixed-stop TP3 run cannot show.\n\nCompare against "TP1 - 1R" (the 390-trade / 9-loss / PF 4.176 baseline) and against "Ratchet (no TP)".",
             group=G_STRAT)
 showBoxes      = input.bool(true, "Show position boxes", group=G_STRAT)
 trailArm  = input.float(0.75, "Ratchet: arm trail after (x ORB range)", group=G_STRAT, minval=0.05, maxval=10.0, step=0.05,
@@ -476,7 +476,7 @@ f_drawPosBox(float e, float slP, float tp3) =>
 // have R-based targets, not ORB-range ones, so the ratchet cannot apply to
 // them: hold them at their proven TP1 instead.
 f_exitLim(float tp1, float tp2, float tp3) =>
-    exitMode == "TP1 · 1R" ? tp1 : exitMode == "TP3 · 3R" ? tp3 : exitMode == "Ratchet (no TP)" ? tp1 : tp2
+    exitMode == "TP1 · 1R" ? tp1 : exitMode == "TP3 · 3R" ? tp3 : exitMode == "Live final-tp (BE cascade)" ? tp3 : exitMode == "Ratchet (no TP)" ? tp1 : tp2
 
 // Shared C2 exit router — used by G, U and V. "Scale 30/75/150" needs the _mtp
 // state machine wired per-signal, so those signals fall through to the
@@ -1187,18 +1187,40 @@ var float  _rt_sl    = na     // current stop
 var float  _rt_sl0   = na     // INITIAL stop, kept for the stop-buffer calc
 var float  _rt_reach = 0.0    // furthest excursion reached, in step units
 
-if exitMode == "Ratchet (no TP)" and _rt_dir != 0 and not na(_rt_lvl) and strategy.position_size != 0
+// TWO MODES SHARE THIS STATE MACHINE. Both need the same facts captured at
+// entry (level, range, direction, id, initial stop) and both move the stop
+// from the favourable high-water mark; they differ ONLY in where the stop
+// goes and whether a take-profit is parked. Sharing the registration means
+// the ten entry sites stay identical between them, so an A/B between the
+// two cannot be contaminated by a difference in how the trade was recorded.
+_rtMode     = exitMode == "Ratchet (no TP)"
+_fcMode     = exitMode == "Live final-tp (BE cascade)"
+_useRtState = _rtMode or _fcMode
+
+if _useRtState and _rt_dir != 0 and not na(_rt_lvl) and strategy.position_size != 0
     step = _rt_rng * orbTPMult
     if step > 0
         // Excursion beyond the ORB level, in step units (1.0 = one TP step).
         reach = _rt_dir == 1 ? (high - _rt_lvl) / step : (_rt_lvl - low) / step
         if reach > _rt_reach
             _rt_reach := reach
-        if _rt_reach >= trailArm
+        // CANDIDATE STOP - the ONLY place the two modes diverge.
+        float cand = na
+        if _rtMode and _rt_reach >= trailArm
             // Stop sits at a FRACTION of the furthest excursion, so it locks
             // PROFIT rather than returning to entry: reach 0.75 with keep 0.75
             // locks 0.5625. Never gives back more than (1 - trailKeep).
-            cand = _rt_lvl + _rt_dir * (_rt_reach * trailKeep) * step
+            cand := _rt_lvl + _rt_dir * (_rt_reach * trailKeep) * step
+        if _fcMode
+            // LIVE BE CASCADE - the mirror of the specialist branch in
+            // manage-trades.js:
+            //     TP1 touched (reach >= 1) -> stop to the ENTRY (breakeven)
+            //     TP2 touched (reach >= 2) -> stop to TP1
+            // Read off _rt_reach, the favourable HIGH-WATER mark, because live
+            // detects a TP touch from the extreme since open and never from the
+            // last price: a spike that tags TP1 and retraces still locks BE.
+            cand := _rt_reach >= 2.0 ? _rt_lvl + _rt_dir * step : _rt_reach >= 1.0 ? _rt_entry : na
+        if not na(cand)
             // FIDELITY FIX 2026-09-23. manage-trades.js applies TWO tests, not
             // one: the stop must improve AND it must still sit a buffer away
             // from current price -
@@ -1218,8 +1240,18 @@ if exitMode == "Ratchet (no TP)" and _rt_dir != 0 and not na(_rt_lvl) and strate
             better = _rt_dir == 1 ? cand > _rt_sl : cand < _rt_sl
             if valid and better
                 _rt_sl := cand
-        // stop only — no limit arg means no take-profit is ever placed
-        strategy.exit(_rt_id + "-X", from_entry=_rt_id, stop=_rt_sl)
+        if _rtMode
+            // stop only — no limit arg means no take-profit is ever placed
+            strategy.exit(_rt_id + "-X", from_entry=_rt_id, stop=_rt_sl)
+        else
+            // The FULL position rides to TP3 — where the live broker TP is
+            // parked in final-tp mode — with the cascaded stop underneath it.
+            //
+            // TP3 is DERIVED, not stored: lvl + dir x step x 3 reproduces each
+            // entry site's own tp3 exactly while _c2Depth is 0, which it is in
+            // every config run so far. If partial-retest depth is ever raised
+            // AND a reverse toggle is on, store tp3 at registration instead.
+            strategy.exit(_rt_id + "-X", from_entry=_rt_id, stop=_rt_sl, limit=_rt_lvl + _rt_dir * step * 3.0)
 
 // Clear ratchet state only on an ACTUAL close (was in a position, now flat).
 // Testing position_size == 0 alone would wipe the state of a C2 limit that is
@@ -1292,7 +1324,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
             // the ORB level either way, so only the entry price differs.
             c2LimFL = (not revM and c2EntryMode == "Retest (limit)") ? entryP : na
             strategy.entry("FRB-L", revM ? strategy.short : strategy.long, limit=c2LimFL, comment="frankfurt-orb · C2 LONG")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revM ? entryP : frb_hi
                 _rt_entry := entryP
                 _rt_rng   := orb_range
@@ -1343,7 +1375,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
             frb_short_today := true
             c2LimFS = (not revM and c2EntryMode == "Retest (limit)") ? entryP : na
             strategy.entry("FRB-S", revM ? strategy.long : strategy.short, limit=c2LimFS, comment="frankfurt-orb · C2 SHORT")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revM ? entryP : frb_lo
                 _rt_entry := entryP
                 _rt_rng   := orb_range
@@ -1413,7 +1445,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             // Ratchet state — without this, f_c2Exit's ratchet branch places a
             // naked stop with no TP and no trail: a guaranteed full loss. Same
             // bug U and V carried until it was found.
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revG ? entryP : lorb_hi
                 _rt_entry := entryP
                 _rt_rng   := orb_range
@@ -1440,7 +1472,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             lorb_done := true
             c2LimGS = (not revG and lonUseC2 and c2EntryMode == "Retest (limit)") ? entryP : na
             strategy.entry("ORB-S", revG ? strategy.long : strategy.short, limit=c2LimGS, comment="london-orb · SHORT")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revG ? entryP : lorb_lo
                 _rt_entry := entryP
                 _rt_rng   := orb_range
@@ -1480,7 +1512,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
             nyorb_done := true
             c2LimNL = (not revH and c2EntryMode == "Retest (limit)") ? entryP : na
             strategy.entry("NYORB-L", revH ? strategy.short : strategy.long, limit=c2LimNL, comment="ny-orb · C2 LONG")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revH ? entryP : nyorb_hi
                 _rt_entry := entryP
                 _rt_rng   := orb_range
@@ -1530,7 +1562,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
             nyorb_done := true
             c2LimNS = (not revH and c2EntryMode == "Retest (limit)") ? entryP : na
             strategy.entry("NYORB-S", revH ? strategy.long : strategy.short, limit=c2LimNS, comment="ny-orb · C2 SHORT")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revH ? entryP : nyorb_lo
                 _rt_entry := entryP
                 _rt_rng   := orb_range
@@ -1608,7 +1640,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
             // branch placed a NAKED stop with no TP and no trail. Every filled
             // Sydney/Tokyo trade could then only ever exit at its original stop —
             // a guaranteed full loss, 100% of the time.
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revU ? entryP : syd_hi
                 _rt_entry := entryP
                 _rt_rng   := rngU
@@ -1637,7 +1669,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
             syd_done := true
             c2LimUS = (not revU and c2EntryMode == "Retest (limit)") ? entryP : na
             strategy.entry("SYD-S", revU ? strategy.long : strategy.short, limit=c2LimUS, comment="sydney-orb · C2 SHORT")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := revU ? entryP : syd_lo
                 _rt_entry := entryP
                 _rt_rng   := rngU
@@ -1664,7 +1696,7 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
             tok_done := true
             c2LimVL = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("TOK-L", strategy.long, limit=c2LimVL, comment="tokyo-orb · C2 LONG")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := tok_hi
                 _rt_entry := entryP
                 _rt_rng   := rngV
@@ -1687,7 +1719,7 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
             tok_done := true
             c2LimVS = c2EntryMode == "Retest (limit)" ? entryP : na
             strategy.entry("TOK-S", strategy.short, limit=c2LimVS, comment="tokyo-orb · C2 SHORT")
-            if exitMode == "Ratchet (no TP)"
+            if _useRtState
                 _rt_lvl   := tok_lo
                 _rt_entry := entryP
                 _rt_rng   := rngV
