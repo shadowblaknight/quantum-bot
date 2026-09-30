@@ -1910,8 +1910,8 @@ if ltfOn
 //        The caller keeps its own pessimistic assumption, so 0 reproduces the
 //        old behaviour exactly.
 f_ltfFirst(float dir, float stopPx, float tgtPx) =>
-    int out = 0
     int n = na(ltfHi) ? 0 : array.size(ltfHi)
+    int out = n > 0 ? 3 : 2
     if n > 0
         for k = 0 to n - 1
             hh = array.get(ltfHi, k)
@@ -1919,7 +1919,8 @@ f_ltfFirst(float dir, float stopPx, float tgtPx) =>
             hs = dir == 1 ? ll <= stopPx : hh >= stopPx
             ht = dir == 1 ? hh >= tgtPx  : ll <= tgtPx
             if hs and ht
-                break                      // same intrabar - still ambiguous
+                out := 0
+                break
             if hs
                 out := -1
                 break
@@ -1928,21 +1929,61 @@ f_ltfFirst(float dir, float stopPx, float tgtPx) =>
                 break
     out
 
+// ─── RUN FINGERPRINT ─────────────────────────────────────────────────
+// The signal count is the fingerprint of the WINDOW, and TradingView never
+// tells you the window: Deep Backtest evaluates far more bars than the script
+// itself runs on. On 30 Sep a run went from 199 signals to 192 with the same
+// stop and the same entry, and there was no way to tell a changed filter from
+// a shifted window because nothing recorded the window. Now every run carries
+// its own, so a population shift is visible in the log instead of being
+// reverse-engineered out of a PF three steps later.
+var int _runBars   = 0
+var int _runFirstT = na
+var int _runLastT  = na
+if barstate.isconfirmed
+    _runBars := _runBars + 1
+    if na(_runFirstT)
+        _runFirstT := time
+    _runLastT := time
+
 // ─── NFP SOURCE AGREEMENT ────────────────────────────────────────────
 // Latched per DAY, because the economic series changes on one bar while the
 // heuristic is true for every bar of that day. Counting raw bars would make
 // the two look wildly different for a reason that is purely mechanical.
+//
+// TWO RUNS AGREED ON 10 / 10 / 0 (30 Sep): both sources found the right NUMBER
+// of releases for the window and never once landed on the same day. Identical
+// twice over is a fixed offset, not noise - so the counts cannot diagnose it
+// and the DATES can. Each source's flagged days are kept and printed side by
+// side; whatever separates the two columns is the offset.
 var int  xNfpApx  = 0
 var int  xNfpEco  = 0
 var int  xNfpBoth = 0
 var bool _nfpApxD = false
 var bool _nfpEcoD = false
+var int  _nfpApxT = na
+var int  _nfpEcoT = na
+var array<int> xNfpApxT = array.new<int>()
+var array<int> xNfpEcoT = array.new<int>()
 if _newDay
-    xNfpApx  := xNfpApx  + (_nfpApxD ? 1 : 0)
-    xNfpEco  := xNfpEco  + (_nfpEcoD ? 1 : 0)
-    xNfpBoth := xNfpBoth + (_nfpApxD and _nfpEcoD ? 1 : 0)
+    if _nfpApxD
+        xNfpApx := xNfpApx + 1
+        if array.size(xNfpApxT) < 60
+            array.push(xNfpApxT, _nfpApxT)
+    if _nfpEcoD
+        xNfpEco := xNfpEco + 1
+        if array.size(xNfpEcoT) < 60
+            array.push(xNfpEcoT, _nfpEcoT)
+    if _nfpApxD and _nfpEcoD
+        xNfpBoth := xNfpBoth + 1
     _nfpApxD := false
     _nfpEcoD := false
+    _nfpApxT := na
+    _nfpEcoT := na
+if _isNFPapx and na(_nfpApxT)
+    _nfpApxT := time
+if _isNFPeco and na(_nfpEcoT)
+    _nfpEcoT := time
 _nfpApxD := _nfpApxD or _isNFPapx
 _nfpEcoD := _nfpEcoD or _isNFPeco
 
@@ -1977,6 +2018,14 @@ var int xSig     = 0    // signals captured
 var int xExp     = 0    // limits that expired unfilled
 var int xLtfSeen = 0    // same-bar collisions the intrabar feed could rule on
 var int xLtfFlip = 0    //   ...of those, how many the STOP assumption got wrong
+// "4 collisions in 147 trades" read as a reassuringly small number, but it only
+// ever counted the collisions the feed COULD rule on. A collision the feed had
+// no data for looked identical to no collision at all - so the three ways a
+// ruling fails are now separate, because they mean different things:
+var int xLtfTie  = 0    // stop and target landed in the SAME 1m bar - ambiguous even here
+var int xLtfNone = 0    // empty array: past TradingView's intrabar cap, UNMEASURED
+var int xLtfGap  = 0    // data present but it reached NEITHER level - the 1m feed
+                        // disagrees with the 15m bar it sits inside, so it is wrong
 
 // A BE exit lands within a tick of the entry. Wider than a tick and it is a
 // real outcome; inside it, the trade neither won nor lost and belongs in
@@ -2013,11 +2062,12 @@ if showXcmp and barstate.isconfirmed and array.size(xS) > 0
                     // Both in one bar. Ask the intrabar feed which came first
                     // instead of assuming; 0 keeps the old pessimistic answer.
                     o = f_ltfFirst(xd, xs0, tg)
-                    if o != 0
-                        xLtfSeen := xLtfSeen + 1
-                    if o == 1
-                        xLtfFlip := xLtfFlip + 1
-                    else
+                    xLtfSeen := xLtfSeen + (math.abs(o) == 1 ? 1 : 0)
+                    xLtfFlip := xLtfFlip + (o == 1 ? 1 : 0)
+                    xLtfTie  := xLtfTie  + (o == 0 ? 1 : 0)
+                    xLtfNone := xLtfNone + (o == 2 ? 1 : 0)
+                    xLtfGap  := xLtfGap  + (o == 3 ? 1 : 0)
+                    if o != 1
                         hitT := false
                 if hitT
                     array.set(xN,  m, array.get(xN,  m) + 1)
@@ -2060,10 +2110,12 @@ if showXcmp and barstate.isconfirmed and array.size(xS) > 0
                 fht = xd == 1 ? high >= ft3 : low <= ft3
                 if fhs and fht
                     o2 = f_ltfFirst(xd, fst, ft3)
-                    if o2 != 0
-                        xLtfSeen := xLtfSeen + 1
+                    xLtfSeen := xLtfSeen + (math.abs(o2) == 1 ? 1 : 0)
+                    xLtfFlip := xLtfFlip + (o2 == 1 ? 1 : 0)
+                    xLtfTie  := xLtfTie  + (o2 == 0 ? 1 : 0)
+                    xLtfNone := xLtfNone + (o2 == 2 ? 1 : 0)
+                    xLtfGap  := xLtfGap  + (o2 == 3 ? 1 : 0)
                     if o2 == 1
-                        xLtfFlip := xLtfFlip + 1
                         fhs := false
                     else
                         fht := false
@@ -3289,6 +3341,23 @@ f_drawXcmpTable(table t) =>
     table.cell(t, 7, 10, str.tostring(xNfpBoth), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 8, 10, ftmoGuards ? "FTMO ON" : "FTMO off", text_color=ftmoGuards ? color.new(color.lime, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
 
+    // The window this run actually saw. Read it BEFORE the signal count: two
+    // runs with different signal counts and the same window differ by a
+    // filter, and two with different windows are not comparable at all.
+    table.cell(t, 0, 11, "run window: " + str.tostring(_runBars) + " bars, "
+               + str.format("{0,date,yyyy-MM-dd}", _runFirstT) + " to " + str.format("{0,date,yyyy-MM-dd}", _runLastT)
+               + " on " + timeframe.period + " — the SCRIPT's slice, not the Tester's. If the signal count moves, check this line first.",
+               text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+
+    // A collision the feed had no data for used to be invisible, which made
+    // the ruled count look like the whole story.
+    table.cell(t, 0, 12, not ltfOn ? "intrabar OFF — every same-bar collision was assumed to be the stop, and none of them were counted"
+               : "intrabar: " + str.tostring(xLtfSeen) + " ruled, " + str.tostring(xLtfFlip) + " overturned · unruled: "
+               + str.tostring(xLtfTie) + " tie inside one 1m bar · " + str.tostring(xLtfNone) + " past the intrabar cap (UNMEASURED, not absent) · "
+               + str.tostring(xLtfGap) + " where the 1m feed reached neither level",
+               text_color=not ltfOn ? gX : xLtfGap > 0 ? color.new(color.red, 0) : xLtfNone > 0 ? color.new(color.orange, 0) : gX,
+               text_size=size.tiny, text_halign=text.align_left)
+
     // The one way this table can quietly lie: it always models the plain
     // un-reversed C2 trade, so a reverse toggle or legacy-G makes the rows
     // describe a trade the strategy is no longer taking.
@@ -3300,13 +3369,28 @@ f_drawXcmpTable(table t) =>
 
 if barstate.islast and showXcmp
     if na(xcTbl)
-        xcTbl := table.new(position.middle_center, 9, 11,
+        xcTbl := table.new(position.middle_center, 9, 13,
                   bgcolor=color.new(color.black, 30),
                   border_color=color.new(color.gray, 40), border_width=1,
                   frame_color=color.new(#D4A017, 40), frame_width=2)
     f_drawXcmpTable(xcTbl)
 
+// Joins day timestamps into one line. When two sources agree on the COUNT and
+// never on the day, the counts cannot diagnose it and the dates can.
+f_dateList(array<int> a) =>
+    string s = ""
+    int n = array.size(a)
+    if n == 0
+        s := "(none)"
+    else
+        for k = 0 to n - 1
+            s := s + (k > 0 ? "  " : "") + str.format("{0,date,yyyy-MM-dd}", array.get(a, k))
+    s
+
 if barstate.islast and showLog
+    log.info("run window: {0} bars, {1} to {2}, {3} — the SCRIPT's slice, not the Tester's",
+              str.tostring(_runBars), str.format("{0,date,yyyy-MM-dd}", _runFirstT),
+              str.format("{0,date,yyyy-MM-dd}", _runLastT), timeframe.period)
     log.info("QB GOLD — exit comparison over {0} signals, {1} filled, {2} never retested",
               str.tostring(xSig), str.tostring(xDone), str.tostring(xExp))
     for q = 0 to 5
@@ -3322,13 +3406,23 @@ if barstate.islast and showLog
     if bal2 != 0
         log.error("shadow accounting does not balance — {0} trades unaccounted for", str.tostring(bal2))
     if ltfOn
-        log.info("intrabar: {0} same-bar collisions resolved, {1} overturned the stop-first assumption", str.tostring(xLtfSeen), str.tostring(xLtfFlip))
+        log.info("intrabar: {0} collisions ruled, {1} overturned the stop-first assumption", str.tostring(xLtfSeen), str.tostring(xLtfFlip))
+        log.info("  unruled: {0} tie inside one 1m bar, {1} past the intrabar cap, {2} where the 1m feed reached neither level",
+                  str.tostring(xLtfTie), str.tostring(xLtfNone), str.tostring(xLtfGap))
+        if xLtfNone > 0
+            log.warning("{0} collisions had NO intrabar data — UNMEASURED, not absent. The ruled count above describes only the stretch the feed covered, so it is a floor on the fudge, not its size.", str.tostring(xLtfNone))
+        if xLtfGap > 0
+            log.error("{0} collisions had 1m data that reached NEITHER level inside a 15m bar which touched BOTH — the intrabar feed contradicts the chart and none of its rulings can be trusted", str.tostring(xLtfGap))
     else
         log.warning("intrabar resolution OFF — every same-bar stop/target collision was assumed to be the STOP")
     if xNfpEco == 0
         log.warning("request.economic returned no NFP releases — the field code is wrong, so that option does nothing")
     else
         log.info("NFP days: heuristic {0}, economic {1}, agreed on {2}", str.tostring(xNfpApx), str.tostring(xNfpEco), str.tostring(xNfpBoth))
+        if xNfpBoth == 0 and xNfpApx > 0 and xNfpEco > 0
+            log.warning("both sources found releases and agreed on NOTHING — a fixed offset, not noise. The gap between the two date lines below IS the offset.")
+        log.info("  NFP heuristic: {0}", f_dateList(xNfpApxT))
+        log.info("  NFP economic:  {0}", f_dateList(xNfpEcoT))
     if fpOn
         if fpYes == 0
             log.error("footprint returned na on all {0} bars — Premium/Ultimate plan required, or no tick data for this symbol", str.tostring(fpNo))
