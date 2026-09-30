@@ -2263,6 +2263,63 @@ if tok_done   and not tok_done[1]
     trdV := trdV + 1
 
 // ═══════════════════════════════════════════════════════════════════════
+// ORDER FLOW AT THE BREAK  (request.footprint)
+// ═══════════════════════════════════════════════════════════════════════
+// Every filter this file has tried was built from PRICE: where the bar
+// closed, how far past the level, which way a moving average pointed. All
+// six failed. Footprint is the first input that is not price - it is who
+// was actually transacting inside the bar.
+//
+// THE QUESTION IT ANSWERS: an ORB break closes above the level. Was that
+// buyers lifting offers, or sellers being absorbed while price drifted up?
+// Delta says which. A break up on NEGATIVE delta is a break nobody bought.
+//
+// API confirmed against the January 2026 release notes - method syntax on a
+// `footprint` object, na when the bar has no footprint data:
+//     footprint fp = request.footprint(ticksPerRow, vaPercent)
+//     fp.buy_volume() · fp.sell_volume() · fp.delta() · fp.total_volume()
+//     fp.poc() · fp.vah() · fp.val()  -> volume_row
+//     row.up_price() · row.down_price()
+//
+// TWO HARD LIMITS, BOTH WORTH KNOWING BEFORE YOU READ ANY RESULT:
+//   · footprint needs a PREMIUM or ULTIMATE plan. On anything less the
+//     request returns na on every bar and the coverage row below reads 0.
+//   · tick data does not go back as far as price data. A three-year ORB
+//     study may find footprint on only the recent slice, which makes any
+//     delta split a RECENT-SLICE finding, not a three-year one. The
+//     coverage row prints the first and last date data was found - read it
+//     before you read the buckets.
+//
+// Called inside a conditional, so with the switch OFF nothing is requested
+// and the run costs exactly what it did before.
+G_FP    = "Order flow (footprint)"
+fpOn    = input.bool(false, "Read volume footprint at the signal bar", group=G_FP,
+          tooltip="Records volume DELTA on each signal bar, then splits the taken trades by whether delta agreed with the break direction. Two extra rows appear at the bottom of the condition study.\n\nNEEDS A PREMIUM OR ULTIMATE PLAN. Without one the request returns na on every bar and the coverage row reads 0 - that is a plan problem, not a data problem.\n\nCHECK COVERAGE FIRST. Tick data is shallower than price data, so the split may only describe the recent slice of the backtest rather than the whole run.")
+fpTicks = input.int(10, "  Ticks per footprint row", group=G_FP, minval=1, maxval=10000,
+          tooltip="Price height of one footprint row, in ticks. Gold's mintick is 0.01, so 10 ticks = 0.10 points per row. Coarser rows are cheaper and blur the POC; finer rows are sharper and slower.")
+fpVA    = input.int(70, "  Value-area %", group=G_FP, minval=1, maxval=100,
+          tooltip="Share of the bar's volume the value area spans. 70 is the convention. Only affects vah()/val(), not delta.")
+
+// Coverage probe + the per-bar reading. fpDelta is na on any bar without
+// data, which is exactly what the capture blocks below should store - a
+// missing reading must never be mistaken for a flat one.
+var int   fpYes    = 0
+var int   fpNo     = 0
+var int   fpFirstT = na
+var int   fpLastT  = na
+float fpDelta = na
+if fpOn and barstate.isconfirmed
+    footprint fpBar = request.footprint(fpTicks, fpVA)
+    if na(fpBar)
+        fpNo := fpNo + 1
+    else
+        fpYes := fpYes + 1
+        if na(fpFirstT)
+            fpFirstT := time
+        fpLastT := time
+        fpDelta := fpBar.delta()
+
+// ═══════════════════════════════════════════════════════════════════════
 // A+ CONTEXT CAPTURE — recorded at SIGNAL time, not fill time
 // ─────────────────────────────────────────────────────────────────────
 // WHY THIS CHANGED. The previous version captured on the bar a position
@@ -2306,6 +2363,10 @@ var array<float> _ctxAtr = array.new<float>(0) // entry-TF ATR at signal — the
 // Signal U, whose 22:00 UTC window can carry the fill into the next day.
 var array<int>   _ctxTime = array.new<int>(0)   // signal bar time (ms)
 var array<int>   _ctxNFP  = array.new<int>(0)   // 1 = first-Friday NFP day
+// Volume delta on the signal bar. na = no footprint data for that bar, which
+// must stay distinct from a genuine zero - "nobody traded either way" and "we
+// could not see" are different facts.
+var array<float> _ctxDelta = array.new<float>(0)
 
 // Inlined per signal rather than wrapped in a helper: Pine functions may not
 // assign to globals, and mutating a global array from inside one is a rule I
@@ -2325,6 +2386,7 @@ if frb_done and not frb_done[1] and not na(frb_hi) and not na(frb_lo) and frb_hi
     array.push(_ctxAtr, atrVal)
     array.push(_ctxTime, time)
     array.push(_ctxNFP, _isNFP ? 1 : 0)
+    array.push(_ctxDelta, fpDelta)
 
 if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) and nyorb_hi > nyorb_lo
     dirN = close > nyorb_hi ? 1 : -1
@@ -2341,6 +2403,7 @@ if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) an
     array.push(_ctxAtr, atrVal)
     array.push(_ctxTime, time)
     array.push(_ctxNFP, _isNFP ? 1 : 0)
+    array.push(_ctxDelta, fpDelta)
 
 if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi > syd_lo
     dirS = close > syd_hi ? 1 : -1
@@ -2357,6 +2420,7 @@ if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi
     array.push(_ctxAtr, atrVal)
     array.push(_ctxTime, time)
     array.push(_ctxNFP, _isNFP ? 1 : 0)
+    array.push(_ctxDelta, fpDelta)
 
 if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi > tok_lo
     dirT = close > tok_hi ? 1 : -1
@@ -2373,6 +2437,7 @@ if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi
     array.push(_ctxAtr, atrVal)
     array.push(_ctxTime, time)
     array.push(_ctxNFP, _isNFP ? 1 : 0)
+    array.push(_ctxDelta, fpDelta)
 
 // SIGNAL G — was missing entirely. Without this block every London ORB trade is
 // invisible to the A+ table: ctxSig has no code for it, so the matcher below
@@ -2397,6 +2462,7 @@ if lorb_done and not lorb_done[1] and not na(lorb_hi) and not na(lorb_lo) and lo
     array.push(_ctxAtr, atrVal)
     array.push(_ctxTime, time)
     array.push(_ctxNFP, _isNFP ? 1 : 0)
+    array.push(_ctxDelta, fpDelta)
 
 // ═══════════════════════════════════════════════════════════════════════
 // SL RESEARCH — MAE-driven stop sweep  (answers "how small can c2SLBuf go?")
@@ -2601,22 +2667,22 @@ condSig = input.string("ALL", "Signal to break down", options=["ALL", "M  Frankf
           tooltip="Study ONE signal at a time. Conditions are not shared between signals - the ADR guard is measured GOOD for H and BAD for M - so pooling them averages the real effects away.\n\nRun this four times, once per signal, and write down the buckets that hold both a high win rate AND low heat. Those are the rungs of the risk ladder.")
 showCond = input.bool(true, "Show condition study", group=G_COND)
 
-var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break weak  < .10", "break mid  .10-.25", "break strong > .25")
+var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break weak  < .10", "break mid  .10-.25", "break strong > .25", "delta AGREES break", "delta OPPOSES break")
 var table cdTbl = na
 
 f_drawCondTable(table t) =>
     pv4 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
     // 20 buckets, five families. Parallel arrays keep it flat and readable.
-    cN   = array.new<int>(20, 0)
-    cWin = array.new<int>(20, 0)
-    cLow = array.new<int>(20, 0)
-    cMae = array.new<float>(20, 0.0)
-    cPts = array.new<float>(20, 0.0)
+    cN   = array.new<int>(22, 0)
+    cWin = array.new<int>(22, 0)
+    cLow = array.new<int>(22, 0)
+    cMae = array.new<float>(22, 0.0)
+    cPts = array.new<float>(22, 0.0)
     seen = 0
     // Pre-allocated ONCE. Building this with array.from() inside the trade loop
     // would allocate a fresh array per trade and can hit Pine's object ceiling
     // on a long backtest; reusing seven slots costs nothing.
-    bIdx = array.new<int>(7, 0)
+    bIdx = array.new<int>(8, 0)
 
     // Which _ctxSig this run is studying. -1 = pool everything.
     want = condSig == "M  Frankfurt" ? 0 : condSig == "H  NY" ? 1 : condSig == "U  Sydney" ? 2 : condSig == "G  London" ? 4 : -1
@@ -2654,6 +2720,10 @@ f_drawCondTable(table t) =>
                     bM15 = array.get(_ctxM15, k4) == 1 ? 13 : 14
                     bPul = array.get(_ctxPool, k4) == 1 ? 15 : 16
                     bStr = st < 0.10 ? 17 : st < 0.25 ? 18 : 19
+                    // -1 = no footprint reading for this signal, so it joins
+                    // neither delta bucket rather than silently padding one.
+                    dl   = array.get(_ctxDelta, k4)
+                    bDlt = na(dl) ? -1 : ((isLong4 ? dl > 0 : dl < 0) ? 20 : 21)
                     // Each trade lands in exactly one bucket per family, so it
                     // is counted seven times across seven independent splits.
                     array.set(bIdx, 0, bRng)
@@ -2663,8 +2733,11 @@ f_drawCondTable(table t) =>
                     array.set(bIdx, 4, bM15)
                     array.set(bIdx, 5, bPul)
                     array.set(bIdx, 6, bStr)
-                    for bi7 = 0 to 6
+                    array.set(bIdx, 7, bDlt)
+                    for bi7 = 0 to 7
                         b = array.get(bIdx, bi7)
+                        if b < 0
+                            continue
                         array.set(cN,   b, array.get(cN,   b) + 1)
                         array.set(cWin, b, array.get(cWin, b) + (p4 > 0 ? 1 : 0))
                         array.set(cMae, b, array.get(cMae, b) + m4)
@@ -2682,7 +2755,7 @@ f_drawCondTable(table t) =>
     table.cell(t, 4, 0, "<=20 %",  text_color=hD, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 0, "avg pts", text_color=hD, text_size=size.tiny, text_halign=text.align_right)
 
-    for b = 0 to 19
+    for b = 0 to 21
         n5 = array.get(cN, b)
         wr5  = n5 > 0 ? 100.0 * array.get(cWin, b) / n5 : 0.0
         mae5 = n5 > 0 ? array.get(cMae, b) / n5 : 0.0
@@ -2701,12 +2774,12 @@ f_drawCondTable(table t) =>
         table.cell(t, 4, b + 1, str.tostring(low5, "#.#"),  text_color=rowD, text_size=size.tiny, text_halign=text.align_right)
         table.cell(t, 5, b + 1, str.tostring(pts5, "#.#"),  text_color=wD,   text_size=size.tiny, text_halign=text.align_right)
 
-    table.cell(t, 0, 21, "n=" + str.tostring(seen) + " trades in this signal   ·   AQUA = n>=10, WR>=97%, heat<=20 on 80%+   ·   ORANGE n = too thin to read",
+    table.cell(t, 0, 23, "n=" + str.tostring(seen) + " trades in this signal   ·   AQUA = n>=10, WR>=97%, heat<=20 on 80%+   ·   ORANGE n = too thin to read",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showCond and strategy.closedtrades > 0
     if na(cdTbl)
-        cdTbl := table.new(position.bottom_left, 6, 22,
+        cdTbl := table.new(position.bottom_left, 6, 24,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
@@ -3256,6 +3329,13 @@ if barstate.islast and showLog
         log.warning("request.economic returned no NFP releases — the field code is wrong, so that option does nothing")
     else
         log.info("NFP days: heuristic {0}, economic {1}, agreed on {2}", str.tostring(xNfpApx), str.tostring(xNfpEco), str.tostring(xNfpBoth))
+    if fpOn
+        if fpYes == 0
+            log.error("footprint returned na on all {0} bars — Premium/Ultimate plan required, or no tick data for this symbol", str.tostring(fpNo))
+        else
+            log.info("footprint coverage: {0} bars with data, {1} without, from {2} to {3} — delta buckets describe THIS slice only",
+                      str.tostring(fpYes), str.tostring(fpNo),
+                      str.format("{0,date,yyyy-MM-dd}", fpFirstT), str.format("{0,date,yyyy-MM-dd}", fpLastT))
     if not ftmoGuards
         log.warning("FTMO guards OFF — net below is what the strategy makes with nobody enforcing the daily or total caps")
     if revM or revG or revH or revU or not lonUseC2
