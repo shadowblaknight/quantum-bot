@@ -270,6 +270,102 @@ fvgMaxAgeBars = input.int(48,     "FVG max age (bars)",             group=G_FILT
 slMinH1ATR    = input.float(0.30, "SL min (× H1 ATR)",             group=G_FILT, minval=0.1,  step=0.05)
 slMaxH1ATR    = input.float(3.00, "SL max (× H1 ATR)",             group=G_FILT, minval=1.0,  step=0.10)
 
+// ═══════════════════════════════════════════════════════════════════════
+// FTMO RULES AS BACKTEST CONSTRAINTS  (strategy.risk.*)
+// ═══════════════════════════════════════════════════════════════════════
+// Until now the daily-loss exposure was computed AFTER a run, by hand, from
+// a loss rate — "at 4% risk, two stops in one day is 8% and breaches the 5%
+// cap". That is an estimate about a sequence the backtest never actually
+// enforced.
+//
+// Pine enforces it natively. These two calls make the account rules a rule
+// of the RUN: the strategy stops trading for the day when the intraday loss
+// trips, and stops entirely when total drawdown trips. So the cost of a
+// circuit breaker can be measured BEFORE one is written into manage-trades,
+// which is the open item the sizing notes have carried since 22 Sep.
+//
+// DEFAULT OFF, and off means 100% — a threshold no run reaches — so every
+// recorded baseline reproduces byte-for-byte until the switch is thrown.
+// They are called unconditionally rather than inside `if` because these are
+// declarations, not actions: they register a rule with the engine once.
+//
+// READ IT AS: net WITH the guards is what the funded account would actually
+// have made. Net without them is what the strategy would make if nobody
+// enforced the rules. The gap is what the rules cost you.
+// ═══════════════════════════════════════════════════════════════════════
+// PINE LOGS  (log.info / log.warning / log.error)
+// ═══════════════════════════════════════════════════════════════════════
+// This file has spent weeks reimplementing a log panel out of table cells.
+// Pine has had one since v6. A log line is timestamped, scrollable, wraps to
+// any length and can be COPIED - none of which a table cell does. So tables
+// keep the things you scan at a glance, and anything you would want to read
+// in full or paste into a conversation goes here instead.
+//
+// Deliberately bounded: one summary block at the end of the run, plus one
+// line per LOSING trade. Logging every signal would flood the panel, and
+// Pine caps how many lines it keeps.
+G_LOG   = "Pine Logs"
+showLog = input.bool(false, "Write the run summary to Pine Logs", group=G_LOG,
+          tooltip="Opens under the Pine Editor's 'Pine Logs' tab. Writes the exit-mode comparison, the shadow accounting, the intrabar verdict and one line per losing trade.\n\nOFF by default because logs cost time on a three-year run and you rarely want them while sweeping a parameter.")
+
+G_FTMO     = "FTMO rules (backtest enforcement)"
+ftmoGuards = input.bool(false, "Enforce the account rules during the backtest", group=G_FTMO,
+             tooltip="OFF = the run ignores account rules entirely, which is how every recorded baseline was measured.\n\nON = the strategy stops for the DAY when the intraday loss hits the daily cap, and stops for GOOD when equity drawdown hits the total cap. That is what the funded account does to you, so it is what the backtest should do to the strategy.\n\nExpect NET TO FALL. That fall is not a worse strategy - it is the part of the old number the rules would never have let you keep.")
+ftmoDaily  = input.float(5.0,  "  Daily loss cap (% of equity)", group=G_FTMO, minval=0.5, maxval=100.0, step=0.5,
+             tooltip="FTMO measures this from each day's STARTING equity, resets daily, and counts floating P&L. At riskPct 4% one full stop is 4% of the account, so two stops in one day is 8% and breaches - this is the rule that actually binds, not the 10% total.")
+ftmoTotal  = input.float(10.0, "  Total drawdown cap (% of equity)", group=G_FTMO, minval=1.0, maxval=100.0, step=0.5,
+             tooltip="FTMO's total loss floor is STATIC - fixed in dollars on day one and it never trails your equity up - so every dollar of profit is permanent buffer. Pine's max_drawdown is measured from peak equity instead, which is STRICTER than FTMO. Treat a trip here as a warning, not a literal breach.")
+
+// 100 = a cap no run ever reaches, so OFF is genuinely inert.
+strategy.risk.max_intraday_loss(ftmoGuards ? ftmoDaily : 100.0, strategy.percent_of_equity)
+strategy.risk.max_drawdown(ftmoGuards ? ftmoTotal : 100.0, strategy.percent_of_equity)
+
+// ═══════════════════════════════════════════════════════════════════════
+// INTRABAR RESOLUTION  (request.security_lower_tf)
+// ═══════════════════════════════════════════════════════════════════════
+// THE FUDGE THIS REMOVES. Every comparison this file has produced carries one
+// assumption: when a single bar touches BOTH the stop and the target, the
+// STOP is taken. It is applied identically to every row so it cannot favour
+// one exit, but it is still a guess, made on a 15m bar, about a 7-pt target
+// and an 81-pt stop. On the trades where it fires it is the whole result.
+//
+// request.security_lower_tf returns an ARRAY holding one value per intrabar,
+// in time order. Walking that array says which level price reached FIRST
+// instead of assuming. That is not an estimate - it is the sequence.
+//
+// DEFAULT OFF for two honest reasons:
+//   · intrabar data is capped by TradingView and deep history may return an
+//     empty array, in which case the old assumption is used and the counter
+//     below tells you how often that happened
+//   · it is heavy, and turning it on changes historical numbers, so it wants
+//     its own re-baseline rather than being mixed into an unrelated A/B
+G_LTF  = "Intrabar resolution"
+ltfOn  = input.bool(false, "Resolve same-bar stop/target hits from intrabar data", group=G_LTF,
+         tooltip="When one bar touches the stop AND the target, this walks the lower-timeframe bars inside it and takes whichever came FIRST, instead of assuming the stop.\n\nOnly affects the exit-comparison table - the Strategy Tester has its own intrabar model and this cannot change it.\n\nThe table reports how many times the real sequence OVERTURNED the pessimistic assumption. A high count means every previous comparison understated the winning modes; a count near zero means the fudge was harmless and you can stop worrying about it.")
+ltfTF  = input.timeframe("1", "  Intrabar timeframe", group=G_LTF,
+         tooltip="1 minute inside a 15m bar gives 15 slices. Finer is more faithful and more expensive; TradingView caps how many intrabars a script may pull, and past the cap the array comes back empty and the old assumption is used.")
+
+// ═══════════════════════════════════════════════════════════════════════
+// NFP DAY — heuristic vs the real release calendar  (request.economic)
+// ═══════════════════════════════════════════════════════════════════════
+// `_isNFP` has always been "Friday, and day-of-month <= 7". That is a decent
+// approximation and it is wrong several times a year: BLS moves the release
+// for holidays, and a month starting on a Saturday puts the first Friday on
+// the 7th while the release is the 6th of the NEXT week.
+//
+// request.economic pulls the actual series. It does not hand you a "release
+// today" flag, so the release bar is detected as the bar the VALUE CHANGES.
+//
+// WHY THIS IS A SWITCH AND NOT A REPLACEMENT: the field code is not something
+// this file can prove. `ignore_invalid_symbol = true` makes a wrong code
+// return na rather than throwing, so a bad guess degrades to "never NFP"
+// silently. The comparison table therefore reports how many days each source
+// flagged and how often they AGREED. If the economic count is 0, the field
+// code is wrong - not the calendar.
+G_ECON = "NFP source"
+nfpSrc = input.string("Heuristic (first Friday)", "How to detect an NFP day", options=["Heuristic (first Friday)", "request.economic (US NFP)"], group=G_ECON,
+         tooltip="Only matters when orbNFPFilter is ON - which it is not, because NFP was measured DEAD as a filter on 2026-09-27. This exists so the loss autopsy's NFP column is honest, and so the two sources can be checked against each other.\n\nIf the economic row in the comparison table reports 0 days, the field code is wrong and this option is doing nothing.")
+
 // ─── HTF BIAS (H1 / H4 / D) ──────────────────────────────────────────
 f_htfBias(int emaLen, int atrLen) =>
     e = ta.ema(close, emaLen)
@@ -335,7 +431,15 @@ _adrQuiet      = _adrConsumed < 0.75
 _adrRemainTo75 = math.max(0.0, _atr14d * 0.75 - (_todayHigh - _todayLow))
 
 // H/M research gate helpers (placed here — needs _adrConsumed defined first)
-_isNFP      = dayofweek == dayofweek.friday and dayofmonth <= 7
+// NFP day. Two sources, switchable, because the heuristic is an approximation
+// the file has never been able to check. _isNFPapx is the original rule;
+// _isNFPeco marks the bar the official series CHANGES, which is the release.
+// A wrong field code returns na and simply never fires - the comparison table
+// counts both so a silent zero is visible rather than assumed correct.
+_nfpEco     = request.economic("US", "NFP", ignore_invalid_symbol = true)
+_isNFPapx   = dayofweek == dayofweek.friday and dayofmonth <= 7
+_isNFPeco   = not na(_nfpEco) and ta.change(_nfpEco) != 0
+_isNFP      = nfpSrc == "request.economic (US NFP)" ? _isNFPeco : _isNFPapx
 _mnth       = month(time)
 _orbSeasonL = not orbSeasonFilt or _mnth != 9   // Sep blocks longs (90% bearish)
 _orbSeasonS = not orbSeasonFilt or _mnth != 1   // Jan blocks shorts (80% bullish)
@@ -1788,20 +1892,91 @@ G_XCMP   = "Exit comparison"
 showXcmp = input.bool(true, "Show exit-mode comparison (every signal, no slot limit)", group=G_XCMP,
            tooltip="Resolves TP1, TP2, TP3, the ratchet and the final-tp BE cascade over the SAME list of signals, ignoring the position slot entirely. Places no orders and changes no trade in the Strategy Tester.\n\nUse it to RANK the exits. Use the Tester for what the account would actually have made, because the slot is real and a longer hold genuinely costs trades live.\n\nThe ratchet row uses whatever trailArm / trailKeep are set to and prints them in its own label — set 1.00 / 0.85 to match the account.")
 
-// One row per live shadow trade:
-//  0 lvl · 1 entry · 2 dir · 3 step · 4 initial stop · 5 signal (0=M 1=H 2=G 3=U 4=V)
-//  6 filled · 7 reach high-water · 8 ratchet stop · 9 BE@TP1 stop · 10 fixed progress
-//  11 BE@TP2 stop
-// na in a stop column = that mode has already resolved for this trade.
-var matrix<float> xM = matrix.new<float>(0, 12, 0.0)
+// ─── INTRABAR FEED ───────────────────────────────────────────────────
+// Each call returns an ARRAY holding one value per intrabar, in time order.
+// Called inside a conditional, which v6 permits now that request.*() accepts
+// series arguments - so with the switch OFF the data is never pulled and the
+// script costs nothing. On v5 this had to run on every bar regardless.
+array<float> ltfHi = na
+array<float> ltfLo = na
+if ltfOn
+    ltfHi := request.security_lower_tf(syminfo.tickerid, ltfTF, high)
+    ltfLo := request.security_lower_tf(syminfo.tickerid, ltfTF, low)
+
+// Which level price reached FIRST inside this bar.
+//    1 = target first
+//   -1 = stop first
+//    0 = cannot tell - no intrabar data, or both landed in the SAME intrabar.
+//        The caller keeps its own pessimistic assumption, so 0 reproduces the
+//        old behaviour exactly.
+f_ltfFirst(float dir, float stopPx, float tgtPx) =>
+    int out = 0
+    int n = na(ltfHi) ? 0 : array.size(ltfHi)
+    if n > 0
+        for k = 0 to n - 1
+            hh = array.get(ltfHi, k)
+            ll = array.get(ltfLo, k)
+            hs = dir == 1 ? ll <= stopPx : hh >= stopPx
+            ht = dir == 1 ? hh >= tgtPx  : ll <= tgtPx
+            if hs and ht
+                break                      // same intrabar - still ambiguous
+            if hs
+                out := -1
+                break
+            if ht
+                out := 1
+                break
+    out
+
+// ─── NFP SOURCE AGREEMENT ────────────────────────────────────────────
+// Latched per DAY, because the economic series changes on one bar while the
+// heuristic is true for every bar of that day. Counting raw bars would make
+// the two look wildly different for a reason that is purely mechanical.
+var int  xNfpApx  = 0
+var int  xNfpEco  = 0
+var int  xNfpBoth = 0
+var bool _nfpApxD = false
+var bool _nfpEcoD = false
+if _newDay
+    xNfpApx  := xNfpApx  + (_nfpApxD ? 1 : 0)
+    xNfpEco  := xNfpEco  + (_nfpEcoD ? 1 : 0)
+    xNfpBoth := xNfpBoth + (_nfpApxD and _nfpEcoD ? 1 : 0)
+    _nfpApxD := false
+    _nfpEcoD := false
+_nfpApxD := _nfpApxD or _isNFPapx
+_nfpEcoD := _nfpEcoD or _isNFPeco
+
+// ─── ONE SHADOW TRADE ────────────────────────────────────────────────
+// Was twelve float columns of a matrix, which worked but put every field one
+// off-by-one away from silently meaning something else. A named type cannot
+// drift: `sh.sl0` is the initial stop or it is a compile error.
+//
+// na in a stop field = that mode has already resolved for this trade.
+type Shadow
+    float lvl       // ORB level the rungs measure from
+    float ent       // entry (the resting limit, or the close on a market fill)
+    float dir       // +1 long, -1 short
+    float stp       // one rung = range x orbTPMult
+    float sl0       // initial stop
+    int   sig       // 0=M 1=H 2=G 3=U 4=V
+    bool  filled    // false = limit still resting
+    float reach     // favourable high-water, in rungs
+    float rsl       // ratchet stop
+    float fsl1      // final-tp stop, BE armed at TP1  (what the account runs)
+    float fsl2      // final-tp stop, BE armed at TP2
+    int   fix       // how many of TP1/TP2/TP3 have banked (0-3)
+
+var array<Shadow> xS = array.new<Shadow>()
 var array<int>   xN  = array.new<int>(6, 0)      // resolved trades per mode
 var array<int>   xW  = array.new<int>(6, 0)      // wins per mode
 var array<int>   xBE = array.new<int>(6, 0)      // BREAKEVEN exits, neither win nor loss
 var array<float> xGP = array.new<float>(6, 0.0)  // gross profit, points
 var array<float> xGL = array.new<float>(6, 0.0)  // gross loss, points
-var int xDone = 0                                // shadows fully resolved on every mode
-var int xSig = 0                                 // signals captured
-var int xExp = 0                                 // limits that expired unfilled
+var int xDone    = 0    // shadows fully resolved on every mode
+var int xSig     = 0    // signals captured
+var int xExp     = 0    // limits that expired unfilled
+var int xLtfSeen = 0    // same-bar collisions the intrabar feed could rule on
+var int xLtfFlip = 0    //   ...of those, how many the STOP assumption got wrong
 
 // A BE exit lands within a tick of the entry. Wider than a tick and it is a
 // real outcome; inside it, the trade neither won nor lost and belongs in
@@ -1809,47 +1984,58 @@ var int xExp = 0                                 // limits that expired unfilled
 // on a mode whose gross loss was identical to TP1's.
 xEps = syminfo.mintick * 5
 
-if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
-    for i = matrix.rows(xM) - 1 to 0
-        xd = matrix.get(xM, i, 2)
-        xe = matrix.get(xM, i, 1)
-        if matrix.get(xM, i, 6) < 0.5
+if showXcmp and barstate.isconfirmed and array.size(xS) > 0
+    for i = array.size(xS) - 1 to 0
+        sh = array.get(xS, i)
+        xd = sh.dir
+        xe = sh.ent
+        if not sh.filled
             if xd == 1 ? low <= xe : high >= xe
-                matrix.set(xM, i, 6, 1.0)
+                sh.filled := true
             else
-                xg = matrix.get(xM, i, 5)
-                if not (xg == 0 ? in_frb_trade : xg == 1 ? not _newDay : xg == 2 ? in_lorb_trade : xg == 3 ? in_syd_trade : in_tok_trade)
+                if not (sh.sig == 0 ? in_frb_trade : sh.sig == 1 ? not _newDay : sh.sig == 2 ? in_lorb_trade : sh.sig == 3 ? in_syd_trade : in_tok_trade)
                     xExp := xExp + 1
-                    matrix.remove_row(xM, i)
+                    array.remove(xS, i)
                 continue
-        xl  = matrix.get(xM, i, 0)
-        xst = matrix.get(xM, i, 3)
-        xs0 = matrix.get(xM, i, 4)
-        // ── RESOLVE, against the stops this bar OPENED with ─────────────
+        xl  = sh.lvl
+        xst = sh.stp
+        xs0 = sh.sl0
+        hitS = xd == 1 ? low <= xs0 : high >= xs0
+        // ── FIXED RUNGS ─────────────────────────────────────────────
         // TP1/TP2/TP3 share one stop and differ only in target, and those
-        // targets are ordered, so a single progress counter covers all
-        // three: 0-3 = how many have already banked.
-        fx = int(matrix.get(xM, i, 10))
-        if fx < 3
-            if xd == 1 ? low <= xs0 : high >= xs0
-                for m = fx to 2
-                    array.set(xN,  m, array.get(xN,  m) + 1)
-                    array.set(xGL, m, array.get(xGL, m) + math.abs(xe - xs0))
-                fx := 3
-            else
-                for m = fx to 2
-                    tg = xl + xd * xst * (m + 1)
-                    if xd == 1 ? high >= tg : low <= tg
-                        array.set(xN,  m, array.get(xN,  m) + 1)
-                        array.set(xW,  m, array.get(xW,  m) + 1)
-                        array.set(xGP, m, array.get(xGP, m) + math.abs(tg - xe))
-                        fx := m + 1
+        // targets are ordered, so a single counter covers all three.
+        if sh.fix < 3
+            fx = sh.fix
+            for m = fx to 2
+                tg = xl + xd * xst * (m + 1)
+                hitT = xd == 1 ? high >= tg : low <= tg
+                if hitT and hitS
+                    // Both in one bar. Ask the intrabar feed which came first
+                    // instead of assuming; 0 keeps the old pessimistic answer.
+                    o = f_ltfFirst(xd, xs0, tg)
+                    if o != 0
+                        xLtfSeen := xLtfSeen + 1
+                    if o == 1
+                        xLtfFlip := xLtfFlip + 1
                     else
-                        break
-            matrix.set(xM, i, 10, fx)
-        xr = matrix.get(xM, i, 8)
-        if not na(xr) and (xd == 1 ? low <= xr : high >= xr)
-            pr = xd * (xr - xe)
+                        hitT := false
+                if hitT
+                    array.set(xN,  m, array.get(xN,  m) + 1)
+                    array.set(xW,  m, array.get(xW,  m) + 1)
+                    array.set(xGP, m, array.get(xGP, m) + math.abs(tg - xe))
+                    fx := m + 1
+                else
+                    if hitS
+                        for z = m to 2
+                            array.set(xN,  z, array.get(xN,  z) + 1)
+                            array.set(xGL, z, array.get(xGL, z) + math.abs(xe - xs0))
+                        fx := 3
+                    break
+            sh.fix := fx
+        // ── RATCHET ─────────────────────────────────────────────────
+        // Stop only, no target, so there is never a same-bar collision.
+        if not na(sh.rsl) and (xd == 1 ? low <= sh.rsl : high >= sh.rsl)
+            pr = xd * (sh.rsl - xe)
             array.set(xN, 3, array.get(xN, 3) + 1)
             if math.abs(pr) < xEps
                 array.set(xBE, 3, array.get(xBE, 3) + 1)
@@ -1858,22 +2044,30 @@ if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
                 array.set(xGP, 3, array.get(xGP, 3) + pr)
             else
                 array.set(xGL, 3, array.get(xGL, 3) - pr)
-            matrix.set(xM, i, 8, na)
-            xr := na
-        // ── FINAL-TP, BOTH BE RUNGS AT ONCE ─────────────────────────────
-        // fm 0 = stop arms at TP1, which is what the account runs today.
-        // fm 1 = stop arms at TP2, so it only engages once the trade has
-        //        PROVEN continuation rather than merely tagged TP1.
-        // There is no third row for "BE off" because it is already on the
-        // board: a stop that never moves, riding to TP3, IS "TP3 · 3R".
+            sh.rsl := na
+        // ── FINAL-TP, BOTH BE RUNGS ─────────────────────────────────
+        // fm 0 arms breakeven at TP1, which is what the account ran until
+        // 2026-09-30. fm 1 arms at TP2, so it only engages once the trade has
+        // PROVEN continuation rather than merely tagged TP1. There is no third
+        // row for "BE off" because that is already on the board: a stop that
+        // never moves, riding to TP3, IS the TP3 row.
+        ft3 = xl + xd * xst * 3.0
         for fm = 0 to 1
-            fcR = fm == 0 ? 9 : 11
-            fmi = fm == 0 ? 4 : 5
-            fst = matrix.get(xM, i, fcR)
+            fst = fm == 0 ? sh.fsl1 : sh.fsl2
             if not na(fst)
-                ft3 = xl + xd * xst * 3.0
+                fmi = fm == 0 ? 4 : 5
                 fhs = xd == 1 ? low <= fst : high >= fst
-                if fhs or (xd == 1 ? high >= ft3 : low <= ft3)
+                fht = xd == 1 ? high >= ft3 : low <= ft3
+                if fhs and fht
+                    o2 = f_ltfFirst(xd, fst, ft3)
+                    if o2 != 0
+                        xLtfSeen := xLtfSeen + 1
+                    if o2 == 1
+                        xLtfFlip := xLtfFlip + 1
+                        fhs := false
+                    else
+                        fht := false
+                if fhs or fht
                     fpl = xd * ((fhs ? fst : ft3) - xe)
                     array.set(xN, fmi, array.get(xN, fmi) + 1)
                     if math.abs(fpl) < xEps
@@ -1883,32 +2077,37 @@ if showXcmp and barstate.isconfirmed and matrix.rows(xM) > 0
                         array.set(xGP, fmi, array.get(xGP, fmi) + fpl)
                     else
                         array.set(xGL, fmi, array.get(xGL, fmi) - fpl)
-                    matrix.set(xM, i, fcR, na)
+                    if fm == 0
+                        sh.fsl1 := na
+                    else
+                        sh.fsl2 := na
         // ── ADVANCE the moving stops. Live from the NEXT bar, never this
         // one, which is exactly why this sits AFTER the resolution above.
-        if not na(xr) or not na(matrix.get(xM, i, 9)) or not na(matrix.get(xM, i, 11))
-            rc = math.max(matrix.get(xM, i, 7), xd == 1 ? (high - xl) / xst : (xl - low) / xst)
-            matrix.set(xM, i, 7, rc)
+        if not na(sh.rsl) or not na(sh.fsl1) or not na(sh.fsl2)
+            rc = math.max(sh.reach, xd == 1 ? (high - xl) / xst : (xl - low) / xst)
+            sh.reach := rc
             bf = math.min(math.max(math.abs(xe - xs0) * 0.25, 0.2), 0.8)
-            if not na(xr) and rc >= trailArm
+            if not na(sh.rsl) and rc >= trailArm
                 cd = xl + xd * (rc * trailKeep) * xst
-                if xd == 1 ? (cd <= close - bf and cd > xr) : (cd >= close + bf and cd < xr)
-                    matrix.set(xM, i, 8, cd)
-            // Rungs cleared so far. The cascade is the live rule generalised:
-            // clearing the ARM rung moves the stop to the entry, and every
-            // rung above it moves the stop one rung further down the ladder.
+                if xd == 1 ? (cd <= close - bf and cd > sh.rsl) : (cd >= close + bf and cd < sh.rsl)
+                    sh.rsl := cd
+            // The cascade is the live rule generalised: clearing the ARM rung
+            // moves the stop to the entry, and every rung above it moves the
+            // stop one rung further down the ladder.
             brg = math.min(math.floor(rc), 3)
             for fm = 0 to 1
-                fcA = fm == 0 ? 9 : 11
-                fa  = fm == 0 ? 1 : 2
-                fsv = matrix.get(xM, i, fcA)
+                fsv = fm == 0 ? sh.fsl1 : sh.fsl2
                 if not na(fsv)
+                    fa  = fm == 0 ? 1 : 2
                     fcd = brg > fa ? xl + xd * xst * (brg - fa) : brg >= fa ? xe : na
                     if not na(fcd) and (xd == 1 ? (fcd <= close - bf and fcd > fsv) : (fcd >= close + bf and fcd < fsv))
-                        matrix.set(xM, i, fcA, fcd)
-        if matrix.get(xM, i, 10) >= 3 and na(matrix.get(xM, i, 8)) and na(matrix.get(xM, i, 9)) and na(matrix.get(xM, i, 11))
+                        if fm == 0
+                            sh.fsl1 := fcd
+                        else
+                            sh.fsl2 := fcd
+        if sh.fix >= 3 and na(sh.rsl) and na(sh.fsl1) and na(sh.fsl2)
             xDone := xDone + 1
-            matrix.remove_row(xM, i)
+            array.remove(xS, i)
 
 // SIGNAL COUNTER - setups that FIRED vs setups that were TAKEN
 // -------------------------------------------------------------------
@@ -1983,7 +2182,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
                 xlz = okML ? frb_hi : frb_lo
                 xsz = xlz - xdz * f_c2SL(rM)
                 xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rM * _c2Depth : close
-                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rM * orbTPMult, xsz, 0.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0, xsz))
+                array.push(xS, Shadow.new(xlz, xez, xdz, rM * orbTPMult, xsz, 0, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
 if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
@@ -1999,7 +2198,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
                 xlz = okHL ? nyorb_hi : nyorb_lo
                 xsz = xlz - xdz * f_c2SL(rH)
                 xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rH * _c2Depth : close
-                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rH * orbTPMult, xsz, 1.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0, xsz))
+                array.push(xS, Shadow.new(xlz, xez, xdz, rH * orbTPMult, xsz, 1, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
 if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgDone and not na(lorb_hi) and not na(lorb_lo) and (not lonADRGuard or _adrConsumed[1] < 0.90) and _testWinOk and _hm_dow_ok
@@ -2015,7 +2214,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgD
                 xlz = okGL ? lorb_hi : lorb_lo
                 xsz = xlz - xdz * f_c2SL(rG)
                 xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rG * _c2Depth : close
-                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rG * orbTPMult, xsz, 2.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0, xsz))
+                array.push(xS, Shadow.new(xlz, xez, xdz, rG * orbTPMult, xsz, 2, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
@@ -2031,7 +2230,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                 xlz = okUL ? syd_hi : syd_lo
                 xsz = xlz - xdz * f_c2SL(rU2)
                 xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rU2 * _c2Depth : close
-                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rU2 * orbTPMult, xsz, 3.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0, xsz))
+                array.push(xS, Shadow.new(xlz, xez, xdz, rU2 * orbTPMult, xsz, 3, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
 if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locked and not svDone and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok
@@ -2047,7 +2246,7 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
                 xlz = okVL ? tok_hi : tok_lo
                 xsz = xlz - xdz * f_c2SL(rV2)
                 xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rV2 * _c2Depth : close
-                matrix.add_row(xM, matrix.rows(xM), array.from(xlz, xez, xdz, rV2 * orbTPMult, xsz, 4.0, c2EntryMode == "Retest (limit)" ? 0.0 : 1.0, 0.0, xsz, xsz, 0.0, xsz))
+                array.push(xS, Shadow.new(xlz, xez, xdz, rV2 * orbTPMult, xsz, 4, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
 // TAKEN counters - the rising edge of each real done-flag IS the moment an
@@ -2749,6 +2948,14 @@ f_drawLossTable(table t) =>
                         table.cell(t, 9, rw, agrL < 0 ? "?" : agrL == 1 ? "agree" : "OPPOSED", text_color=agrL == 0 ? color.new(color.orange, 0) : rwC, text_size=size.tiny)
                         table.cell(t, 10, rw, str.tostring(maeL, "#.#"), text_color=rwC, text_size=size.tiny)
                         table.cell(t, 11, rw, str.tostring(math.abs(pL), "#.#"), text_color=color.new(color.red, 0), text_size=size.tiny)
+                        if showLog
+                            log.warning("LOSS {0} | {1} {2} | {3} | ORB rng {4} | ADR {5}% | brk {6} | MAE {7} | -{8} pts",
+                                        str.tostring(rw), sigNm, dL == 1 ? "LONG" : "SHORT",
+                                        str.format("{0,date,yyyy-MM-dd}", tL),
+                                        na(rngL) ? "?" : str.tostring(rngL, "#.#"),
+                                        na(adrL) ? "?" : str.tostring(adrL * 100, "#"),
+                                        na(strL) ? "?" : str.tostring(strL, "0.##"),
+                                        str.tostring(maeL, "#.#"), str.tostring(math.abs(pL), "#.#"))
 
     bs = nShown + 2
     okC = nUnmatched == 0 and nFound > 0 ? color.new(color.lime, 0) : color.new(color.orange, 0)
@@ -2987,7 +3194,7 @@ f_drawXcmpTable(table t) =>
         table.cell(t, 7, q + 1, nq > 0 ? str.tostring(nvq / nq, "#.#") : "-", text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
         table.cell(t, 8, q + 1, glq > 0 ? str.tostring(gpq / glq, "#.###") : (gpq > 0 ? "no loss" : "-"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
 
-    bal = xSig - xDone - xExp - matrix.rows(xM)
+    bal = xSig - xDone - xExp - array.size(xS)
     table.cell(t, 0, 7, "signals", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 7, str.tostring(xSig), text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 2, 7, "filled", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
@@ -2995,8 +3202,19 @@ f_drawXcmpTable(table t) =>
     table.cell(t, 4, 7, "never retested", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 7, str.tostring(xExp), text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 6, 7, "open", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 7, 7, str.tostring(matrix.rows(xM)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 7, str.tostring(array.size(xS)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 8, 7, bal == 0 ? "balances" : "LOST " + str.tostring(bal), text_color=bal == 0 ? color.new(color.lime, 0) : color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_right)
+
+    // What the two new data sources actually did on this run.
+    table.cell(t, 0, 10, "intrabar", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 10, ltfOn ? str.tostring(xLtfSeen) : "off", text_color=ltfOn ? color.new(color.aqua, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 10, "overturned", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 10, str.tostring(xLtfFlip), text_color=xLtfFlip > 0 ? color.new(color.orange, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 10, "NFP apx/eco", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 10, str.tostring(xNfpApx) + " / " + str.tostring(xNfpEco), text_color=xNfpEco == 0 ? color.new(color.orange, 0) : wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 10, "agree", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 10, str.tostring(xNfpBoth), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 8, 10, ftmoGuards ? "FTMO ON" : "FTMO off", text_color=ftmoGuards ? color.new(color.lime, 0) : gX, text_size=size.tiny, text_halign=text.align_right)
 
     // The one way this table can quietly lie: it always models the plain
     // un-reversed C2 trade, so a reverse toggle or legacy-G makes the rows
@@ -3014,6 +3232,34 @@ if barstate.islast and showXcmp
                   border_color=color.new(color.gray, 40), border_width=1,
                   frame_color=color.new(#D4A017, 40), frame_width=2)
     f_drawXcmpTable(xcTbl)
+
+if barstate.islast and showLog
+    log.info("QB GOLD — exit comparison over {0} signals, {1} filled, {2} never retested",
+              str.tostring(xSig), str.tostring(xDone), str.tostring(xExp))
+    for q = 0 to 5
+        nq  = array.get(xN, q)
+        wq  = array.get(xW, q)
+        beq = array.get(xBE, q)
+        lq  = nq - wq - beq
+        nvq = array.get(xGP, q) - array.get(xGL, q)
+        log.info("  {0} | N {1} | W {2} | BE {3} | L {4} | NET {5} pts | PF {6}",
+                  array.get(_xcLbl, q), str.tostring(nq), str.tostring(wq), str.tostring(beq), str.tostring(lq),
+                  str.tostring(nvq, "#"), array.get(xGL, q) > 0 ? str.tostring(array.get(xGP, q) / array.get(xGL, q), "#.###") : "no loss")
+    bal2 = xSig - xDone - xExp - array.size(xS)
+    if bal2 != 0
+        log.error("shadow accounting does not balance — {0} trades unaccounted for", str.tostring(bal2))
+    if ltfOn
+        log.info("intrabar: {0} same-bar collisions resolved, {1} overturned the stop-first assumption", str.tostring(xLtfSeen), str.tostring(xLtfFlip))
+    else
+        log.warning("intrabar resolution OFF — every same-bar stop/target collision was assumed to be the STOP")
+    if xNfpEco == 0
+        log.warning("request.economic returned no NFP releases — the field code is wrong, so that option does nothing")
+    else
+        log.info("NFP days: heuristic {0}, economic {1}, agreed on {2}", str.tostring(xNfpApx), str.tostring(xNfpEco), str.tostring(xNfpBoth))
+    if not ftmoGuards
+        log.warning("FTMO guards OFF — net below is what the strategy makes with nobody enforcing the daily or total caps")
+    if revM or revG or revH or revU or not lonUseC2
+        log.error("a reverse toggle or legacy-G is ON — the comparison table models the un-reversed C2 trade and is lying")
 
 // ─── SESSION BACKGROUNDS ──────────────────────────────────────────────
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
