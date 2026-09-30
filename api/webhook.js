@@ -863,8 +863,27 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     // market, at any size. So the honest budget is the profit room itself.
     const _drift = isLong ? (_cur - rEntry) : (rEntry - _cur);
     _dbgDriftPips = +(_drift / pipSz).toFixed(1);
-    const _room = (finalTP1 != null && isFinite(finalTP1))
-      ? Math.abs(finalTP1 - rEntry) : null;
+    // EXIT-MODE AWARE BUDGET. This read finalTP1 unconditionally, and finalTP1
+    // always arrives on a Pine alert, so the TP1 branch ALWAYS won and every exit
+    // mode was policed against TP1's ~8 points of room:
+    //   tp1       correct. The position closes at TP1, so once price is past it
+    //             there is genuinely no trade left at any size.
+    //   final-tp  3x too tight. That position rides to TP3, ~24 points of room.
+    //   ratchet   wrong in kind. There is NO fixed target. SL and the rungs are
+    //             both anchored to the ORB LEVEL, so a late entry widens the stop
+    //             (smaller lot, IDENTICAL dollar risk) and leaves reach untouched.
+    //             The trade stays viable; only R degrades - which is exactly what
+    //             the 25%-of-stop fallback below already prices. That fallback was
+    //             unreachable dead code until now.
+    //
+    // Live evidence, 2026-09-30: a gold SHORT skipped at drift 133.4 pips against
+    // an 81-pip TP1 budget. Under the stop-based budget (202 pips) it is taken,
+    // and in ratchet mode it was a perfectly good trade.
+    const _exitTgt = _exitMode === 'tp1'      ? finalTP1
+                   : _exitMode === 'final-tp' ? (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1))
+                   : null;   // ratchet: uncapped, fall through to the stop-based budget
+    const _room = (_exitTgt != null && isFinite(_exitTgt))
+      ? Math.abs(_exitTgt - rEntry) : null;
     const _budget = _room != null
       ? Math.max(_room, pipSz * 5)
       : Math.max(Math.abs(rEntry - rSL) * 0.25, pipSz * 10);
@@ -873,15 +892,20 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       await logActivity({
         type: 'placement-skipped', asset: assetId, template: p.template,
         direction: p.direction, reason: 'ran-past-target',
-        signalEntry: rEntry, marketPrice: _cur,
+        signalEntry: rEntry, marketPrice: _cur, exitMode: _exitMode,
         driftPips: _dbgDriftPips, roomPips: _room != null ? +(_room / pipSz).toFixed(1) : null,
-        canLimit: _canLimit,
+        budgetPips: +(_budget / pipSz).toFixed(1), canLimit: _canLimit,
       });
+      // Name the constraint that actually fired. Saying "TP1" in ratchet mode
+      // would describe a target the position does not have.
+      const _skipWhy = _room != null
+        ? (_exitMode === 'tp1' ? 'TP1' : 'TP3') + ' is already behind'
+        : 'that is past 25% of the stop';
       try {
         await sendOnce(`webhook-ranpast:${dedupeKey}`,
           `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
           `Template: ${p.template}\nDirection: ${p.direction}\n` +
-          `Price ran ${_dbgDriftPips} pips past entry \u2014 TP1 is already behind. Not chasing.`);
+          `Price ran ${_dbgDriftPips} pips past entry \u2014 ${_skipWhy}. Not chasing.`);
       } catch (_) {}
       return;
     }
