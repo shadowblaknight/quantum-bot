@@ -777,6 +777,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   let entryType = 'retest';
   let useMarket = false;
   let _dbgProbed = null, _dbgProbeOk = false, _dbgCanLimit = null, _dbgDriftPips = null;
+  let _dbgProbeSrc = null;
 
   if (_pStyle === 'immediate') {
     // Pine explicitly flagged this as an immediate fill -- send MARKET unconditionally.
@@ -813,9 +814,40 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       for (let _att = 0; _att < 2 && _cur == null; _att++) {
         const _cr   = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
         const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
-        if (_last && isFinite(_last.close)) { _cur = _last.close; _bar = _last; }
+        if (_last && isFinite(_last.close)) { _cur = _last.close; _bar = _last; _dbgProbeSrc = 'candles'; }
       }
-    } catch (_) { /* _cur stays null -> skipped below, never a blind limit */ }
+    } catch (_) { /* fall through to the broker quote below */ }
+
+    // FALLBACK: the BROKER'S OWN LIVE QUOTE.
+    //
+    // The probe above asks candle-source for 5m history, which on MetaAPI is a
+    // paginated REST call behind a concurrency semaphore, given 1200ms twice.
+    // When it misses, the signal was being dropped outright - the code comment
+    // below records 4 of 17 gold routings reaching that path, and 1 Oct 2026 is
+    // the latest. A quarter of signals thrown away for want of one number.
+    //
+    // fetchPrice is a SINGLE lightweight call to the broker's current-price
+    // endpoint, already imported at the top of this file and never used here.
+    // It is also the most authoritative price available: it comes from the same
+    // account that is about to receive the order, so it is exactly the price the
+    // limit will be judged against.
+    //
+    // Correct side of the spread, not the mid: a LONG buy-limit must rest below
+    // the ASK, a SHORT sell-limit above the BID. Mid flatters both by half a
+    // spread. Falls back to mid only if one side is missing.
+    //
+    // THIS CAN ONLY TURN A SKIP INTO A PLACEMENT. It never runs when the candle
+    // probe succeeded, so no signal that is placed today changes behaviour.
+    if (_cur == null) {
+      try {
+        const _q = await withTimeout(fetchPrice(assetId), 2500, null);
+        if (_q && !_q.error) {
+          const _side = isLong ? _q.ask : _q.bid;
+          const _px   = isFinite(_side) ? _side : (isFinite(_q.price) ? _q.price : null);
+          if (_px != null && isFinite(_px) && _px > 0) { _cur = _px; _dbgProbeSrc = 'broker-quote'; }
+        }
+      } catch (_) { /* _cur stays null -> skipped below, never a blind limit */ }
+    }
 
     // NO PRICE = NO ORDER. An order that cannot fill still consumes the
     // one-position-per-asset slot, so guessing wrong costs the NEXT signal too.
@@ -824,7 +856,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       await logActivity({
         type: 'placement-skipped', asset: assetId, template: p.template,
         direction: p.direction, reason: 'price-probe-failed',
-        signalEntry: rEntry, marketPrice: null,
+        signalEntry: rEntry, marketPrice: null, probeSrc: null,
       });
       try {
         await sendOnce(`webhook-noprobe:${dedupeKey}`,
@@ -1014,7 +1046,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     await logActivity({
       type: 'entry-routing', asset: assetId, template: p.template, direction: p.direction,
       pineActualStyle: _pStyle || null, signalEntry: rEntry, routingEntry,
-      marketPrice: _dbgProbed, probeOk: _dbgProbeOk,
+      marketPrice: _dbgProbed, probeOk: _dbgProbeOk, probeSrc: _dbgProbeSrc,
       canLimit: _dbgCanLimit, driftPips: _dbgDriftPips,
       decided: useMarket ? 'immediate(market)' : 'retest(limit)',
     });
