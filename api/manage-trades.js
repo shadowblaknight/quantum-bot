@@ -27,7 +27,7 @@ const { resolveSymbol, resolveAsset } = require('./symbol-resolver');
 const { fetchPositions, fetchCandles, refreshBalanceCache } = require('./broker');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
-const { addDailyPnL } = require('./rules-store');   // v1.3: NEW import
+const { addDailyPnL, logActivity } = require('./rules-store');   // v1.3: NEW import
 const goalHandler = require('./jarvis-goal');
 const addGoalPnL  = goalHandler.addGoalPnL;
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
@@ -315,12 +315,49 @@ async function managePosition(position) {
   }
 
   if (matchedPending && matchedPending.status === 'placed') {
+    // TIME TO FILL — the only thing that separates a live retest from a stale one.
+    //
+    // A limit that fills in MINUTES is a break-and-retest: the level is still the
+    // level and the setup is intact. One that fills HOURS later is an order resting
+    // against a level that stopped being the opening range long ago. Distance from
+    // price cannot tell those apart; only the clock can.
+    //
+    // M, G and U are already bounded by their order windows (210 / 150 / 90 min),
+    // so they physically cannot go stale. H is not: nyOrderMins = 0 means its limit
+    // rests until the daily roll, up to ~7 hours. H is therefore the only signal
+    // where a stale fill is possible, and this turns that from an argument into a
+    // measurable distribution.
+    //
+    // Market fills land here too, with waitSec ~0 — which is what makes the
+    // market-vs-limit split readable from the same field.
+    const _placedAt = matchedPending.createdAt || null;
+    const _waitSec  = _placedAt ? Math.max(0, Math.round((Date.now() - _placedAt) / 1000)) : null;
+    const _planned  = typeof matchedPending.plannedEntry === 'number' ? matchedPending.plannedEntry : null;
+    const _fillDelta = (_planned != null && typeof position.openPrice === 'number')
+      ? +(position.openPrice - _planned).toFixed(5) : null;
     await updatePendingSetup(asset, matchedPending.id, {
       status: 'filled',
       filledAt: Date.now(),
       actualEntry: position.openPrice,
       positionId: position.id,
+      waitSec: _waitSec,
     });
+    // Logging only — never let a telemetry failure interfere with managing a
+    // position that is now open and carrying real risk.
+    try {
+      await logActivity({
+        type: 'order-filled', asset,
+        template: matchedPending.setup ? matchedPending.setup.template : null,
+        direction, comment: matchedPending.comment || null,
+        execKind: matchedPending.execKind || null,
+        entryType: matchedPending.entryType || null,
+        waitSec: _waitSec,
+        waitMin: _waitSec != null ? +(_waitSec / 60).toFixed(1) : null,
+        plannedEntry: _planned, actualEntry: position.openPrice,
+        fillDelta: _fillDelta,
+        positionId: position.id,
+      });
+    } catch (_) {}
     await pushCommentary(asset, 'fill',
       `Order filled: ${direction} ${position.volume} lot @ ${position.openPrice.toFixed(position.openPrice > 100 ? 2 : 5)}`);
   }
