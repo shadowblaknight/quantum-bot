@@ -88,6 +88,23 @@ sgeBreakSydHi = input.bool(false, "W LONG)  Require close above the Sydney sessi
                 tooltip="The direct analogue of M requiring the Asian extreme and H requiring the London extreme. For a 01:00 open the prior session is Sydney, 22:00 to 01:00. This is the filter family that blocked every setup on 8 and 9 Oct, and that is the point: a break of an 8-point opening range that cannot clear the previous session is a break going nowhere.")
 sgeBreakSydLo = input.bool(false, "W SHORT) Require close below the Sydney session LOW", group=G_SGE,
                 tooltip="Symmetric to the LONG filter above.")
+// PREVIOUS-SESSION filters. W fires at 01:00, so London and NY are YESTERDAY's
+// sessions - they finished 11 and 4 hours earlier and sit on the far side of the
+// broker daily roll. The levels they left behind are the liquidity the Asian
+// session is trading into, which is exactly what the H and M filters exploit in
+// their own sessions. These ask W to clear them before it trades.
+sgeBreakNyHi  = input.bool(false, "W LONG)  Require close above the previous NY session HIGH", group=G_SGE,
+                tooltip="NY ran 14:00-21:00 UTC yesterday and closed about four hours before the SGE open. Its high is the nearest major pool of resting sell orders above W's range. Asking the break to clear it is the same demand H makes of the London extreme.")
+sgeBreakNyLo  = input.bool(false, "W SHORT) Require close below the previous NY session LOW", group=G_SGE,
+                tooltip="Symmetric to the LONG filter above.")
+sgeBreakLonHi = input.bool(false, "W LONG)  Require close above the previous LONDON session HIGH", group=G_SGE,
+                tooltip="London ran 08:00-14:00 UTC yesterday. It is the deepest-liquidity session on gold and the LBMA fixes happen inside it, so its extremes are the levels the physical market itself transacted around. A W break that clears yesterday's London high has taken out the level that actually mattered, not just an overnight wick.")
+sgeBreakLonLo = input.bool(false, "W SHORT) Require close below the previous LONDON session LOW", group=G_SGE,
+                tooltip="Symmetric to the LONG filter above.")
+sgeNyCascade  = input.bool(false, "W) NY cascade - trade only in the previous NY close direction", group=G_SGE,
+                tooltip="Blocks a W trade opposing the direction NY closed yesterday, measured close versus open over 14:00-21:00 UTC. The T-1 theorem measured this cascade as significant on every session it was tested; this is the Asian leg of it.")
+sgeLonCascade = input.bool(false, "W) London cascade - trade only in the previous LONDON close direction", group=G_SGE,
+                tooltip="Same as the NY cascade but keyed to yesterday's London session, 08:00-14:00 UTC.")
 sgeCascade    = input.bool(false, "W) Sydney cascade - trade only in the Sydney close direction", group=G_SGE,
                 tooltip="Blocks a W trade opposing the direction the Sydney session closed, measured close versus open over 22:00 to 01:00. Same shape as lonAsianCascade, which was the one G filter that helped at the 150-pt stop.")
 
@@ -1117,6 +1134,64 @@ if not in_tok_window and in_tok_window[1] and not na(tok_hi)
 // the Sydney open and the NY pool window.
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── PREVIOUS LONDON / NY SESSIONS, LATCHED  (feeds Signal W) ────────
+// Why this cannot reuse lon_hi_preny: that one is wiped on _newDay, and the
+// broker day rolls at 21:00/22:00 UTC - AFTER London and NY have both finished
+// but BEFORE W fires at 01:00. By the time W looks, the old values are na.
+//
+// So each session accumulates into a _Cur pair, and on the FALLING EDGE of the
+// session the finished values are latched into a _Prev pair that nothing ever
+// resets. At 01:00 those hold yesterday's completed sessions, which is exactly
+// what W needs. The same latch carries the session's DIRECTION for the cascades.
+in_lon_sess = timeframe.isintraday and (_minOfDay >= 480 and _minOfDay < 840)
+in_ny_sess  = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 1260)
+
+var float _lonHiCur = na
+var float _lonLoCur = na
+var float _lonOpCur = na
+var float _lonClCur = na
+var float _lonHiPrev = na
+var float _lonLoPrev = na
+var int   _lonBiasPrev = 0
+if in_lon_sess and not in_lon_sess[1]
+    _lonHiCur := na
+    _lonLoCur := na
+    _lonOpCur := na
+    _lonClCur := na
+if in_lon_sess
+    _lonHiCur := na(_lonHiCur) ? high : math.max(_lonHiCur, high)
+    _lonLoCur := na(_lonLoCur) ? low  : math.min(_lonLoCur, low)
+    if na(_lonOpCur)
+        _lonOpCur := open
+    _lonClCur := close
+if not in_lon_sess and in_lon_sess[1] and not na(_lonHiCur)
+    _lonHiPrev := _lonHiCur
+    _lonLoPrev := _lonLoCur
+    _lonBiasPrev := _lonClCur > _lonOpCur ? 1 : _lonClCur < _lonOpCur ? -1 : 0
+
+var float _nyHiCur = na
+var float _nyLoCur = na
+var float _nyOpCur = na
+var float _nyClCur = na
+var float _nyHiPrev = na
+var float _nyLoPrev = na
+var int   _nyBiasPrev = 0
+if in_ny_sess and not in_ny_sess[1]
+    _nyHiCur := na
+    _nyLoCur := na
+    _nyOpCur := na
+    _nyClCur := na
+if in_ny_sess
+    _nyHiCur := na(_nyHiCur) ? high : math.max(_nyHiCur, high)
+    _nyLoCur := na(_nyLoCur) ? low  : math.min(_nyLoCur, low)
+    if na(_nyOpCur)
+        _nyOpCur := open
+    _nyClCur := close
+if not in_ny_sess and in_ny_sess[1] and not na(_nyHiCur)
+    _nyHiPrev := _nyHiCur
+    _nyLoPrev := _nyLoCur
+    _nyBiasPrev := _nyClCur > _nyOpCur ? 1 : _nyClCur < _nyOpCur ? -1 : 0
+
 // NY session extreme feeding Signal U. Ends where the Sydney ORB begins.
 in_ny_pool = f_inWin(840, _sydOrbStart)
 var float ny_hi_presyd = na
@@ -1842,7 +1917,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
 if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locked and not sge_done and not na(sge_hi) and not na(sge_lo) and (not sgeADRGuard or _adrConsumed[1] < 0.90) and _nfpOk and _hm_dow_ok and strategy.position_size == 0
     rngW = sge_hi - sge_lo
     if rngW >= sgeMinRange
-        if close > sge_hi and (close - sge_hi) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0)
+        if close > sge_hi and (close - sge_hi) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0) and (not sgeBreakNyHi or (not na(_nyHiPrev) and close > _nyHiPrev)) and (not sgeBreakLonHi or (not na(_lonHiPrev) and close > _lonHiPrev)) and (not sgeNyCascade or _nyBiasPrev >= 0) and (not sgeLonCascade or _lonBiasPrev >= 0)
             entryP = sge_hi + rngW * _c2Depth
             slP    = sge_hi - f_c2SL(rngW)
             tp1    = sge_hi + rngW * orbTPMult
@@ -1868,7 +1943,7 @@ if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locke
                       color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < sge_lo and (sge_lo - close) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0)
+        else if close < sge_lo and (sge_lo - close) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0) and (not sgeBreakNyLo or (not na(_nyLoPrev) and close < _nyLoPrev)) and (not sgeBreakLonLo or (not na(_lonLoPrev) and close < _lonLoPrev)) and (not sgeNyCascade or _nyBiasPrev <= 0) and (not sgeLonCascade or _lonBiasPrev <= 0)
             entryP = sge_lo - rngW * _c2Depth
             slP    = sge_lo + f_c2SL(rngW)
             tp1    = sge_lo - rngW * orbTPMult
@@ -2440,8 +2515,8 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgD
 if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locked and not swDone and not na(sge_hi) and not na(sge_lo) and (not sgeADRGuard or _adrConsumed[1] < 0.90) and _nfpOk and _hm_dow_ok
     rW2 = sge_hi - sge_lo
     if rW2 >= sgeMinRange
-        okWL = close > sge_hi and (close - sge_hi) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0)
-        okWS = close < sge_lo and (sge_lo - close) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0)
+        okWL = close > sge_hi and (close - sge_hi) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0) and (not sgeBreakNyHi or (not na(_nyHiPrev) and close > _nyHiPrev)) and (not sgeBreakLonHi or (not na(_lonHiPrev) and close > _lonHiPrev)) and (not sgeNyCascade or _nyBiasPrev >= 0) and (not sgeLonCascade or _lonBiasPrev >= 0)
+        okWS = close < sge_lo and (sge_lo - close) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0) and (not sgeBreakNyLo or (not na(_nyLoPrev) and close < _nyLoPrev)) and (not sgeBreakLonLo or (not na(_lonLoPrev) and close < _lonLoPrev)) and (not sgeNyCascade or _nyBiasPrev <= 0) and (not sgeLonCascade or _lonBiasPrev <= 0)
         if okWL or okWS
             sigW   := sigW + 1
             swDone := true
