@@ -3091,7 +3091,7 @@ f_drawSigTable(table t) =>
     tB  = tS - tO
     tBp = tS > 0 ? 100.0 * tB / tS : 0.0
     cA  = color.new(color.aqua, 0)
-    table.cell(t, 0, 8, "TOTAL",             text_color=cA, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 7, "TOTAL",             text_color=cA, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 7, str.tostring(tS),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 2, 7, str.tostring(tO),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 3, 7, str.tostring(tF),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
@@ -3414,7 +3414,7 @@ f_drawContribTable(table t) =>
         table.cell(t, 8, q + 1, str.tostring(shq, "#.#"), text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
 
     cAq = color.new(color.aqua, 0)
-    table.cell(t, 0, 8, "TOTAL", text_color=cAq, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 7, "TOTAL", text_color=cAq, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 7, str.tostring(seenC), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 6, 7, str.tostring(netTot, "#"), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 7, 7, seenC > 0 ? str.tostring(netTot / seenC, "#.#") : "-", text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
@@ -3425,11 +3425,11 @@ f_drawContribTable(table t) =>
     covOk = otherN == 0 and seenC == strategy.closedtrades
     covC = covOk ? color.new(color.lime, 0) : color.new(color.orange, 0)
     table.cell(t, 0, 8, "trades", text_color=gP, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 7, str.tostring(strategy.closedtrades), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 1, 8, str.tostring(strategy.closedtrades), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 2, 8, "ORB", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 3, 7, str.tostring(seenC), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 8, str.tostring(seenC), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 4, 8, "other", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 5, 7, str.tostring(otherN), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 8, str.tostring(otherN), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 6, 8, "vs Tester", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
 
 if barstate.islast and showContrib and strategy.closedtrades > 0
@@ -3499,13 +3499,13 @@ f_drawXcmpTable(table t) =>
         table.cell(t, 8, q + 1, glq > 0 ? str.tostring(gpq / glq, "#.###") : (gpq > 0 ? "no loss" : "-"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
 
     bal = xSig - xDone - xExp - array.size(xS)
-    table.cell(t, 0, 8, "signals", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 7, "signals", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 7, str.tostring(xSig), text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 2, 8, "filled", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 7, "filled", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 3, 7, str.tostring(xDone), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 4, 8, "never retested", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 7, "never retested", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 7, str.tostring(xExp), text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 8, "open", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 7, "open", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 7, 7, str.tostring(array.size(xS)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 8, 7, bal == 0 ? "balances" : "LOST " + str.tostring(bal), text_color=bal == 0 ? color.new(color.lime, 0) : color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_right)
 
