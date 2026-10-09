@@ -24,12 +24,24 @@ async function withTimeout(promise, ms, fallback) {
   ]);
 }
 
+// 9s, not 2s. MetaAPI routinely answers these in 12-15s when its connection is
+// cold, and broker.js already aborts at BROKER_TIMEOUT_MS - this race only ever
+// cut it off EARLIER and threw away the answer that was still coming. At 2s the
+// dashboard lost every single time MetaAPI was slow, which is the whole bug.
+const BROKER_WAIT_MS = 20000;  // fetchPositions caches in Redis for 30s, so this
+                               // long wait is only ever paid on a cache MISS; the
+                               // next 30s of polls are served instantly from it.
+
 async function actionSummary() {
   const [account, positions, todaysPnL] = await Promise.all([
-    withTimeout(fetchAccount(), 2000, null),
-    withTimeout(fetchPositions(), 2000, []),
+    withTimeout(fetchAccount(), BROKER_WAIT_MS, null),
+    withTimeout(fetchPositions(), BROKER_WAIT_MS, null),
     getTodaysPnL(),
   ]);
+  // null means the BROKER FAILED; [] means it genuinely answered "no positions".
+  // broker.js is careful to distinguish these and the old `[]` fallback destroyed
+  // the distinction, so an unreachable broker rendered as a flat, confident zero.
+  const brokerOk = positions !== null;
   const rules = await getRules();
   const balance = account ? (account.balance || account.equity || 0) : 0;
   const equity = account ? (account.equity || balance) : 0;
@@ -46,7 +58,8 @@ async function actionSummary() {
       todaysPnL: round2(todaysPnL),
       todaysPnLPct: balance > 0 ? round2((todaysPnL / balance) * 100) : 0,
     },
-    positions: { open: managedPositions.length, total: (positions || []).length },
+    positions: { open: managedPositions.length, total: (positions || []).length, brokerOk },
+    brokerOk,
     watched: { watching: watchingCount, alerted: alertedCount, total: watched.length },
     tradingMode: rules.tradingMode || 'auto',
     activeMode: rules.activeMode || 'active',
@@ -95,9 +108,10 @@ async function actionEmergencyStop(body) {
 
 async function actionPositions() {
   const [positions, account] = await Promise.all([
-    withTimeout(fetchPositions(), 2000, []),
-    withTimeout(fetchAccount(), 2000, null),
+    withTimeout(fetchPositions(), BROKER_WAIT_MS, null),
+    withTimeout(fetchAccount(), BROKER_WAIT_MS, null),
   ]);
+  const brokerOk = positions !== null;
   const managed = (positions || []).filter((p) =>
     p.comment && (p.comment.startsWith('QB-V12-') || p.comment.startsWith('QB-V13-') || p.comment.startsWith('QB-V20-')));
   const enriched = managed.map((pos) => {

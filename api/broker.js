@@ -78,9 +78,16 @@ const TF_CACHE_TTL = {
 //   low-activity hours (01:00–05:00 UTC). manage-trades has a 30s maxDuration
 //   so 14s is well within budget and still safely below the platform kill limit.
 const BROKER_TIMEOUT_MS   = parseInt(process.env.BROKER_TIMEOUT_MS, 10)   || 14000;
-const BROKER_MAX_ATTEMPTS = parseInt(process.env.BROKER_MAX_ATTEMPTS, 10) || 1;
+// 2, not 1. At 1 the guard `attempt < BROKER_MAX_ATTEMPTS` is never true, so the
+// whole retry block below was unreachable and 504 sat in RETRYABLE_STATUS where
+// it could never be retried. MetaAPI returns a transient 504 whenever its broker
+// connection is cold; we were treating that as fatal on the first try.
+const BROKER_MAX_ATTEMPTS = parseInt(process.env.BROKER_MAX_ATTEMPTS, 10) || 2;
 const BROKER_BACKOFF_MS   = parseInt(process.env.BROKER_BACKOFF_MS, 10)   || 500;
-const RETRYABLE_STATUS    = new Set([408, 425, 429, 500, 502, 503, 504]);
+// 429 deliberately NOT retried. Retrying a rate limit is how you deepen a rate
+// limit, and this token has been throttled before (28 Sep, 18 Sep incidents).
+// Back off and fail instead; everything else here is a transient worth one retry.
+const RETRYABLE_STATUS    = new Set([408, 425, 500, 502, 503, 504]);
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 

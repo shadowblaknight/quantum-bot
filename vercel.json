@@ -11,9 +11,13 @@
     },
     "api/manage-trades.js": {
       "memory": 1024,
-      "maxDuration": 30
+      "maxDuration": 60
     },
     "api/broker.js": {
+      "memory": 512,
+      "maxDuration": 60
+    },
+    "api/dashboard-feed.js": {
       "memory": 512,
       "maxDuration": 30
     },
@@ -72,10 +76,22 @@
     {
       "source": "/api/(.*)",
       "headers": [
-        { "key": "Access-Control-Allow-Credentials", "value": "true" },
-        { "key": "Access-Control-Allow-Origin",      "value": "*" },
-        { "key": "Access-Control-Allow-Methods",     "value": "GET,POST,OPTIONS" },
-        { "key": "Access-Control-Allow-Headers",     "value": "Content-Type, Authorization" }
+        {
+          "key": "Access-Control-Allow-Credentials",
+          "value": "true"
+        },
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        },
+        {
+          "key": "Access-Control-Allow-Methods",
+          "value": "GET,POST,OPTIONS"
+        },
+        {
+          "key": "Access-Control-Allow-Headers",
+          "value": "Content-Type, Authorization"
+        }
       ]
     }
   ]
