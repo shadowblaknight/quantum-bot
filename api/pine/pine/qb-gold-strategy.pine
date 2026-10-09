@@ -50,6 +50,8 @@ modNYORB      = input.bool(true,  "H) NY ORB — 14:00-14:30 UTC (verified)",   
 modNYORBP     = input.bool(false, "H') NY ORB PRIME — restrict H to a 14:30-16:00 trade window", group=G_CORE,
               tooltip="LEAVE OFF — TESTED AND REJECTED 2026-09-18. Kept so the negative result stays attached to the code.\n\nMEASURED 3y (16 Sep 2023 - 16 Sep 2026), full baseline H+M+U+V both arms:\n  OFF  218 trades  99.08% WR  PF 6.335  +4148 USD  DD 710  (19.03 per trade)\n  ON   141 trades  99.29% WR  PF 5.906  +2342 USD  DD 787  (16.61 per trade)\n\nThe window removed ~77 trades and 44% of net profit while RAISING drawdown. Win rate barely moved (+0.21pp), so it removed volume, not risk.\n\nTHE LATE BREAKS ARE THE BETTER TRADES. The ~77 trades the window removed accounted for ~1806 USD, about 23.45 each, against 16.61 for the trades it kept. A genuine quality filter lifts per-trade profit; this lowered it. So NY ORB breaks that fire after 16:00 UTC are MORE profitable than the ones inside the opening window, not less. The hypothesis was exactly backwards.\n\n(Path-dependence caveat: blocking H frees the position slot for other signals, so the 141 are not the 218 minus a fixed 77. The per-trade figures are net inferences. The direction is not in doubt.)\n\nWHAT THIS MEANS. Lateness costs FILLS, not edge. A backtest cannot see a fill problem - here a limit either fills or it does not; there is no 'the alert arrived after the move and the order sat unfilled'. Do not block late signals. Fix the entry router so a signal whose price has already run past the limit is taken at market or skipped, instead of resting on an order that cannot fill.\n\nORIGINAL RATIONALE BELOW, kept because the lateness measurement is still correct.\n\nOFF = Signal H exactly as it runs today. ON = H may only fire inside 14:30-16:00 UTC.\n\nWHY THIS EXISTS. Signal M is gated by in_frb_trade (07:30-11:00). Signal H was never given the equivalent, so it waits for the first 15m close outside the 14:00-14:30 range FOR THE REST OF THE DAY. Measured on the live account, every NY ORB signal fired:\n  16 Sep 14:45  +0.3h after the range closed\n  03 Sep 15:00  +0.5h\n  24 Aug 15:30  +1.0h\n  21 Aug 15:45  +1.3h\n  08 Sep 16:15  +1.8h\n  01 Sep 16:30  +2.0h\n  18 Sep 17:15  +2.8h\nMedian 1.3 hours late. By then the ORB level is stale, price has wandered, and when it finally breaks it tends to run without ever retesting — so the C2 limit rests unfilled while the move happens without you.\n\nThis window keeps the first four and blocks the last three.\n\nALSO CHANGES ORDER EXPIRY. When ON, a NYORB limit is cancelled at 16:00 instead of surviving to the daily roll, mirroring how M cancels at the end of its own window. Otherwise a limit armed at 15:55 could still fill hours later against a level that is long dead — the same disease in a different place.\n\nEXPECT FEWER TRADES. This harness is path-dependent: blocking a signal frees the position slot for a later one, so the trade list reshuffles rather than simply shrinking. Judge it on net P&L and trade count, not on win rate alone.")
 modFRB        = input.bool(true,  "M) Frankfurt ORB — 07:00-07:30 UTC (pre-London)", group=G_CORE)
+modSGE        = input.bool(false, "W) Shanghai ORB - SGE day session 01:00 UTC  [UNTESTED]", group=G_CORE,
+              tooltip="Signal W. The Shanghai Gold Exchange day session opens 09:00 Beijing = 01:00 UTC, and China does not observe DST, so that mapping is exact year-round. WHY THIS IS NOT JUST TOKYO AGAIN: V Tokyo was re-tested 2026-10-09 and failed at PF 0.57 over 3 years because Asian breaks do not hold (86% WR against a 91.6% breakeven). W fires one hour later on a DIFFERENT event - Tokyo 00:00 is the financial open, SGE 01:00 is the largest PHYSICAL gold market opening. That is the entire hypothesis and it may well be wrong. Default OFF so every recorded baseline reproduces unchanged.")
 modSYD        = input.bool(true,  "U) Sydney ORB — session open, same C2 architecture as M/H  [UNTESTED]", group=G_CORE)
 modTOK        = input.bool(true,  "V) Tokyo ORB — REJECTED, kept only so the 218-trade baseline reproduces",  group=G_CORE,
               tooltip="TESTED AND REJECTED ~2026-09-07. Tokyo does not perform like Sydney.\n\nNot live: the indicator has no modTOK input and the webhook's SPECIALIST_ALLOWED_ZONES is ['FRB','NYORB','SYD'], so a V alert would be dropped as specialist-zone-inactive even if one fired.\n\nIt contributed ZERO trades to the 96-trade sample the A+ table measured — Tokyo hours are too thin to clear the 5-pt min-range floor, exactly as predicted. Left ON only because the 218-trade baseline was recorded with it on; since it fires essentially never, that baseline is effectively M+H+U.\n\nDo not re-propose enabling V live.")
@@ -65,6 +67,29 @@ tokOrbMins  = input.int(30, "V) Tokyo ORB length (mins)", group=G_ASIA, minval=1
 tokTradeMins= input.int(180,"V) Tokyo trade window after ORB (mins)", group=G_ASIA, minval=30, maxval=420, step=30)
 c2MinRangeASIA = input.float(5.0, "U/V) Min ORB range to trade (pts)", group=G_ASIA, step=1.0,
               tooltip="Asian sessions are thin — ranges are typically much smaller than Frankfurt or NY. If this filter blocks nearly every signal, that is the finding: the setup does not exist on gold in Asian hours.")
+
+G_SGE = "W - Shanghai ORB (SGE)"
+// Every filter gets its OWN toggle. The ADR guard taught this the expensive way:
+// one switch gating M, H, U and V was wrong for M for months, because a setting
+// right for NY is wrong for Frankfurt. W gets its own of everything on day one.
+sgeOpenHr     = input.int(1,   "W) SGE day-session open (UTC hour)", group=G_SGE, minval=0, maxval=6,
+                tooltip="01:00 UTC = 09:00 Beijing. China has no DST so this never drifts, the same property that makes Tokyo exact.")
+sgeOrbMins    = input.int(30,  "W) ORB length (mins)", group=G_SGE, minval=15, maxval=120, step=15)
+sgeTradeMins  = input.int(150, "W) Trade window after the ORB (mins)", group=G_SGE, minval=30, maxval=360, step=30,
+                tooltip="150 means the limit expires 04:00 UTC, before the Tokyo-to-London handover. Bound it: an unexpired limit resting into the European open is an order against a level that stopped mattering hours earlier - the open item H still carries with nyOrderMins 0.")
+sgeMinRange   = input.float(5.0, "W) Min ORB range to trade (pts)", group=G_SGE, step=1.0,
+                tooltip="The same 5.0 floor the other signals use. Note it is an ABSOLUTE point value on an instrument whose price doubled, so it is materially looser now than when it was set - at a 5-pt range the breakeven win rate is about 96.9%, at 16 pts it is 90.9%.")
+sgeDirFilter  = input.string("Both", "W) Direction filter", options=["Both", "Long only", "Short only"], group=G_SGE)
+sgeBiasFilter = input.bool(false, "W) Require HTF bias alignment", group=G_SGE,
+                tooltip="Uses the same bias timeframe selected for H/M above, so W can be compared against them on equal terms.")
+sgeADRGuard   = input.bool(false, "W) Skip when >90% ADR already consumed", group=G_SGE,
+                tooltip="Its OWN guard, never shared. Expect it near-inert: W fires at 01:00, roughly three hours after the broker daily roll, so little of the day range is spent - the same reason this guard never bites on U. Measure it rather than assuming it.")
+sgeBreakSydHi = input.bool(false, "W LONG)  Require close above the Sydney session HIGH", group=G_SGE,
+                tooltip="The direct analogue of M requiring the Asian extreme and H requiring the London extreme. For a 01:00 open the prior session is Sydney, 22:00 to 01:00. This is the filter family that blocked every setup on 8 and 9 Oct, and that is the point: a break of an 8-point opening range that cannot clear the previous session is a break going nowhere.")
+sgeBreakSydLo = input.bool(false, "W SHORT) Require close below the Sydney session LOW", group=G_SGE,
+                tooltip="Symmetric to the LONG filter above.")
+sgeCascade    = input.bool(false, "W) Sydney cascade - trade only in the Sydney close direction", group=G_SGE,
+                tooltip="Blocks a W trade opposing the direction the Sydney session closed, measured close versus open over 22:00 to 01:00. Same shape as lonAsianCascade, which was the one G filter that helped at the 150-pt stop.")
 
 G_STRAT = "Strategy"
 exitMode  = input.string("TP1 · 1R", "Exit target",
@@ -910,10 +935,32 @@ f_inWin(int startMin, int endMin) =>
     e = endMin % 1440
     timeframe.isintraday and (e > s ? (_minOfDay >= s and _minOfDay < e) : (_minOfDay >= s or _minOfDay < e))
 
+// W - Shanghai. 01:00 sits AFTER the broker roll (21:00/22:00), so unlike U this
+// window never straddles the day boundary and plain minute maths is safe here.
+_sgeOrbStart = sgeOpenHr * 60
+_sgeOrbEnd   = _sgeOrbStart + sgeOrbMins
+in_sge_window = timeframe.isintraday and (_minOfDay >= _sgeOrbStart and _minOfDay < _sgeOrbEnd)
+in_sge_trade  = timeframe.isintraday and (_minOfDay >= _sgeOrbEnd and _minOfDay < _sgeOrbEnd + sgeTradeMins)
+// The PRIOR session for a 01:00 open is Sydney: its open through to the SGE open.
+// Wrap-safe, because it crosses midnight.
+in_sge_pool   = f_inWin(_sydOrbStart, _sgeOrbStart)
+
 in_syd_window = f_inWin(_sydOrbStart, _sydOrbEnd)
 in_syd_trade  = f_inWin(_sydOrbEnd,   _sydOrbEnd + sydTradeMins)
 in_tok_window = f_inWin(_tokOrbStart, _tokOrbEnd)
 in_tok_trade  = f_inWin(_tokOrbEnd,   _tokOrbEnd + tokTradeMins)
+
+var float sge_hi = na
+var float sge_lo = na
+var bool  sge_locked = false
+var bool  sge_done   = false
+// Sydney extreme and direction feeding W. Reset on the rising edge of the POOL
+// window, never on _newDay - the broker day turns over at 21:00/22:00, directly
+// on top of where this starts accumulating.
+var float syd_hi_presge = na
+var float syd_lo_presge = na
+var float _sydOpenPx    = na
+var float _sydClosePx   = na
 
 var float syd_hi = na
 var float syd_lo = na
@@ -1002,6 +1049,30 @@ if _minOfDay >= 480 and _minOfDay < 840
 if in_syd_window
     syd_hi := na(syd_hi) ? high : math.max(syd_hi, high)
     syd_lo := na(syd_lo) ? low  : math.min(syd_lo, low)
+if in_sge_pool and not in_sge_pool[1]
+    syd_hi_presge := na
+    syd_lo_presge := na
+    _sydOpenPx    := na
+    _sydClosePx   := na
+if in_sge_pool
+    syd_hi_presge := na(syd_hi_presge) ? high : math.max(syd_hi_presge, high)
+    syd_lo_presge := na(syd_lo_presge) ? low  : math.min(syd_lo_presge, low)
+    if na(_sydOpenPx)
+        _sydOpenPx := open
+    _sydClosePx := close
+_sydBias = na(_sydOpenPx) or na(_sydClosePx) ? 0 : _sydClosePx > _sydOpenPx ? 1 : _sydClosePx < _sydOpenPx ? -1 : 0
+
+if in_sge_window and not in_sge_window[1]
+    sge_hi     := na
+    sge_lo     := na
+    sge_locked := false
+    sge_done   := false
+if in_sge_window
+    sge_hi := na(sge_hi) ? high : math.max(sge_hi, high)
+    sge_lo := na(sge_lo) ? low  : math.min(sge_lo, low)
+if not in_sge_window and in_sge_window[1] and not na(sge_hi)
+    sge_locked := true
+
 if not in_syd_window and in_syd_window[1] and not na(syd_hi)
     syd_locked := true
 
@@ -1065,6 +1136,25 @@ var bool nyo_sw_lo   = false
 var bool nyo_sw_hi   = false
 var bool nyo_pool_lo = false
 var bool nyo_pool_hi = false
+var bool sge_sw_lo   = false
+var bool sge_sw_hi   = false
+var bool sge_pool_lo = false
+var bool sge_pool_hi = false
+if in_sge_window and not in_sge_window[1]
+    sge_sw_lo   := false
+    sge_sw_hi   := false
+    sge_pool_lo := false
+    sge_pool_hi := false
+if in_sge_window or in_sge_trade
+    if sge_locked and not na(sge_lo) and low < sge_lo
+        sge_sw_lo := true
+    if sge_locked and not na(sge_hi) and high > sge_hi
+        sge_sw_hi := true
+    if not na(syd_lo_presge) and low < syd_lo_presge
+        sge_pool_lo := true
+    if not na(syd_hi_presge) and high > syd_hi_presge
+        sge_pool_hi := true
+
 var bool syd_sw_lo   = false
 var bool syd_sw_hi   = false
 var bool syd_pool_lo = false
@@ -1262,6 +1352,9 @@ if not in_frb_trade and in_frb_trade[1]
 if not in_lorb_trade and in_lorb_trade[1]
     strategy.cancel("ORB-L")
     strategy.cancel("ORB-S")
+if not in_sge_trade and in_sge_trade[1]
+    strategy.cancel("SGE-L")
+    strategy.cancel("SGE-S")
 if not in_syd_trade and in_syd_trade[1]
     strategy.cancel("SYD-L")
     strategy.cancel("SYD-S")
@@ -1727,6 +1820,76 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
 // f_c2Exit moved UP to just after f_exitLim — Signal G now uses it too, and G
 // sits earlier in the file than this block did. Pine requires a function to be
 // defined before every use.
+
+// ═══════════════════════════════════════════════════════════════════════
+// SIGNAL W — Shanghai ORB (SGE day session, 01:00 UTC)
+// ─────────────────────────────────────────────────────────────────────
+// Identical C2 architecture to M/H/U/G: 30-min opening range, first close
+// outside it is the break, a limit rests back at the level shifted by
+// _c2Depth, SL = level +/- f_c2SL(range), TPs = range x orbTPMult x {1,2,3}.
+//
+// THE HYPOTHESIS, stated plainly so a failed test is readable: Asian-hours
+// breaks were measured DEAD on 2026-10-09 (V Tokyo, PF 0.57 over 3yr, 86% WR
+// against a 91.6% breakeven). W is not a retry of that. Tokyo 00:00 is the
+// financial open; SGE 01:00 is the largest physical gold market opening, a
+// different participant set on the one instrument where physical demand
+// actually sets price. If W fails too, the honest conclusion is that the
+// whole 00:00-07:00 window is untradeable with an ORB and the matter is
+// closed for good.
+//
+// Every filter is on its own switch and defaults OFF, so turning modSGE on
+// alone measures W bare before any filter is allowed to flatter it.
+if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locked and not sge_done and not na(sge_hi) and not na(sge_lo) and (not sgeADRGuard or _adrConsumed[1] < 0.90) and _nfpOk and _hm_dow_ok and strategy.position_size == 0
+    rngW = sge_hi - sge_lo
+    if rngW >= sgeMinRange
+        if close > sge_hi and (close - sge_hi) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0)
+            entryP = sge_hi + rngW * _c2Depth
+            slP    = sge_hi - f_c2SL(rngW)
+            tp1    = sge_hi + rngW * orbTPMult
+            tp2    = sge_hi + rngW * orbTPMult * 2.0
+            tp3    = sge_hi + rngW * orbTPMult * 3.0
+            sge_done := true
+            c2LimWL = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("SGE-L", strategy.long, limit=c2LimWL, comment="shanghai-orb · C2 LONG")
+            // Ratchet state MUST be registered here. Without it f_c2Exit's ratchet
+            // branch places a naked stop with no TP and no trail - the bug that
+            // made every filled U and V trade a guaranteed full loss.
+            if _useRtState
+                _rt_lvl   := sge_hi
+                _rt_entry := entryP
+                _rt_rng   := rngW
+                _rt_dir   := 1
+                _rt_id    := "SGE-L"
+                _rt_sl    := slP
+                _rt_sl0   := slP
+                _rt_reach := 0.0
+            f_c2Exit("SGE-L", slP, tp1, tp2, tp3, rngW)
+            label.new(bar_index, low, "W↑", style=label.style_label_up,
+                      color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
+
+        else if close < sge_lo and (sge_lo - close) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0)
+            entryP = sge_lo - rngW * _c2Depth
+            slP    = sge_lo + f_c2SL(rngW)
+            tp1    = sge_lo - rngW * orbTPMult
+            tp2    = sge_lo - rngW * orbTPMult * 2.0
+            tp3    = sge_lo - rngW * orbTPMult * 3.0
+            sge_done := true
+            c2LimWS = c2EntryMode == "Retest (limit)" ? entryP : na
+            strategy.entry("SGE-S", strategy.short, limit=c2LimWS, comment="shanghai-orb · C2 SHORT")
+            if _useRtState
+                _rt_lvl   := sge_lo
+                _rt_entry := entryP
+                _rt_rng   := rngW
+                _rt_dir   := -1
+                _rt_id    := "SGE-S"
+                _rt_sl    := slP
+                _rt_sl0   := slP
+                _rt_reach := 0.0
+            f_c2Exit("SGE-S", slP, tp1, tp2, tp3, rngW)
+            label.new(bar_index, high, "W↓", style=label.style_label_down,
+                      color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
+            f_drawPosBox(entryP, slP, tp3)
 
 // ─── SIGNAL U — Sydney ORB ───────────────────────────────────────────
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
@@ -2198,16 +2361,19 @@ if na(_firstBarT)
 var int  sigM   = 0
 var int  sigH   = 0
 var int  sigG   = 0
+var int  sigW   = 0
 var int  sigU   = 0
 var int  sigV   = 0
 var int  trdM   = 0
 var int  trdH   = 0
 var int  trdG   = 0
+var int  trdW   = 0
 var int  trdU   = 0
 var int  trdV   = 0
 var bool smDone = false
 var bool shDone = false
 var bool sgDone = false
+var bool swDone = false
 var bool suDone = false
 var bool svDone = false
 
@@ -2216,6 +2382,8 @@ if _newDay
     smDone := false
     shDone := false
     sgDone := false
+if in_sge_window and not in_sge_window[1]
+    swDone := false
 if in_syd_window and not in_syd_window[1]
     suDone := false
 if in_tok_window and not in_tok_window[1]
@@ -2269,6 +2437,15 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgD
                 array.push(xS, Shadow.new(xlz, xez, xdz, rG * orbTPMult, xsz, 2, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
+if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locked and not swDone and not na(sge_hi) and not na(sge_lo) and (not sgeADRGuard or _adrConsumed[1] < 0.90) and _nfpOk and _hm_dow_ok
+    rW2 = sge_hi - sge_lo
+    if rW2 >= sgeMinRange
+        okWL = close > sge_hi and (close - sge_hi) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0)
+        okWS = close < sge_lo and (sge_lo - close) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0)
+        if okWL or okWS
+            sigW   := sigW + 1
+            swDone := true
+
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
     rU2 = syd_hi - syd_lo
     if rU2 >= c2MinRangeASIA
@@ -2309,6 +2486,8 @@ if nyorb_done and not nyorb_done[1]
     trdH := trdH + 1
 if lorb_done  and not lorb_done[1]
     trdG := trdG + 1
+if sge_done   and not sge_done[1]
+    trdW := trdW + 1
 if syd_done   and not syd_done[1]
     trdU := trdU + 1
 if tok_done   and not tok_done[1]
@@ -2856,13 +3035,13 @@ if barstate.islast and showCond and strategy.closedtrades > 0
 showSigCnt = input.bool(true, "Show signal funnel (signals -> orders -> fills)", group=G_SLR,
              tooltip="Counts every setup whose conditions were met, whether or not the position slot was free. Places no orders - it cannot change a single trade. Use it to separate 'the setup did not happen' from 'the setup happened and we could not take it'.")
 
-var array<string> _sfLbl = array.from("M  Frankfurt", "H  NY", "G  London", "U  Sydney", "V  Tokyo")
+var array<string> _sfLbl = array.from("M  Frankfurt", "H  NY", "G  London", "U  Sydney", "V  Tokyo", "W  Shanghai")
 var table sfTbl = na
 
 f_drawSigTable(table t) =>
-    sigA = array.from(sigM, sigH, sigG, sigU, sigV)
-    trdA = array.from(trdM, trdH, trdG, trdU, trdV)
-    filA = array.new<int>(5, 0)
+    sigA = array.from(sigM, sigH, sigG, sigU, sigV, sigW)
+    trdA = array.from(trdM, trdH, trdG, trdU, trdV, trdW)
+    filA = array.new<int>(6, 0)
     // DIAGNOSTIC 2026-09-23. `filled` totalled 174 while the Tester showed 390
     // trades. Rather than argue about which number is wrong, record what the
     // unmatched trades are actually CALLED - that settles it in one run.
@@ -2871,7 +3050,7 @@ f_drawSigTable(table t) =>
     if strategy.closedtrades > 0
         for i = 0 to strategy.closedtrades - 1
             idf = strategy.closedtrades.entry_id(i)
-            fi = (idf == "FRB-L" or idf == "FRB-S") ? 0 : (idf == "NYORB-L" or idf == "NYORB-S") ? 1 : (idf == "ORB-L" or idf == "ORB-S") ? 2 : (idf == "SYD-L" or idf == "SYD-S") ? 3 : (idf == "TOK-L" or idf == "TOK-S") ? 4 : -1
+            fi = (idf == "FRB-L" or idf == "FRB-S") ? 0 : (idf == "NYORB-L" or idf == "NYORB-S") ? 1 : (idf == "ORB-L" or idf == "ORB-S") ? 2 : (idf == "SYD-L" or idf == "SYD-S") ? 3 : (idf == "TOK-L" or idf == "TOK-S") ? 4 : (idf == "SGE-L" or idf == "SGE-S") ? 5 : -1
             if fi >= 0
                 array.set(filA, fi, array.get(filA, fi) + 1)
             else
@@ -2892,7 +3071,7 @@ f_drawSigTable(table t) =>
     tS = 0
     tO = 0
     tF = 0
-    for q = 0 to 4
+    for q = 0 to 5
         sq = array.get(sigA, q)
         oq = array.get(trdA, q)
         fq = array.get(filA, q)
@@ -2912,25 +3091,25 @@ f_drawSigTable(table t) =>
     tB  = tS - tO
     tBp = tS > 0 ? 100.0 * tB / tS : 0.0
     cA  = color.new(color.aqua, 0)
-    table.cell(t, 0, 6, "TOTAL",             text_color=cA, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 6, str.tostring(tS),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 2, 6, str.tostring(tO),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 3, 6, str.tostring(tF),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 4, 6, str.tostring(tB),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 5, 6, str.tostring(tBp, "#.#"), text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 0, 8, "TOTAL",             text_color=cA, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 7, str.tostring(tS),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 7, str.tostring(tO),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 3, 7, str.tostring(tF),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 7, str.tostring(tB),    text_color=cA, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 5, 7, str.tostring(tBp, "#.#"), text_color=cA, text_size=size.tiny, text_halign=text.align_right)
 
-    table.cell(t, 0, 7, "signals = conditions met, position gate IGNORED. Should NOT change when only the exit mode changes.",
+    table.cell(t, 0, 8, "signals = conditions met, position gate IGNORED. Should NOT change when only the exit mode changes.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 8, "closedtrades " + str.tostring(strategy.closedtrades) + "  ·  ORB-matched " + str.tostring(tF) + "  ·  UNMATCHED " + str.tostring(unm) + (unm > 0 ? "  ->  " + uids : "  (none - every trade is an ORB trade)"),
+    table.cell(t, 0, 9, "closedtrades " + str.tostring(strategy.closedtrades) + "  ·  ORB-matched " + str.tostring(tF) + "  ·  UNMATCHED " + str.tostring(unm) + (unm > 0 ? "  ->  " + uids : "  (none - every trade is an ORB trade)"),
                text_color=unm > 0 ? color.new(color.orange, 0) : color.new(color.lime, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 9, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
+    table.cell(t, 0, 10, "signals-ordered = slot busy (a trade was still open).   ordered-filled = C2 limit expired unfilled.",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 10, "SCRIPT SAW  bars " + str.tostring(bar_index + 1) + "   from " + str.format("{0,date,yyyy-MM-dd}", _firstBarT) + "  to " + str.format("{0,date,yyyy-MM-dd}", time) + "   <- compare with the Tester date range above",
+    table.cell(t, 0, 11, "SCRIPT SAW  bars " + str.tostring(bar_index + 1) + "   from " + str.format("{0,date,yyyy-MM-dd}", _firstBarT) + "  to " + str.format("{0,date,yyyy-MM-dd}", time) + "   <- compare with the Tester date range above",
                text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showSigCnt
     if na(sfTbl)
-        sfTbl := table.new(position.bottom_right, 6, 11,
+        sfTbl := table.new(position.bottom_right, 6, 12,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
@@ -3157,16 +3336,16 @@ G_CONTRIB   = "Signal contribution"
 showContrib = input.bool(true, "Show per-signal point contribution", group=G_CONTRIB,
               tooltip="Net points earned per signal, so you can see which one carries the system. Places no orders and reads no future data.\n\nAQUA star = biggest net contributor. ORANGE = the signal takes a bigger share of the position SLOT than it returns in points, which is the one shape that makes a signal worth removing even at a high win rate.\n\nCheck the TRADES row against the Tester's trade count before trusting the shares. Units are POINTS (1 point = 10 pips on gold).")
 
-var array<string> _pcLbl = array.from("M Frankfurt", "H NY", "G London", "U Sydney", "V Tokyo")
+var array<string> _pcLbl = array.from("M Frankfurt", "H NY", "G London", "U Sydney", "V Tokyo", "W Shanghai")
 var table pcTbl = na
 
 f_drawContribTable(table t) =>
     pvC = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
-    cN = array.new<int>(5, 0)
-    cW = array.new<int>(5, 0)
-    cL = array.new<int>(5, 0)
-    cPos = array.new<float>(5, 0.0)
-    cNeg = array.new<float>(5, 0.0)
+    cN = array.new<int>(6, 0)
+    cW = array.new<int>(6, 0)
+    cL = array.new<int>(6, 0)
+    cPos = array.new<float>(6, 0.0)
+    cNeg = array.new<float>(6, 0.0)
     seenC = 0
     otherN = 0
 
@@ -3178,7 +3357,7 @@ f_drawContribTable(table t) =>
                 pC = strategy.closedtrades.profit(i) / uC
                 idC = strategy.closedtrades.entry_id(i)
                 // NYORB must be tested BEFORE ORB - "NYORB-L" contains "ORB".
-                sC = str.contains(idC, "FRB") ? 0 : str.contains(idC, "NYORB") ? 1 : str.contains(idC, "ORB") ? 2 : str.contains(idC, "SYD") ? 3 : str.contains(idC, "TOK") ? 4 : -1
+                sC = str.contains(idC, "FRB") ? 0 : str.contains(idC, "NYORB") ? 1 : str.contains(idC, "SGE") ? 5 : str.contains(idC, "ORB") ? 2 : str.contains(idC, "SYD") ? 3 : str.contains(idC, "TOK") ? 4 : -1
                 if sC >= 0
                     seenC := seenC + 1
                     array.set(cN, sC, array.get(cN, sC) + 1)
@@ -3194,7 +3373,7 @@ f_drawContribTable(table t) =>
     netTot = 0.0
     bestI = -1
     bestV = -1e12
-    for q = 0 to 4
+    for q = 0 to 5
         nq = array.get(cPos, q) - array.get(cNeg, q)
         netTot := netTot + nq
         if array.get(cN, q) > 0 and nq > bestV
@@ -3214,7 +3393,7 @@ f_drawContribTable(table t) =>
     table.cell(t, 7, 0, "pts/tr", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 8, 0, "NET%", text_color=hP, text_size=size.tiny, text_halign=text.align_right)
 
-    for q = 0 to 4
+    for q = 0 to 5
         nq = array.get(cN, q)
         netq = array.get(cPos, q) - array.get(cNeg, q)
         wrq = nq > 0 ? 100.0 * array.get(cW, q) / nq : 0.0
@@ -3235,27 +3414,27 @@ f_drawContribTable(table t) =>
         table.cell(t, 8, q + 1, str.tostring(shq, "#.#"), text_color=rowP, text_size=size.tiny, text_halign=text.align_right)
 
     cAq = color.new(color.aqua, 0)
-    table.cell(t, 0, 6, "TOTAL", text_color=cAq, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 6, str.tostring(seenC), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 6, str.tostring(netTot, "#"), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 7, 6, seenC > 0 ? str.tostring(netTot / seenC, "#.#") : "-", text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 0, 8, "TOTAL", text_color=cAq, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 1, 7, str.tostring(seenC), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 7, str.tostring(netTot, "#"), text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 7, 7, seenC > 0 ? str.tostring(netTot / seenC, "#.#") : "-", text_color=cAq, text_size=size.tiny, text_halign=text.align_right)
 
     // Coverage split across cells instead of one long sentence in column 0 -
     // a wide string there sets the column width and shoves the table sideways
     // into whatever else is on screen.
     covOk = otherN == 0 and seenC == strategy.closedtrades
     covC = covOk ? color.new(color.lime, 0) : color.new(color.orange, 0)
-    table.cell(t, 0, 7, "trades", text_color=gP, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 8, "trades", text_color=gP, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 7, str.tostring(strategy.closedtrades), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 2, 7, "ORB", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 8, "ORB", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 3, 7, str.tostring(seenC), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 4, 7, "other", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 8, "other", text_color=gP, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 7, str.tostring(otherN), text_color=covC, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 7, "vs Tester", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 8, "vs Tester", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
 
 if barstate.islast and showContrib and strategy.closedtrades > 0
     if na(pcTbl)
-        pcTbl := table.new(position.top_right, 9, 8,
+        pcTbl := table.new(position.top_right, 9, 9,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
@@ -3320,13 +3499,13 @@ f_drawXcmpTable(table t) =>
         table.cell(t, 8, q + 1, glq > 0 ? str.tostring(gpq / glq, "#.###") : (gpq > 0 ? "no loss" : "-"), text_color=rwq, text_size=size.tiny, text_halign=text.align_right)
 
     bal = xSig - xDone - xExp - array.size(xS)
-    table.cell(t, 0, 7, "signals", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 8, "signals", text_color=gX, text_size=size.tiny, text_halign=text.align_left)
     table.cell(t, 1, 7, str.tostring(xSig), text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 2, 7, "filled", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 2, 8, "filled", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 3, 7, str.tostring(xDone), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 4, 7, "never retested", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 4, 8, "never retested", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 7, str.tostring(xExp), text_color=color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
-    table.cell(t, 6, 7, "open", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(t, 6, 8, "open", text_color=gX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 7, 7, str.tostring(array.size(xS)), text_color=wX, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 8, 7, bal == 0 ? "balances" : "LOST " + str.tostring(bal), text_color=bal == 0 ? color.new(color.lime, 0) : color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_right)
 
