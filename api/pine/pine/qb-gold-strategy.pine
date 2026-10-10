@@ -68,6 +68,33 @@ tokTradeMins= input.int(180,"V) Tokyo trade window after ORB (mins)", group=G_AS
 c2MinRangeASIA = input.float(5.0, "U/V) Min ORB range to trade (pts)", group=G_ASIA, step=1.0,
               tooltip="Asian sessions are thin — ranges are typically much smaller than Frankfurt or NY. If this filter blocks nearly every signal, that is the finding: the setup does not exist on gold in Asian hours.")
 
+// ─── U CONTEXT FILTERS  (added 2026-10-10) ───────────────────────────
+// WHY U AND NOT THE OTHERS: an audit of the whole file found U is the only
+// ORB signal with no context test at all. Its gate is break strength, the
+// liquidity check and HTF bias - nothing that asks whether the break cleared
+// anything. M has orbBreakAsianHi/Lo (ON, live), G has lonBreakAsianHi/Lo,
+// H has orbNYLonHiFilter/LoFilter plus asianBiasFilter, W has three. U has
+// none, and the two signals that DO carry this family are the two it is
+// measured to help - lonBreakAsian took G from PF 4.176 to 7.096.
+//
+// This is NOT a port of the Shanghai work. W was retired on 2026-10-10 when
+// the blend test showed it cut the book's return-per-drawdown by 64%. What
+// survived W is the previous-DAY test, which nothing else in the file had.
+//
+// All default OFF. Test each ALONE and inside the blend - the live book runs
+// 99.59% on 242 trades with ONE loss, so a filter cannot be validated against
+// the loss count; judge it on P&L per unit of drawdown instead.
+sydBreakNyHi = input.bool(false, "U LONG)  Require close above the NY session HIGH", group=G_ASIA,
+               tooltip="U opens at 22:00, one hour after NY closes at 21:00, so NY is the session immediately behind it and its high is the nearest pool of resting sell orders. Exactly the demand M makes of the Asian extreme and H makes of the London extreme. Uses ny_hi_presyd, the 14:00-to-Sydney-open pool, which self-adjusts if you change the Sydney open hour.")
+sydBreakNyLo = input.bool(false, "U SHORT) Require close below the NY session LOW", group=G_ASIA,
+               tooltip="Symmetric to the LONG filter above.")
+sydNyCascade = input.bool(false, "U) NY cascade - trade only in the NY close direction", group=G_ASIA,
+               tooltip="Blocks a U trade opposing the direction NY closed, measured close versus open over 14:00-21:00 UTC. The T-1 theorem measured this cascade as significant on every session tested (Asian to NY was z=+3.68); asianBiasFilter is the same idea pointed the other way. CAVEAT: the NY bias is latched at 21:00, so this is only 'today's NY' while the Sydney open hour is 21 or later. At the 18-20 settings the ORB runs INSIDE the NY session and the latch still holds YESTERDAY's - the filter silently changes meaning.")
+sydBreakPdHi = input.bool(false, "U LONG)  Require close above the PREVIOUS DAY high", group=G_ASIA,
+               tooltip="The one mechanism that came out of the Shanghai research and outlived it. Osler's NY Fed order-book work found protective stops cluster just past prior-period extremes and round numbers, and that clearing a real stop cluster ACCELERATES price while merely leaving a range into the take-profit cluster reverts. An INFERENCE, not a cited result - no order-level study of this exists for gold. Note the broker day rolls at 21:00/22:00, so at 22:30 the 'previous day' is the session that closed less than two hours ago, and which one depends on DST by an hour.")
+sydBreakPdLo = input.bool(false, "U SHORT) Require close below the PREVIOUS DAY low", group=G_ASIA,
+               tooltip="Symmetric to the LONG filter above. Test it apart from the NY-extreme filter: the two overlap (the day high is often set in London or NY) but they are different claims and a null on one says nothing about the other.")
+
 G_SGE = "W - Shanghai ORB (SGE)"
 // Every filter gets its OWN toggle. The ADR guard taught this the expensive way:
 // one switch gating M, H, U and V was wrong for M for months, because a setting
@@ -208,6 +235,12 @@ orbNYLonHiFilter = input.bool(false, "H LONG)  Require close above London sessio
                  group=G_STRAT)
 orbNYLonLoFilter = input.bool(false, "H SHORT) Require close below London session LOW (theorem filter)",
                  tooltip="NY ORB SHORT only fires when the breakout bar also closes below the London session low (08:00-14:00 UTC). Mirrors the FRB Asian-extreme gate — theorem predicts WR ≈ 97-98%.",
+                 group=G_STRAT)
+orbNYPdHiFilter  = input.bool(false, "H LONG)  Require close above the PREVIOUS DAY high",
+                 tooltip="The level-quality test, one step up from the London filter above: not the session behind H but the whole day behind it. Osler's NY Fed order-book work found protective stops cluster just past prior-period extremes, and that clearing a real stop cluster accelerates price while leaving a range into the take-profit cluster reverts. EXPECT THIS TO BE WEAK FOR H SPECIFICALLY: by 14:00 London has already run six hours, so on a trending day the previous day's high is usually long gone and the filter passes trivially. That is the opposite of its position on U, where it fires 90 minutes after the day rolled. A null here is informative, not a bug.",
+                 group=G_STRAT)
+orbNYPdLoFilter  = input.bool(false, "H SHORT) Require close below the PREVIOUS DAY low",
+                 tooltip="Symmetric to the LONG filter above.",
                  group=G_STRAT)
 asianBiasFilter  = input.bool(false, "H/M) Asian cascade — only trade in Asian close direction (T-1: z=+3.68, all sessions significant)",
                  tooltip="T-1 Theorem: Asian session direction (close vs open, 00:00-07:00 UTC) cascades to Frankfurt (65.7%, z=3.03★), London (61.7%, z=3.63★) and NY (64.6%, z=3.68★). When ON, blocks ORB trades that oppose the Asian session close direction. Default OFF — turn ON to test the cascade filter independently.",
@@ -1714,6 +1747,19 @@ if _mtp_cur == 0
     _mtp_be := false
 _mtp_prev := _mtp_cur
 
+// ─── H / U CONTEXT GATES, HOISTED ────────────────────────────────────
+// Each of these gate lines exists TWICE - the real entry block and the shadow
+// signal-funnel copy that has to agree with it. Hoisting is what keeps the two
+// in step; inlining the conditions twice is how the funnel drifts and starts
+// counting signals the entry never took. Defined here, above every signal
+// block, because H fires at 14:30 and U at 22:30 and one definition serves
+// both plus their funnel copies.
+_hOkL = (not orbNYPdHiFilter or (not na(_pdHigh) and close > _pdHigh))
+_hOkS = (not orbNYPdLoFilter or (not na(_pdLow)  and close < _pdLow))
+
+_uOkL = (not sydBreakNyHi or (not na(ny_hi_presyd) and close > ny_hi_presyd)) and (not sydNyCascade or _nyBiasPrev >= 0) and (not sydBreakPdHi or (not na(_pdHigh) and close > _pdHigh))
+_uOkS = (not sydBreakNyLo or (not na(ny_lo_presyd) and close < ny_lo_presyd)) and (not sydNyCascade or _nyBiasPrev <= 0) and (not sydBreakPdLo or (not na(_pdLow)  and close < _pdLow))
+
 // ═══════════════════════════════════════════════════════════════════════
 // SIGNAL M — Frankfurt ORB (Opening Range Breakout 07:00-07:30 UTC)
 // Frankfurt/ECB open — European banks begin gold programs.  Same ORB
@@ -1915,7 +1961,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
     orb_range = nyorb_hi - nyorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeNY
-        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
+        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it.
             _hlE = nyorb_hi + orb_range * _c2Depth
@@ -1965,7 +2011,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
+        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS
             // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             _hsE = nyorb_lo - orb_range * _c2Depth
@@ -2131,7 +2177,7 @@ if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locke
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     rngU = syd_hi - syd_lo
     if rngU >= c2MinRangeASIA
-        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong)
+        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL
             _ulE = syd_hi + rngU * _c2Depth
             _ulS = syd_hi - f_c2SL(rngU)
             _ulA = syd_hi + rngU * orbTPMult
@@ -2164,7 +2210,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort)
+        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS
             _usE = syd_lo - rngU * _c2Depth
             _usS = syd_lo + f_c2SL(rngU)
             _usA = syd_lo - rngU * orbTPMult
@@ -2644,8 +2690,8 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
 if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
     rH = nyorb_hi - nyorb_lo
     if rH >= c2MinRangeNY
-        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0)
-        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0)
+        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL
+        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS
         if okHL or okHS
             sigH   := sigH + 1
             shDone := true
@@ -2685,8 +2731,8 @@ if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locke
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
     rU2 = syd_hi - syd_lo
     if rU2 >= c2MinRangeASIA
-        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong)
-        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort)
+        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL
+        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS
         if okUL or okUS
             sigU   := sigU + 1
             suDone := true
