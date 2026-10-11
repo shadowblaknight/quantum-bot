@@ -1,0 +1,507 @@
+//@version=6
+strategy("QB NAS100 C3 — Strategy", "QB NAS · C3", overlay=true,
+         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.0,
+         slippage=2, pyramiding=0, calc_on_every_tick=false,
+         close_entries_rule="ANY")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  QB NAS100 — C1 / C2 / C3  (US100 cash, 15m)
+//  ─────────────────────────────────────────────────────────────────────
+//  THIS IS A HARNESS, NOT A THESIS. Both NASDAQ architectures that have
+//  ever been measured here are OUT: the TJR narrative (London sweep ->
+//  ORB BOS -> Silver Bullet FVG) failed, and the gold H+M ORB port came
+//  in at PF 1.202 / 54 trades-yr. So nothing below is asserted to work.
+//  Every filter is its own toggle and every one defaults OFF, so turning
+//  the strategy on bare measures the structure before any filter is
+//  allowed to flatter it. The backtest decides, not this comment.
+//
+//  THE LADDER
+//    C1  the break      first close beyond the NY opening range
+//    C2  the retest     a limit resting back at that level
+//    C3  confirmation   an extra gate, enum, default Off
+//
+//  C3 IS THE POINT OF THE FILE. Gold has no third confirmation. The test
+//  is C2-alone against C2+C3, one C3 mode at a time, never bundled.
+//
+//  TWO CLOCKS, DELIBERATELY SEPARATE
+//    · WHEN MAY THE BREAK FIRE — effectively unbounded. NASDAQ often does
+//      not move until two hours after the open, and the equivalent gold
+//      test settles it: restricting NY to 14:30-16:00 removed 77 of 218
+//      trades and 44% of net profit while RAISING drawdown, and the
+//      removed trades were worth 23.45 each against 16.61 for the ones
+//      kept. Late breaks were the BETTER trades. Do not cap this.
+//    · HOW LONG MAY AN UNFILLED LIMIT REST — bounded, and strictly. An
+//      unexpired limit fills days later against a level that stopped
+//      existing. Conflating these two clocks is a real bug that has bitten
+//      this project twice.
+//
+//  DST. The NASDAQ cash open is 09:30 New York, which is 13:30 UTC in
+//  summer and 14:30 UTC in winter. Every session below is therefore read
+//  in its OWN exchange timezone, never in fixed UTC minutes. Gold could
+//  get away with fixed UTC because commodity sessions are not pinned to
+//  an equity cash open. This cannot.
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── 0 · TEST WINDOW ──────────────────────────────────────────────────
+// TradingView serves however much deep history it feels like on a 15m
+// chart and the start date MOVES between loads, so two runs taken on
+// different days are two different populations. Pin this before any A/B.
+G_WIN = "0 · Test window"
+useTestWin = input.bool(false, "Pin the backtest window (ON for any A/B)", group=G_WIN,
+             tooltip="OFF = every bar TradingView supplies, and the loaded start date drifts between loads.\n\nON = only bars inside the window below may OPEN a trade. It cannot make TradingView load more bars than it served - check the run fingerprint in the diagnostics table to see what the script actually ran on.")
+twStart = input.time(timestamp("01 Jan 2024 00:00 +0000"), "  Window start", group=G_WIN)
+twEnd   = input.time(timestamp("01 Jan 2027 00:00 +0000"), "  Window end",   group=G_WIN)
+_winOk  = not useTestWin or (time >= twStart and time <= twEnd)
+
+// ─── 1 · SESSION + OPENING RANGE ──────────────────────────────────────
+G_ORB = "1 · NY opening range"
+orbOpenMin  = input.int(570, "NY open (minutes past midnight, NEW YORK time)", group=G_ORB, minval=0, maxval=1439, step=15,
+              tooltip="570 = 09:30 New York, the cash open. Read in America/New_York, so it tracks US daylight saving automatically and never needs changing. 540 would be 09:00 if you ever want the pre-open.")
+orbMins     = input.int(30,  "Opening range length (mins)", group=G_ORB, minval=5, maxval=120, step=5)
+breakEndMin = input.int(960, "Last NY minute a break may fire", group=G_ORB, minval=570, maxval=1439, step=15,
+              tooltip="960 = 16:00 New York, the cash close. This is DELIBERATELY LATE. The matching gold test proved late breaks are the better trades, so this is not a quality filter and should not be tightened to make the equity curve look tidier. Order life below is the thing that should be short, not this.")
+orderLife   = input.int(120, "Limit order life (mins from the break)", group=G_ORB, minval=15, maxval=600, step=15,
+              tooltip="How long an UNFILLED limit may rest before it is cancelled. Separate from the break window on purpose. Leave it bounded: an order that never expires fills days later against a dead level, which has happened in this project more than once.")
+minRange    = input.float(0.0, "Min opening range to trade (points, 0 = off)", group=G_ORB, step=5.0,
+              tooltip="An ABSOLUTE point floor. On an index that has run from 15,000 to 25,000 this ages badly, so prefer the ATR-relative floor below and leave this at 0 unless you are reproducing an old run.")
+minRangeAtr = input.float(0.0, "Min opening range as x ATR (0 = off)", group=G_ORB, step=0.05,
+              tooltip="Self-scaling alternative to the absolute floor. 0.50 means the opening range must be at least half the entry-timeframe ATR. Survives the index repricing in a way a fixed point value does not.")
+dirFilter   = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ORB)
+
+// ─── 2 · C2 ENTRY + STOP GEOMETRY ─────────────────────────────────────
+G_C2 = "2 · C2 entry and stops"
+c2Mode  = input.string("Retest (limit)", "C2 entry type", options=["Retest (limit)", "Immediate (market)"], group=G_C2,
+          tooltip="RETEST rests a limit back at the broken level and only trades if price returns. IMMEDIATE fills at the break bar's close, taking runaway moves at a worse price. On gold the retest won and the reason mattered: the limit protects the entry price the whole R:R depends on.")
+c2Depth = input.float(0.0, "Retest depth (x range, toward price)", group=G_C2, minval=0.0, maxval=0.70, step=0.05,
+          tooltip="0 = the limit sits exactly ON the level and needs a full retest. Higher lifts it toward price so a shallower pullback fills it, trading entry quality for fill probability. Auto-clamped below the TP multiplier so the entry can never sit past its own target.")
+slMode  = input.string("x ATR", "Stop mode", options=["x ATR", "x range", "Absolute points"], group=G_C2,
+          tooltip="DEFAULTS TO ATR ON PURPOSE. Gold runs a flat 76-point stop, and that number is gold-specific - it is 1.9% of a 4,000 price. The same constant on a 25,000 index is 0.3%, a completely different strategy wearing the same name. NASDAQ volatility also swings far harder than gold's, so a constant ages badly within a single backtest. Absolute is here only for reproducing a fixed-stop run.")
+slAtr   = input.float(1.50, "  Stop = k x ATR",   group=G_C2, minval=0.10, maxval=20.0, step=0.10)
+slRange = input.float(1.00, "  Stop = k x range", group=G_C2, minval=0.10, maxval=15.0, step=0.10)
+slPts   = input.float(100.0,"  Stop = points",    group=G_C2, minval=1.0,  step=5.0)
+tpMult  = input.float(2.00, "TP1 = k x range from the level", group=G_C2, minval=0.25, maxval=10.0, step=0.25,
+          tooltip="2.0 is the deliberate default and it is the single biggest departure from the gold template. Gold runs 0.75 x range against a stop many times larger, which produces a 99% win rate sitting only 3 percentage points above its breakeven - an edge that cannot absorb a bad month. A 2R-style target needs roughly a 33% win rate to break even, so it carries far more cushion. Sweep it, but understand which shape you are choosing.")
+
+// ─── 3 · C3 CONFIRMATION ──────────────────────────────────────────────
+G_C3 = "3 · C3 third confirmation"
+c3Mode = input.string("Off", "C3 confirmation", options=["Off", "Break strength", "Volume surge", "Swing BOS", "Retest holds", "Cross-asset agrees"], group=G_C3,
+         tooltip="THE POINT OF THIS FILE, and it is an ENUM rather than a stack of checkboxes for a reason: bundling confirmations is how you end up with one that works and four that do not, all averaged into a single number you cannot read. Test ONE mode at a time against Off.\n\nOFF - C2 alone. This is the baseline every mode must beat.\n\nBREAK STRENGTH - the break bar must close a minimum distance beyond the level. WARNING: measured and REJECTED on gold, where it made every metric monotonically worse. Kept because NASDAQ is a different instrument with different noise, but treat a positive result here with suspicion and re-run it.\n\nVOLUME SURGE - the break bar carries at least k times its hour-matched average volume. The one genuinely new input. Relative volume failed badly on gold, but gold CFDs only carry TICK volume; if this feed carries real volume that failure may have been a data problem rather than a concept problem. Check the diagnostics row - if the feed has no volume this mode disables itself rather than passing silently.\n\nSWING BOS - the break must also take out the prior swing extreme, not merely the edge of the opening range. Structure rather than a line.\n\nRETEST HOLDS - price must touch the retest zone and then CLOSE back beyond the level. The most literal reading of 'confirmation', and the most expensive in entry price.\n\nCROSS-ASSET AGREES - a second instrument must be moving the same way over the same window.")
+c3BreakStr = input.float(0.15, "  Break strength (x range beyond the level)", group=G_C3, minval=0.0, maxval=1.0, step=0.05)
+c3VolMult  = input.float(1.50, "  Volume surge (x hour-matched average)", group=G_C3, minval=1.0, maxval=10.0, step=0.1)
+c3VolDays  = input.int(14, "  Volume lookback (days)", group=G_C3, minval=3, maxval=60,
+             tooltip="Hour-matched: the break bar's volume is compared against the SAME clock slot on previous days, not against the day's average. Index volume is strongly diurnal - the open and the close dwarf midday - so a day-average denominator would flag every open as a surge and measure nothing.")
+c3SwingLen = input.int(5, "  Swing lookback (bars each side)", group=G_C3, minval=2, maxval=30)
+c3Sym      = input.symbol("SP:SPX", "  Cross-asset symbol", group=G_C3,
+             tooltip="Checked in the same direction over the opening-range window. SP:SPX is the obvious correlated check; a gold symbol tests the risk-on/risk-off relationship instead, which is the untested one.")
+
+// ─── 4 · CONTEXT FILTERS (every one its own switch, all default OFF) ──
+G_CTX = "4 · Context filters"
+ctxBiasOn  = input.bool(false, "Require HTF bias alignment", group=G_CTX)
+ctxBiasTF  = input.string("H1+H4", "  Bias timeframe", options=["H1", "H4", "Daily", "H1+H4", "H1+H4+D"], group=G_CTX)
+ctxAdrOn   = input.bool(false, "Skip when >90% of ADR is already spent", group=G_CTX,
+             tooltip="Reads the PREVIOUS bar's value so the trigger bar's own wick cannot self-block. Measured GOOD for NY on gold and BAD for Frankfurt, which is exactly why it is per-signal and not global.")
+ctxPrevDay = input.bool(false, "Break must clear the PREVIOUS DAY high/low", group=G_CTX,
+             tooltip="The one mechanism that outlived the Shanghai research. Osler's NY Fed order-book work found protective stops cluster just past prior-period extremes, and that clearing a real stop cluster accelerates price while merely leaving a range into the take-profit cluster reverts. An inference, not a cited result for an index.")
+ctxPrevWk  = input.bool(false, "Break must clear the PREVIOUS WEEK high/low", group=G_CTX,
+             tooltip="New - gold has no weekly level. A weekly extreme is a far larger pool than a daily one, so expect this to be strict and to cut the trade count hard. Watch the count before reading the win rate.")
+ctxAsia    = input.bool(false, "Break must clear the ASIAN session high/low", group=G_CTX,
+             tooltip="Asian session read in Asia/Tokyo, 09:00-15:00 local, so it tracks Japan's calendar rather than a fixed UTC block.")
+ctxLondon  = input.bool(false, "Break must clear the LONDON session high/low", group=G_CTX,
+             tooltip="London read in Europe/London, 08:00-16:30 local. Note UK and US daylight saving do not switch on the same dates, which is precisely why this is timezone-named rather than a UTC constant.")
+ctxAsiaCas = input.bool(false, "Asian cascade - trade only with the Asian close direction", group=G_CTX)
+ctxLonCas  = input.bool(false, "London cascade - trade only with the London close direction", group=G_CTX)
+ctxDowOn   = input.bool(false, "Day-of-week filter", group=G_CTX)
+ctxMon = input.bool(true, "  Mon", group=G_CTX, inline="dow")
+ctxTue = input.bool(true, "  Tue", group=G_CTX, inline="dow")
+ctxWed = input.bool(true, "  Wed", group=G_CTX, inline="dow")
+ctxThu = input.bool(true, "  Thu", group=G_CTX, inline="dow")
+ctxFri = input.bool(true, "  Fri", group=G_CTX, inline="dow")
+
+// ─── 5 · EXIT ─────────────────────────────────────────────────────────
+G_EXIT = "5 · Exit"
+exitMode  = input.string("TP1", "Exit", options=["TP1", "TP2", "TP3", "Ratchet (no TP)"], group=G_EXIT,
+            tooltip="TP1/2/3 are fixed targets at k, 2k, 3k times the range from the level. RATCHET removes the target entirely and exits only on a trailing stop - the mode the gold account actually runs.")
+trailArm  = input.float(1.00, "  Ratchet: arm after (x step)", group=G_EXIT, minval=0.05, maxval=10.0, step=0.05)
+trailKeep = input.float(0.85, "  Ratchet: fraction of reach locked", group=G_EXIT, minval=0.10, maxval=0.95, step=0.05,
+            tooltip="Measured on gold: do NOT raise this above 0.85. Past that the candidate stop hugs the extreme so closely that it keeps failing the price-buffer test, never moves, and the trade rides its original stop for days. That looks like higher profit and is actually no trail at all.")
+showBoxes = input.bool(true, "Draw position boxes", group=G_EXIT)
+
+// ─── 6 · DIAGNOSTICS ──────────────────────────────────────────────────
+G_DIAG   = "6 · Diagnostics"
+showDiag = input.bool(true, "Show the diagnostics table", group=G_DIAG,
+           tooltip="Signals vs orders vs fills, the volume-feed check, and the RUN FINGERPRINT - the bar count and date range the script actually executed on. Read the fingerprint before comparing any two runs: the Tester's date label and the script's real slice are not the same thing.")
+
+atrLen = input.int(14, "ATR period", group=G_DIAG, minval=2, maxval=100)
+emaLen = input.int(20, "HTF bias EMA period", group=G_DIAG, minval=5, maxval=200)
+
+// ═══════════════════════════════════════════════════════════════════════
+// TIME — every session in its OWN exchange timezone
+// ═══════════════════════════════════════════════════════════════════════
+_nyMin  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+_lonMin = hour(time, "Europe/London")    * 60 + minute(time, "Europe/London")
+_tokMin = hour(time, "Asia/Tokyo")       * 60 + minute(time, "Asia/Tokyo")
+_newDay = ta.change(time("D")) != 0
+_dow    = dayofweek(time, "America/New_York")
+_dowOk  = not ctxDowOn or (_dow == dayofweek.monday and ctxMon) or (_dow == dayofweek.tuesday and ctxTue) or (_dow == dayofweek.wednesday and ctxWed) or (_dow == dayofweek.thursday and ctxThu) or (_dow == dayofweek.friday and ctxFri)
+
+atrVal = ta.atr(atrLen)
+
+// ═══════════════════════════════════════════════════════════════════════
+// HTF BIAS — close[1] vs ema[1] on the higher timeframe
+// Reading [1] is deliberate: a bar that closes beyond the opening range has
+// almost certainly closed beyond its own EMA too, so scoring the current bar
+// would grade the breakout against itself and produce a filter that looks
+// predictive while measuring nothing.
+// ═══════════════════════════════════════════════════════════════════════
+f_bias(int n) =>
+    e = ta.ema(close, n)
+    close[1] > e[1] ? 1 : close[1] < e[1] ? -1 : 0
+
+h1B = request.security(syminfo.tickerid, "60",  f_bias(emaLen), lookahead=barmerge.lookahead_off)
+h4B = request.security(syminfo.tickerid, "240", f_bias(emaLen), lookahead=barmerge.lookahead_off)
+hdB = request.security(syminfo.tickerid, "D",   f_bias(emaLen), lookahead=barmerge.lookahead_off)
+
+_biasLong  = ctxBiasTF == "H1" ? h1B >= 0 : ctxBiasTF == "H4" ? h4B >= 0 : ctxBiasTF == "Daily" ? hdB >= 0 : ctxBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : (h1B == 1 and h4B == 1 and hdB == 1)
+_biasShort = ctxBiasTF == "H1" ? h1B <= 0 : ctxBiasTF == "H4" ? h4B <= 0 : ctxBiasTF == "Daily" ? hdB <= 0 : ctxBiasTF == "H1+H4" ? (h1B == -1 and h4B == -1) : (h1B == -1 and h4B == -1 and hdB == -1)
+
+// ═══════════════════════════════════════════════════════════════════════
+// HIGHER-PERIOD LEVELS — [1] reads the FINISHED bar, so no lookahead
+// ═══════════════════════════════════════════════════════════════════════
+_atrD   = request.security(syminfo.tickerid, "D", ta.atr(14))
+_dHi    = request.security(syminfo.tickerid, "D", high)
+_dLo    = request.security(syminfo.tickerid, "D", low)
+_pdHi   = request.security(syminfo.tickerid, "D", high[1])
+_pdLo   = request.security(syminfo.tickerid, "D", low[1])
+_pwHi   = request.security(syminfo.tickerid, "W", high[1])
+_pwLo   = request.security(syminfo.tickerid, "W", low[1])
+_adr    = _atrD > 0 ? (_dHi - _dLo) / _atrD : 0.0
+_adrOk  = not ctxAdrOn or _adr[1] < 0.90
+
+// ═══════════════════════════════════════════════════════════════════════
+// SESSION EXTREMES — accumulate during, latch on the FALLING edge.
+// Latched rather than reset daily because the NY open happens AFTER both
+// sessions have finished; a daily wipe would leave them na by the time the
+// break fires. Nothing ever resets the _Prev pair.
+// ═══════════════════════════════════════════════════════════════════════
+in_tok = timeframe.isintraday and _tokMin >= 540 and _tokMin < 900     // 09:00-15:00 Tokyo
+in_lon = timeframe.isintraday and _lonMin >= 480 and _lonMin < 990     // 08:00-16:30 London
+
+var float _tokHiC = na
+var float _tokLoC = na
+var float _tokOpC = na
+var float _tokClC = na
+var float _tokHi  = na
+var float _tokLo  = na
+var int   _tokBias = 0
+if in_tok and not in_tok[1]
+    _tokHiC := na
+    _tokLoC := na
+    _tokOpC := na
+    _tokClC := na
+if in_tok
+    _tokHiC := na(_tokHiC) ? high : math.max(_tokHiC, high)
+    _tokLoC := na(_tokLoC) ? low  : math.min(_tokLoC, low)
+    if na(_tokOpC)
+        _tokOpC := open
+    _tokClC := close
+if not in_tok and in_tok[1] and not na(_tokHiC)
+    _tokHi   := _tokHiC
+    _tokLo   := _tokLoC
+    _tokBias := _tokClC > _tokOpC ? 1 : _tokClC < _tokOpC ? -1 : 0
+
+var float _lonHiC = na
+var float _lonLoC = na
+var float _lonOpC = na
+var float _lonClC = na
+var float _lonHi  = na
+var float _lonLo  = na
+var int   _lonBias = 0
+if in_lon and not in_lon[1]
+    _lonHiC := na
+    _lonLoC := na
+    _lonOpC := na
+    _lonClC := na
+if in_lon
+    _lonHiC := na(_lonHiC) ? high : math.max(_lonHiC, high)
+    _lonLoC := na(_lonLoC) ? low  : math.min(_lonLoC, low)
+    if na(_lonOpC)
+        _lonOpC := open
+    _lonClC := close
+if not in_lon and in_lon[1] and not na(_lonHiC)
+    _lonHi   := _lonHiC
+    _lonLo   := _lonLoC
+    _lonBias := _lonClC > _lonOpC ? 1 : _lonClC < _lonOpC ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════
+// HOUR-MATCHED VOLUME — index volume is strongly diurnal, so the break bar
+// is compared against the SAME clock slot on previous days. A day-average
+// denominator would mark every open as a surge and measure nothing.
+// The feed check is separate and loud: if this symbol carries no volume the
+// surge mode disables itself rather than passing every bar silently.
+// ═══════════════════════════════════════════════════════════════════════
+var array<float> _volHist = array.new<float>(0)
+var float _relVol   = na
+var int   _volBars  = 0
+var int   _volZero  = 0
+if barstate.isconfirmed
+    _volBars := _volBars + 1
+    if na(volume) or volume <= 0
+        _volZero := _volZero + 1
+_volFeedOk = _volBars > 50 and _volZero < _volBars / 2
+
+// ═══════════════════════════════════════════════════════════════════════
+// SWING STRUCTURE — for the Swing-BOS confirmation
+// ═══════════════════════════════════════════════════════════════════════
+_swHi = ta.pivothigh(high, c3SwingLen, c3SwingLen)
+_swLo = ta.pivotlow(low,   c3SwingLen, c3SwingLen)
+var float _lastSwHi = na
+var float _lastSwLo = na
+if not na(_swHi)
+    _lastSwHi := _swHi
+if not na(_swLo)
+    _lastSwLo := _swLo
+
+// ═══════════════════════════════════════════════════════════════════════
+// CROSS-ASSET — same direction over the same window
+// ═══════════════════════════════════════════════════════════════════════
+_xOpen  = request.security(c3Sym, timeframe.period, open,  ignore_invalid_symbol=true)
+_xClose = request.security(c3Sym, timeframe.period, close, ignore_invalid_symbol=true)
+_xDir   = na(_xOpen) or na(_xClose) ? 0 : _xClose > _xOpen ? 1 : _xClose < _xOpen ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════
+// THE OPENING RANGE
+// ═══════════════════════════════════════════════════════════════════════
+in_orb   = timeframe.isintraday and _nyMin >= orbOpenMin and _nyMin < orbOpenMin + orbMins
+in_trade = timeframe.isintraday and _nyMin >= orbOpenMin + orbMins and _nyMin < breakEndMin
+
+var float orbHi = na
+var float orbLo = na
+var bool  orbLocked = false
+var bool  orbDone   = false
+var int   orbVol    = 0
+var int   breakBar  = na
+
+if in_orb and not in_orb[1]
+    orbHi     := na
+    orbLo     := na
+    orbLocked := false
+    orbDone   := false
+    breakBar  := na
+if in_orb
+    orbHi := na(orbHi) ? high : math.max(orbHi, high)
+    orbLo := na(orbLo) ? low  : math.min(orbLo, low)
+if not in_orb and in_orb[1] and not na(orbHi)
+    orbLocked := true
+    // hour-matched denominator: one entry per completed opening range
+    if _volFeedOk
+        int nb = math.max(1, int(orbMins / math.max(1, timeframe.multiplier)))
+        float wv = 0.0
+        for k = 0 to nb - 1
+            wv := wv + nz(volume[k + 1])
+        int n = array.size(_volHist)
+        if n >= c3VolDays
+            float sm = 0.0
+            for i = 0 to n - 1
+                sm := sm + array.get(_volHist, i)
+            float mn = sm / n
+            _relVol := mn > 0 ? wv / mn : na
+        else
+            _relVol := na
+        array.push(_volHist, wv)
+        if array.size(_volHist) > c3VolDays
+            array.shift(_volHist)
+
+_orbRange = orbHi - orbLo
+_rangeOk  = (minRange    <= 0 or _orbRange >= minRange) and (minRangeAtr <= 0 or na(atrVal) or _orbRange >= atrVal * minRangeAtr)
+
+// stop distance, floored at a tick so a degenerate range cannot put SL on entry
+f_sl(float rng) =>
+    d = slMode == "x ATR" ? atrVal * slAtr : slMode == "x range" ? rng * slRange : slPts
+    math.max(d, syminfo.mintick)
+
+_depth = math.min(c2Depth, tpMult * 0.9)
+
+// ═══════════════════════════════════════════════════════════════════════
+// C3 — one mode at a time, never bundled
+// ═══════════════════════════════════════════════════════════════════════
+f_c3(bool isLong, float lvl, float rng) =>
+    bool ok = true
+    if c3Mode == "Break strength"
+        ok := math.abs(close - lvl) >= rng * c3BreakStr
+    else if c3Mode == "Volume surge"
+        // Inert rather than silently true when the feed carries no volume.
+        ok := _volFeedOk and not na(_relVol) and _relVol >= c3VolMult
+    else if c3Mode == "Swing BOS"
+        ok := isLong ? (not na(_lastSwHi) and close > _lastSwHi) : (not na(_lastSwLo) and close < _lastSwLo)
+    else if c3Mode == "Retest holds"
+        // touched the level this bar and closed back beyond it
+        ok := isLong ? (low <= lvl and close > lvl) : (high >= lvl and close < lvl)
+    else if c3Mode == "Cross-asset agrees"
+        ok := isLong ? _xDir > 0 : _xDir < 0
+    ok
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTEXT GATES — hoisted so the entry block and the shadow counter below
+// read ONE definition. Inlining them twice is how a funnel drifts out of
+// step with the entries it is supposed to be counting.
+// ═══════════════════════════════════════════════════════════════════════
+_ctxL = (not ctxBiasOn or _biasLong) and (not ctxPrevDay or (not na(_pdHi) and close > _pdHi)) and (not ctxPrevWk or (not na(_pwHi) and close > _pwHi)) and (not ctxAsia or (not na(_tokHi) and close > _tokHi)) and (not ctxLondon or (not na(_lonHi) and close > _lonHi)) and (not ctxAsiaCas or _tokBias >= 0) and (not ctxLonCas or _lonBias >= 0)
+_ctxS = (not ctxBiasOn or _biasShort) and (not ctxPrevDay or (not na(_pdLo) and close < _pdLo)) and (not ctxPrevWk or (not na(_pwLo) and close < _pwLo)) and (not ctxAsia or (not na(_tokLo) and close < _tokLo)) and (not ctxLondon or (not na(_lonLo) and close < _lonLo)) and (not ctxAsiaCas or _tokBias <= 0) and (not ctxLonCas or _lonBias <= 0)
+
+_gateOk = _winOk and _adrOk and _dowOk and orbLocked and not na(orbHi) and not na(orbLo) and _rangeOk
+
+okLong  = _gateOk and close > orbHi and dirFilter != "Short only" and _ctxL and f_c3(true,  orbHi, _orbRange)
+okShort = _gateOk and close < orbLo and dirFilter != "Long only"  and _ctxS and f_c3(false, orbLo, _orbRange)
+
+// ═══════════════════════════════════════════════════════════════════════
+// RATCHET STATE
+// ═══════════════════════════════════════════════════════════════════════
+var float _rtLvl = na
+var float _rtEnt = na
+var float _rtRng = na
+var int   _rtDir = 0
+var string _rtId = na
+var float _rtSl  = na
+var float _rtSl0 = na
+var float _rtRch = 0.0
+_rtOn = exitMode == "Ratchet (no TP)"
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENTRY
+// ═══════════════════════════════════════════════════════════════════════
+f_box(float e, float sl, float tp) =>
+    if showBoxes
+        r = bar_index + 30
+        box.new(bar_index, math.max(e, tp), r, math.min(e, tp), border_color=color.new(color.teal, 55), bgcolor=color.new(color.teal, 90))
+        box.new(bar_index, math.max(e, sl), r, math.min(e, sl), border_color=color.new(color.red, 55),  bgcolor=color.new(color.red, 92))
+
+if barstate.isconfirmed and in_trade and not orbDone and strategy.position_size == 0 and (okLong or okShort)
+    isL   = okLong
+    lvl   = isL ? orbHi : orbLo
+    dir   = isL ? 1 : -1
+    ent   = lvl + dir * _orbRange * _depth
+    slP   = lvl - dir * f_sl(_orbRange)
+    step  = _orbRange * tpMult
+    tp1   = lvl + dir * step
+    tp2   = lvl + dir * step * 2.0
+    tp3   = lvl + dir * step * 3.0
+    id    = isL ? "NAS-L" : "NAS-S"
+    orbDone  := true
+    breakBar := bar_index
+    lim = c2Mode == "Retest (limit)" ? ent : na
+    strategy.entry(id, isL ? strategy.long : strategy.short, limit=lim, comment=(isL ? "nas-orb LONG" : "nas-orb SHORT"))
+    // Ratchet state must be registered HERE. Without it the ratchet branch
+    // places a naked stop with no target and no trail, which is a guaranteed
+    // full loss on every filled trade - a bug this project has already paid
+    // for once on two different signals.
+    if _rtOn
+        _rtLvl := lvl
+        _rtEnt := ent
+        _rtRng := _orbRange
+        _rtDir := dir
+        _rtId  := id
+        _rtSl  := slP
+        _rtSl0 := slP
+        _rtRch := 0.0
+    if _rtOn
+        strategy.exit(id + "-X", from_entry=id, stop=slP)
+    else
+        strategy.exit(id + "-X", from_entry=id, stop=slP,
+                      limit=exitMode == "TP1" ? tp1 : exitMode == "TP2" ? tp2 : tp3)
+    label.new(bar_index, isL ? low : high, isL ? "C1↑" : "C1↓",
+              style=isL ? label.style_label_up : label.style_label_down,
+              color=color.new(isL ? color.teal : color.red, 10), textcolor=color.white, size=size.small)
+    f_box(ent, slP, tp1)
+
+// ─── RATCHET ADVANCE — recalculated at the bar CLOSE, live from the NEXT
+// bar, matching how the live trade manager behaves.
+if _rtOn and _rtDir != 0 and not na(_rtLvl) and strategy.position_size != 0
+    stp = _rtRng * tpMult
+    if stp > 0
+        rch = _rtDir == 1 ? (high - _rtLvl) / stp : (_rtLvl - low) / stp
+        if rch > _rtRch
+            _rtRch := rch
+        if _rtRch >= trailArm
+            cand = _rtLvl + _rtDir * (_rtRch * trailKeep) * stp
+            bufR = math.min(math.max(math.abs(_rtEnt - _rtSl0) * 0.25, syminfo.mintick * 2), math.max(syminfo.mintick * 20, 1.0))
+            okV  = _rtDir == 1 ? cand <= close - bufR : cand >= close + bufR
+            okB  = _rtDir == 1 ? cand > _rtSl : cand < _rtSl
+            if okV and okB
+                _rtSl := cand
+        strategy.exit(_rtId + "-X", from_entry=_rtId, stop=_rtSl)
+
+var float _rtPrev = 0.0
+if strategy.position_size == 0 and _rtPrev != 0
+    _rtDir := 0
+    _rtRch := 0.0
+    _rtLvl := na
+_rtPrev := strategy.position_size
+
+// ─── ORDER LIFE — cancel an UNFILLED limit. Bounded on purpose, and kept
+// separate from the break window above: one controls when a setup may
+// appear, the other how long a pending order may sit. An order that never
+// expires fills days later against a level that stopped existing.
+if not na(breakBar) and strategy.position_size == 0 and (bar_index - breakBar) * timeframe.multiplier > orderLife
+    strategy.cancel("NAS-L")
+    strategy.cancel("NAS-S")
+if not in_trade and in_trade[1]
+    strategy.cancel("NAS-L")
+    strategy.cancel("NAS-S")
+
+// ═══════════════════════════════════════════════════════════════════════
+// DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════
+var int _sig   = 0      // setups whose conditions were met, position gate ignored
+var int _ord   = 0      // orders actually placed
+var int _runB  = 0
+var int _runT0 = na
+var int _runT1 = na
+var bool _sigDone = false
+
+if barstate.isconfirmed
+    _runB := _runB + 1
+    if na(_runT0)
+        _runT0 := time
+    _runT1 := time
+if in_orb and not in_orb[1]
+    _sigDone := false
+if barstate.isconfirmed and in_trade and not _sigDone and (okLong or okShort)
+    _sig     := _sig + 1
+    _sigDone := true
+if orbDone and not orbDone[1]
+    _ord := _ord + 1
+
+var table dg = na
+if barstate.islast and showDiag
+    if na(dg)
+        dg := table.new(position.bottom_right, 2, 9, bgcolor=color.new(color.black, 55),
+                        border_color=color.new(color.gray, 60), border_width=1,
+                        frame_color=color.new(color.gray, 60), frame_width=1)
+    h = color.new(#D4A017, 0)
+    g = color.new(color.gray, 10)
+    w = color.new(color.white, 15)
+    table.cell(dg, 0, 0, "QB NAS100 · C3", text_color=h, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 0, c3Mode == "Off" ? "C2 only" : "C3 " + c3Mode, text_color=h, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 1, "signals", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 1, str.tostring(_sig), text_color=w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 2, "ordered", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 2, str.tostring(_ord), text_color=w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 3, "filled (closed)", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 3, str.tostring(strategy.closedtrades), text_color=w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 4, "blocked by slot", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 4, str.tostring(_sig - _ord), text_color=(_sig - _ord) > _ord ? color.new(color.orange, 0) : w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 5, "volume feed", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 5, _volFeedOk ? "OK  relvol " + (na(_relVol) ? "warming" : str.tostring(_relVol, "0.00")) : "NONE — surge mode inert",
+               text_color=_volFeedOk ? color.new(color.lime, 0) : color.new(color.orange, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 6, "stop mode", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 6, slMode + "  ->  " + str.tostring(f_sl(nz(_orbRange, 0)), "#.#") + " pts", text_color=w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 7, "NY open (UTC today)", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 7, str.tostring(orbOpenMin / 60, "#") + ":" + str.tostring(orbOpenMin % 60, "00") + " NY  (DST-tracked)", text_color=w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 8, "SCRIPT SAW", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 8, str.tostring(_runB) + " bars  " + str.format("{0,date,yyyy-MM-dd}", _runT0) + " to " + str.format("{0,date,yyyy-MM-dd}", _runT1),
+               text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
+
+bgcolor(in_orb   ? color.new(color.yellow, 88) : na, title="NY opening range")
+bgcolor(in_trade ? color.new(color.blue,   94) : na, title="break window")
