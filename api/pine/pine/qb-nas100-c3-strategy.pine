@@ -455,6 +455,15 @@ if not in_trade and in_trade[1]
 // ═══════════════════════════════════════════════════════════════════════
 var int _sig   = 0      // setups whose conditions were met, position gate ignored
 var int _ord   = 0      // orders actually placed
+// FILL FORENSICS. 211 orders and 0 fills is not a plausible market outcome, so
+// one of two things is true: the retest genuinely never comes, or the order is
+// not alive when it does. These three counters tell them apart.
+var int   _armed   = 0   // orders that went live
+var int   _touched = 0   // ...of those, how many had price trade through the limit
+var int   _expired = 0   // ...how many died on the order-life clock
+var float _pendPx  = na  // the live limit price
+var int   _pendDir = 0
+var bool  _pendHit = false
 var int _runB  = 0
 var int _runT0 = na
 var int _runT1 = na
@@ -473,10 +482,26 @@ if barstate.isconfirmed and in_trade and not _sigDone and (okLong or okShort)
 if orbDone and not orbDone[1]
     _ord := _ord + 1
 
+// Track the live limit and whether price ever reached it.
+if orbDone and not orbDone[1]
+    _armed   := _armed + 1
+    _pendDir := okLong ? 1 : -1
+    _pendPx  := (okLong ? orbHi : orbLo) + (okLong ? 1 : -1) * _orbRange * _depth
+    _pendHit := false
+if _pendDir != 0 and not _pendHit and not na(_pendPx)
+    if (_pendDir == 1 and low <= _pendPx) or (_pendDir == -1 and high >= _pendPx)
+        _pendHit := true
+        _touched := _touched + 1
+if _pendDir != 0 and not na(breakBar) and (bar_index - breakBar) * timeframe.multiplier > orderLife
+    if not _pendHit
+        _expired := _expired + 1
+    _pendDir := 0
+    _pendPx  := na
+
 var table dg = na
 if barstate.islast and showDiag
     if na(dg)
-        dg := table.new(position.bottom_right, 2, 9, bgcolor=color.new(color.black, 55),
+        dg := table.new(position.bottom_right, 2, 10, bgcolor=color.new(color.black, 55),
                         border_color=color.new(color.gray, 60), border_width=1,
                         frame_color=color.new(color.gray, 60), frame_width=1)
     h = color.new(#D4A017, 0)
@@ -498,9 +523,14 @@ if barstate.islast and showDiag
     table.cell(dg, 0, 6, "stop mode", text_color=g, text_size=size.tiny, text_halign=text.align_left)
     table.cell(dg, 1, 6, slMode + "  ->  " + str.tostring(f_sl(nz(_orbRange, 0)), "#.#") + " pts", text_color=w, text_size=size.tiny, text_halign=text.align_right)
     table.cell(dg, 0, 7, "NY open (UTC today)", text_color=g, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(dg, 1, 7, str.tostring(orbOpenMin / 60, "#") + ":" + str.tostring(orbOpenMin % 60, "00") + " NY  (DST-tracked)", text_color=w, text_size=size.tiny, text_halign=text.align_right)
-    table.cell(dg, 0, 8, "SCRIPT SAW", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(dg, 1, 8, str.tostring(_runB) + " bars  " + str.format("{0,date,yyyy-MM-dd}", _runT0) + " to " + str.format("{0,date,yyyy-MM-dd}", _runT1),
+    table.cell(dg, 1, 7, str.tostring(math.floor(orbOpenMin / 60), "#") + ":" + str.tostring(orbOpenMin % 60, "00") + " NY  (DST-tracked)", text_color=w, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 8, "armed / touched / expired", text_color=g, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 8, str.tostring(_armed) + " / " + str.tostring(_touched) + " / " + str.tostring(_expired)
+               + (_armed > 0 and _touched == 0 ? "   <- price NEVER reached the limit" : _touched > 0 and strategy.closedtrades == 0 ? "   <- price REACHED it but no fill: ORDER BUG" : ""),
+               text_color=_armed > 0 and _touched == 0 ? color.new(color.orange, 0) : _touched > 0 and strategy.closedtrades == 0 ? color.new(color.red, 0) : w,
+               text_size=size.tiny, text_halign=text.align_right)
+    table.cell(dg, 0, 9, "SCRIPT SAW", text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(dg, 1, 9, str.tostring(_runB) + " bars  " + str.format("{0,date,yyyy-MM-dd}", _runT0) + " to " + str.format("{0,date,yyyy-MM-dd}", _runT1),
                text_color=color.new(color.aqua, 0), text_size=size.tiny, text_halign=text.align_right)
 
 bgcolor(in_orb   ? color.new(color.yellow, 88) : na, title="NY opening range")
