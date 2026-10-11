@@ -1,11 +1,25 @@
 //@version=6
 strategy("QB NAS100 C3 — Strategy", "QB NAS · C3", overlay=true,
          max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
-         default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         default_qty_type=strategy.fixed, default_qty_value=1,
          commission_type=strategy.commission.percent, commission_value=0.0,
          slippage=2, pyramiding=0, calc_on_every_tick=false,
          close_entries_rule="ANY")
 
+// ═══════════════════════════════════════════════════════════════════════
+//  POSITION SIZE: strategy.fixed, 1 contract. NOT percent_of_equity.
+//  ─────────────────────────────────────────────────────────────────────
+//  The first chart run placed 211 orders and filled NONE of them, with the
+//  forensics reporting armed 211 / touched 211 - price reached the limit
+//  every single time. The orders were never the problem; the SIZE was zero.
+//  percent_of_equity at 1% on a 100k Tester account is 1,000 USD, and one
+//  NAS100 contract is ~30,890, so the quantity rounded to 0 and a zero-size
+//  order fills nothing. Gold never hit this because its Tester runs at 1M
+//  against a 4,195 price, which comes to 2.4 contracts.
+//
+//  Fixed sizing is also simply better for research: it cannot round to zero
+//  on any account size, it does not compound, and net P&L reads directly as
+//  points, so two runs are comparable without equity-curve distortion.
 // ═══════════════════════════════════════════════════════════════════════
 //  QB NAS100 — C1 / C2 / C3  (US100 cash, 15m)
 //  ─────────────────────────────────────────────────────────────────────
