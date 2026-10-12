@@ -1210,8 +1210,35 @@ async function runManageTick() {
   let heartbeat = 'error';
   try { heartbeat = await refreshBalanceCache(); } catch (_) {}
 
+  // ─── FTMO EQUITY SNAPSHOT ────────────────────────────────────────────
+  // The FTMO guard runs inside the webhook, where a slow broker call costs the
+  // trade outright. So it never contacts MetaAPI itself - it reads a snapshot,
+  // and this is where the snapshot is written.
+  //
+  // COSTS NOTHING EXTRA: balance comes from the cache the heartbeat above
+  // already maintains, and floating P&L is summed from positions this tick has
+  // already fetched. No additional broker request anywhere.
+  //
+  // Written TWICE per tick on purpose. Here it covers the FLAT case, where the
+  // hasAnyWork() gate below returns early and positions are never fetched - and
+  // flat means floating is zero, so balance alone is the correct equity. The
+  // second write, after fetchPositions, adds real floating P&L when a trade is
+  // open. Fully wrapped: this is a reporting side-effect and must never be able
+  // to break the trade manager.
+  const _snapWrite = async (redis, floating) => {
+    try {
+      if (!redis) return;
+      const raw = await redis.get('v13:account:balance');
+      const bal = parseFloat(raw);
+      if (!bal || !isFinite(bal)) return;
+      await redis.set('v20:ftmo:equity_snapshot',
+        JSON.stringify({ balance: bal, equity: bal + (floating || 0), ts: Date.now() }));
+    } catch (_) { /* never throw out of a snapshot write */ }
+  };
+
   // Skip MetaAPI entirely when Redis confirms nothing is open or pending.
   const r = getRedis();
+  await _snapWrite(r, 0);
   if (r) {
     const hasWork = await hasAnyWork(r);
     if (!hasWork) {
@@ -1228,6 +1255,15 @@ async function runManageTick() {
       skipped: 'broker-positions-unavailable',
     };
   }
+
+  // Now that positions are known, rewrite the snapshot with real floating P&L.
+  // FTMO counts unrealised P&L toward the daily loss, so a trade running toward
+  // its stop has to be visible to the guard BEFORE it closes.
+  try {
+    const _floating = positions.reduce(
+      (s, p) => s + (p.profit || p.unrealizedProfit || 0) + (p.swap || 0), 0);
+    await _snapWrite(r, _floating);
+  } catch (_) {}
 
   const managedPositions = positions.filter((p) => p.comment && (
     p.comment.startsWith('QB-V12-') ||
