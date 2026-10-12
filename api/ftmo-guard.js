@@ -46,12 +46,25 @@ const INITIAL_BAL_KEY   = 'v20:ftmo:initial_balance';
 const DAY_START_KEY     = (d) => `v20:ftmo:day_start:${d}`;
 const EQUITY_SNAP_KEY   = 'v20:ftmo:equity_snapshot';
 
-// How long to wait for the broker. The OLD value was 3000ms, far shorter than
-// the broker layer's own BROKER_TIMEOUT_MS (14000, x2 attempts) - so any
-// MetaAPI response slower than 3s made this guard give up and fail OPEN,
-// silently. webhook.js has a 30s budget, so 10s leaves 20s for the rest.
-const GUARD_TIMEOUT_MS  = parseInt(process.env.FTMO_GUARD_TIMEOUT_MS, 10) || 10000;
-// A cached equity reading older than this is not trusted.
+// THE GUARD MUST NOT SLOW THE WEBHOOK DOWN. This sits in the signal path, and
+// a webhook that times out loses the trade outright - which has already cost a
+// week of trades once on this project. So the broker is NOT called here in the
+// normal case at all:
+//
+//   1. read the equity snapshot manage-trades writes every minute  (~10ms)
+//   2. only if that is missing or stale, call the broker with a SHORT timeout
+//   3. only if that also fails, fall back to a stale snapshot
+//   4. only if there is nothing at all, fail open and say so loudly
+//
+// 2500ms matches the budget the other webhook filters already use, so the
+// worst case is unchanged from before this guard existed. The earlier version
+// of this fix used 10s, which removed one failure mode by introducing a worse
+// one.
+const GUARD_TIMEOUT_MS  = parseInt(process.env.FTMO_GUARD_TIMEOUT_MS, 10) || 2500;
+// A snapshot this fresh is used directly and the broker is never contacted.
+// manage-trades writes one every minute, so 2 min tolerates a missed tick.
+const SNAP_FRESH_MS     = parseInt(process.env.FTMO_SNAP_FRESH_MS, 10) || 2 * 60 * 1000;
+// Older than this and a snapshot is not trusted even as a fallback.
 const SNAP_MAX_AGE_MS   = parseInt(process.env.FTMO_SNAP_MAX_AGE_MS, 10) || 15 * 60 * 1000;
 
 // FTMO's trading day rolls at MIDNIGHT PRAGUE (CET/CEST) - not midnight UTC,
@@ -95,35 +108,45 @@ async function checkFTMOLimits() {
   try {
     const r = getRedis();
 
-    const acct = await Promise.race([
-      fetchAccount(),
-      new Promise((res) => setTimeout(() => res(null), GUARD_TIMEOUT_MS)),
-    ]);
+    // ── 1 · the fast path: a fresh snapshot, no broker contact ──────────
+    let snap = null;
+    if (r) {
+      try {
+        const raw = await r.get(EQUITY_SNAP_KEY);
+        const j = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+        if (j && j.balance && j.equity) snap = j;
+      } catch (_) {}
+    }
+    const snapAge = snap ? Date.now() - (snap.ts || 0) : Infinity;
+
+    let balance, equity, snapshotUsed = false, acct = null;
+
+    if (snap && snapAge < SNAP_FRESH_MS) {
+      balance = snap.balance; equity = snap.equity; snapshotUsed = true;
+    } else {
+      // ── 2 · snapshot missing or stale: short broker call ──────────────
+      acct = await Promise.race([
+        fetchAccount(),
+        new Promise((res) => setTimeout(() => res(null), GUARD_TIMEOUT_MS)),
+      ]);
+    }
 
     // fetchAccount resolves to { error } on failure - an OBJECT, which is
     // truthy. The old `if (!acct)` never caught that, so a broker error fell
     // through and was reported as 'guard-no-balance'.
     const acctBad = !acct || acct.error || !(acct.balance || acct.equity);
 
-    let balance, equity, snapshotUsed = false;
-    if (!acctBad) {
+    if (snapshotUsed) {
+      // already have what we need
+    } else if (!acctBad) {
       balance = acct.balance || acct.equity || 0;
       equity  = acct.equity  || acct.balance || 0;
-      // Cache it, so a later slow call still has something recent to read.
       if (r) await r.set(EQUITY_SNAP_KEY, JSON.stringify({ balance, equity, ts: Date.now() })).catch(() => {});
     } else {
-      // The guard going blind is the failure mode that actually matters, so try
-      // the last cached reading before giving up. A slightly stale number beats
-      // no number when the question is "have I lost 4% today".
-      let snap = null;
-      if (r) {
-        try {
-          const raw = await r.get(EQUITY_SNAP_KEY);
-          const j = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
-          if (j && Date.now() - (j.ts || 0) < SNAP_MAX_AGE_MS) snap = j;
-        } catch (_) {}
-      }
-      if (!snap) {
+      // ── 3 · broker failed too: accept a STALE snapshot rather than go
+      // blind. A slightly old number beats no number when the question is
+      // "have I lost 4% today".
+      if (!(snap && snapAge < SNAP_MAX_AGE_MS)) {
         // Genuinely blind. Still fail OPEN - a guard that blocks every trade on
         // a broker hiccup is worse than no guard - but say so LOUDLY. The old
         // code did this silently, so "guard passed" and "guard never ran" were
