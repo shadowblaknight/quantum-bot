@@ -5,15 +5,8 @@
 // Blocks execution when approaching FTMO's hard limits with a safety margin.
 //
 // FTMO 2-Step Standard (100k account):
-//   Max daily loss:  5%  of the INITIAL balance, measured from the day's
-//                        starting point (the higher of balance/equity), with
-//                        floating P&L included. The old comment here read "5%
-//                        of balance at start of day", which disagreed with the
-//                        code below - the code was right, the comment was not.
+//   Max daily loss:  5%  of balance at start of day  (equity-based)
 //   Max total loss:  10% of initial challenge balance (equity-based)
-//
-// DAY BOUNDARY: midnight Europe/Prague. See _today() for why that is neither
-// midnight UTC nor the broker's midnight, and why it mattered for Signal U.
 //
 // Our block thresholds (buffer before the FTMO wall):
 //   Daily block:   4.0%  (1% buffer before the 5% wall)
@@ -44,51 +37,8 @@ const TOTAL_WARN_PCT  = 7.0;   // warning — signal alert, still trade
 
 const INITIAL_BAL_KEY   = 'v20:ftmo:initial_balance';
 const DAY_START_KEY     = (d) => `v20:ftmo:day_start:${d}`;
-const EQUITY_SNAP_KEY   = 'v20:ftmo:equity_snapshot';
 
-// THE GUARD MUST NOT SLOW THE WEBHOOK DOWN. This sits in the signal path, and
-// a webhook that times out loses the trade outright - which has already cost a
-// week of trades once on this project. So the broker is NOT called here in the
-// normal case at all:
-//
-//   1. read the equity snapshot manage-trades writes every minute  (~10ms)
-//   2. only if that is missing or stale, call the broker with a SHORT timeout
-//   3. only if that also fails, fall back to a stale snapshot
-//   4. only if there is nothing at all, fail open and say so loudly
-//
-// 2500ms matches the budget the other webhook filters already use, so the
-// worst case is unchanged from before this guard existed. The earlier version
-// of this fix used 10s, which removed one failure mode by introducing a worse
-// one.
-const GUARD_TIMEOUT_MS  = parseInt(process.env.FTMO_GUARD_TIMEOUT_MS, 10) || 2500;
-// A snapshot this fresh is used directly and the broker is never contacted.
-// manage-trades writes one every minute, so 2 min tolerates a missed tick.
-const SNAP_FRESH_MS     = parseInt(process.env.FTMO_SNAP_FRESH_MS, 10) || 2 * 60 * 1000;
-// Older than this and a snapshot is not trusted even as a fallback.
-const SNAP_MAX_AGE_MS   = parseInt(process.env.FTMO_SNAP_MAX_AGE_MS, 10) || 15 * 60 * 1000;
-
-// FTMO's trading day rolls at MIDNIGHT PRAGUE (CET/CEST) - not midnight UTC,
-// and not the broker's midnight. Those are three different instants: the broker
-// runs UTC+3 and rolls at 21:00 UTC, FTMO rolls at 22:00 UTC in summer and
-// 23:00 in winter, and the old _today() rolled at 00:00 UTC.
-//
-// This mattered in practice, not in theory. Signal U fires 22:00-22:30 UTC,
-// which is AFTER FTMO's day has rolled but BEFORE the old UTC key rolled, so
-// every Sydney trade was measured against the PREVIOUS day's starting balance:
-// understating the new day's loss after a winning day, overstating it after a
-// losing one.
-//
-// en-CA formats as YYYY-MM-DD, which is the shape the Redis key wants.
-const _TZ = process.env.FTMO_TIMEZONE || 'Europe/Prague';
-function _today() {
-  try {
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: _TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(new Date());
-  } catch (_) {
-    return new Date().toISOString().slice(0, 10);   // never throw inside the guard
-  }
-}
+function _today() { return new Date().toISOString().slice(0, 10); }
 function _hour()  { return new Date().toISOString().slice(0, 13); }
 
 // Seed a Redis key if not set; return whatever value is now in Redis
@@ -108,66 +58,18 @@ async function checkFTMOLimits() {
   try {
     const r = getRedis();
 
-    // ── 1 · the fast path: a fresh snapshot, no broker contact ──────────
-    let snap = null;
-    if (r) {
-      try {
-        const raw = await r.get(EQUITY_SNAP_KEY);
-        const j = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
-        if (j && j.balance && j.equity) snap = j;
-      } catch (_) {}
-    }
-    const snapAge = snap ? Date.now() - (snap.ts || 0) : Infinity;
+    // Fetch account with 3 s hard timeout (broker can be slow)
+    const acct = await Promise.race([
+      fetchAccount(),
+      new Promise((res) => setTimeout(() => res(null), 3000)),
+    ]);
 
-    let balance, equity, snapshotUsed = false, acct = null;
+    if (!acct) return { canTrade: true, reason: 'guard-broker-timeout' };
 
-    if (snap && snapAge < SNAP_FRESH_MS) {
-      balance = snap.balance; equity = snap.equity; snapshotUsed = true;
-    } else {
-      // ── 2 · snapshot missing or stale: short broker call ──────────────
-      acct = await Promise.race([
-        fetchAccount(),
-        new Promise((res) => setTimeout(() => res(null), GUARD_TIMEOUT_MS)),
-      ]);
-    }
+    const balance = acct.balance || acct.equity || 0;
+    const equity  = acct.equity  || acct.balance || 0;
 
-    // fetchAccount resolves to { error } on failure - an OBJECT, which is
-    // truthy. The old `if (!acct)` never caught that, so a broker error fell
-    // through and was reported as 'guard-no-balance'.
-    const acctBad = !acct || acct.error || !(acct.balance || acct.equity);
-
-    if (snapshotUsed) {
-      // already have what we need
-    } else if (!acctBad) {
-      balance = acct.balance || acct.equity || 0;
-      equity  = acct.equity  || acct.balance || 0;
-      if (r) await r.set(EQUITY_SNAP_KEY, JSON.stringify({ balance, equity, ts: Date.now() })).catch(() => {});
-    } else {
-      // ── 3 · broker failed too: accept a STALE snapshot rather than go
-      // blind. A slightly old number beats no number when the question is
-      // "have I lost 4% today".
-      if (!(snap && snapAge < SNAP_MAX_AGE_MS)) {
-        // Genuinely blind. Still fail OPEN - a guard that blocks every trade on
-        // a broker hiccup is worse than no guard - but say so LOUDLY. The old
-        // code did this silently, so "guard passed" and "guard never ran" were
-        // indistinguishable from the outside.
-        await sendOnce(
-          `ftmo-guard-blind:${_hour()}`,
-          `⚠️ <b>FTMO guard could not read the account</b>\n\n` +
-          `Reason: ${(acct && acct.error) || 'broker timeout'}\n` +
-          `No cached equity within ${Math.round(SNAP_MAX_AGE_MS / 60000)} min.\n\n` +
-          `Trading continues UNGUARDED until the broker answers.`
-        ).catch(() => {});
-        return {
-          canTrade: true,
-          reason:   `guard-blind:${(acct && acct.error) ? 'broker-error' : 'timeout'}`,
-          degraded: true,
-        };
-      }
-      balance = snap.balance; equity = snap.equity; snapshotUsed = true;
-    }
-
-    if (!balance || !equity) return { canTrade: true, reason: 'guard-no-balance', degraded: true };
+    if (!balance || !equity) return { canTrade: true, reason: 'guard-no-balance' };
 
     // FTMO uses equity (floating P&L included) for daily loss calculation.
     // Taking min(balance, equity) is conservative and always safe.
@@ -179,18 +81,8 @@ async function checkFTMOLimits() {
     if (r) {
       // Auto-seed initial balance on first ever run
       initialBal = await _seedIfAbsent(r, INITIAL_BAL_KEY, balance, 0 /* no expiry */);
-      // FTMO takes the day's starting point as the HIGHER of balance or equity,
-      // so max() is both correct and conservative: a higher start means a larger
-      // measured loss, which blocks earlier rather than later.
-      //
-      // KNOWN LIMITATION, stated rather than hidden - this seeds on the first
-      // SIGNAL of the day, not at the day boundary. A trade that closes at a
-      // loss before the day's first signal moves `balance` down before it is
-      // ever recorded, so that loss is excluded from the day's total. Closing
-      // that needs a scheduled write at the boundary (manage-trades already runs
-      // on cron and could do it). Until then the guard understates the daily
-      // loss in exactly that one case.
-      dayStart = await _seedIfAbsent(r, DAY_START_KEY(_today()), Math.max(balance, equity), 90000);
+      // Auto-seed today's start-of-day balance on first signal of the day (25h TTL)
+      dayStart = await _seedIfAbsent(r, DAY_START_KEY(_today()), balance, 90000);
     }
 
     const dailyLoss    = Math.max(0, dayStart - currentValue);
@@ -262,17 +154,12 @@ async function checkFTMOLimits() {
       ).catch(() => {});
     }
 
-    if (snapshotUsed) warnings.push('guard-using-cached-equity');
-
     return {
       canTrade:     true,
       dailyLossPct: +dailyLossPct.toFixed(3),
       totalDDPct:   +totalDDPct.toFixed(3),
       warnings,
-      snapshotUsed,
       debug: {
-        tz:           _TZ,
-        ftmoDay:      _today(),
         initialBal:   +initialBal.toFixed(2),
         dayStart:     +dayStart.toFixed(2),
         balance:      +balance.toFixed(2),
