@@ -40,31 +40,20 @@ twEnd      = input.time(timestamp("01 Sep 2026 00:00 +0000"), "  Window end",   
 _testWinOk = not useTestWin or (time >= twStart and time <= twEnd)
 
 G_CORE = "Core"
-modFVG      = input.bool(true,  "A) FVG Signal (gold-fvg)",                        group=G_CORE)
-modJudas    = input.bool(true,  "B) Judas Sweep (judas-swing)",                    group=G_CORE)
-modSB       = input.bool(true,  "C) Silver Bullet (gold-sb)",                      group=G_CORE)
-modPsych    = input.bool(true,  "D) Psych Level Bounce (reaction)",                group=G_CORE)
-modPsychExt = input.bool(true,  "D2) Psych Extended / outside KZ (reaction-ext)", group=G_CORE)
 modORB        = input.bool(false, "G) London ORB — 08:00-08:30 UTC (verified)",     group=G_CORE)
 modNYORB      = input.bool(true,  "H) NY ORB — 14:00-14:30 UTC (verified)",         group=G_CORE)
 modNYORBP     = input.bool(false, "H') NY ORB PRIME — restrict H to a 14:30-16:00 trade window", group=G_CORE,
               tooltip="LEAVE OFF — TESTED AND REJECTED 2026-09-18. Kept so the negative result stays attached to the code.\n\nMEASURED 3y (16 Sep 2023 - 16 Sep 2026), full baseline H+M+U+V both arms:\n  OFF  218 trades  99.08% WR  PF 6.335  +4148 USD  DD 710  (19.03 per trade)\n  ON   141 trades  99.29% WR  PF 5.906  +2342 USD  DD 787  (16.61 per trade)\n\nThe window removed ~77 trades and 44% of net profit while RAISING drawdown. Win rate barely moved (+0.21pp), so it removed volume, not risk.\n\nTHE LATE BREAKS ARE THE BETTER TRADES. The ~77 trades the window removed accounted for ~1806 USD, about 23.45 each, against 16.61 for the trades it kept. A genuine quality filter lifts per-trade profit; this lowered it. So NY ORB breaks that fire after 16:00 UTC are MORE profitable than the ones inside the opening window, not less. The hypothesis was exactly backwards.\n\n(Path-dependence caveat: blocking H frees the position slot for other signals, so the 141 are not the 218 minus a fixed 77. The per-trade figures are net inferences. The direction is not in doubt.)\n\nWHAT THIS MEANS. Lateness costs FILLS, not edge. A backtest cannot see a fill problem - here a limit either fills or it does not; there is no 'the alert arrived after the move and the order sat unfilled'. Do not block late signals. Fix the entry router so a signal whose price has already run past the limit is taken at market or skipped, instead of resting on an order that cannot fill.\n\nORIGINAL RATIONALE BELOW, kept because the lateness measurement is still correct.\n\nOFF = Signal H exactly as it runs today. ON = H may only fire inside 14:30-16:00 UTC.\n\nWHY THIS EXISTS. Signal M is gated by in_frb_trade (07:30-11:00). Signal H was never given the equivalent, so it waits for the first 15m close outside the 14:00-14:30 range FOR THE REST OF THE DAY. Measured on the live account, every NY ORB signal fired:\n  16 Sep 14:45  +0.3h after the range closed\n  03 Sep 15:00  +0.5h\n  24 Aug 15:30  +1.0h\n  21 Aug 15:45  +1.3h\n  08 Sep 16:15  +1.8h\n  01 Sep 16:30  +2.0h\n  18 Sep 17:15  +2.8h\nMedian 1.3 hours late. By then the ORB level is stale, price has wandered, and when it finally breaks it tends to run without ever retesting — so the C2 limit rests unfilled while the move happens without you.\n\nThis window keeps the first four and blocks the last three.\n\nALSO CHANGES ORDER EXPIRY. When ON, a NYORB limit is cancelled at 16:00 instead of surviving to the daily roll, mirroring how M cancels at the end of its own window. Otherwise a limit armed at 15:55 could still fill hours later against a level that is long dead — the same disease in a different place.\n\nEXPECT FEWER TRADES. This harness is path-dependent: blocking a signal frees the position slot for a later one, so the trade list reshuffles rather than simply shrinking. Judge it on net P&L and trade count, not on win rate alone.")
 modFRB        = input.bool(true,  "M) Frankfurt ORB — 07:00-07:30 UTC (pre-London)", group=G_CORE)
-modSGE        = input.bool(false, "W) Shanghai ORB - SGE day session 01:00 UTC  [UNTESTED]", group=G_CORE,
-              tooltip="Signal W. The Shanghai Gold Exchange day session opens 09:00 Beijing = 01:00 UTC, and China does not observe DST, so that mapping is exact year-round. WHY THIS IS NOT JUST TOKYO AGAIN: V Tokyo was re-tested 2026-10-09 and failed at PF 0.57 over 3 years because Asian breaks do not hold (86% WR against a 91.6% breakeven). W fires one hour later on a DIFFERENT event - Tokyo 00:00 is the financial open, SGE 01:00 is the largest PHYSICAL gold market opening. That is the entire hypothesis and it may well be wrong. Default OFF so every recorded baseline reproduces unchanged.")
 modSYD        = input.bool(true,  "U) Sydney ORB — session open, same C2 architecture as M/H  [UNTESTED]", group=G_CORE)
-modTOK        = input.bool(true,  "V) Tokyo ORB — REJECTED, kept only so the 218-trade baseline reproduces",  group=G_CORE,
-              tooltip="TESTED AND REJECTED ~2026-09-07. Tokyo does not perform like Sydney.\n\nNot live: the indicator has no modTOK input and the webhook's SPECIALIST_ALLOWED_ZONES is ['FRB','NYORB','SYD'], so a V alert would be dropped as specialist-zone-inactive even if one fired.\n\nIt contributed ZERO trades to the 96-trade sample the A+ table measured — Tokyo hours are too thin to clear the 5-pt min-range floor, exactly as predicted. Left ON only because the 218-trade baseline was recorded with it on; since it fires essentially never, that baseline is effectively M+H+U.\n\nDo not re-propose enabling V live.")
+modBBX      = input.bool(false, "BBX) Bollinger breakout — NOT a session ORB  [best candidate found]", group=G_CORE,
+              tooltip="The first NON-ORB family that beat the baseline, out of 24 tested. A 15m close outside the 2.5-sigma Bollinger band, traded in the BREAK direction.\n\nMEASURED 1yr (2025-10-10 to 2026-10-09), ratchet 1.00/0.85, SL 76, one slot, 1m path:\n  BASELINE M+G+H+U    214 trades, WR 78.97%, PF 1.369, netR +16.60, maxDD 3.83, netR/DD 4.34\n  BOOK + BBX 14/2.5   252 trades, WR 78.97%, PF 1.736, netR +39.03, maxDD 4.29, netR/DD 9.09\n\nMore trades, higher PF, netR more than doubled, and the win rate came back IDENTICAL to two decimals.\n\n★ LEAVE M/G/H/U ON. BBX ALONE scores 3.83 - WORSE than the book. The whole gain is the COMBINATION: it adds +24.19R of its own while displacing 85 low-value book trades that only cost the book 1.77R.\n\n⚠ ONE YEAR, IN-SAMPLE, found after ~36 looks. Needs the 3yr window before it means anything.")
 
 G_ASIA = "U/V — Asian session ORBs"
 sydOpenHr   = input.int(22, "U) Sydney open (UTC hour)", group=G_ASIA, minval=18, maxval=23,
               tooltip="Sydney is UTC+10 (AEST) / UTC+11 (AEDT), so 07:00 local lands on 21:00 or 22:00 UTC depending on DST.\n\nDefault 22 also keeps the ORB window clear of the broker's daily rollover (21:00/22:00 UTC on XAUUSD) — if the range were built BEFORE the rollover, the daily reset would wipe it mid-trade-window.\n\nSweep 21 vs 22 and compare.")
 sydOrbMins  = input.int(30, "U) Sydney ORB length (mins)", group=G_ASIA, minval=15, maxval=120, step=15)
 sydTradeMins= input.int(90, "U) Sydney trade window after ORB (mins)", group=G_ASIA, minval=30, maxval=300, step=30)
-tokOpenHr   = input.int(0,  "V) Tokyo open (UTC hour)", group=G_ASIA, minval=0, maxval=23,
-              tooltip="Tokyo is UTC+9 with NO daylight saving, so 09:00 local = 00:00 UTC year-round. This one is unambiguous.")
-tokOrbMins  = input.int(30, "V) Tokyo ORB length (mins)", group=G_ASIA, minval=15, maxval=120, step=15)
-tokTradeMins= input.int(180,"V) Tokyo trade window after ORB (mins)", group=G_ASIA, minval=30, maxval=420, step=30)
 c2MinRangeASIA = input.float(5.0, "U/V) Min ORB range to trade (pts)", group=G_ASIA, step=1.0,
               tooltip="Asian sessions are thin — ranges are typically much smaller than Frankfurt or NY. If this filter blocks nearly every signal, that is the finding: the setup does not exist on gold in Asian hours.")
 
@@ -95,83 +84,168 @@ sydBreakPdHi = input.bool(false, "U LONG)  Require close above the PREVIOUS DAY 
 sydBreakPdLo = input.bool(false, "U SHORT) Require close below the PREVIOUS DAY low", group=G_ASIA,
                tooltip="Symmetric to the LONG filter above. Test it apart from the NY-extreme filter: the two overlap (the day high is often set in London or NY) but they are different claims and a null on one says nothing about the other.")
 
-G_SGE = "W - Shanghai ORB (SGE)"
-// Every filter gets its OWN toggle. The ADR guard taught this the expensive way:
-// one switch gating M, H, U and V was wrong for M for months, because a setting
-// right for NY is wrong for Frankfurt. W gets its own of everything on day one.
-sgeOpenHr     = input.int(1,   "W) SGE day-session open (UTC hour)", group=G_SGE, minval=0, maxval=6,
-                tooltip="01:00 UTC = 09:00 Beijing. China has no DST so this never drifts, the same property that makes Tokyo exact.")
-sgeOrbMins    = input.int(30,  "W) ORB length (mins)", group=G_SGE, minval=15, maxval=120, step=15)
-sgeTradeMins  = input.int(150, "W) Trade window after the ORB (mins)", group=G_SGE, minval=30, maxval=360, step=30,
-                tooltip="150 means the limit expires 04:00 UTC, before the Tokyo-to-London handover. Bound it: an unexpired limit resting into the European open is an order against a level that stopped mattering hours earlier - the open item H still carries with nyOrderMins 0.")
-sgeMinRange   = input.float(5.0, "W) Min ORB range to trade (pts)", group=G_SGE, step=1.0,
-                tooltip="The same 5.0 floor the other signals use. Note it is an ABSOLUTE point value on an instrument whose price doubled, so it is materially looser now than when it was set - at a 5-pt range the breakeven win rate is about 96.9%, at 16 pts it is 90.9%.")
-sgeDirFilter  = input.string("Both", "W) Direction filter", options=["Both", "Long only", "Short only"], group=G_SGE)
-sgeBiasFilter = input.bool(false, "W) Require HTF bias alignment", group=G_SGE,
-                tooltip="Uses the same bias timeframe selected for H/M above, so W can be compared against them on equal terms.")
-sgeADRGuard   = input.bool(false, "W) Skip when >90% ADR already consumed", group=G_SGE,
-                tooltip="Its OWN guard, never shared. Expect it near-inert: W fires at 01:00, roughly three hours after the broker daily roll, so little of the day range is spent - the same reason this guard never bites on U. Measure it rather than assuming it.")
-sgeBreakSydHi = input.bool(false, "W LONG)  Require close above the Sydney session HIGH", group=G_SGE,
-                tooltip="The direct analogue of M requiring the Asian extreme and H requiring the London extreme. For a 01:00 open the prior session is Sydney, 22:00 to 01:00. This is the filter family that blocked every setup on 8 and 9 Oct, and that is the point: a break of an 8-point opening range that cannot clear the previous session is a break going nowhere.")
-sgeBreakSydLo = input.bool(false, "W SHORT) Require close below the Sydney session LOW", group=G_SGE,
-                tooltip="Symmetric to the LONG filter above.")
-// PREVIOUS-SESSION filters. W fires at 01:00, so London and NY are YESTERDAY's
-// sessions - they finished 11 and 4 hours earlier and sit on the far side of the
-// broker daily roll. The levels they left behind are the liquidity the Asian
-// session is trading into, which is exactly what the H and M filters exploit in
-// their own sessions. These ask W to clear them before it trades.
-sgeBreakNyHi  = input.bool(false, "W LONG)  Require close above the previous NY session HIGH", group=G_SGE,
-                tooltip="NY ran 14:00-21:00 UTC yesterday and closed about four hours before the SGE open. Its high is the nearest major pool of resting sell orders above W's range. Asking the break to clear it is the same demand H makes of the London extreme.")
-sgeBreakNyLo  = input.bool(false, "W SHORT) Require close below the previous NY session LOW", group=G_SGE,
-                tooltip="Symmetric to the LONG filter above.")
-sgeBreakLonHi = input.bool(false, "W LONG)  Require close above the previous LONDON session HIGH", group=G_SGE,
-                tooltip="London ran 08:00-14:00 UTC yesterday. It is the deepest-liquidity session on gold and the LBMA fixes happen inside it, so its extremes are the levels the physical market itself transacted around. A W break that clears yesterday's London high has taken out the level that actually mattered, not just an overnight wick.")
-sgeBreakLonLo = input.bool(false, "W SHORT) Require close below the previous LONDON session LOW", group=G_SGE,
-                tooltip="Symmetric to the LONG filter above.")
-sgeNyCascade  = input.bool(false, "W) NY cascade - trade only in the previous NY close direction", group=G_SGE,
-                tooltip="Blocks a W trade opposing the direction NY closed yesterday, measured close versus open over 14:00-21:00 UTC. The T-1 theorem measured this cascade as significant on every session it was tested; this is the Asian leg of it.")
-sgeLonCascade = input.bool(false, "W) London cascade - trade only in the previous LONDON close direction", group=G_SGE,
-                tooltip="Same as the NY cascade but keyed to yesterday's London session, 08:00-14:00 UTC.")
-sgeCascade    = input.bool(false, "W) Sydney cascade - trade only in the Sydney close direction", group=G_SGE,
-                tooltip="Blocks a W trade opposing the direction the Sydney session closed, measured close versus open over 22:00 to 01:00. Same shape as lonAsianCascade, which was the one G filter that helped at the 150-pt stop.")
-
-// ─── RESEARCH-DERIVED FILTERS  (2026-10-09 deep research) ────────────
-// These four come from the SGE/physical-gold research rather than from being
-// ported off another session. Read the findings that motivate each one as part
-// of the tooltip: if a filter is inert the reason usually is in there.
+// ─── BBX — BOLLINGER BREAKOUT (the first non-ORB family that worked) ──
+// Found 2026-10-15 by testing 24 non-ORB strategy families against the live
+// baseline on identical terms. It is the only one that survived every check.
 //
-// The headline negative that frames all of them: 09:00 Beijing is NOT an
-// exchange open. The SGE rulebook starts the trading day at 19:45 the previous
-// evening and labels 02:30-09:00 a Trading Break, so 01:00 UTC is a RESUMPTION
-// after a 6h30m halt, with no call auction and no uncrossing print on a normal
-// day. The venue that does auction at 08:59-09:00 is SHFE, ~19x larger by
-// volume. And the one on-point peer-reviewed study (Ma, Bouri, Xu & Zhou,
-// Global Finance Journal 64, 2025) found the 09:00-09:30 Beijing half-hour
-// LOST its predictive power once night trading launched. So expect these to
-// fail. They are built because they are cheap and because three of them
-// produce measurements that do not exist in public.
-sgeMinRelVol  = input.float(0.0, "W) Min ORB relative volume (0 = off)", group=G_SGE, step=0.1, minval=0.0,
-                tooltip="THE BEST-EVIDENCED FILTER IN THE SET. Volume accumulated during W's own opening range, divided by the mean of the SAME clock window on the previous N days. Hour-matching is the whole point - gold volume is strongly diurnal, so a denominator taken from the day average would swamp the signal. In the largest study with a published gradient (Zarattini and Aziz, ~7000 US stocks 2016-2023) the plain 5-min ORB earned 29% against 198% buy-and-hold, but graded by opening relative volume the gradient was monotone and large: below 100% relvol about -0.02R per trade, above 100% +0.08R, above 3000% +0.38R. SWEEP THIS RATHER THAN SETTING IT. Nothing in the literature supports a fixed multiple, and the widely circulated 1.5-2x rule traces to trading education, not to a study. Try 0.8 / 1.0 / 1.2 / 1.5 / 2.0 and read the shape. The live relvol is printed on the W chart label so a feed with no usable volume is visible rather than silently inert.")
-sgeRelVolDays = input.int(14, "W) Relative-volume lookback (days)", group=G_SGE, minval=3, maxval=60,
-                tooltip="How many previous SGE opening ranges form the denominator. 14 matches the Zarattini study's own window. The filter stays off until this many W sessions have been seen, which costs the first few weeks of the backtest.")
-sgeOvnAgree   = input.bool(false, "W) Require break to agree with the overnight COMEX move", group=G_SGE,
-                tooltip="Sign test on the move across the Shanghai halt, 18:30 to 01:00 UTC. During that halt COMEX kept trading and Shanghai could not, so part of the 01:00 move is mechanical catch-up rather than information - New York leads gold price discovery with about a 56% information share and the SGE is a net spillover RECEIVER. This asks the break to point the same way the catch-up does.")
-sgeOvnMaxAdr  = input.float(0.0, "W) Skip when the overnight move exceeded X x ADR (0 = off)", group=G_SGE, step=0.05, minval=0.0,
-                tooltip="The other half of the catch-up test, and the more interesting one. If COMEX already made a large move while Shanghai was shut, the 01:00 break may be pure repricing with no onshore information in it. Scaled by ATR(14) daily so it survives the price doubling. Try 0.40 / 0.60 / 0.80. The clean offline version of this test is to regress the 01:00 move on the 18:30-01:00 COMEX move and split W's wins and losses on the RESIDUAL - no source quantifies that split for gold, and it needs no data you do not already have.")
-sgeOvnStartMin = input.int(1110, "W) Overnight window start (mins UTC)", group=G_SGE, minval=0, maxval=1439, step=30,
-                tooltip="1110 = 18:30 UTC, which is 02:30 Beijing - the moment the SGE night session ends and the halt begins. It is also roughly the COMEX settlement. Both the agree and the ADR filter above measure from here to the SGE resumption.")
-sgeSkipCnShut = input.bool(false, "W) Skip days when mainland China is CLOSED", group=G_SGE,
-                tooltip="About 25-30 trading days a year the Asian window loses its largest physical participant: SGE, SHFE and CFFEX all shut together and the onshore yuan market closes with them. XAUUSD keeps trading, so W keeps firing into a session missing the exact flow the signal is premised on. NO QUANTITATIVE STUDY OF XAUUSD IN ASIAN HOURS CONDITIONAL ON CHINA BEING CLOSED EXISTS - it was searched for directly. That makes this both a filter test and a genuinely novel measurement. Dates are transcribed from SGE's own English announcements for 2024, 2025 and 2026; the 2023 Golden Week range is UNVERIFIED and marked as such in the code.")
-sgeSkipCnOpen = input.bool(false, "W) Skip the FIRST trading day after a China closure", group=G_SGE,
-                tooltip="A separate regime, not the same filter. On the first day back the SGE rulebook applies Schedule 2 Table B, which DOES run a real 9-minute volume-maximising call auction at 00:50-00:59 UTC and clears the whole holiday gap in one print before continuous trading starts. SGE also suspends the night session beforehand and issues pre-holiday margin and limit changes, so these sessions are non-standard on three counts at once. Test it apart from the closure filter.")
-sgeBreakPdHi  = input.bool(false, "W LONG)  Require close above the PREVIOUS DAY high", group=G_SGE,
-                tooltip="Level quality, first of two. The reasoning is Osler's NY Fed order-book work: protective stops cluster just past prior-period extremes and round numbers, and a break that clears a genuine stop cluster ACCELERATES, while merely leaving a small range into the zone where take-profit limits cluster REVERTS. Note this is the opposite of how retail education uses the word sweep. LABEL IT AN INFERENCE, NOT A RESULT - no order-level study of this exists for gold and Osler's sample is 1996-1998 FX in New York hours.")
-sgeBreakPdLo  = input.bool(false, "W SHORT) Require close below the PREVIOUS DAY low", group=G_SGE,
-                tooltip="Symmetric to the LONG filter above.")
-sgeNearHandle = input.bool(false, "W) Require the broken level to sit near a round handle", group=G_SGE,
-                tooltip="Level quality, second of two, and the same Osler logic. Uses the $10 handle, which at current gold levels is the spacing retail stops actually cluster on. Tolerance is set below. Test this SEPARATELY from the previous-day filter - they are two different claims about where real orders rest, and conflating them means a null result tells you nothing about either.")
-sgeHandleTol  = input.float(2.0, "W) Round-handle tolerance (pts)", group=G_SGE, step=0.5, minval=0.1,
-                tooltip="How close the broken level must sit to a multiple of 10 for the filter above to pass. 2.0 admits a 4-point band around each handle, so roughly 40% of levels - loose enough to leave a usable sample out of 342 trades.")
+// WHAT IT IS: a 15m close outside the 2.5-sigma band of a 14-period SMA,
+// traded in the direction of the break. No session, no opening range. The band
+// WIDTH plays the role the ORB range plays for M/G/H/U - it sets the targets
+// and the ratchet step. Everything else is the same C2 plumbing.
+//
+// ★ WHY IT SURVIVED WHERE SIGNAL X AND THE IORB HYBRID DID NOT
+//  1. sigma 2.5 beats the baseline at EVERY lookback tested - 14 -> 9.09,
+//     20 -> 7.22, 30 -> 5.85, 40 -> 5.63 netR/DD. The effect is the WIDE
+//     BAND, not one fitted pair. (sigma 1.5 and 2.0 are MIXED - do not use.)
+//  2. netR improves in all THREE thirds: baseline +6.10/+6.15/+4.35
+//     (declining), book+BBX +6.50/+15.20/+17.32. The most RECENT third is the
+//     best - the exact opposite of the Shanghai signature that killed Signal
+//     W, and of the first-half-only signature that killed the IORB fade.
+//
+//     ⚠ BUT READ THE SAME THIRDS IN netR/DD, WHICH IS THE REAL BAR:
+//         baseline   2.03 / 1.76 / 1.14
+//         book+BBX   1.51 / 3.95 / 8.30
+//     THE FIRST THIRD IS WORSE, not better. BBX buys its extra netR there
+//     with disproportionately more drawdown, and all of the real gain sits in
+//     the last two thirds. Every cap setting shows the same shape.
+//
+//     That is NOT the SGE failure mode (which was first-half-only, i.e. dying
+//     out), but it is not a clean sweep either, and it carries an obvious
+//     alternative explanation: 2026 gold has been violently trending, and a
+//     breakout signal naturally thrives in a trending regime. So the honest
+//     reading is that BBX may be levered to the recent volatility regime
+//     rather than carrying a persistent edge. The 3yr window is what tells
+//     those two apart - it contains quiet gold, and this year does not.
+//  3. Drop its best FIVE trades and it still scores 4.78, above the full
+//     baseline's 4.34.
+//  4. Second half stronger than the first, while the baseline collapses
+//     4.05 -> 1.16.
+//
+// ★ THE WIDER FINDING, worth as much as the signal itself: across all 24
+// families the ranking was completely one-directional. Every momentum and
+// breakout family finished top (BB breakout, Donchian, EMA cross, RSI
+// continuation, ignition, PDH/PDL breakout); every fade and mean-reversion
+// family finished bottom (VWAP reversion was netR -35.27). 15m gold is a
+// MOMENTUM market. This corroborates the inverse-ORB test the same day, where
+// inverting the whole book produced PF < 1.0. Stop looking for fades.
+//
+// Also tested and DEAD in the blend, do not revisit: Donchian 55, NR4, NR7,
+// inside bar, daily opening range, prev-week H/L, round-$10 fade, FVG fill,
+// 3-bar reversal, pivot fade, ATR channel. Donchian 20 LOOKED good (4.65) but
+// FAILS the split - alone it is -7.19R in the second half.
+//
+// ⚠ ONE YEAR, IN-SAMPLE (2025-10-10 -> 2026-10-09), and found after ~36
+// looks (24 families + 12 parameter combos). The robustness checks are strong
+// but they do not erase that. modBBX defaults OFF so every recorded baseline
+// reproduces untouched.
+G_BBX = "BBX - Bollinger breakout"
+bbLen       = input.int(14, "BBX) Bollinger lookback", group=G_BBX, minval=5, maxval=100,
+              tooltip="14 measured best (netR/DD 9.09), but 20 (7.22), 30 (5.85) and 40 (5.63) ALL beat the baseline at sigma 2.5. That is why this is believable - it is the band WIDTH that carries the edge, not this number.")
+bbMult      = input.float(2.5, "BBX) Sigma", group=G_BBX, minval=0.5, maxval=5.0, step=0.1,
+              tooltip="★ 2.5 IS THE FINDING. At 2.5 every lookback beat the baseline. At 2.0 and 1.5 the results are MIXED and several are worse. If you change one number here, do not let it be this one.")
+bbAnchor    = input.string("Signal bar close", "BBX) Anchor SL/TP to", options=["Signal bar close", "Band edge"], group=G_BBX,
+              tooltip="Where the trade geometry is measured from.\n\nSIGNAL BAR CLOSE reproduces the backtest exactly - that is what was measured.\n\nBAND EDGE treats the band as the structural level the way the ORB high is treated. Closer to C2 in spirit, but NOT TESTED - and note a Bollinger band is a volatility envelope, not a level anyone defends, so the C2 reasoning does not automatically transfer. Treat any result from it as new research.")
+bbMinWidth  = input.float(5.0, "BBX) Min band width (pts)", group=G_BBX, step=1.0, minval=0.1,
+              tooltip="Bands narrower than this are SKIPPED, and the width is also FLOORED here when sizing targets.\n\nMEASURED INERT at 5.0. Across 603 raw 14/2.5 breaks the NARROWEST band seen was 8.43 pts (1st pct 11.06), so this gate never once fired and the blend is bit-identical with it on or off. It is kept only as a floor against a freak dead-market band, not because it does anything.\n\nIt came from the 24-family zoo, where a shared 5-40 clamp stopped any family handing itself a target the ORB could never have. For BBX only the CAP below turned out to matter.")
+bbMaxWidth  = input.float(40.0, "BBX) Max band width for sizing (pts)", group=G_BBX, step=1.0, minval=1.0,
+              tooltip="Width is CAPPED here when sizing targets - the signal still fires, the target just stops growing.\n\n★ THE SECOND MOST LOAD-BEARING NUMBER AFTER SIGMA. It BINDS ON 51% of breaks (median band 40.80, max 478.50), and it sets BOTH the TP ladder (width x 0.75 x n) AND the ratchet step, so it governs how half the trades are managed.\n\nSWEPT 2026-10-15, book+BBX 14/2.5 netR/DD:\n  20pt 7.03 | 25pt 7.96 | 30pt 9.92 | 35pt 9.17 | 40pt 9.09\n  50pt 7.37 | 60pt 5.05 | 80pt 5.10 | 120pt 4.94 | no cap 5.23\n\nTWO THINGS WORTH KNOWING. First, EVERY cap from 20 to no-cap beats the 4.34 baseline, and the curve is smooth with a single peak - that is what a real effect looks like, not noise. Second, 30 is the in-sample PEAK while 40 sits on its shoulder.\n\n40 IS KEPT AS THE DEFAULT ON PURPOSE: it is the number the recorded 9.09 was measured at, so the Tester can be reconciled against it. Picking 30 would be a second parameter choice on the same in-sample year. Let the 3yr window decide, not this one.")
+bbOnePerDay = input.bool(true, "BBX) One trade per broker day", group=G_BBX,
+              tooltip="ON for the measured result. Price can sit outside the band for several bars running; without this the signal re-fires all day and the character of the test changes completely.")
+bbOrderMins = input.int(120, "BBX) Limit order life (mins)", group=G_BBX, minval=0, maxval=600, step=30,
+              tooltip="How long an unfilled limit may rest. 120 is what was measured. 0 = never expire - which is how an unfilled order ends up filling days later against a band that no longer exists. BBX has no session window to bound it, so this is the only thing that does.")
+bbDirFilter = input.string("Both", "BBX) Direction filter", options=["Both", "Long only", "Short only"], group=G_BBX,
+              tooltip="Both = measured. Its own switch, not shared with the ORB direction filters.")
+bbEntryMode = input.string("Retest (limit)", "BBX) Entry type", options=["Retest (limit)", "Immediate (market)"], group=G_BBX,
+              tooltip="★ RETEST (LIMIT) WITH DEPTH 0.00 IS THE MEASURED CONFIGURATION. The harness rested a limit exactly AT the signal bar close, so it filled on the 1m path at that price.\n\nIMMEDIATE (MARKET) is NOT the same thing in Pine - a strategy.entry with no limit fills at the NEXT BAR OPEN, which on 15m gold can gap several points off the close. It is offered for comparison, but it is not what produced netR/DD 9.09.")
+bbRetestDepth = input.float(0.0, "BBX) Retest depth (x band width)", group=G_BBX, minval=0.0, maxval=0.70, step=0.05,
+              tooltip="How far back toward the band the limit sits, in band-width units. 0.00 = AT the signal bar close = the tested configuration.\n\n⚠ ANY VALUE ABOVE 0 IS UNTESTED and is a genuinely different strategy - it waits for a pullback, so breakouts that run away are never taken. The C2 logic that makes depth work for M/H is that a broken ORB level gets retested as support; a Bollinger band has no such structural meaning. Measure it, do not assume it carries over.\n\nAuto-clamped below the TP multiplier so the entry can never sit past its own first target.")
+bbBiasFilter = input.bool(false, "BBX) Require HTF bias alignment", group=G_BBX,
+              tooltip="OFF for the measured result - BBX was tested with NO filters at all. Uses the orbBiasTF setting shared with H/M.\n\nWorth testing, but remember the HTF bias filters REVERSED SIGN between a fixed-list sweep and the one-slot blend. Only a full blend run counts as a verdict.")
+bbADRGuard  = input.bool(false, "BBX) Skip when >90% ADR already consumed", group=G_BBX,
+              tooltip="Its OWN switch, never shared - the ADR guard is measured GOOD for NY and BAD for Frankfurt off identical logic, which is why every signal carries its own copy. OFF for the measured result.")
+bbNFPFilter = input.bool(false, "BBX) Skip NFP days", group=G_BBX,
+              tooltip="OFF for the measured result. NFP was separately measured DEAD as an ORB filter, and request.economic marks the WRONG day - see the NFP source setting.")
+bbSessFilter = input.bool(false, "BBX) Restrict to a UTC window", group=G_BBX,
+              tooltip="OFF for the measured result - BBX fired at any hour, which is precisely what makes it a different family from the session ORBs. Turn on only to test whether its edge is concentrated somewhere.")
+bbSessStart = input.int(420, "BBX)   window start (mins UTC)", group=G_BBX, minval=0, maxval=1439, step=15)
+bbSessEnd   = input.int(1260, "BBX)   window end (mins UTC)", group=G_BBX, minval=0, maxval=1440, step=15)
+
+// ─── LIQUIDITY TARGETS — aim at a LEVEL, not at a multiple of the range ──
+// Every target in this file is range x orbTPMult x n. That number describes the
+// OPENING RANGE. It says nothing about where price is actually trying to go.
+// Price travels to LIQUIDITY - prior-day and prior-session extremes - because
+// that is where resting stops and limit orders sit.
+//
+// So the first rung becomes ADAPTIVE: find the nearest untouched pool ahead of
+// the entry and aim just short of it. tp2/tp3 keep the ladder shape at 2x/3x
+// that distance. If no pool qualifies, the normal range multiple is used, so
+// the signal never loses a target.
+//
+// ★ MEASURED 1yr (2025-10-10 -> 2026-10-09), book M+G+H+U, one slot, 1m path,
+// SL 50, c2RetestDepth 0.25 (the LIVE depth):
+//     range x 0.75 (today)      169 tr  WR 90.5  PF 1.479  netR  +7.68  DD 2.80  netR/DD 2.75  avgWin  7.8
+//     nearest PD + session      154 tr  WR 77.9  PF 1.627  netR +16.55  DD 3.60  netR/DD 4.60  avgWin 17.9
+//     ...only if >= 30pt away   158 tr  WR 83.5  PF 1.823  netR +17.52  DD 2.17  netR/DD 8.05  avgWin 14.7
+//
+// The minimum-distance rule is what makes it work: a big void ahead means let
+// it run, a pool close by means take the quick target. 2.3x the netR, 2.9x the
+// risk-adjusted return, nearly DOUBLE the average win, on LOWER drawdown.
+//
+// ⚠ ONE YEAR, IN-SAMPLE, and measured in the offline harness, not the Tester.
+// Also note the win rate FALLS (90.5 -> 83.5) - this trades some of the win
+// rate for much bigger wins, which is the whole point, but it changes how the
+// equity curve feels. Default OFF.
+// ─── CONTEXT FILTERS — intermarket + higher timeframe ────────────────
+// Added 2026-10-17 from the deep run. These are the only two entry filters in
+// this file that were validated on a FIXED LIST (every candidate taken, nothing
+// displaced), which is the one test that cannot be faked by the position slot
+// reshuffling the population. Seven earlier filters died because they were only
+// ever read in the blend.
+//
+// ★ WHY SILVER AND NOT THE DOLLAR. Gold/DXY correlates -0.466 over 24h on this
+// window - real, textbook, and NOT TRADEABLE: on the fixed list DXY-opposing
+// scores +0.1092 against the +0.0951 of what it rejects. Gold/silver correlates
+// +0.844 and silver-leading scores +0.2094 against -0.0128. It is the only
+// filter in the project whose rejected half goes NEGATIVE, on a near-even split
+// (417 of 804), which is real selection rather than skimming a pile that was
+// already positive.
+//
+// ⚠ SILVER NEEDS A BIG TARGET. At the live range x 0.75 geometry it makes things
+// WORSE (+0.0186 vs the +0.0288 baseline). It predicts DIRECTION, not magnitude
+// - the MFE distribution of silver-leading candidates is the same as everything
+// else (median 46.6 vs 41.9 pts). It is useless if you are aiming 10 points.
+//
+// ⚠ DO NOT STACK A THIRD. silver+align is 11.98 netR/DD; adding DXY takes it to
+// 6.37, adding the room filter to 2.90. Two is the ceiling, measured.
+G_CTX = "Context filters (deep run 2026-10-17)"
+ctxSilverOn  = input.bool(false, "CTX) Require SILVER to be leading gold", group=G_CTX,
+               tooltip="The trade is only taken when silver has moved the SAME way as the trade over the lookback AND by at least as much as gold has.\n\nMEASURED on a fixed list (804 ORB candidates, SL 50, 3R target, nothing displaced):\n  baseline            R/trade +0.1025\n  silver leading 1h   R/trade +0.2094   rejected half -0.0128\n  silver leading 4h   R/trade +0.1788\n  silver merely AGREES 1h       +0.1420\n\nThe LEAD matters less than the agreement, but both beat baseline and the 1h window is the best of the twelve lookback/multiple cells tested.\n\nIn the blend with the clock exit: netR/DD 2.67 -> 8.07 on its own, 11.98 with the HTF align filter as well.")
+ctxXagSym    = input.symbol("XAGUSD", "CTX)   silver symbol", group=G_CTX,
+               tooltip="Whatever YOUR data provider calls spot silver. The broker behind the account quotes XAGUSD; TradingView may serve it under a different prefix, so set it from the symbol picker rather than trusting the default.\n\nIf this resolves to nothing the filter blocks every trade and the trade count goes to zero - that is the symptom of a wrong symbol, not of a dead filter.")
+ctxSilverBars= input.int(4, "CTX)   lookback (bars)", group=G_CTX, minval=1, maxval=96,
+               tooltip="4 bars = 1 hour on 15m, which measured best. Swept: 4 bars -> R/trade +0.2094, 16 bars (4h) -> +0.1788, 96 bars (24h) -> +0.1092. The effect decays as the window widens, so a short window is doing the work.")
+ctxSilverMult= input.float(1.0, "CTX)   silver must move this x gold", group=G_CTX, minval=0.0, maxval=3.0, step=0.25,
+               tooltip="1.0 = silver's move must be at least as large as gold's own. 0.0 turns this into a pure agreement test.\n\nSwept at the 1h window: x0.5 -> 5.11, x1.0 -> 8.07, x1.5 -> 7.31, x2.0 -> 6.61 netR/DD. Broad, single-peaked, and every cell beats the 2.67 baseline.")
+ctxAlignOn   = input.bool(false, "CTX) Require HTF alignment (W+D+H4+H1)", group=G_CTX,
+               tooltip="Sums the DIRECTION of the last COMPLETED weekly, daily, H4 and H1 bar (close vs open, +1/-1 each) and requires the net to agree with the trade by at least the threshold below.\n\nMEASURED on the fixed list: align>=2 gives R/trade +0.2126 against the +0.1025 baseline. In the blend it takes silver's 8.07 to 11.98 and halves the drawdown (6.87 -> 3.71).\n\n★ NOTE THIS IS NOT THE REJECTED EMA BIAS FILTER. orbBiasFilter reads close vs an EMA; this reads the bar's own open-to-close on four completed timeframes. The H4 EMA bias famously REVERSED SIGN between a fixed-list sweep and the blend; this one is positive in BOTH, which is why it is here.")
+ctxAlignMin  = input.int(2, "CTX)   net timeframes that must agree", group=G_CTX, minval=1, maxval=4,
+               tooltip="Net sum, so 2 means something like three up and one down. Swept in the blend: >=2 -> netR/DD 8.24, >=4 (all four agree) -> 1.49 on only 51 trades. Demanding all four is too strict - it removes the trades that pay.")
+
+G_LIQ = "Liquidity targets (adaptive TP)"
+liqTgtOn   = input.bool(false, "LIQ) Target the nearest liquidity pool instead of range x mult", group=G_LIQ,
+             tooltip="OFF = tp1/tp2/tp3 are range x orbTPMult x {1,2,3}, exactly as today.\n\nON = tp1 aims just short of the nearest untouched pool AHEAD of the entry, and tp2/tp3 sit at 2x and 3x that distance from the level. When no pool qualifies the range multiple is used, so a signal never ends up without a target.")
+liqUsePD   = input.bool(true,  "LIQ)   use the PREVIOUS DAY high / low", group=G_LIQ,
+             tooltip="The strongest single pool in testing: alone it gave netR +16.73 and netR/DD 4.52 against the baseline's +7.68 / 2.75. Reads the completed daily bar, so there is no lookahead.")
+liqUseSess = input.bool(true,  "LIQ)   use the PREVIOUS SESSION extreme", group=G_LIQ,
+             tooltip="Per signal, the session immediately behind it: M and G look at the Asian range, H at London (08:00-14:00), U at NY (14:00 to the Sydney open). Adds little on its own but combines well with the previous day.")
+liqUsePW   = input.bool(false, "LIQ)   use the PREVIOUS WEEK high / low", group=G_LIQ,
+             tooltip="Biggest average win of any pool (22.7 pts) and the highest raw netR (+18.46), but drawdown rises to 4.50 so the risk-adjusted figure is lower. Worth testing alone.")
+liqMinDist = input.float(30.0, "LIQ) Only aim at a pool at least this far (pts)", group=G_LIQ, step=5.0, minval=0.0,
+             tooltip="★ THIS IS THE SETTING THAT MAKES IT WORK. A pool 8 points away is not a target, it is the scalp you already take - so below this distance the normal range multiple is used instead.\n\nSWEPT, PD+session, SL 50: 5pt -> netR/DD 4.89 | 8pt -> 4.60 | 12pt -> 4.71 | 20pt -> 5.60 | 30pt -> 8.05. Monotone above 12 and the best cell by a wide margin. Drawdown FALLS as this rises (3.60 -> 2.17), which is the opposite of what a reach-further setting usually does.")
+liqMaxDist = input.float(200.0, "LIQ) Ignore pools further than this (pts)", group=G_LIQ, step=10.0, minval=10.0,
+             tooltip="A pool three daily ranges away is not a target either. Falls back to the range multiple beyond this.")
+liqBuf     = input.float(1.0, "LIQ) Stop this far SHORT of the pool (pts)", group=G_LIQ, step=0.5, minval=0.0,
+             tooltip="Resting liquidity is where the order book is thickest, so the fill is better just in front of it. Swept: 0pt -> netR/DD 4.53, 1pt -> 4.60, 2pt -> 4.32, 4pt -> 3.69. Shallow is better; 1.0 is the peak.")
 
 G_STRAT = "Strategy"
 exitMode  = input.string("TP1 · 1R", "Exit target",
@@ -199,8 +273,8 @@ nyorbDirFilter = input.string("Both", "H) Direction filter",  options=["Both", "
                  tooltip="London Bias study (54yr): the PM fix window (14:00 UTC) has a structural short tailwind. Test 'Short only' to isolate whether H shorts carry the PF.",
                  group=G_STRAT)
 frbDirFilter   = input.string("Both", "M) Direction filter",  options=["Both", "Long only", "Short only"], group=G_STRAT)
-orbTPMult      = input.float(0.75, "H/M) TP1 multiplier",    minval=0.25, maxval=2.0, step=0.25,
-                 tooltip="1.0 = standard 1R (baseline PF 1.145). 0.75 = ¾R — raises WR at cost of smaller wins. Find the WR/PF sweet spot between 0.75 and 1.0.",
+orbTPMult      = input.float(0.75, "H/M) TP1 multiplier",    minval=0.25, maxval=8.0, step=0.25,
+                 tooltip="1.0 = standard 1R (baseline PF 1.145). 0.75 = ¾R — raises WR at cost of smaller wins. Find the WR/PF sweet spot between 0.75 and 1.0.\n\n★ MAXVAL RAISED 2.0 -> 8.0 on 2026-10-17. Nothing about the default changed; the cap simply made the only geometry that can pass a one-month challenge impossible to enter.\n\nMEASURED 1yr, SL 50, depth 0.25, one slot, rolling 30-day windows against the real FTMO rules (+10% target, -5%/day, -10% total):\n  x0.75 at SL 76 (LIVE)   0% pass at EVERY risk, and 0% even with an UNLIMITED horizon - it makes ~+4.9%/yr at 2% risk, so it cannot reach +10% in 300 days\n  x0.75 at SL 50          2% pass at 4% risk\n  x3                     35% pass / 38% breach at 4%\n  x4                     37% / 24%\n  ★ x5                   51% / 21%  <- best one-slot cell found\n  x8                     51% / 24%\n\nWin rate FALLS 90.5% -> 53.6%. That is the mechanism, not a side effect: a 0.13R win cannot compound to 10% in ~14 trades, so every high-WR setting scores ZERO. The target has to be worth ~2R.\n\n⚠ THE EXIT MODEL BEHIND THESE FIGURES WAS WRONG - see the CLK group. The target fired on only 10.6% of trades; 58.7% exited on an arbitrary 24h clock that carried more than the whole net, and 24h was the PEAK of its own sweep. Treat the pass rates above as the shape of the finding (a big target is required) and NOT as the numbers. The fixed clock exit replaces them.",
                  group=G_STRAT)
 orbNFPFilter   = input.bool(false, "H/M) Skip first-Friday of month (NFP days)", group=G_STRAT)
 orbADRGuard    = input.bool(true,  "U/V) Skip when >90% ADR already consumed",   group=G_STRAT,
@@ -372,16 +446,8 @@ revH = input.bool(false, "H) Reverse NY ORB (H' too)", group=G_REV)
 revU = input.bool(false, "U) Reverse Sydney ORB",    group=G_REV)
 
 G_FILT = "Filters"
-adrFVGMax     = input.float(0.85, "FVG / SB max ADR consumed",     group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
-adrJudasMax   = input.float(0.90, "Judas max ADR consumed",        group=G_FILT, minval=0.50, maxval=1.50, step=0.05)
-adrPsychMax   = input.float(1.20, "Psych bounce max ADR consumed", group=G_FILT, minval=0.70, maxval=2.50, step=0.05)
 atrLength     = input.int(14,     "ATR period",                    group=G_FILT, minval=2,    maxval=50)
 emaLength     = input.int(20,     "HTF bias EMA period",           group=G_FILT, minval=5,    maxval=100)
-fvgMinGapATR  = input.float(0.10, "FVG min gap (× ATR)",           group=G_FILT, minval=0.03, step=0.03)
-fvgMaxFillPct = input.float(0.50, "FVG max fill before entry",     group=G_FILT, minval=0.0,  maxval=1.0, step=0.05)
-fvgMaxAgeBars = input.int(48,     "FVG max age (bars)",             group=G_FILT, minval=4,    maxval=200)
-slMinH1ATR    = input.float(0.30, "SL min (× H1 ATR)",             group=G_FILT, minval=0.1,  step=0.05)
-slMaxH1ATR    = input.float(3.00, "SL max (× H1 ATR)",             group=G_FILT, minval=1.0,  step=0.10)
 
 // ═══════════════════════════════════════════════════════════════════════
 // FTMO RULES AS BACKTEST CONSTRAINTS  (strategy.risk.*)
@@ -492,6 +558,59 @@ f_htfBias(int emaLen, int atrLen) =>
 
 atrVal = ta.atr(atrLength)
 
+// ─── CONTEXT FILTER SERIES  (silver + completed-HTF direction) ───────
+// Computed at TOP LEVEL and unconditionally: request.security and the HTF
+// direction series carry internal state, so calling them inside `if ctxSilverOn`
+// would feed them a gappy history and return different numbers than an
+// always-on call returns. Costs nothing when the filters are off.
+//
+// NO LOOKAHEAD, two separate guards:
+//   lookahead_off, so a forming HTF bar never leaks its future
+//   [1] on the direction expression, so what is read is the last bar to CLOSE
+// The silver change is likewise measured to close[1], never to the live bar -
+// the trigger bar's own move must not leak into its own filter.
+f_barDir() => close > open ? 1 : close < open ? -1 : 0
+_wDir  = request.security(syminfo.tickerid, "W",   f_barDir()[1], lookahead=barmerge.lookahead_off)
+_dDir  = request.security(syminfo.tickerid, "D",   f_barDir()[1], lookahead=barmerge.lookahead_off)
+_h4Dir = request.security(syminfo.tickerid, "240", f_barDir()[1], lookahead=barmerge.lookahead_off)
+_h1Dir = request.security(syminfo.tickerid, "60",  f_barDir()[1], lookahead=barmerge.lookahead_off)
+_htfAlign = nz(_wDir) + nz(_dDir) + nz(_h4Dir) + nz(_h1Dir)
+
+_xagC   = request.security(ctxXagSym, timeframe.period, close, lookahead=barmerge.lookahead_off)
+_xagChg = na(_xagC[1]) or na(_xagC[1 + ctxSilverBars]) or _xagC[1 + ctxSilverBars] == 0 ? na : (_xagC[1] / _xagC[1 + ctxSilverBars] - 1.0) * 100.0
+_auChg  = na(close[1]) or na(close[1 + ctxSilverBars]) or close[1 + ctxSilverBars] == 0 ? na : (close[1] / close[1 + ctxSilverBars] - 1.0) * 100.0
+
+// Direction-aware gate. d = +1 long, -1 short. Returns true when the filter is
+// off, so an unset filter can never block a trade; returns FALSE when the data
+// is missing, because a filter that silently passes on na is a filter that is
+// not running.
+f_ctxOk(int d) =>
+    bool okAg = true
+    if ctxAlignOn
+        okAg := d * _htfAlign >= ctxAlignMin
+    bool okAg2 = okAg
+    if ctxSilverOn
+        okAg2 := okAg and not na(_xagChg) and not na(_auChg) and d * _xagChg > 0 and math.abs(_xagChg) >= ctxSilverMult * math.abs(_auChg)
+    okAg2
+
+// ─── CLOCK EXIT ──────────────────────────────────────────────────────
+// Replaces the fitted 24-hour hold the deep run was accidentally measuring.
+// The hold was the PEAK of its own sweep (12h 7.82 / 18h 9.33 / 24h 11.98 /
+// 30h 6.21); a fixed clock is implementable AND flat: 17:00 9.38, 17:30 9.99,
+// 18:00 11.06, 18:30 9.02, 19:00 9.69, 19:30 10.25, 20:00 10.58, 20:30 9.50,
+// with ZERO challenge breaches across 17:00-20:00 at both 2% and 3% risk.
+//
+// ⚠ AND THE HONEST PART: on the BARE entry set the same exit scores 1.34. The
+// exit carries none of the edge - the context filters do. Its only job is to
+// stop the edge being given back.
+G_CLK = "Clock exit (deep run 2026-10-17)"
+clkExitOn  = input.bool(false, "CLK) Close every position at a fixed UTC time", group=G_CLK,
+             tooltip="Flattens whatever is open when this minute arrives and cancels any limit still resting. Pine fills it at the NEXT bar's open, so expect a small difference from the offline figures, which priced it inside the 20:00 bar.\n\nMEASURED with SL 50 + silver + align: a target or a trail on top of this is worth about 0.5 netR/DD, which is inside the noise - the clock alone scores 10.58 against 11.13 with a 200pt target. The simplest version is the right one.\n\n⚠ NEEDS SL 50. The same exit at c2SLBuf 76 scores 6.71 and passes 23% of challenge months instead of 52%.")
+clkExitMin = input.int(1200, "CLK)   UTC minute to flatten", group=G_CLK, minval=0, maxval=1439, step=15,
+             tooltip="1200 = 20:00 UTC, the best pass rate (52% of rolling 30-day windows, zero breaches). 1080 = 18:00 UTC gives the lowest drawdown (2.82R vs 3.17R) but a lower pass rate. Anything from 17:00 to 20:30 sits on the plateau.\n\nNote Signal U fires at 22:30, AFTER this time, so a Sydney trade is flattened at the NEXT day's clock - about 21 hours later. That is what was measured; it is not a bug.")
+
+
+
 // 15m bias — the ORB's OWN timeframe. Computed natively (no request.security);
 // the chart is 15m, so this is just EMA(emaLength) on this series.
 //
@@ -523,6 +642,7 @@ f_c2SL(float rng) =>
     math.max(d, syminfo.mintick)
 
 
+
 // Bias check helpers for H/M filter (resolved once per bar)
 _orbBiasLong  = orbBiasTF == "H1" ? h1B >= 0 : orbBiasTF == "Daily" ? hdB >= 0 : orbBiasTF == "H1+H4" ? (h1B == 1 and h4B == 1) : orbBiasTF == "H1+H4+D" ? (h1B == 1 and h4B == 1 and hdB == 1) : orbBiasTF == "M15" ? m15B == 1 : orbBiasTF == "M15+H1" ? (m15B == 1 and h1B == 1) : orbBiasTF == "M15+H1+H4" ? (m15B == 1 and h1B == 1 and h4B == 1) : h4B >= 0
 _orbBiasShort = orbBiasTF == "H1" ? h1B <= 0 : orbBiasTF == "Daily" ? hdB <= 0 : orbBiasTF == "H1+H4" ? (h1B == -1 and h4B == -1) : orbBiasTF == "H1+H4+D" ? (h1B == -1 and h4B == -1 and hdB == -1) : orbBiasTF == "M15" ? m15B == -1 : orbBiasTF == "M15+H1" ? (m15B == -1 and h1B == -1) : orbBiasTF == "M15+H1+H4" ? (m15B == -1 and h1B == -1 and h4B == -1) : h4B <= 0
@@ -544,44 +664,59 @@ _priorClose = request.security(syminfo.tickerid, "D", close[1])
 // 01:00 UTC "previous day" means the session that ended ~3h before W fires.
 _pdHigh     = request.security(syminfo.tickerid, "D", high[1])
 _pdLow      = request.security(syminfo.tickerid, "D", low[1])
+// Previous WEEK extremes, for the liquidity-target pool set. Same [1] safety
+// as the daily pair above: it reads the COMPLETED weekly bar.
+_pwHigh     = request.security(syminfo.tickerid, "W", high[1])
+_pwLow      = request.security(syminfo.tickerid, "W", low[1])
 
-// ─── MAINLAND CHINA CLOSURES  (feeds Signal W) ───────────────────────
-// Dates transcribed from SGE's own English announcements for 2024, 2025 and
-// 2026. There is no signal in the XAUUSD feed that says the mainland is shut -
-// gold keeps trading - so this has to be hardcoded. Pairs are inclusive
-// yyyymmdd start,end. W fires at 01:00 UTC = 09:00 the SAME Beijing day, so
-// the bar's UTC date is the right date to test and no offset is needed.
+// ─── CRABEL CONTRACTION-EXPANSION RATIO  (feeds Signal X) ────────────
+// Yesterday's daily range measured against the mean of the ten days BEFORE
+// yesterday. Above 1 the tape is expanding, below 1 it is contracting.
 //
-// CAVEAT, stated so a result is readable: the FIRST pair (Golden Week 2023) is
-// NOT from the SGE announcements - it predates them and is included only so a
-// 3-year window starting in Oct 2023 is not left unfiltered at its very start.
-// Treat any effect that rests on it alone as unverified.
-var array<int> _cnShutRng = array.from(20230929, 20231006, 20231230, 20240101, 20240210, 20240217, 20240404, 20240406, 20240501, 20240505, 20240608, 20240610, 20240915, 20240917, 20241001, 20241007, 20250101, 20250101, 20250128, 20250204, 20250404, 20250406, 20250501, 20250505, 20250531, 20250602, 20251001, 20251008, 20260101, 20260103, 20260215, 20260223, 20260404, 20260406, 20260501, 20260505, 20260619, 20260621, 20260925, 20260927, 20261001, 20261007)
-// First trading day back after each closure above, in the same order.
-var array<int> _cnOpenDay = array.from(20231009, 20240102, 20240219, 20240408, 20240506, 20240611, 20240918, 20241008, 20250102, 20250205, 20250407, 20250506, 20250603, 20251009, 20260105, 20260224, 20260407, 20260506, 20260622, 20260928, 20261008)
+// THE OFFSETS ARE THE WHOLE POINT. dr[1] is the last FINISHED day and avg[2]
+// is the mean of the ten days ending the day before that, so the ratio is
+// fully formed before the session X trades in has even begun. Reading dr
+// (today) would leak the trigger day's own range into its own gate, which is
+// the classic way an activity filter ends up grading itself and measuring
+// nothing. Same safety argument as _pdHigh/_pdLow directly above.
+//
+// ⚠ FIDELITY NOTE, stated because it is a real difference from the offline
+// run: request.security on "D" cuts the day on the CHART's daily bar, while
+// the Python harness cut it on the BROKER day (21:00 UTC). The ratio is a
+// 10-day average so a boundary shift moves it only slightly, but it does mean
+// the Tester and the offline numbers will not agree trade-for-trade.
+f_crabelCE() =>
+    dr  = high - low
+    avg = ta.sma(dr, 10)
+    avg[2] > 0 ? dr[1] / avg[2] : na
 
-_ymdUtc = year(time, "UTC") * 10000 + month(time, "UTC") * 100 + dayofmonth(time, "UTC")
+// Session VWAP, for Signal X's optional VWAP-side filter. Computed at TOP
+// LEVEL and unconditionally on purpose: ta.vwap carries internal cumulative
+// state, so calling it inside `if modX` would feed it a gappy history and
+// return a different number than an always-on call would. Costs nothing when
+// X is off. Note ta.vwap anchors to the CHART session while the offline
+// harness anchored to the broker day - another reason the Tester and the
+// Python numbers will not line up trade-for-trade on this filter.
 
-// Steps by 2 over start,end pairs rather than dividing the size. Pine does
-// integer division on two ints, so size/2 would work - but a for-loop bound
-// that silently truncates is not worth relying on when `by 2` says it outright.
-f_cnShut(int ymd) =>
-    bool hit = false
-    for i = 0 to array.size(_cnShutRng) - 2 by 2
-        if ymd >= array.get(_cnShutRng, i) and ymd <= array.get(_cnShutRng, i + 1)
-            hit := true
-    hit
-
-f_cnReopen(int ymd) =>
-    bool hit = false
-    for i = 0 to array.size(_cnOpenDay) - 1
-        if ymd == array.get(_cnOpenDay, i)
-            hit := true
-    hit
-
-_cnShutToday   = f_cnShut(_ymdUtc)
-_cnReopenToday = f_cnReopen(_ymdUtc)
-
+// ─── BOLLINGER BANDS (feeds Signal BBX) ──────────────────────
+// Computed at TOP LEVEL and unconditionally. ta.sma and ta.stdev carry
+// internal state, so calling them inside `if modBBX` would feed them a gappy
+// history and return different numbers than an always-on call returns. Costs
+// nothing when BBX is off.
+//
+// The band is read on the CURRENT bar, not [1], and that is correct here: the
+// trigger IS "this bar closed outside the band", so the bar being tested has
+// to be the bar being measured. That is the opposite of the HTF bias filters,
+// which read [1] precisely so a breakout is not graded against itself.
+_bbBasis = ta.sma(close, bbLen)
+_bbDev   = bbMult * ta.stdev(close, bbLen)
+_bbUpper = _bbBasis + _bbDev
+_bbLower = _bbBasis - _bbDev
+_bbWidth = _bbUpper - _bbLower
+// Width drives BOTH the targets and the ratchet step, clamped exactly as the
+// backtest clamped it so no signal inherits a target the ORB could never have.
+_bbSize  = math.min(math.max(_bbWidth, bbMinWidth), bbMaxWidth)
+_bbDepth = math.min(bbRetestDepth, orbTPMult * 0.9)
 
 _adrConsumed   = _atr14d > 0 ? (_todayHigh - _todayLow) / _atr14d : 0.0
 _adrQuiet      = _adrConsumed < 0.75
@@ -607,119 +742,22 @@ _orbGateNY  = (not nyADRGuard  or _adrConsumed[1] < 0.90) and _nfpOk   // H — 
 _hm_dow     = dayofweek(time, "UTC")
 _hm_dow_ok  = not i_hm_useDow or (_hm_dow == dayofweek.monday and i_hm_dow_mon) or (_hm_dow == dayofweek.tuesday and i_hm_dow_tue) or (_hm_dow == dayofweek.wednesday and i_hm_dow_wed) or (_hm_dow == dayofweek.thursday and i_hm_dow_thu) or (_hm_dow == dayofweek.friday and i_hm_dow_fri)
 
-// ─── CVD ──────────────────────────────────────────────────────────────
-_signedVol = close > open ? volume : close < open ? -volume : 0.0
-var float _cvdRunning = 0.0
-_cvdRunning := _cvdRunning + _signedVol
-var float _cvdBase = 0.0
-if _newDay
-    _cvdBase := _cvdRunning - _signedVol
-cvd   = _cvdRunning - _cvdBase
-cvdMa = ta.ema(cvd, 14)
-
 // ─── SESSION GATES (UTC) ──────────────────────────────────────────────
 in_asian   = timeframe.isintraday and (_minOfDay >= 0   and _minOfDay < 480)
 in_london  = timeframe.isintraday and (_minOfDay >= 480 and _minOfDay < 660)
 in_overlap = timeframe.isintraday and (_minOfDay >= 780 and _minOfDay < 1020)
-in_sb_win  = timeframe.isintraday and (_minOfDay >= 900 and _minOfDay < 960)
-in_kz      = in_london or in_overlap
-
-// ─── ADR GATES  (use [1] so the trigger bar's wick can't self-block) ──
-adr_fvg_ok   = _adrConsumed[1] < adrFVGMax
-adr_judas_ok = _adrConsumed[1] < adrJudasMax
-adr_psych_ok = _adrConsumed[1] < adrPsychMax
-adr_hard_ok  = _adrConsumed    < 2.50
 
 // ─── ASIAN RANGE ──────────────────────────────────────────────────────
 var float ar_hi    = na
 var float ar_lo    = na
-var bool  ar_locked = false
 
 if _newDay
     ar_hi    := na
     ar_lo    := na
-    ar_locked := false
 
 if in_asian
     ar_hi := na(ar_hi) ? high : math.max(ar_hi, high)
     ar_lo := na(ar_lo) ? low  : math.min(ar_lo, low)
-
-if not in_asian and in_asian[1] and not na(ar_hi)
-    ar_locked := true
-
-// ─── BOS TRACKING ─────────────────────────────────────────────────────
-SWG = 3
-var float _prev_sh   = na
-var float _prev_sl   = na
-var int   bos_bull_b = na
-var int   bos_bear_b = na
-
-_sh_now = ta.pivothigh(high, SWG, SWG)
-_sl_now = ta.pivotlow(low,   SWG, SWG)
-
-if not na(_sh_now)
-    if not na(_prev_sh) and _sh_now > _prev_sh
-        bos_bull_b := bar_index[SWG]
-    _prev_sh := _sh_now
-
-if not na(_sl_now)
-    if not na(_prev_sl) and _sl_now < _prev_sl
-        bos_bear_b := bar_index[SWG]
-    _prev_sl := _sl_now
-
-bos_bull_ok = not na(bos_bull_b) and (bar_index - bos_bull_b) <= 30
-bos_bear_ok = not na(bos_bear_b) and (bar_index - bos_bear_b) <= 30
-
-// ─── FVG POOL ─────────────────────────────────────────────────────────
-var array<float> fU     = array.new<float>(0)
-var array<float> fL     = array.new<float>(0)
-var array<int>   fDir   = array.new<int>(0)
-var array<int>   fBar   = array.new<int>(0)
-var array<float> fFill  = array.new<float>(0)
-var array<bool>  fFired = array.new<bool>(0)
-
-if barstate.isconfirmed and atrVal > 0
-    bull_fvg = low > high[2]
-    bear_fvg = high < low[2]
-    bull_gap = bull_fvg ? (low - high[2]) : 0.0
-    bear_gap = bear_fvg ? (low[2] - high) : 0.0
-
-    if bull_fvg and bull_gap >= atrVal * fvgMinGapATR
-        array.push(fU,     low)
-        array.push(fL,     high[2])
-        array.push(fDir,   1)
-        array.push(fBar,   bar_index - 1)
-        array.push(fFill,  0.0)
-        array.push(fFired, false)
-
-    if bear_fvg and bear_gap >= atrVal * fvgMinGapATR
-        array.push(fU,     low[2])
-        array.push(fL,     high)
-        array.push(fDir,   -1)
-        array.push(fBar,   bar_index - 1)
-        array.push(fFill,  0.0)
-        array.push(fFired, false)
-
-    while array.size(fU) > 25
-        array.shift(fU)
-        array.shift(fL)
-        array.shift(fDir)
-        array.shift(fBar)
-        array.shift(fFill)
-        array.shift(fFired)
-
-if barstate.isconfirmed and array.size(fU) > 0
-    for idx = array.size(fU) - 1 to 0
-        u   = array.get(fU,   idx)
-        l   = array.get(fL,   idx)
-        d   = array.get(fDir, idx)
-        gsz = u - l
-        if gsz <= 0
-            continue
-        if d == 1 and low < u
-            array.set(fFill, idx, math.min(1.0, math.max(0.0, u - math.max(l, low)) / gsz))
-        if d == -1 and high > l
-            array.set(fFill, idx, math.min(1.0, math.max(0.0, math.min(u, high) - l) / gsz))
 
 // ─── POSITION BOX (same visual as indicator) ──────────────────────────
 f_drawPosBox(float e, float slP, float tp3) =>
@@ -757,257 +795,6 @@ f_c2Exit(string id, float slP, float tp1, float tp2, float tp3, float rng) =>
         strategy.exit(id + "-X", from_entry=id, stop=slP)
     else
         strategy.exit(id + "-X", from_entry=id, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL A — Gold FVG  (gold-fvg)
-// ═══════════════════════════════════════════════════════════════════════
-if modFVG and barstate.isconfirmed and _testWinOk and in_kz and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
-    firedA = false
-    for idx = array.size(fU) - 1 to 0
-        if firedA or array.get(fFired, idx)
-            continue
-        u       = array.get(fU,    idx)
-        l       = array.get(fL,    idx)
-        d       = array.get(fDir,  idx)
-        birth   = array.get(fBar,  idx)
-        fillPct = array.get(fFill, idx)
-
-        if (bar_index - birth) > fvgMaxAgeBars or fillPct > fvgMaxFillPct
-            continue
-
-        touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
-        if not touch
-            continue
-
-        if not ((d == 1 and bos_bull_ok) or (d == -1 and bos_bear_ok))
-            continue
-
-        buf      = math.max(0.20 * atrVal, 0.08 * h1ATR)
-        proximal = d == 1 ? u : l
-        distal   = d == 1 ? l : u
-        entryP   = proximal
-        slP      = d == 1 ? distal - buf : distal + buf
-        slDist   = math.abs(entryP - slP)
-
-        if slDist <= 0
-            continue
-
-        tp1Mult = (_adrQuiet and _adrRemainTo75 > 0 and _adrRemainTo75 < slDist * 1.5) ? 0.75 : 1.0
-        tp1 = d == 1 ? entryP + slDist * tp1Mult : entryP - slDist * tp1Mult
-        tp2 = d == 1 ? entryP + slDist * 2.0     : entryP - slDist * 2.0
-        tp3 = d == 1 ? entryP + slDist * 3.0     : entryP - slDist * 3.0
-
-        if not ((d == 1 ? slP < entryP : slP > entryP) and (d == 1 ? tp1 > entryP : tp1 < entryP))
-            continue
-
-        array.set(fFired, idx, true)
-        firedA := true
-
-        eId = d == 1 ? "FVG-L" : "FVG-S"
-        strategy.entry(eId, d == 1 ? strategy.long : strategy.short, comment="gold-fvg")
-        strategy.exit(eId + "-X", from_entry=eId, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-        f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL B — Judas Sweep  (judas-swing)
-// Limit orders at the swept level — accurate R:R backtest
-// ═══════════════════════════════════════════════════════════════════════
-var bool judas_hi_done = false
-var bool judas_lo_done = false
-
-if _newDay
-    judas_hi_done := false
-    judas_lo_done := false
-    strategy.cancel("JUDAS-S")
-    strategy.cancel("JUDAS-L")
-
-// Expire pending limit orders when London session ends
-if not in_london and in_london[1]
-    strategy.cancel("JUDAS-S")
-    strategy.cancel("JUDAS-L")
-
-if modJudas and barstate.isconfirmed and _testWinOk and in_london and ar_locked and adr_judas_ok and adr_hard_ok and not na(ar_hi) and not na(ar_lo) and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
-    aRef = nz(atrVal, h1ATR)
-
-    // SHORT — swept Asian high, closed back inside → LIMIT at ar_hi (retest entry)
-    if not judas_hi_done and high > ar_hi and close < ar_hi and (high - ar_hi) >= aRef * 0.15
-        buf    = aRef * 0.20
-        slP    = high + buf
-        entryP = ar_hi          // limit fills exactly at the swept level on retest
-        slDist = slP - entryP   // sweep height + buf (small, precise SL)
-        if slDist > 0
-            tp1 = entryP - slDist * 1.0
-            tp2 = entryP - slDist * 2.0
-            tp3 = entryP - slDist * 3.0
-            judas_hi_done := true
-            strategy.entry("JUDAS-S", strategy.short, limit=entryP, comment="judas-swing · SHORT")
-            strategy.exit("JUDAS-S-X", from_entry="JUDAS-S", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, high, "⚡ Judas SHORT",
-                      style=label.style_label_down, color=color.new(color.red, 5),
-                      textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-    // LONG — swept Asian low, closed back inside → LIMIT at ar_lo (retest entry)
-    if not judas_lo_done and low < ar_lo and close > ar_lo and (ar_lo - low) >= aRef * 0.15 and strategy.position_size == 0
-        buf    = aRef * 0.20
-        slP    = low - buf
-        entryP = ar_lo          // limit fills exactly at the swept level on retest
-        slDist = entryP - slP   // sweep depth + buf (small, precise SL)
-        if slDist > 0
-            tp1 = entryP + slDist * 1.0
-            tp2 = entryP + slDist * 2.0
-            tp3 = entryP + slDist * 3.0
-            judas_lo_done := true
-            strategy.entry("JUDAS-L", strategy.long, limit=entryP, comment="judas-swing · LONG")
-            strategy.exit("JUDAS-L-X", from_entry="JUDAS-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-            label.new(bar_index, low, "⚡ Judas LONG",
-                      style=label.style_label_up, color=color.new(color.teal, 5),
-                      textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL C — Silver Bullet  (gold-sb)
-// ═══════════════════════════════════════════════════════════════════════
-var bool sb_done = false
-
-if _newDay
-    sb_done := false
-
-if modSB and barstate.isconfirmed and _testWinOk and in_sb_win and not sb_done and adr_fvg_ok and adr_hard_ok and not na(h1ATR) and h1ATR > 0 and array.size(fU) > 0 and strategy.position_size == 0
-    firedC = false
-    for idx = array.size(fU) - 1 to 0
-        if firedC or array.get(fFired, idx)
-            continue
-        u       = array.get(fU,    idx)
-        l       = array.get(fL,    idx)
-        d       = array.get(fDir,  idx)
-        birth   = array.get(fBar,  idx)
-        fillPct = array.get(fFill, idx)
-
-        if (bar_index - birth) > 48 or fillPct > 0.50
-            continue
-
-        touch = d == 1 ? (low <= u and high >= l) : (high >= l and low <= u)
-        if not touch
-            continue
-
-        buf      = math.max(0.20 * atrVal, 0.08 * h1ATR)
-        proximal = d == 1 ? u : l
-        distal   = d == 1 ? l : u
-        entryP   = proximal
-        slP      = d == 1 ? distal - buf : distal + buf
-        slDist   = math.abs(entryP - slP)
-
-        if slDist <= 0
-            continue
-
-        // Gold SB uses extended TPs: 1.5R / 2.5R / 4R
-        tp1Mult_sb = (_adrQuiet and _adrRemainTo75 > 0 and _adrRemainTo75 < slDist * 1.5) ? 1.0 : 1.5
-        tp1 = d == 1 ? entryP + slDist * tp1Mult_sb : entryP - slDist * tp1Mult_sb
-        tp2 = d == 1 ? entryP + slDist * 2.5        : entryP - slDist * 2.5
-        tp3 = d == 1 ? entryP + slDist * 4.0        : entryP - slDist * 4.0
-
-        if not (d == 1 ? (slP < entryP and tp1 > entryP) : (slP > entryP and tp1 < entryP))
-            continue
-
-        array.set(fFired, idx, true)
-        sb_done := true
-        firedC  := true
-
-        eId = d == 1 ? "SB-L" : "SB-S"
-        strategy.entry(eId, d == 1 ? strategy.long : strategy.short, comment="gold-sb")
-        strategy.exit(eId + "-X", from_entry=eId, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-        f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL D — Psychological Level Bounce  (reaction)
-// ═══════════════════════════════════════════════════════════════════════
-var bool psych_done = false
-
-if _newDay
-    psych_done := false
-
-if modPsych and barstate.isconfirmed and _testWinOk and in_kz and adr_psych_ok and adr_hard_ok and not psych_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
-    lvl50     = math.round(close / 50.0)  * 50.0
-    lvl100    = math.round(close / 100.0) * 100.0
-    nearLevel = math.abs(close - lvl50) <= math.abs(close - lvl100) ? lvl50 : lvl100
-    tol       = atrVal * 0.25
-
-    bounceLong  = low  <= nearLevel + tol and low  <= nearLevel and close > nearLevel
-    bounceShort = high >= nearLevel - tol and high >= nearLevel and close < nearLevel
-    dir = bounceLong and not bounceShort ? 1 : bounceShort and not bounceLong ? -1 : 0
-
-    if dir != 0
-        buf    = math.max(0.30 * atrVal, 0.10 * h1ATR)
-        wick   = dir == 1 ? low : high
-        entryP = nearLevel
-        slP    = dir == 1 ? wick - buf : wick + buf
-        slDist = math.abs(entryP - slP)
-        slH1   = slDist / h1ATR
-
-        if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
-            tp1 = dir == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
-            tp2 = dir == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
-            tp3 = dir == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
-
-            if (dir == 1 ? (slP < entryP and tp1 > entryP) : (slP > entryP and tp1 < entryP))
-                psych_done := true
-                eId = dir == 1 ? "PSYCH-L" : "PSYCH-S"
-                strategy.entry(eId, dir == 1 ? strategy.long : strategy.short, comment="reaction")
-                strategy.exit(eId + "-X", from_entry=eId, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-                lvlStr = str.tostring(math.round(nearLevel))
-                label.new(bar_index, dir == 1 ? low : high,
-                          lvlStr + " Psych " + (dir == 1 ? "Bounce" : "Reject"),
-                          style=dir == 1 ? label.style_label_up : label.style_label_down,
-                          color=color.new(color.purple, 10), textcolor=color.white, size=size.tiny)
-                f_drawPosBox(entryP, slP, tp3)
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL D2 — Psych Extended  (reaction-ext)
-// ═══════════════════════════════════════════════════════════════════════
-var bool psych_ext_done = false
-
-if _newDay
-    psych_ext_done := false
-
-if modPsychExt and barstate.isconfirmed and _testWinOk and not in_kz and adr_psych_ok and adr_hard_ok and not psych_ext_done and not na(h1ATR) and h1ATR > 0 and strategy.position_size == 0
-    nearLevel = math.round(close / 100.0) * 100.0
-    tol       = atrVal * 0.25
-
-    bounceLong  = low  <= nearLevel + tol and low  <= nearLevel and close > nearLevel
-    bounceShort = high >= nearLevel - tol and high >= nearLevel and close < nearLevel
-    dir = bounceLong and not bounceShort ? 1 : bounceShort and not bounceLong ? -1 : 0
-
-    if dir != 0
-        h1ok       = h1B == dir
-        h4ok       = h4B == dir
-        hdok       = hdB == dir
-        alignCount = (h1ok ? 1 : 0) + (h4ok ? 1 : 0) + (hdok ? 1 : 0)
-
-        if alignCount >= 2
-            buf    = math.max(0.30 * atrVal, 0.10 * h1ATR)
-            wick   = dir == 1 ? low : high
-            entryP = nearLevel
-            slP    = dir == 1 ? wick - buf : wick + buf
-            slDist = math.abs(entryP - slP)
-            slH1   = slDist / h1ATR
-
-            if slDist > 0 and slH1 >= slMinH1ATR and slH1 <= slMaxH1ATR
-                tp1 = dir == 1 ? entryP + slDist * 1.0 : entryP - slDist * 1.0
-                tp2 = dir == 1 ? entryP + slDist * 2.0 : entryP - slDist * 2.0
-                tp3 = dir == 1 ? entryP + slDist * 3.0 : entryP - slDist * 3.0
-
-                if (dir == 1 ? (slP < entryP and tp1 > entryP) : (slP > entryP and tp1 < entryP))
-                    psych_ext_done := true
-                    eId = dir == 1 ? "EXT-L" : "EXT-S"
-                    strategy.entry(eId, dir == 1 ? strategy.long : strategy.short, comment="reaction-ext")
-                    strategy.exit(eId + "-X", from_entry=eId, stop=slP, limit=f_exitLim(tp1, tp2, tp3))
-                    lvlStr = str.tostring(math.round(nearLevel))
-                    label.new(bar_index, dir == 1 ? low : high,
-                              "⚡ " + lvlStr + " [EXT] " + (dir == 1 ? "Bounce" : "Reject"),
-                              style=dir == 1 ? label.style_label_up : label.style_label_down,
-                              color=color.new(color.orange, 10), textcolor=color.white, size=size.tiny)
-                    f_drawPosBox(entryP, slP, tp3)
 
 // ─── OPENING RANGE TRACKERS ───────────────────────────────────────────
 // Frankfurt ORB: 07:00–07:30 UTC (pre-London institutional open)
@@ -1059,8 +846,6 @@ in_ny_orderlife = nyOrderMins <= 0 or (_minOfDay >= 870 and _minOfDay < 870 + ny
 // the var resets below) rolls at 21:00/22:00 UTC instead.
 _sydOrbStart = sydOpenHr * 60
 _sydOrbEnd   = _sydOrbStart + sydOrbMins
-_tokOrbStart = tokOpenHr * 60
-_tokOrbEnd   = _tokOrbStart + tokOrbMins
 
 f_inWin(int startMin, int endMin) =>
     s = startMin % 1440
@@ -1069,39 +854,20 @@ f_inWin(int startMin, int endMin) =>
 
 // W - Shanghai. 01:00 sits AFTER the broker roll (21:00/22:00), so unlike U this
 // window never straddles the day boundary and plain minute maths is safe here.
-_sgeOrbStart = sgeOpenHr * 60
-_sgeOrbEnd   = _sgeOrbStart + sgeOrbMins
-in_sge_window = timeframe.isintraday and (_minOfDay >= _sgeOrbStart and _minOfDay < _sgeOrbEnd)
-in_sge_trade  = timeframe.isintraday and (_minOfDay >= _sgeOrbEnd and _minOfDay < _sgeOrbEnd + sgeTradeMins)
 // The PRIOR session for a 01:00 open is Sydney: its open through to the SGE open.
 // Wrap-safe, because it crosses midnight.
-in_sge_pool   = f_inWin(_sydOrbStart, _sgeOrbStart)
 
 in_syd_window = f_inWin(_sydOrbStart, _sydOrbEnd)
 in_syd_trade  = f_inWin(_sydOrbEnd,   _sydOrbEnd + sydTradeMins)
-in_tok_window = f_inWin(_tokOrbStart, _tokOrbEnd)
-in_tok_trade  = f_inWin(_tokOrbEnd,   _tokOrbEnd + tokTradeMins)
 
-var float sge_hi = na
-var float sge_lo = na
-var bool  sge_locked = false
-var bool  sge_done   = false
 // Sydney extreme and direction feeding W. Reset on the rising edge of the POOL
 // window, never on _newDay - the broker day turns over at 21:00/22:00, directly
 // on top of where this starts accumulating.
-var float syd_hi_presge = na
-var float syd_lo_presge = na
-var float _sydOpenPx    = na
-var float _sydClosePx   = na
 
 var float syd_hi = na
 var float syd_lo = na
 var bool  syd_locked = false
 var bool  syd_done   = false
-var float tok_hi = na
-var float tok_lo = na
-var bool  tok_locked = false
-var bool  tok_done   = false
 var float nyorb_hi = na
 var float nyorb_lo = na
 var bool  nyorb_locked = false
@@ -1135,10 +901,6 @@ if _newDay
     syd_lo       := na
     syd_locked   := false
     syd_done     := false
-    tok_hi       := na
-    tok_lo       := na
-    tok_locked   := false
-    tok_done     := false
 
 // Track Asian range BEFORE Frankfurt ORB window (strictly 00:00-07:00 UTC)
 // Also capture first/last close for T-1 cascade direction
@@ -1181,74 +943,8 @@ if _minOfDay >= 480 and _minOfDay < 840
 if in_syd_window
     syd_hi := na(syd_hi) ? high : math.max(syd_hi, high)
     syd_lo := na(syd_lo) ? low  : math.min(syd_lo, low)
-if in_sge_pool and not in_sge_pool[1]
-    syd_hi_presge := na
-    syd_lo_presge := na
-    _sydOpenPx    := na
-    _sydClosePx   := na
-if in_sge_pool
-    syd_hi_presge := na(syd_hi_presge) ? high : math.max(syd_hi_presge, high)
-    syd_lo_presge := na(syd_lo_presge) ? low  : math.min(syd_lo_presge, low)
-    if na(_sydOpenPx)
-        _sydOpenPx := open
-    _sydClosePx := close
-_sydBias = na(_sydOpenPx) or na(_sydClosePx) ? 0 : _sydClosePx > _sydOpenPx ? 1 : _sydClosePx < _sydOpenPx ? -1 : 0
-
-if in_sge_window and not in_sge_window[1]
-    sge_hi     := na
-    sge_lo     := na
-    sge_locked := false
-    sge_done   := false
-if in_sge_window
-    sge_hi := na(sge_hi) ? high : math.max(sge_hi, high)
-    sge_lo := na(sge_lo) ? low  : math.min(sge_lo, low)
-if not in_sge_window and in_sge_window[1] and not na(sge_hi)
-    sge_locked := true
-
-// ─── W OPENING-RANGE RELATIVE VOLUME, HOUR-MATCHED ───────────────────
-// Volume inside W's own opening range, against the mean of the SAME clock
-// window on the previous N sessions. Two details carry the whole measurement:
-//
-//  1. The denominator is PRIOR days only. The current day is pushed into the
-//     history AFTER its relvol is computed, so the ratio can never include
-//     itself - that would compress every value toward 1.0 and hide the gradient.
-//  2. History is only pushed on a real locked session. A weekend or a gap
-//     leaves sge_hi na, and polluting the window with a non-session would
-//     deflate the denominator and inflate every later relvol.
-//
-// If the feed carries no usable volume the ratio stays na and the gate passes,
-// which would make the filter silently inert - so the value is printed on the
-// W chart label to make that visible instead of invisible.
-var array<float> _sgeVolHist = array.new<float>(0)
-var float _sgeVolCur = na
-var float _sgeRelVol = na
-
-if in_sge_window and not in_sge_window[1]
-    _sgeVolCur := 0.0
-if in_sge_window and not na(_sgeVolCur)
-    _sgeVolCur := _sgeVolCur + nz(volume)
-if not in_sge_window and in_sge_window[1] and not na(sge_hi) and not na(_sgeVolCur)
-    int nH = array.size(_sgeVolHist)
-    if nH >= sgeRelVolDays and _sgeVolCur > 0
-        float sumH = 0.0
-        for i = 0 to nH - 1
-            sumH := sumH + array.get(_sgeVolHist, i)
-        float meanH = sumH / nH
-        _sgeRelVol := meanH > 0 ? _sgeVolCur / meanH : na
-    else
-        _sgeRelVol := na
-    array.push(_sgeVolHist, _sgeVolCur)
-    if array.size(_sgeVolHist) > sgeRelVolDays
-        array.shift(_sgeVolHist)
-
 if not in_syd_window and in_syd_window[1] and not na(syd_hi)
     syd_locked := true
-
-if in_tok_window
-    tok_hi := na(tok_hi) ? high : math.max(tok_hi, high)
-    tok_lo := na(tok_lo) ? low  : math.min(tok_lo, low)
-if not in_tok_window and in_tok_window[1] and not na(tok_hi)
-    tok_locked := true
 
 // ═══════════════════════════════════════════════════════════════════════
 // LIQUIDITY-GRAB TRACKING  (Signals M / H / U)
@@ -1294,31 +990,7 @@ if not in_tok_window and in_tok_window[1] and not na(tok_hi)
 // session the finished values are latched into a _Prev pair that nothing ever
 // resets. At 01:00 those hold yesterday's completed sessions, which is exactly
 // what W needs. The same latch carries the session's DIRECTION for the cascades.
-in_lon_sess = timeframe.isintraday and (_minOfDay >= 480 and _minOfDay < 840)
 in_ny_sess  = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 1260)
-
-var float _lonHiCur = na
-var float _lonLoCur = na
-var float _lonOpCur = na
-var float _lonClCur = na
-var float _lonHiPrev = na
-var float _lonLoPrev = na
-var int   _lonBiasPrev = 0
-if in_lon_sess and not in_lon_sess[1]
-    _lonHiCur := na
-    _lonLoCur := na
-    _lonOpCur := na
-    _lonClCur := na
-if in_lon_sess
-    _lonHiCur := na(_lonHiCur) ? high : math.max(_lonHiCur, high)
-    _lonLoCur := na(_lonLoCur) ? low  : math.min(_lonLoCur, low)
-    if na(_lonOpCur)
-        _lonOpCur := open
-    _lonClCur := close
-if not in_lon_sess and in_lon_sess[1] and not na(_lonHiCur)
-    _lonHiPrev := _lonHiCur
-    _lonLoPrev := _lonLoCur
-    _lonBiasPrev := _lonClCur > _lonOpCur ? 1 : _lonClCur < _lonOpCur ? -1 : 0
 
 var float _nyHiCur = na
 var float _nyLoCur = na
@@ -1343,30 +1015,6 @@ if not in_ny_sess and in_ny_sess[1] and not na(_nyHiCur)
     _nyLoPrev := _nyLoCur
     _nyBiasPrev := _nyClCur > _nyOpCur ? 1 : _nyClCur < _nyOpCur ? -1 : 0
 
-// ─── THE OVERNIGHT MOVE ACROSS THE SHANGHAI HALT  (feeds Signal W) ───
-// 18:30 UTC is 02:30 Beijing, when the SGE night session ends and the 6h30m
-// halt begins; 01:00 UTC is the resumption. Across that gap COMEX kept trading
-// and Shanghai could not, so some of the 01:00 move is mechanical catch-up
-// rather than new information. This latches the size and sign of what W is
-// resuming INTO.
-//
-// The window wraps midnight and straddles the 21:00/22:00 broker roll, so it
-// needs f_inWin and the same falling-edge latch the session highs use - a
-// _newDay reset would wipe it before W ever looks at it.
-in_sge_ovn = f_inWin(sgeOvnStartMin, _sgeOrbStart)
-var float _ovnOpenPx  = na
-var float _ovnClosePx = na
-var float _ovnMove    = na
-if in_sge_ovn and not in_sge_ovn[1]
-    _ovnOpenPx  := open
-    _ovnClosePx := na
-if in_sge_ovn
-    if na(_ovnOpenPx)
-        _ovnOpenPx := open
-    _ovnClosePx := close
-if not in_sge_ovn and in_sge_ovn[1] and not na(_ovnOpenPx) and not na(_ovnClosePx)
-    _ovnMove := _ovnClosePx - _ovnOpenPx
-
 // NY session extreme feeding Signal U. Ends where the Sydney ORB begins.
 in_ny_pool = f_inWin(840, _sydOrbStart)
 var float ny_hi_presyd = na
@@ -1386,25 +1034,6 @@ var bool nyo_sw_lo   = false
 var bool nyo_sw_hi   = false
 var bool nyo_pool_lo = false
 var bool nyo_pool_hi = false
-var bool sge_sw_lo   = false
-var bool sge_sw_hi   = false
-var bool sge_pool_lo = false
-var bool sge_pool_hi = false
-if in_sge_window and not in_sge_window[1]
-    sge_sw_lo   := false
-    sge_sw_hi   := false
-    sge_pool_lo := false
-    sge_pool_hi := false
-if in_sge_window or in_sge_trade
-    if sge_locked and not na(sge_lo) and low < sge_lo
-        sge_sw_lo := true
-    if sge_locked and not na(sge_hi) and high > sge_hi
-        sge_sw_hi := true
-    if not na(syd_lo_presge) and low < syd_lo_presge
-        sge_pool_lo := true
-    if not na(syd_hi_presge) and high > syd_hi_presge
-        sge_pool_hi := true
-
 var bool syd_sw_lo   = false
 var bool syd_sw_hi   = false
 var bool syd_pool_lo = false
@@ -1465,35 +1094,6 @@ if in_syd_window or in_syd_trade
 // f_liqOk gates below are deliberately NOT extended to V, so turning the
 // filter on still changes exactly the same three signals the two test runs
 // used. Pool = the Sydney session, i.e. Sydney open -> Tokyo open.
-in_tok_pool = f_inWin(_sydOrbStart, _tokOrbStart)
-var float syd_hi_pretok = na
-var float syd_lo_pretok = na
-if in_tok_pool and not in_tok_pool[1]
-    syd_hi_pretok := na
-    syd_lo_pretok := na
-if in_tok_pool
-    syd_hi_pretok := na(syd_hi_pretok) ? high : math.max(syd_hi_pretok, high)
-    syd_lo_pretok := na(syd_lo_pretok) ? low  : math.min(syd_lo_pretok, low)
-
-var bool tok_sw_lo   = false
-var bool tok_sw_hi   = false
-var bool tok_pool_lo = false
-var bool tok_pool_hi = false
-if in_tok_window and not in_tok_window[1]
-    tok_sw_lo   := false
-    tok_sw_hi   := false
-    tok_pool_lo := false
-    tok_pool_hi := false
-if in_tok_window or in_tok_trade
-    if tok_locked and not na(tok_lo) and low < tok_lo
-        tok_sw_lo := true
-    if tok_locked and not na(tok_hi) and high > tok_hi
-        tok_sw_hi := true
-    if not na(syd_lo_pretok) and low < syd_lo_pretok
-        tok_pool_lo := true
-    if not na(syd_hi_pretok) and high > syd_hi_pretok
-        tok_pool_hi := true
-
 // ═══════════════════════════════════════════════════════════════════════
 // STRUCTURAL ANCHOR TRACKING  (instrumentation only — places no stop)
 // ─────────────────────────────────────────────────────────────────────
@@ -1558,6 +1158,49 @@ if in_lorb_window or in_lorb_trade
     lorb_ext_lo := na(lorb_ext_lo) ? low  : math.min(lorb_ext_lo, low)
     lorb_ext_hi := na(lorb_ext_hi) ? high : math.max(lorb_ext_hi, high)
 
+// ─── LIQUIDITY TARGET RESOLVER ───────────────────────────
+// Returns the FIRST-RUNG DISTANCE in points, measured from the structural
+// level. Every caller then builds tp_n = level + dir * dist * n, so the ladder
+// keeps its shape and nothing else in the file has to change.
+//
+// Returns the plain range multiple whenever the feature is off or no pool
+// qualifies, so a signal can never be left without a target.
+//
+// NO LOOKAHEAD: _pdHigh/_pdLow read the COMPLETED daily bar via [1], and every
+// session extreme used here is a latched PREVIOUS session.
+f_tpDist(int d, float lvl, float px, float rng, string sg) =>
+    float base = rng * orbTPMult
+    float best = na
+    if liqTgtOn
+        if liqUsePD
+            float p = d == 1 ? _pdHigh : _pdLow
+            if not na(p) and (p - px) * d > 0
+                best := na(best) ? p : (d == 1 ? math.min(best, p) : math.max(best, p))
+        if liqUsePW
+            float w = d == 1 ? _pwHigh : _pwLow
+            if not na(w) and (w - px) * d > 0
+                best := na(best) ? w : (d == 1 ? math.min(best, w) : math.max(best, w))
+        if liqUseSess
+            // the session immediately behind each signal
+            float e = na
+            if sg == "M" or sg == "G"
+                e := d == 1 ? ar_hi : ar_lo
+            else if sg == "H"
+                e := d == 1 ? lon_hi_preny : lon_lo_preny
+            else if sg == "U"
+                e := d == 1 ? ny_hi_presyd : ny_lo_presyd
+            if not na(e) and (e - px) * d > 0
+                best := na(best) ? e : (d == 1 ? math.min(best, e) : math.max(best, e))
+    float dist = na
+    if not na(best)
+        float tgt  = best - d * liqBuf
+        // GATE on the distance actually captured (target - ENTRY); the returned
+        // distance is from the LEVEL because callers build tp_n = lvl + d*dist*n.
+        float gain = (tgt - px) * d
+        if gain >= liqMinDist and gain <= liqMaxDist
+            dist := (tgt - lvl) * d
+    na(dist) ? base : dist
+
 // Pure resolver — reads the mode, assigns nothing, so it is safe as a function.
 f_liqOk(bool ownSw, bool poolSw) =>
     c2LiqGrab == "Off" ? true : c2LiqGrab == "Sweep own ORB opposite" ? ownSw : c2LiqGrab == "Sweep prior session pool" ? poolSw : (ownSw or poolSw)
@@ -1602,15 +1245,9 @@ if not in_frb_trade and in_frb_trade[1]
 if not in_lorb_trade and in_lorb_trade[1]
     strategy.cancel("ORB-L")
     strategy.cancel("ORB-S")
-if not in_sge_trade and in_sge_trade[1]
-    strategy.cancel("SGE-L")
-    strategy.cancel("SGE-S")
 if not in_syd_trade and in_syd_trade[1]
     strategy.cancel("SYD-L")
     strategy.cancel("SYD-S")
-if not in_tok_trade and in_tok_trade[1]
-    strategy.cancel("TOK-L")
-    strategy.cancel("TOK-S")
 if _newDay
     strategy.cancel("NYORB-L")
     strategy.cancel("NYORB-S")
@@ -1627,6 +1264,14 @@ if modNYORBP and not in_nyorb_trade and in_nyorb_trade[1]
 if not in_ny_orderlife and in_ny_orderlife[1]
     strategy.cancel("NYORB-L")
     strategy.cancel("NYORB-S")
+
+// Clock exit: flatten and clear the book at the configured UTC minute. Placed
+// with the other time-bounding logic, before the ratchet state machine, so a
+// flattened trade frees its slot on the same pass the cancels run.
+if clkExitOn and timeframe.isintraday and _minOfDay >= clkExitMin and _minOfDay < clkExitMin + 15
+    strategy.cancel_all()
+    if strategy.position_size != 0
+        strategy.close_all(comment="clock exit " + str.tostring(clkExitMin))
 
 var float  _rt_lvl   = na     // ORB structural level the rungs measure from
 var float  _rt_entry = na     // actual fill reference (level +/- _c2Depth)
@@ -1754,6 +1399,12 @@ _mtp_prev := _mtp_cur
 // counting signals the entry never took. Defined here, above every signal
 // block, because H fires at 14:30 and U at 22:30 and one definition serves
 // both plus their funnel copies.
+// Context gates, hoisted for the same reason as _hOkL/_uOkL below: each one
+// is needed at BOTH the real entry and its shadow-funnel copy, and hoisting
+// is what keeps the two in step.
+_ctxL = f_ctxOk(1)
+_ctxS = f_ctxOk(-1)
+
 _hOkL = (not orbNYPdHiFilter or (not na(_pdHigh) and close > _pdHigh))
 _hOkS = (not orbNYPdLoFilter or (not na(_pdLow)  and close < _pdLow))
 
@@ -1770,15 +1421,16 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
     orb_range = frb_hi - frb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeFRB
-        if close > frb_hi and (close - frb_hi) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
+        if close > frb_hi and (close - frb_hi) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0) and _ctxL
             // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it;
             // SL/TP stay on the ORB level, so only entry price and fill odds move.
             _mlE = frb_hi + orb_range * _c2Depth
             _mlS = frb_hi - f_c2SL(orb_range)
-            _mlA = frb_hi + orb_range * orbTPMult
-            _mlB = frb_hi + orb_range * orbTPMult * 2.0
-            _mlC = frb_hi + orb_range * orbTPMult * 3.0
+            _dml = f_tpDist(1, frb_hi, _mlE, orb_range, "M")
+            _mlA = frb_hi + _dml
+            _mlB = frb_hi + _dml * 2.0
+            _mlC = frb_hi + _dml * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revM ? close : _mlE
             slP    = revM ? close + math.abs(_mlE - _mlS) : _mlS
@@ -1823,14 +1475,15 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < frb_lo and (frb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
+        else if close < frb_lo and (frb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0) and _ctxS
             // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             _msE = frb_lo - orb_range * _c2Depth
             _msS = frb_lo + f_c2SL(orb_range)
-            _msA = frb_lo - orb_range * orbTPMult
-            _msB = frb_lo - orb_range * orbTPMult * 2.0
-            _msC = frb_lo - orb_range * orbTPMult * 3.0
+            _dms = f_tpDist(-1, frb_lo, _msE, orb_range, "M")
+            _msA = frb_lo - _dms
+            _msB = frb_lo - _dms * 2.0
+            _msC = frb_lo - _dms * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revM ? close : _msE
             slP    = revM ? close - math.abs(_msE - _msS) : _msS
@@ -1892,14 +1545,15 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
     orb_range = lorb_hi - lorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= (lonUseC2 ? c2MinRangeLON : 0.50)
-        if close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0)
+        if close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0) and _ctxL
             // C2: BUY LIMIT back at lorb_hi (broken ORB high retests as support).
             // Legacy: market fill at this bar's close, SL at the opposite extreme.
             _glE = lonUseC2 ? lorb_hi + orb_range * _c2Depth : close
             _glS = lonUseC2 ? lorb_hi - f_c2SL(orb_range)    : lorb_lo - buf
-            _glA = lonUseC2 ? lorb_hi + orb_range * orbTPMult       : lorb_hi + orb_range
-            _glB = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 2.0 : lorb_hi + orb_range * 2.0
-            _glC = lonUseC2 ? lorb_hi + orb_range * orbTPMult * 3.0 : lorb_hi + orb_range * 3.0
+            _dgl = f_tpDist(1, lorb_hi, _glE, orb_range, "G")
+            _glA = lonUseC2 ? lorb_hi + _dgl       : lorb_hi + orb_range
+            _glB = lonUseC2 ? lorb_hi + _dgl * 2.0 : lorb_hi + orb_range * 2.0
+            _glC = lonUseC2 ? lorb_hi + _dgl * 3.0 : lorb_hi + orb_range * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revG ? close : _glE
             slP    = revG ? close + math.abs(_glE - _glS) : _glS
@@ -1924,12 +1578,13 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             f_c2Exit("ORB-L", slP, tp1, tp2, tp3, orb_range)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0)
+        else if close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0) and _ctxS
             _gsE = lonUseC2 ? lorb_lo - orb_range * _c2Depth : close
             _gsS = lonUseC2 ? lorb_lo + f_c2SL(orb_range)    : lorb_hi + buf
-            _gsA = lonUseC2 ? lorb_lo - orb_range * orbTPMult       : lorb_lo - orb_range
-            _gsB = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 2.0 : lorb_lo - orb_range * 2.0
-            _gsC = lonUseC2 ? lorb_lo - orb_range * orbTPMult * 3.0 : lorb_lo - orb_range * 3.0
+            _dgs = f_tpDist(-1, lorb_lo, _gsE, orb_range, "G")
+            _gsA = lonUseC2 ? lorb_lo - _dgs       : lorb_lo - orb_range
+            _gsB = lonUseC2 ? lorb_lo - _dgs * 2.0 : lorb_lo - orb_range * 2.0
+            _gsC = lonUseC2 ? lorb_lo - _dgs * 3.0 : lorb_lo - orb_range * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revG ? close : _gsE
             slP    = revG ? close - math.abs(_gsE - _gsS) : _gsS
@@ -1961,14 +1616,15 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
     orb_range = nyorb_hi - nyorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeNY
-        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL
+        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it.
             _hlE = nyorb_hi + orb_range * _c2Depth
             _hlS = nyorb_hi - f_c2SL(orb_range)
-            _hlA = nyorb_hi + orb_range * orbTPMult
-            _hlB = nyorb_hi + orb_range * orbTPMult * 2.0
-            _hlC = nyorb_hi + orb_range * orbTPMult * 3.0
+            _dhl = f_tpDist(1, nyorb_hi, _hlE, orb_range, "H")
+            _hlA = nyorb_hi + _dhl
+            _hlB = nyorb_hi + _dhl * 2.0
+            _hlC = nyorb_hi + _dhl * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revH ? close : _hlE
             slP    = revH ? close + math.abs(_hlE - _hlS) : _hlS
@@ -2011,14 +1667,15 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS
+        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS and _ctxS
             // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             _hsE = nyorb_lo - orb_range * _c2Depth
             _hsS = nyorb_lo + f_c2SL(orb_range)
-            _hsA = nyorb_lo - orb_range * orbTPMult
-            _hsB = nyorb_lo - orb_range * orbTPMult * 2.0
-            _hsC = nyorb_lo - orb_range * orbTPMult * 3.0
+            _dhs = f_tpDist(-1, nyorb_lo, _hsE, orb_range, "H")
+            _hsA = nyorb_lo - _dhs
+            _hsB = nyorb_lo - _dhs * 2.0
+            _hsC = nyorb_lo - _dhs * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revH ? close : _hsE
             slP    = revH ? close - math.abs(_hsE - _hsS) : _hsS
@@ -2084,105 +1741,17 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
 // sits earlier in the file than this block did. Pine requires a function to be
 // defined before every use.
 
-// ─── W RESEARCH-FILTER GATES, HOISTED ────────────────────────────────
-// Computed once here and referenced from BOTH the entry block and the shadow
-// signal-funnel copy. The gate line is already about 700 characters and lives
-// in two places that have to stay byte-identical; inlining eight more
-// conditions twice is how the funnel silently drifts out of step with the
-// entry. Direction-independent tests go in _wOk, the rest split by side.
-_wRelVolOk = sgeMinRelVol <= 0 or (not na(_sgeRelVol) and _sgeRelVol >= sgeMinRelVol)
-_wOvnSzOk  = sgeOvnMaxAdr <= 0 or na(_ovnMove) or na(_atr14d[1]) or _atr14d[1] <= 0 or math.abs(_ovnMove) <= sgeOvnMaxAdr * _atr14d[1]
-_wCnOk     = (not sgeSkipCnShut or not _cnShutToday) and (not sgeSkipCnOpen or not _cnReopenToday)
-_wOk       = _wRelVolOk and _wOvnSzOk and _wCnOk
-
-// Distance from a price to the nearest $10 handle. Round numbers are where
-// Osler found protective stops actually cluster.
-f_handleOff(float px) =>
-    math.abs(px - math.round(px / 10.0) * 10.0)
-
-_wOkL = (not sgeOvnAgree or (not na(_ovnMove) and _ovnMove >= 0)) and (not sgeBreakPdHi or (not na(_pdHigh) and close > _pdHigh)) and (not sgeNearHandle or (not na(sge_hi) and f_handleOff(sge_hi) <= sgeHandleTol))
-_wOkS = (not sgeOvnAgree or (not na(_ovnMove) and _ovnMove <= 0)) and (not sgeBreakPdLo or (not na(_pdLow)  and close < _pdLow))  and (not sgeNearHandle or (not na(sge_lo) and f_handleOff(sge_lo) <= sgeHandleTol))
-
-// ═══════════════════════════════════════════════════════════════════════
-// SIGNAL W — Shanghai ORB (SGE day session, 01:00 UTC)
-// ─────────────────────────────────────────────────────────────────────
-// Identical C2 architecture to M/H/U/G: 30-min opening range, first close
-// outside it is the break, a limit rests back at the level shifted by
-// _c2Depth, SL = level +/- f_c2SL(range), TPs = range x orbTPMult x {1,2,3}.
-//
-// THE HYPOTHESIS, stated plainly so a failed test is readable: Asian-hours
-// breaks were measured DEAD on 2026-10-09 (V Tokyo, PF 0.57 over 3yr, 86% WR
-// against a 91.6% breakeven). W is not a retry of that. Tokyo 00:00 is the
-// financial open; SGE 01:00 is the largest physical gold market opening, a
-// different participant set on the one instrument where physical demand
-// actually sets price. If W fails too, the honest conclusion is that the
-// whole 00:00-07:00 window is untradeable with an ORB and the matter is
-// closed for good.
-//
-// Every filter is on its own switch and defaults OFF, so turning modSGE on
-// alone measures W bare before any filter is allowed to flatter it.
-if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locked and not sge_done and not na(sge_hi) and not na(sge_lo) and (not sgeADRGuard or _adrConsumed[1] < 0.90) and _nfpOk and _hm_dow_ok and strategy.position_size == 0
-    rngW = sge_hi - sge_lo
-    if rngW >= sgeMinRange
-        if close > sge_hi and (close - sge_hi) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0) and (not sgeBreakNyHi or (not na(_nyHiPrev) and close > _nyHiPrev)) and (not sgeBreakLonHi or (not na(_lonHiPrev) and close > _lonHiPrev)) and (not sgeNyCascade or _nyBiasPrev >= 0) and (not sgeLonCascade or _lonBiasPrev >= 0) and _wOk and _wOkL
-            entryP = sge_hi + rngW * _c2Depth
-            slP    = sge_hi - f_c2SL(rngW)
-            tp1    = sge_hi + rngW * orbTPMult
-            tp2    = sge_hi + rngW * orbTPMult * 2.0
-            tp3    = sge_hi + rngW * orbTPMult * 3.0
-            sge_done := true
-            c2LimWL = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("SGE-L", strategy.long, limit=c2LimWL, comment="shanghai-orb · C2 LONG")
-            // Ratchet state MUST be registered here. Without it f_c2Exit's ratchet
-            // branch places a naked stop with no TP and no trail - the bug that
-            // made every filled U and V trade a guaranteed full loss.
-            if _useRtState
-                _rt_lvl   := sge_hi
-                _rt_entry := entryP
-                _rt_rng   := rngW
-                _rt_dir   := 1
-                _rt_id    := "SGE-L"
-                _rt_sl    := slP
-                _rt_sl0   := slP
-                _rt_reach := 0.0
-            f_c2Exit("SGE-L", slP, tp1, tp2, tp3, rngW)
-            label.new(bar_index, low, "W↑ rv" + (na(_sgeRelVol) ? "-" : str.tostring(_sgeRelVol, "0.00")), style=label.style_label_up,
-                      color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-        else if close < sge_lo and (sge_lo - close) >= rngW * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0) and (not sgeBreakNyLo or (not na(_nyLoPrev) and close < _nyLoPrev)) and (not sgeBreakLonLo or (not na(_lonLoPrev) and close < _lonLoPrev)) and (not sgeNyCascade or _nyBiasPrev <= 0) and (not sgeLonCascade or _lonBiasPrev <= 0) and _wOk and _wOkS
-            entryP = sge_lo - rngW * _c2Depth
-            slP    = sge_lo + f_c2SL(rngW)
-            tp1    = sge_lo - rngW * orbTPMult
-            tp2    = sge_lo - rngW * orbTPMult * 2.0
-            tp3    = sge_lo - rngW * orbTPMult * 3.0
-            sge_done := true
-            c2LimWS = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("SGE-S", strategy.short, limit=c2LimWS, comment="shanghai-orb · C2 SHORT")
-            if _useRtState
-                _rt_lvl   := sge_lo
-                _rt_entry := entryP
-                _rt_rng   := rngW
-                _rt_dir   := -1
-                _rt_id    := "SGE-S"
-                _rt_sl    := slP
-                _rt_sl0   := slP
-                _rt_reach := 0.0
-            f_c2Exit("SGE-S", slP, tp1, tp2, tp3, rngW)
-            label.new(bar_index, high, "W↓ rv" + (na(_sgeRelVol) ? "-" : str.tostring(_sgeRelVol, "0.00")), style=label.style_label_down,
-                      color=color.new(color.orange, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
 // ─── SIGNAL U — Sydney ORB ───────────────────────────────────────────
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     rngU = syd_hi - syd_lo
     if rngU >= c2MinRangeASIA
-        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL
+        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL and _ctxL
             _ulE = syd_hi + rngU * _c2Depth
             _ulS = syd_hi - f_c2SL(rngU)
-            _ulA = syd_hi + rngU * orbTPMult
-            _ulB = syd_hi + rngU * orbTPMult * 2.0
-            _ulC = syd_hi + rngU * orbTPMult * 3.0
+            _dul = f_tpDist(1, syd_hi, _ulE, rngU, "U")
+            _ulA = syd_hi + _dul
+            _ulB = syd_hi + _dul * 2.0
+            _ulC = syd_hi + _dul * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revU ? close : _ulE
             slP    = revU ? close + math.abs(_ulE - _ulS) : _ulS
@@ -2210,12 +1779,13 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS
+        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS and _ctxS
             _usE = syd_lo - rngU * _c2Depth
             _usS = syd_lo + f_c2SL(rngU)
-            _usA = syd_lo - rngU * orbTPMult
-            _usB = syd_lo - rngU * orbTPMult * 2.0
-            _usC = syd_lo - rngU * orbTPMult * 3.0
+            _dus = f_tpDist(-1, syd_lo, _usE, rngU, "U")
+            _usA = syd_lo - _dus
+            _usB = syd_lo - _dus * 2.0
+            _usC = syd_lo - _dus * 3.0
             // REVERSE: opposite side at the bar close, ORIGINAL distances mirrored.
             entryP = revU ? close : _usE
             slP    = revU ? close - math.abs(_usE - _usS) : _usS
@@ -2239,55 +1809,6 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-// ─── SIGNAL V — Tokyo ORB ────────────────────────────────────────────
-if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locked and not tok_done and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
-    rngV = tok_hi - tok_lo
-    if rngV >= c2MinRangeASIA
-        if close > tok_hi and (close - tok_hi) >= rngV * c2MinBreakStr and (not orbBiasFilter or _orbBiasLong)
-            entryP = tok_hi + rngV * _c2Depth
-            slP    = tok_hi - f_c2SL(rngV)
-            tp1    = tok_hi + rngV * orbTPMult
-            tp2    = tok_hi + rngV * orbTPMult * 2.0
-            tp3    = tok_hi + rngV * orbTPMult * 3.0
-            tok_done := true
-            c2LimVL = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("TOK-L", strategy.long, limit=c2LimVL, comment="tokyo-orb · C2 LONG")
-            if _useRtState
-                _rt_lvl   := tok_hi
-                _rt_entry := entryP
-                _rt_rng   := rngV
-                _rt_dir   := 1
-                _rt_id    := "TOK-L"
-                _rt_sl    := slP
-                _rt_sl0   := slP
-                _rt_reach := 0.0
-            f_c2Exit("TOK-L", slP, tp1, tp2, tp3, rngV)
-            label.new(bar_index, low, "V↑", style=label.style_label_up,
-                      color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
-
-        else if close < tok_lo and (tok_lo - close) >= rngV * c2MinBreakStr and (not orbBiasFilter or _orbBiasShort)
-            entryP = tok_lo - rngV * _c2Depth
-            slP    = tok_lo + f_c2SL(rngV)
-            tp1    = tok_lo - rngV * orbTPMult
-            tp2    = tok_lo - rngV * orbTPMult * 2.0
-            tp3    = tok_lo - rngV * orbTPMult * 3.0
-            tok_done := true
-            c2LimVS = c2EntryMode == "Retest (limit)" ? entryP : na
-            strategy.entry("TOK-S", strategy.short, limit=c2LimVS, comment="tokyo-orb · C2 SHORT")
-            if _useRtState
-                _rt_lvl   := tok_lo
-                _rt_entry := entryP
-                _rt_rng   := rngV
-                _rt_dir   := -1
-                _rt_id    := "TOK-S"
-                _rt_sl    := slP
-                _rt_sl0   := slP
-                _rt_reach := 0.0
-            f_c2Exit("TOK-S", slP, tp1, tp2, tp3, rngV)
-            label.new(bar_index, high, "V↓", style=label.style_label_down,
-                      color=color.new(color.fuchsia, 5), textcolor=color.white, size=size.small)
-            f_drawPosBox(entryP, slP, tp3)
 
 
 
@@ -2297,6 +1818,80 @@ if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locke
 
 
 
+
+
+
+
+// ═════════════════════════════════════════════════════════════════════
+// SIGNAL BBX — Bollinger breakout  (NOT a session ORB)
+// ═════════════════════════════════════════════════════════════════════
+// A 15m close outside the 2.5-sigma band, traded in the break direction. Same
+// C2 plumbing as every other signal: a level, a limit at that level, SL =
+// level +/- f_c2SL, targets at level +/- size x orbTPMult x {1,2,3}, and the
+// same ratchet. The only structural difference is where the level and the size
+// come from - the band instead of an opening range.
+//
+// READ THE G_BBX GROUP HEADER before interpreting any result. In particular:
+// LEAVE M/G/H/U ON. BBX alone is WORSE than the book (3.83 vs 4.34); the
+// entire gain is in the combination.
+//
+// No reverse arm. Inverting breakouts is measured dead - inverting the whole
+// book produces PF < 1.0 - so there is deliberately no revBBX to tempt anyone.
+var bool  bbx_done   = false
+var float _bbxExpire = na
+if _newDay
+    bbx_done := false
+
+// Expire a resting BBX limit at its own order life. Every other signal is
+// bounded by its session window; BBX has none, so without this an unfilled
+// limit rests for ever against a band that stopped existing - the single worst
+// failure mode this architecture has.
+if not na(_bbxExpire) and bbOrderMins > 0 and time > _bbxExpire
+    strategy.cancel("BBX-L")
+    strategy.cancel("BBX-S")
+    _bbxExpire := na
+
+if modBBX and barstate.isconfirmed and _testWinOk and (not bbOnePerDay or not bbx_done) and _bbWidth >= bbMinWidth and (not bbADRGuard or _adrConsumed[1] < 0.90) and (not bbNFPFilter or not _isNFP) and (not bbSessFilter or (_minOfDay >= bbSessStart and _minOfDay < bbSessEnd)) and _hm_dow_ok and strategy.position_size == 0
+    _bbxL = close > _bbUpper and bbDirFilter != "Short only" and (not bbBiasFilter or _orbBiasLong)
+    _bbxS = close < _bbLower and bbDirFilter != "Long only"  and (not bbBiasFilter or _orbBiasShort)
+    if _bbxL or _bbxS
+        _bbD   = _bbxL ? 1 : -1
+        // ANCHOR. "Signal bar close" is what was measured. "Band edge" treats
+        // the band as the structural level the way the ORB high is treated -
+        // closer to C2 in spirit, but untested.
+        _bbLvl = bbAnchor == "Band edge" ? (_bbxL ? _bbUpper : _bbLower) : close
+        _bbE   = _bbLvl + _bbD * _bbSize * _bbDepth
+        _bbSL  = _bbLvl - _bbD * f_c2SL(_bbSize)
+        _bbT1  = _bbLvl + _bbD * _bbSize * orbTPMult
+        _bbT2  = _bbLvl + _bbD * _bbSize * orbTPMult * 2.0
+        _bbT3  = _bbLvl + _bbD * _bbSize * orbTPMult * 3.0
+        _bbId  = _bbxL ? "BBX-L" : "BBX-S"
+        bbx_done   := true
+        _bbxExpire := time + bbOrderMins * 60 * 1000
+        // Depth 0 + limit = a limit resting AT the signal bar close, which is
+        // what the harness measured. "Immediate" is NOT equivalent in Pine -
+        // it fills at the next bar OPEN, which can gap off the close.
+        _bbLim = bbEntryMode == "Retest (limit)" ? _bbE : na
+        strategy.entry(_bbId, _bbxL ? strategy.long : strategy.short, limit=_bbLim,
+                       comment="bollinger-breakout · " + (_bbxL ? "LONG" : "SHORT"))
+        // Ratchet state MUST be registered here. Without it f_c2Exit's ratchet
+        // branch places a naked stop with no TP and no trail - the bug that
+        // made every filled U and V trade a guaranteed full loss.
+        if _useRtState
+            _rt_lvl   := _bbLvl
+            _rt_entry := _bbE
+            _rt_rng   := _bbSize
+            _rt_dir   := _bbD
+            _rt_id    := _bbId
+            _rt_sl    := _bbSL
+            _rt_sl0   := _bbSL
+            _rt_reach := 0.0
+        f_c2Exit(_bbId, _bbSL, _bbT1, _bbT2, _bbT3, _bbSize)
+        label.new(bar_index, _bbxL ? low : high,
+                  "BBX" + (_bbxL ? "↑" : "↓") + " w" + str.tostring(_bbWidth, "0.0"),
+                  style = _bbxL ? label.style_label_up : label.style_label_down,
+                  color=color.new(color.yellow, 5), textcolor=color.black, size=size.small)
+        f_drawPosBox(_bbE, _bbSL, _bbT3)
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2487,7 +2082,7 @@ if showXcmp and barstate.isconfirmed and array.size(xS) > 0
             if xd == 1 ? low <= xe : high >= xe
                 sh.filled := true
             else
-                if not (sh.sig == 0 ? in_frb_trade : sh.sig == 1 ? not _newDay : sh.sig == 2 ? in_lorb_trade : sh.sig == 3 ? in_syd_trade : in_tok_trade)
+                if not (sh.sig == 0 ? in_frb_trade : sh.sig == 1 ? not _newDay : sh.sig == 2 ? in_lorb_trade : in_syd_trade)
                     xExp := xExp + 1
                     array.remove(xS, i)
                 continue
@@ -2664,18 +2259,14 @@ if _newDay
     smDone := false
     shDone := false
     sgDone := false
-if in_sge_window and not in_sge_window[1]
-    swDone := false
 if in_syd_window and not in_syd_window[1]
     suDone := false
-if in_tok_window and not in_tok_window[1]
-    svDone := false
 
 if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locked and not smDone and not na(frb_hi) and not na(frb_lo) and _orbGateFRB and _hm_dow_ok
     rM = frb_hi - frb_lo
     if rM >= c2MinRangeFRB
-        okML = close > frb_hi and (close - frb_hi) >= rM * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0)
-        okMS = close < frb_lo and (frb_lo - close) >= rM * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0)
+        okML = close > frb_hi and (close - frb_hi) >= rM * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0) and _ctxL
+        okMS = close < frb_lo and (frb_lo - close) >= rM * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0) and _ctxS
         if okML or okMS
             sigM   := sigM + 1
             smDone := true
@@ -2690,8 +2281,8 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
 if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
     rH = nyorb_hi - nyorb_lo
     if rH >= c2MinRangeNY
-        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL
-        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS
+        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL
+        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS and _ctxS
         if okHL or okHS
             sigH   := sigH + 1
             shDone := true
@@ -2706,8 +2297,8 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
 if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgDone and not na(lorb_hi) and not na(lorb_lo) and (not lonADRGuard or _adrConsumed[1] < 0.90) and _testWinOk and _hm_dow_ok
     rG = lorb_hi - lorb_lo
     if rG >= (lonUseC2 ? c2MinRangeLON : 0.50)
-        okGL = close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0)
-        okGS = close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0)
+        okGL = close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0) and _ctxL
+        okGS = close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0) and _ctxS
         if okGL or okGS
             sigG   := sigG + 1
             sgDone := true
@@ -2719,20 +2310,12 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgD
                 array.push(xS, Shadow.new(xlz, xez, xdz, rG * orbTPMult, xsz, 2, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
-if modSGE and barstate.isconfirmed and _testWinOk and in_sge_trade and sge_locked and not swDone and not na(sge_hi) and not na(sge_lo) and (not sgeADRGuard or _adrConsumed[1] < 0.90) and _nfpOk and _hm_dow_ok
-    rW2 = sge_hi - sge_lo
-    if rW2 >= sgeMinRange
-        okWL = close > sge_hi and (close - sge_hi) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_lo, sge_pool_lo) and sgeDirFilter != "Short only" and (not sgeBiasFilter or _orbBiasLong) and (not sgeBreakSydHi or (not na(syd_hi_presge) and close > syd_hi_presge)) and (not sgeCascade or _sydBias >= 0) and (not sgeBreakNyHi or (not na(_nyHiPrev) and close > _nyHiPrev)) and (not sgeBreakLonHi or (not na(_lonHiPrev) and close > _lonHiPrev)) and (not sgeNyCascade or _nyBiasPrev >= 0) and (not sgeLonCascade or _lonBiasPrev >= 0) and _wOk and _wOkL
-        okWS = close < sge_lo and (sge_lo - close) >= rW2 * c2MinBreakStr and f_liqOk(sge_sw_hi, sge_pool_hi) and sgeDirFilter != "Long only" and (not sgeBiasFilter or _orbBiasShort) and (not sgeBreakSydLo or (not na(syd_lo_presge) and close < syd_lo_presge)) and (not sgeCascade or _sydBias <= 0) and (not sgeBreakNyLo or (not na(_nyLoPrev) and close < _nyLoPrev)) and (not sgeBreakLonLo or (not na(_lonLoPrev) and close < _lonLoPrev)) and (not sgeNyCascade or _nyBiasPrev <= 0) and (not sgeLonCascade or _lonBiasPrev <= 0) and _wOk and _wOkS
-        if okWL or okWS
-            sigW   := sigW + 1
-            swDone := true
 
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
     rU2 = syd_hi - syd_lo
     if rU2 >= c2MinRangeASIA
-        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL
-        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS
+        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL and _ctxL
+        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS and _ctxS
         if okUL or okUS
             sigU   := sigU + 1
             suDone := true
@@ -2744,22 +2327,6 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                 array.push(xS, Shadow.new(xlz, xez, xdz, rU2 * orbTPMult, xsz, 3, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
-if modTOK and barstate.isconfirmed and _testWinOk and in_tok_trade and tok_locked and not svDone and not na(tok_hi) and not na(tok_lo) and _orbGateOk and _hm_dow_ok
-    rV2 = tok_hi - tok_lo
-    if rV2 >= c2MinRangeASIA
-        okVL = close > tok_hi and (close - tok_hi) >= rV2 * c2MinBreakStr and (not orbBiasFilter or _orbBiasLong)
-        okVS = close < tok_lo and (tok_lo - close) >= rV2 * c2MinBreakStr and (not orbBiasFilter or _orbBiasShort)
-        if okVL or okVS
-            sigV   := sigV + 1
-            svDone := true
-            if showXcmp
-                xdz = okVL ? 1.0 : -1.0
-                xlz = okVL ? tok_hi : tok_lo
-                xsz = xlz - xdz * f_c2SL(rV2)
-                xez = c2EntryMode == "Retest (limit)" ? xlz + xdz * rV2 * _c2Depth : close
-                array.push(xS, Shadow.new(xlz, xez, xdz, rV2 * orbTPMult, xsz, 4, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
-                xSig := xSig + 1
-
 // TAKEN counters - the rising edge of each real done-flag IS the moment an
 // order was placed, so these need no copied conditions and cannot drift.
 if frb_done   and not frb_done[1]
@@ -2768,12 +2335,8 @@ if nyorb_done and not nyorb_done[1]
     trdH := trdH + 1
 if lorb_done  and not lorb_done[1]
     trdG := trdG + 1
-if sge_done   and not sge_done[1]
-    trdW := trdW + 1
 if syd_done   and not syd_done[1]
     trdU := trdU + 1
-if tok_done   and not tok_done[1]
-    trdV := trdV + 1
 
 // ═══════════════════════════════════════════════════════════════════════
 // ORDER FLOW AT THE BREAK  (request.footprint)
@@ -2930,23 +2493,6 @@ if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi
     array.push(_ctxSig, 2)
     array.push(_ctxPool, (dirS == 1 ? syd_pool_lo : syd_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirS ? 1 : 0)
-    array.push(_ctxAtr, atrVal)
-    array.push(_ctxTime, time)
-    array.push(_ctxNFP, _isNFP ? 1 : 0)
-    array.push(_ctxDelta, fpDelta)
-
-if tok_done and not tok_done[1] and not na(tok_hi) and not na(tok_lo) and tok_hi > tok_lo
-    dirT = close > tok_hi ? 1 : -1
-    lvlT = dirT == 1 ? tok_hi : tok_lo
-    rngT = tok_hi - tok_lo
-    array.push(_ctxBar, bar_index)
-    array.push(_ctxRng, rngT)
-    array.push(_ctxStr, math.abs(close - lvlT) / rngT)
-    array.push(_ctxAdr, _adrConsumed)
-    array.push(_ctxAgr, hdB == dirT ? 1 : 0)
-    array.push(_ctxSig, 3)
-    array.push(_ctxPool, (dirT == 1 ? tok_pool_lo : tok_pool_hi) ? 1 : 0)
-    array.push(_ctxM15, m15B == dirT ? 1 : 0)
     array.push(_ctxAtr, atrVal)
     array.push(_ctxTime, time)
     array.push(_ctxNFP, _isNFP ? 1 : 0)
@@ -3900,4 +3446,3 @@ if barstate.islast and showLog
 bgcolor(in_asian   ? color.new(color.blue,   90) : na, title="Asian")
 bgcolor(in_london  ? color.new(color.yellow, 90) : na, title="London KZ")
 bgcolor(in_overlap ? color.new(color.orange, 88) : na, title="NY-Lon Overlap")
-bgcolor(in_sb_win  ? color.new(color.lime,   75) : na, title="Silver Bullet")
