@@ -1,6 +1,6 @@
 //@version=6
 strategy("QB Gold Specialist — Strategy", "QB GOLD · STRAT", overlay=true,
-         max_bars_back=500, max_labels_count=500, max_lines_count=300, max_boxes_count=300,
+         max_bars_back=500, max_labels_count=500, max_lines_count=500, max_boxes_count=300,
          default_qty_type=strategy.percent_of_equity, default_qty_value=1,
          commission_type=strategy.commission.percent, commission_value=0.0,
          slippage=2, pyramiding=0, calc_on_every_tick=false,
@@ -1306,6 +1306,64 @@ f_zoneConf(int d, float lvl) =>
     else if zoneOn and zoneConfMode == "Two closes"
         ok := (close - lvl) * d > 0 and (close[1] - lvl) * d > 0
     ok
+
+// ─── DRAW THE MAP ────────────────────────────────────────────────────
+// He asked to SEE the zones. Without this the engine is invisible: it scores
+// levels, gates trades on them, and shows you nothing — which is exactly the
+// shape of mistake that hid the missing G filter for a month.
+//
+// Line WIDTH and opacity carry the touch count, so the levels the market has
+// actually defended are the ones that stand out. The number on the right is
+// the count. Redrawn only on the last bar.
+zoneDraw = input.bool(true, "ZONE) Draw the map on the chart", group=G_ZONE,
+           tooltip="Only does anything when zoneOn is ticked. Thick/bright = defended many times, faint = touched twice. The label is the touch count.\n\nThe two arrows at the right edge are what f_zoneAhead actually returns for a LONG and for a SHORT from the current close — the first obstacle in each direction. That number is what the headroom gate compares against zoneHeadroom.")
+
+var array<line>  _zLn  = array.new<line>()
+var array<label> _zLb  = array.new<label>()
+
+if barstate.islast
+    for _ln in _zLn
+        line.delete(_ln)
+    for _lb in _zLb
+        label.delete(_lb)
+    array.clear(_zLn)
+    array.clear(_zLb)
+
+    if zoneOn and zoneDraw and array.size(_zPx) > 0
+        for _zi = 0 to array.size(_zPx) - 1
+            _zp = array.get(_zPx, _zi)
+            _zt = array.get(_zN,  _zi)
+            if _zt >= zoneMinTouch
+                // 2 touches = faint and thin, 10+ = solid and thick
+                _w   = _zt >= 10 ? 3 : _zt >= 5 ? 2 : 1
+                _tr  = _zt >= 10 ? 10 : _zt >= 5 ? 35 : 60
+                _age = bar_index - array.get(_zBar, _zi)
+                array.push(_zLn, line.new(bar_index - math.min(_age, 300), _zp, bar_index + 30, _zp,
+                           color=color.new(#D4A017, _tr), width=_w, style=line.style_solid))
+                array.push(_zLb, label.new(bar_index + 30, _zp, str.tostring(_zt),
+                           style=label.style_label_left, color=color.new(color.black, 100),
+                           textcolor=color.new(#D4A017, _tr), size=size.tiny))
+
+        // What the gate is actually reading right now, in both directions.
+        [_upD, _upN] = f_zoneAhead(1, close)
+        [_dnD, _dnN] = f_zoneAhead(-1, close)
+        _upTxt = na(_upD) ? "clear air" : str.tostring(_upD, "#.#") + " pts  (" + str.tostring(_upN) + " touches)"
+        _dnTxt = na(_dnD) ? "clear air" : str.tostring(_dnD, "#.#") + " pts  (" + str.tostring(_dnN) + " touches)"
+        _blk   = zoneHeadroom > 0.0
+        array.push(_zLb, label.new(bar_index + 2, high, "ahead LONG:  " + _upTxt +
+                   (_blk ? (na(_upD) or _upD >= zoneHeadroom ? "   OK" : "   BLOCKED") : ""),
+                   style=label.style_label_down,
+                   color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny))
+        array.push(_zLb, label.new(bar_index + 2, low, "ahead SHORT: " + _dnTxt +
+                   (_blk ? (na(_dnD) or _dnD >= zoneHeadroom ? "   OK" : "   BLOCKED") : ""),
+                   style=label.style_label_up,
+                   color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny))
+        array.push(_zLb, label.new(bar_index + 2, (high + low) / 2.0,
+                   str.tostring(array.size(_zPx)) + " zones tracked  ·  min " + str.tostring(zoneMinTouch) +
+                   " touches  ·  headroom " + (zoneHeadroom > 0.0 ? str.tostring(zoneHeadroom, "#.#") + " pts" : "OFF (measuring only)"),
+                   style=label.style_label_left, color=color.new(color.black, 30),
+                   textcolor=color.new(color.gray, 0), size=size.tiny))
+
 
 // ─── LIQUIDITY TARGET RESOLVER ───────────────────────────
 // Returns the FIRST-RUNG DISTANCE in points, measured from the structural
