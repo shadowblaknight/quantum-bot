@@ -1161,6 +1161,152 @@ if in_lorb_window or in_lorb_trade
     lorb_ext_lo := na(lorb_ext_lo) ? low  : math.min(lorb_ext_lo, low)
     lorb_ext_hi := na(lorb_ext_hi) ? high : math.max(lorb_ext_hi, high)
 
+// ═══════════════════════════════════════════════════════════════════════
+// ZONE MAP — the levels price has actually DEFENDED, scored
+// ═══════════════════════════════════════════════════════════════════════
+// A zone is a price the market has turned at more than once. The map keeps
+// one entry per zone with a touch COUNT, so a level defended 33 times
+// outranks one wicked through on a Tuesday. Capped and pruned, because an
+// unbounded array over three years hits Pine's object ceiling.
+//
+// Sources are the ones this file already tracks, plus swing pivots and the
+// round-$10 grid. Nothing new is requested from the server.
+//
+// ★ FIVE ZONE IDEAS ARE ALREADY DEAD, and they all asked the same question.
+// FVG as the entry location (1.03 against a 4.73 control), FVG as the stop
+// (WR 5.2% — the median gap is 2.39 pts), the opposing-FVG exit (converges
+// to doing nothing), the AOI exit (1.67), AOI as a quality filter (flat).
+// Every one of them asked WHERE AM I.
+//
+// ★★ THE QUESTION NOBODY ASKED IS WHAT IS IN MY WAY. On 21 Oct 2026 the
+// London ORB broke down at 4114.86 with its target at 4101.30 — and
+// 4112-4116 had been defended 33 times in the previous 48 hours. The path
+// was blocked. Every filter in this file looks BEHIND the break (did it
+// clear the level it came from); none looks AHEAD.
+G_ZONE = "ZONE map"
+zoneOn        = input.bool(false, "ZONE) Build the zone map", group=G_ZONE,
+                tooltip="Scores the levels price has actually defended and measures what sits in a trade's PATH. Costs nothing when OFF — no arrays are built.\n\n* WHAT IS ALREADY KNOWN AND SHOULD SHAPE HOW YOU READ IT. pool_ranking measured which levels price REACHES, controlled for distance: 0-30pts 85% | 30-60 48% | 60-100 29% | 100-150 16% | 150-250 5%. DISTANCE dominates TYPE by an order of magnitude — swapping the whole pool set moved netR/DD by less than 0.2, while moving the distance band moved the reach rate 80 points.\n\nSo expect HEADROOM (how far to the first obstacle) to carry nearly all the signal and zone TYPE almost none. If the type buckets separate and the distance buckets do not, suspect the measurement rather than the market.")
+zoneSwingLen  = input.int(5,     "ZONE)   swing pivot length (bars each side)", group=G_ZONE, minval=2, maxval=30)
+zoneTol       = input.float(2.0, "ZONE)   touches within this many pts are the SAME zone", group=G_ZONE, step=0.5, minval=0.1)
+zoneMaxAge    = input.int(960,   "ZONE)   forget a zone after N bars", group=G_ZONE, minval=96, maxval=5000, step=96,
+                tooltip="960 bars = 10 trading days on 15m. A level nobody has defended in two weeks is not a level any more.")
+zoneRound     = input.bool(true, "ZONE)   count round $10 levels", group=G_ZONE,
+                tooltip="Round-$10 was the single best pool under 60 pts in pool_ranking — a 94% reach rate. Computed on demand rather than stored, so it costs nothing.")
+zoneMinTouch  = input.int(2,     "ZONE)   touches before a level counts", group=G_ZONE, minval=1, maxval=20,
+                tooltip="1 = every swing point is an obstacle, which is noise. The 21 Oct level had 33 touches in 48h. A level touched once is not a level, it is a wick.")
+zoneHeadroom  = input.float(0.0, "ZONE) BLOCK if the first opposing zone is nearer than (pts)", group=G_ZONE, step=1.0, minval=0.0,
+                tooltip="0 = MEASURE ONLY, block nothing. That is the default on purpose: the map should be read before it is allowed to decide.\n\nSet it to roughly what the trade needs. At the live geometry tp1 is range x 0.75, so a 20-pt ORB wants ~15 pts of clear air.\n\n* ONE WARNING FROM THE RECORD. A 'room' filter WAS tested once — as the THIRD filter stacked on silver+align — and it took netR/DD from 11.98 to 2.90. That is not a verdict on the idea, because stacking a third filter has degraded EVERY combination tried here, but it is the only prior and it is negative. Test it ALONE first.")
+zoneConfMode  = input.string("Close beyond", "ZONE) Zone break confirmation", options=["Close beyond", "Close + margin", "Two closes"], group=G_ZONE,
+                tooltip="What it takes to call a zone BROKEN rather than merely crossed — the confirmation question, as an input.\n\nCLOSE BEYOND — one 15m close past it. What C2 already does at the ORB edge.\nCLOSE + MARGIN — past it by zoneConfMargin as well, so a close that merely tags the level does not count.\nTWO CLOSES — two consecutive closes beyond. Strictest and most expensive.\n\n* THE CONSTRAINT THAT DECIDES THIS. Measured 2026-10-12: a retest-confirm raises the win rate +2.46pp and costs 32% OF THE TARGET. Gold's ~10pt target cannot afford a ~4pt confirmation, which is why every confirmation idea has died here.\n\n* SO THE ONLY WAY CONFIRMATION CAN PAY IS A BIGGER TARGET. liqTgtOn takes the average win from 7.8 to 14.7 pts (netR/DD 2.75 -> 8.05) and is sitting in this file switched OFF. A 15-pt target can afford a 4-pt confirmation; a 10-pt one cannot. Test confirmation WITH liqTgtOn ON — neither half has ever been run with the other.")
+zoneConfMargin= input.float(2.0, "ZONE)   confirmation margin (pts)", group=G_ZONE, step=0.5, minval=0.0)
+
+var array<float> _zPx  = array.new<float>()
+var array<int>   _zN   = array.new<int>()
+var array<int>   _zBar = array.new<int>()
+
+// Pivots computed at TOP LEVEL and unconditionally, for the same reason the
+// Bollinger and context series are: ta.pivothigh looks back leftbars and
+// forward rightbars, so calling it inside `if zoneOn` would feed it a gappy
+// history and return different levels than an always-on call returns. The
+// map would then be WRONG precisely when it is being measured.
+_zPh = ta.pivothigh(zoneSwingLen, zoneSwingLen)
+_zPl = ta.pivotlow(zoneSwingLen, zoneSwingLen)
+
+// Fold new touches into the map. Inline rather than a function because Pine
+// forbids assigning to globals from inside one.
+if zoneOn and barstate.isconfirmed
+    _zCand = array.new<float>()
+    _ph = _zPh
+    _pl = _zPl
+    if not na(_ph)
+        array.push(_zCand, _ph)
+    if not na(_pl)
+        array.push(_zCand, _pl)
+    if not in_frb_window and in_frb_window[1] and not na(frb_hi)
+        array.push(_zCand, frb_hi)
+        array.push(_zCand, frb_lo)
+    if not in_lorb_window and in_lorb_window[1] and not na(lorb_hi)
+        array.push(_zCand, lorb_hi)
+        array.push(_zCand, lorb_lo)
+    if not in_nyorb_window and in_nyorb_window[1] and not na(nyorb_hi)
+        array.push(_zCand, nyorb_hi)
+        array.push(_zCand, nyorb_lo)
+    if _newDay and not na(_pdHigh)
+        array.push(_zCand, _pdHigh)
+        array.push(_zCand, _pdLow)
+    if array.size(_zCand) > 0
+        for _ci = 0 to array.size(_zCand) - 1
+            _p = array.get(_zCand, _ci)
+            _k = -1
+            if array.size(_zPx) > 0
+                for _zi = 0 to array.size(_zPx) - 1
+                    if math.abs(array.get(_zPx, _zi) - _p) <= zoneTol
+                        _k := _zi
+                        break
+            if _k >= 0
+                array.set(_zN,   _k, array.get(_zN, _k) + 1)
+                array.set(_zBar, _k, bar_index)
+                // drift the stored price toward the new touch so it tracks
+                array.set(_zPx,  _k, (array.get(_zPx, _k) * 2.0 + _p) / 3.0)
+            else
+                array.push(_zPx, _p)
+                array.push(_zN, 1)
+                array.push(_zBar, bar_index)
+    // age out, then cap at 80 by dropping the weakest
+    if array.size(_zPx) > 0
+        for _zi = array.size(_zPx) - 1 to 0
+            if bar_index - array.get(_zBar, _zi) > zoneMaxAge
+                array.remove(_zPx, _zi)
+                array.remove(_zN, _zi)
+                array.remove(_zBar, _zi)
+    while array.size(_zPx) > 80
+        _w = 0
+        for _zi = 1 to array.size(_zPx) - 1
+            if array.get(_zN, _zi) < array.get(_zN, _w)
+                _w := _zi
+        array.remove(_zPx, _w)
+        array.remove(_zN, _w)
+        array.remove(_zBar, _w)
+
+// WHAT IS IN THE PATH. Returns [distance to the first opposing zone, its
+// touch count]. d = +1 long. na distance = clear air, which is the good case.
+f_zoneAhead(int d, float px) =>
+    float best = na
+    int   bn   = 0
+    if zoneOn and array.size(_zPx) > 0
+        for _zi = 0 to array.size(_zPx) - 1
+            _zp = array.get(_zPx, _zi)
+            _zt = array.get(_zN, _zi)
+            if _zt >= zoneMinTouch
+                _gap = (_zp - px) * d
+                if _gap > 0 and (na(best) or _gap < best)
+                    best := _gap
+                    bn   := _zt
+    if zoneOn and zoneRound
+        _r  = d == 1 ? (math.ceil(px / 10.0) * 10.0) : (math.floor(px / 10.0) * 10.0)
+        _rg = (_r - px) * d
+        if _rg > 0.01 and (na(best) or _rg < best)
+            best := _rg
+            bn   := zoneMinTouch
+    [best, bn]
+
+// Headroom gate. TRUE when there is enough clear air to the first obstacle.
+// zoneHeadroom 0 disables it, so the map can be MEASURED before it decides.
+f_zoneOk(int d, float px) =>
+    [_hd, _hn] = f_zoneAhead(d, px)
+    (not zoneOn or zoneHeadroom <= 0.0 or na(_hd)) ? true : _hd >= zoneHeadroom
+
+// Was the level BEHIND the break genuinely cleared? The confirmation question
+// as code: the same break is confirmed or not depending only on which rule
+// you pick, and the three rules cost different amounts of target.
+f_zoneConf(int d, float lvl) =>
+    bool ok = true
+    if zoneOn and zoneConfMode == "Close + margin"
+        ok := (close - lvl) * d >= zoneConfMargin
+    else if zoneOn and zoneConfMode == "Two closes"
+        ok := (close - lvl) * d > 0 and (close[1] - lvl) * d > 0
+    ok
+
 // ─── LIQUIDITY TARGET RESOLVER ───────────────────────────
 // Returns the FIRST-RUNG DISTANCE in points, measured from the structural
 // level. Every caller then builds tp_n = level + dir * dist * n, so the ladder
@@ -1421,7 +1567,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
     orb_range = frb_hi - frb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= c2MinRangeFRB
-        if close > frb_hi and (close - frb_hi) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0) and _ctxL
+        if close > frb_hi and (close - frb_hi) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0) and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, frb_hi)
             // C2 retest: BUY LIMIT at frb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it;
             // SL/TP stay on the ORB level, so only entry price and fill odds move.
@@ -1475,7 +1621,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
                 strategy.exit("FRB-L-X", from_entry="FRB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < frb_lo and (frb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0) and _ctxS
+        else if close < frb_lo and (frb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0) and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, frb_lo)
             // C2 retest: SELL LIMIT at frb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             _msE = frb_lo - orb_range * _c2Depth
@@ -1545,7 +1691,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
     orb_range = lorb_hi - lorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
     if orb_range >= (lonUseC2 ? c2MinRangeLON : 0.50)
-        if close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0) and _ctxL
+        if close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0) and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, lorb_hi)
             // C2: BUY LIMIT back at lorb_hi (broken ORB high retests as support).
             // Legacy: market fill at this bar's close, SL at the opposite extreme.
             _glE = lonUseC2 ? lorb_hi + orb_range * _c2Depth : close
@@ -1578,7 +1724,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             f_c2Exit("ORB-L", slP, tp1, tp2, tp3, orb_range)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0) and _ctxS
+        else if close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0) and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, lorb_lo)
             _gsE = lonUseC2 ? lorb_lo - orb_range * _c2Depth : close
             _gsS = lonUseC2 ? lorb_lo + f_c2SL(orb_range)    : lorb_hi + buf
             _dgs = f_tpDist(-1, lorb_lo, _gsE, orb_range, "G")
@@ -1619,7 +1765,7 @@ if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWin
     // as well as by the toggles.
     _nyTag    = in_nyorb_trade ? "ny-orb-E" : "ny-orb-L"
     if orb_range >= c2MinRangeNY
-        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL
+        if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, nyorb_hi)
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
             // Depth > 0 lifts the limit toward price so a shallow bounce fills it.
             _hlE = nyorb_hi + orb_range * _c2Depth
@@ -1670,7 +1816,7 @@ if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWin
                 strategy.exit("NYORB-L-X", from_entry="NYORB-L", stop=slP, limit=f_exitLim(tp1, tp2, tp3))
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS and _ctxS
+        else if close < nyorb_lo and (nyorb_lo - close) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, nyorb_lo)
             // C2 retest: SELL LIMIT at nyorb_lo (broken ORB low retests as resistance).
             // Depth > 0 drops the limit toward price so a shallow bounce fills it.
             _hsE = nyorb_lo - orb_range * _c2Depth
@@ -1748,7 +1894,7 @@ if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWin
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not syd_done and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok and strategy.position_size == 0
     rngU = syd_hi - syd_lo
     if rngU >= c2MinRangeASIA
-        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL and _ctxL
+        if close > syd_hi and (close - syd_hi) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, syd_hi)
             _ulE = syd_hi + rngU * _c2Depth
             _ulS = syd_hi - f_c2SL(rngU)
             _dul = f_tpDist(1, syd_hi, _ulE, rngU, "U")
@@ -1782,7 +1928,7 @@ if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locke
                       color=color.new(color.blue, 5), textcolor=color.white, size=size.small)
             f_drawPosBox(entryP, slP, tp3)
 
-        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS and _ctxS
+        else if close < syd_lo and (syd_lo - close) >= rngU * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, syd_lo)
             _usE = syd_lo - rngU * _c2Depth
             _usS = syd_lo + f_c2SL(rngU)
             _dus = f_tpDist(-1, syd_lo, _usE, rngU, "U")
@@ -2268,8 +2414,8 @@ if in_syd_window and not in_syd_window[1]
 if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locked and not smDone and not na(frb_hi) and not na(frb_lo) and _orbGateFRB and _hm_dow_ok
     rM = frb_hi - frb_lo
     if rM >= c2MinRangeFRB
-        okML = close > frb_hi and (close - frb_hi) >= rM * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0) and _ctxL
-        okMS = close < frb_lo and (frb_lo - close) >= rM * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0) and _ctxS
+        okML = close > frb_hi and (close - frb_hi) >= rM * c2MinBreakStr and f_liqOk(frb_sw_lo, frb_pool_lo) and (not orbBiasFilter or _orbBiasLong) and frbDirFilter != "Short only" and _orbSeasonL and (not orbBreakAsianHi or (not na(ar_hi_prefrb) and close > ar_hi_prefrb)) and (not asianBiasFilter or _asianBias >= 0) and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, frb_hi)
+        okMS = close < frb_lo and (frb_lo - close) >= rM * c2MinBreakStr and f_liqOk(frb_sw_hi, frb_pool_hi) and (not orbBiasFilter or _orbBiasShort) and frbDirFilter != "Long only" and _orbSeasonS and (not orbBreakAsianLo or (not na(ar_lo_prefrb) and close < ar_lo_prefrb)) and (not asianBiasFilter or _asianBias <= 0) and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, frb_lo)
         if okML or okMS
             sigM   := sigM + 1
             smDone := true
@@ -2284,8 +2430,8 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
 if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWinOk and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
     rH = nyorb_hi - nyorb_lo
     if rH >= c2MinRangeNY
-        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL
-        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS and _ctxS
+        okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, nyorb_hi)
+        okHS = close < nyorb_lo and (nyorb_lo - close) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_hi, nyo_pool_hi) and (not orbBiasFilter or _orbBiasShort) and nyorbDirFilter != "Long only" and _orbSeasonS and (not orbNYFRBCtxS or (frb_short_today and h1B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (not asianBiasFilter or _asianBias <= 0) and _hOkS and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, nyorb_lo)
         if okHL or okHS
             sigH   := sigH + 1
             shDone := true
@@ -2300,8 +2446,8 @@ if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWin
 if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgDone and not na(lorb_hi) and not na(lorb_lo) and (not lonADRGuard or _adrConsumed[1] < 0.90) and _testWinOk and _hm_dow_ok
     rG = lorb_hi - lorb_lo
     if rG >= (lonUseC2 ? c2MinRangeLON : 0.50)
-        okGL = close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0) and _ctxL
-        okGS = close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0) and _ctxS
+        okGL = close > lorb_hi and lonDirFilter != "Short only" and (not lonBiasFilter or _orbBiasLong) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (not lonAsianCascade or _asianBias >= 0) and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, lorb_hi)
+        okGS = close < lorb_lo and lonDirFilter != "Long only" and (not lonBiasFilter or _orbBiasShort) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (not lonAsianCascade or _asianBias <= 0) and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, lorb_lo)
         if okGL or okGS
             sigG   := sigG + 1
             sgDone := true
@@ -2317,8 +2463,8 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not sgD
 if modSYD and barstate.isconfirmed and _testWinOk and in_syd_trade and syd_locked and not suDone and not na(syd_hi) and not na(syd_lo) and _orbGateOk and _hm_dow_ok
     rU2 = syd_hi - syd_lo
     if rU2 >= c2MinRangeASIA
-        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL and _ctxL
-        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS and _ctxS
+        okUL = close > syd_hi and (close - syd_hi) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_lo, syd_pool_lo) and (not orbBiasFilter or _orbBiasLong) and _uOkL and _ctxL and f_zoneOk(1, close) and f_zoneConf(1, syd_hi)
+        okUS = close < syd_lo and (syd_lo - close) >= rU2 * c2MinBreakStr and f_liqOk(syd_sw_hi, syd_pool_hi) and (not orbBiasFilter or _orbBiasShort) and _uOkS and _ctxS and f_zoneOk(-1, close) and f_zoneConf(-1, syd_lo)
         if okUL or okUS
             sigU   := sigU + 1
             suDone := true
