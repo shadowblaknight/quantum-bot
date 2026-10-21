@@ -2650,6 +2650,11 @@ var array<int>   _ctxNFP  = array.new<int>(0)   // 1 = first-Friday NFP day
 // must stay distinct from a genuine zero - "nobody traded either way" and "we
 // could not see" are different facts.
 var array<float> _ctxDelta = array.new<float>(0)
+// ZONE: what was in the PATH at signal time. na headroom = clear air.
+// Recorded whether or not the gate is armed, so the map can be graded
+// before it is ever allowed to block a trade.
+var array<float> _ctxHead  = array.new<float>(0)
+var array<int>   _ctxHeadN = array.new<int>(0)
 
 // Inlined per signal rather than wrapped in a helper: Pine functions may not
 // assign to globals, and mutating a global array from inside one is a rule I
@@ -2664,6 +2669,9 @@ if frb_done and not frb_done[1] and not na(frb_hi) and not na(frb_lo) and frb_hi
     array.push(_ctxAdr, _adrConsumed)
     array.push(_ctxAgr, hdB == dirF ? 1 : 0)
     array.push(_ctxSig, 0)
+    [_hdM, _hnM] = f_zoneAhead(dirF, close)
+    array.push(_ctxHead,  _hdM)
+    array.push(_ctxHeadN, _hnM)
     array.push(_ctxPool, (dirF == 1 ? frb_pool_lo : frb_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirF ? 1 : 0)
     array.push(_ctxAtr, atrVal)
@@ -2681,6 +2689,9 @@ if nyorb_done and not nyorb_done[1] and not na(nyorb_hi) and not na(nyorb_lo) an
     array.push(_ctxAdr, _adrConsumed)
     array.push(_ctxAgr, hdB == dirN ? 1 : 0)
     array.push(_ctxSig, 1)
+    [_hdH, _hnH] = f_zoneAhead(dirN, close)
+    array.push(_ctxHead,  _hdH)
+    array.push(_ctxHeadN, _hnH)
     array.push(_ctxPool, (dirN == 1 ? nyo_pool_lo : nyo_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirN ? 1 : 0)
     array.push(_ctxAtr, atrVal)
@@ -2698,6 +2709,9 @@ if syd_done and not syd_done[1] and not na(syd_hi) and not na(syd_lo) and syd_hi
     array.push(_ctxAdr, _adrConsumed)
     array.push(_ctxAgr, hdB == dirS ? 1 : 0)
     array.push(_ctxSig, 2)
+    [_hdU, _hnU] = f_zoneAhead(dirS, close)
+    array.push(_ctxHead,  _hdU)
+    array.push(_ctxHeadN, _hnU)
     array.push(_ctxPool, (dirS == 1 ? syd_pool_lo : syd_pool_hi) ? 1 : 0)
     array.push(_ctxM15, m15B == dirS ? 1 : 0)
     array.push(_ctxAtr, atrVal)
@@ -2720,6 +2734,9 @@ if lorb_done and not lorb_done[1] and not na(lorb_hi) and not na(lorb_lo) and lo
     array.push(_ctxAdr, _adrConsumed)
     array.push(_ctxAgr, hdB == dirG ? 1 : 0)
     array.push(_ctxSig, 4)
+    [_hdG, _hnG] = f_zoneAhead(dirG, close)
+    array.push(_ctxHead,  _hdG)
+    array.push(_ctxHeadN, _hnG)
     // G has no pool tracking of its own — the liquidity-grab filter was never
     // extended to it. Recorded as 0 rather than left out, so the array lengths
     // stay locked together; read the POOL rows as M/H/U only.
@@ -2933,22 +2950,22 @@ condSig = input.string("ALL", "Signal to break down", options=["ALL", "M  Frankf
           tooltip="Study ONE signal at a time. Conditions are not shared between signals - the ADR guard is measured GOOD for H and BAD for M - so pooling them averages the real effects away.\n\nRun this four times, once per signal, and write down the buckets that hold both a high win rate AND low heat. Those are the rungs of the risk ladder.")
 showCond = input.bool(true, "Show condition study", group=G_COND)
 
-var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break .26-.40", "break .40-.60", "break > .60  (thin at mkt)", "delta AGREES break", "delta OPPOSES break")
+var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break .26-.40", "break .40-.60", "break > .60  (thin at mkt)", "delta AGREES break", "delta OPPOSES break", "ZONE headroom < 5", "ZONE headroom 5-15", "ZONE headroom 15-30", "ZONE headroom 30+ / clear", "ZONE obstacle 2-4 touch", "ZONE obstacle 5+ touch")
 var table cdTbl = na
 
 f_drawCondTable(table t) =>
     pv4 = na(syminfo.pointvalue) or syminfo.pointvalue <= 0 ? 1.0 : syminfo.pointvalue
     // 20 buckets, five families. Parallel arrays keep it flat and readable.
-    cN   = array.new<int>(22, 0)
-    cWin = array.new<int>(22, 0)
-    cLow = array.new<int>(22, 0)
-    cMae = array.new<float>(22, 0.0)
-    cPts = array.new<float>(22, 0.0)
+    cN   = array.new<int>(28, 0)
+    cWin = array.new<int>(28, 0)
+    cLow = array.new<int>(28, 0)
+    cMae = array.new<float>(28, 0.0)
+    cPts = array.new<float>(28, 0.0)
     seen = 0
     // Pre-allocated ONCE. Building this with array.from() inside the trade loop
     // would allocate a fresh array per trade and can hit Pine's object ceiling
     // on a long backtest; reusing seven slots costs nothing.
-    bIdx = array.new<int>(8, 0)
+    bIdx = array.new<int>(10, 0)
 
     // Which _ctxSig this run is studying. -1 = pool everything.
     want = condSig == "M  Frankfurt" ? 0 : condSig == "H  NY" ? 1 : condSig == "U  Sydney" ? 2 : condSig == "G  London" ? 4 : -1
@@ -2990,6 +3007,12 @@ f_drawCondTable(table t) =>
                     // neither delta bucket rather than silently padding one.
                     dl   = array.get(_ctxDelta, k4)
                     bDlt = na(dl) ? -1 : ((isLong4 ? dl > 0 : dl < 0) ? 20 : 21)
+                    // ZONE. na headroom = nothing in the path, which is the
+                    // GOOD case and gets its own bucket rather than a skip.
+                    hd   = array.get(_ctxHead,  k4)
+                    hn   = array.get(_ctxHeadN, k4)
+                    bHd  = na(hd) ? 25 : hd < 5.0 ? 22 : hd < 15.0 ? 23 : hd < 30.0 ? 24 : 25
+                    bHn  = na(hd) ? -1 : (hn >= 5 ? 27 : 26)
                     // Each trade lands in exactly one bucket per family, so it
                     // is counted seven times across seven independent splits.
                     array.set(bIdx, 0, bRng)
@@ -3000,7 +3023,9 @@ f_drawCondTable(table t) =>
                     array.set(bIdx, 5, bPul)
                     array.set(bIdx, 6, bStr)
                     array.set(bIdx, 7, bDlt)
-                    for bi7 = 0 to 7
+                    array.set(bIdx, 8, bHd)
+                    array.set(bIdx, 9, bHn)
+                    for bi7 = 0 to 9
                         b = array.get(bIdx, bi7)
                         if b < 0
                             continue
@@ -3021,7 +3046,7 @@ f_drawCondTable(table t) =>
     table.cell(t, 4, 0, "<=20 %",  text_color=hD, text_size=size.tiny, text_halign=text.align_right)
     table.cell(t, 5, 0, "avg pts", text_color=hD, text_size=size.tiny, text_halign=text.align_right)
 
-    for b = 0 to 21
+    for b = 0 to 27
         n5 = array.get(cN, b)
         wr5  = n5 > 0 ? 100.0 * array.get(cWin, b) / n5 : 0.0
         mae5 = n5 > 0 ? array.get(cMae, b) / n5 : 0.0
@@ -3040,12 +3065,12 @@ f_drawCondTable(table t) =>
         table.cell(t, 4, b + 1, str.tostring(low5, "#.#"),  text_color=rowD, text_size=size.tiny, text_halign=text.align_right)
         table.cell(t, 5, b + 1, str.tostring(pts5, "#.#"),  text_color=wD,   text_size=size.tiny, text_halign=text.align_right)
 
-    table.cell(t, 0, 23, "n=" + str.tostring(seen) + " trades in this signal   ·   AQUA = n>=10, WR>=97%, heat<=20 on 80%+   ·   ORANGE n = too thin to read",
+    table.cell(t, 0, 29, "n=" + str.tostring(seen) + " trades in this signal   ·   AQUA = n>=10, WR>=97%, heat<=20 on 80%+   ·   ORANGE n = too thin to read",
                text_color=color.new(color.gray, 0), text_size=size.tiny, text_halign=text.align_left)
 
 if barstate.islast and showCond and strategy.closedtrades > 0
     if na(cdTbl)
-        cdTbl := table.new(position.bottom_left, 6, 24,
+        cdTbl := table.new(position.bottom_left, 6, 30,
                   bgcolor=color.new(color.black, 60),
                   border_color=color.new(color.gray, 60), border_width=1,
                   frame_color=color.new(color.gray, 60), frame_width=1)
