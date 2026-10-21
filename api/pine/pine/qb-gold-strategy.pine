@@ -41,9 +41,10 @@ _testWinOk = not useTestWin or (time >= twStart and time <= twEnd)
 
 G_CORE = "Core"
 modORB        = input.bool(false, "G) London ORB — 08:00-08:30 UTC (verified)",     group=G_CORE)
-modNYORB      = input.bool(true,  "H) NY ORB — 14:00-14:30 UTC (verified)",         group=G_CORE)
-modNYORBP     = input.bool(false, "H') NY ORB PRIME — restrict H to a 14:30-16:00 trade window", group=G_CORE,
-              tooltip="LEAVE OFF — TESTED AND REJECTED 2026-09-18. Kept so the negative result stays attached to the code.\n\nMEASURED 3y (16 Sep 2023 - 16 Sep 2026), full baseline H+M+U+V both arms:\n  OFF  218 trades  99.08% WR  PF 6.335  +4148 USD  DD 710  (19.03 per trade)\n  ON   141 trades  99.29% WR  PF 5.906  +2342 USD  DD 787  (16.61 per trade)\n\nThe window removed ~77 trades and 44% of net profit while RAISING drawdown. Win rate barely moved (+0.21pp), so it removed volume, not risk.\n\nTHE LATE BREAKS ARE THE BETTER TRADES. The ~77 trades the window removed accounted for ~1806 USD, about 23.45 each, against 16.61 for the trades it kept. A genuine quality filter lifts per-trade profit; this lowered it. So NY ORB breaks that fire after 16:00 UTC are MORE profitable than the ones inside the opening window, not less. The hypothesis was exactly backwards.\n\n(Path-dependence caveat: blocking H frees the position slot for other signals, so the 141 are not the 218 minus a fixed 77. The per-trade figures are net inferences. The direction is not in doubt.)\n\nWHAT THIS MEANS. Lateness costs FILLS, not edge. A backtest cannot see a fill problem - here a limit either fills or it does not; there is no 'the alert arrived after the move and the order sat unfilled'. Do not block late signals. Fix the entry router so a signal whose price has already run past the limit is taken at market or skipped, instead of resting on an order that cannot fill.\n\nORIGINAL RATIONALE BELOW, kept because the lateness measurement is still correct.\n\nOFF = Signal H exactly as it runs today. ON = H may only fire inside 14:30-16:00 UTC.\n\nWHY THIS EXISTS. Signal M is gated by in_frb_trade (07:30-11:00). Signal H was never given the equivalent, so it waits for the first 15m close outside the 14:00-14:30 range FOR THE REST OF THE DAY. Measured on the live account, every NY ORB signal fired:\n  16 Sep 14:45  +0.3h after the range closed\n  03 Sep 15:00  +0.5h\n  24 Aug 15:30  +1.0h\n  21 Aug 15:45  +1.3h\n  08 Sep 16:15  +1.8h\n  01 Sep 16:30  +2.0h\n  18 Sep 17:15  +2.8h\nMedian 1.3 hours late. By then the ORB level is stale, price has wandered, and when it finally breaks it tends to run without ever retesting — so the C2 limit rests unfilled while the move happens without you.\n\nThis window keeps the first four and blocks the last three.\n\nALSO CHANGES ORDER EXPIRY. When ON, a NYORB limit is cancelled at 16:00 instead of surviving to the daily roll, mirroring how M cancels at the end of its own window. Otherwise a limit armed at 15:55 could still fill hours later against a level that is long dead — the same disease in a different place.\n\nEXPECT FEWER TRADES. This harness is path-dependent: blocking a signal frees the position slot for a later one, so the trade list reshuffles rather than simply shrinking. Judge it on net P&L and trade count, not on win rate alone.")
+modNYORB      = input.bool(true,  "H) NY ORB EARLY — break lands inside 14:30-16:00 UTC",  group=G_CORE,
+              tooltip="H and H' are now INDEPENDENT SIGNALS on the same 14:00-14:30 opening range, split by WHEN the breakout bar closes. H takes the break only if it lands inside 14:30-16:00 UTC. H' takes it only if it lands after 16:00. The two windows are disjoint and nyorb_done is shared, so at most ONE NY ORB trade still exists per day. This SPLITS the population, it does not duplicate it.\n\nMAPPING FROM THE OLD SEMANTICS (H' used to be a restriction ON H, not a signal):\n  old H ON / H' OFF  (every break - the 3y-validated baseline)   ==  new H ON + H' ON\n  old H ON / H' ON   (early breaks only - the current LIVE set)  ==  new H ON + H' OFF\n* RESET THESE BY HAND. TradingView keeps the saved value of modNYORBP on an existing chart and that value now means something different.\n\nWHY SPLIT IT. The 2026-09-18 test could only compare 'H windowed' against 'H unwindowed' and had to infer the late trades by subtraction: OFF 218 trades +4148 USD, ON 141 trades +2342 USD, so the ~77 trades the window removed were worth ~23.45 each against 16.61 for the ones it kept. That inference said LATE BREAKS ARE THE BETTER TRADES but could never be measured directly, because blocking H frees the position slot and reshuffles the whole book. Running H' ALONE finally prices the late breaks on their own.")
+modNYORBP     = input.bool(true,  "H') NY ORB LATE — break lands after 16:00 UTC",        group=G_CORE,
+              tooltip="The second half of the NY ORB split - see the H tooltip for the full mapping. ON = a 14:00-14:30 range whose first close outside it lands AFTER 16:00 UTC is traded, with the entry comment 'ny-orb-L' so the Strategy Tester list separates it from the early ones ('ny-orb-E').\n\nSET H OFF AND H' ON to price the late breaks on their own. That is the run the old windowed test could not do.\n\nORDER LIFE. The old H' also cancelled the NYORB limit at 16:00. That cancel is GONE: a LATE break arms after 16:00, so a 16:00 cancel would kill it on arrival. Use 'H) NY limit life' in the Order life group instead - nyOrderMins = 90 reproduces the old 14:30+90min = 16:00 expiry exactly, and it bounds only the resting LIMIT, never the signal.")
 modFRB        = input.bool(true,  "M) Frankfurt ORB — 07:00-07:30 UTC (pre-London)", group=G_CORE)
 modSYD        = input.bool(true,  "U) Sydney ORB — session open, same C2 architecture as M/H  [UNTESTED]", group=G_CORE)
 modBBX      = input.bool(false, "BBX) Bollinger breakout — NOT a session ORB  [best candidate found]", group=G_CORE,
@@ -828,8 +829,10 @@ var bool  lorb_done   = false
 
 // NY ORB: 14:00–14:30 UTC (first 2 bars of NY on 15M)
 in_nyorb_window = timeframe.isintraday and (_minOfDay >= 840 and _minOfDay < 870)
-// H' trade window: 14:30–16:00 UTC. The direct analogue of in_frb_trade, which
-// Signal H has always been missing. Only consulted when modNYORBP is ON.
+// EARLY/LATE split line: 14:30–16:00 UTC. A break landing inside this window
+// belongs to H, a break landing after it belongs to H'. Disjoint by
+// construction, so the two are independent signals over ONE shared opening
+// range, never a filter on each other.
 in_nyorb_trade  = timeframe.isintraday and (_minOfDay >= 870 and _minOfDay < 960)
 // Optional NY limit expiry, independent of H'. When nyOrderMins is 0 this stays
 // permanently TRUE, so the falling-edge cancel below can never fire and the
@@ -1251,16 +1254,13 @@ if not in_syd_trade and in_syd_trade[1]
 if _newDay
     strategy.cancel("NYORB-L")
     strategy.cancel("NYORB-S")
-// H' only: expire the NYORB limit at the end of its own window, the way M does.
-// Without this a limit armed at 15:55 still rests all evening against a level
-// that stopped being the opening range hours earlier.
-if modNYORBP and not in_nyorb_trade and in_nyorb_trade[1]
-    strategy.cancel("NYORB-L")
-    strategy.cancel("NYORB-S")
-// Standalone NY expiry (nyOrderMins > 0). Separate from H' on purpose: H' also
-// blocks the SIGNAL to a 14:30-16:00 window and was rejected for that reason,
-// whereas this only bounds how long an already-armed LIMIT may rest. Late NY
-// breaks were measured as the BETTER trades, so the two must be testable apart.
+// The old H'-only 16:00 cancel is GONE. H' is now the LATE signal and arms
+// AFTER 16:00, so cancelling there would kill it the moment it exists. Set
+// nyOrderMins = 90 (14:30 + 90 = 16:00) to reproduce the old expiry exactly.
+//
+// NY limit expiry (nyOrderMins > 0). Bounds how long an already-armed LIMIT may
+// rest; it never blocks a SIGNAL. Kept separate from the H/H' split so the
+// resting-order question and the early/late question stay testable apart.
 if not in_ny_orderlife and in_ny_orderlife[1]
     strategy.cancel("NYORB-L")
     strategy.cancel("NYORB-S")
@@ -1612,9 +1612,12 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
 // SIGNAL H — NY ORB (Opening Range Breakout 14:00-14:30 UTC)
 // Same concept for the NY open — second major institutional opportunity.
 // ═══════════════════════════════════════════════════════════════════════
-if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok and strategy.position_size == 0
+if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWinOk and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok and strategy.position_size == 0
     orb_range = nyorb_hi - nyorb_lo
     buf       = math.max(atrVal * 0.10, 0.50)
+    // Tags the Strategy Tester trade list so the two halves are separable there
+    // as well as by the toggles.
+    _nyTag    = in_nyorb_trade ? "ny-orb-E" : "ny-orb-L"
     if orb_range >= c2MinRangeNY
         if close > nyorb_hi and (close - nyorb_hi) >= orb_range * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL
             // C2 retest: BUY LIMIT at nyorb_hi (broken ORB high retests as support).
@@ -1634,7 +1637,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
             tp3    = revH ? close - math.abs(_hlE - _hlC) : _hlC
             nyorb_done := true
             c2LimNL = (not revH and c2EntryMode == "Retest (limit)") ? entryP : na
-            strategy.entry("NYORB-L", revH ? strategy.short : strategy.long, limit=c2LimNL, comment="ny-orb · C2 LONG")
+            strategy.entry("NYORB-L", revH ? strategy.short : strategy.long, limit=c2LimNL, comment=_nyTag + " · C2 LONG")
             if _useRtState
                 _rt_lvl   := revH ? entryP : nyorb_hi
                 _rt_entry := entryP
@@ -1685,7 +1688,7 @@ if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyo
             tp3    = revH ? close + math.abs(_hsE - _hsC) : _hsC
             nyorb_done := true
             c2LimNS = (not revH and c2EntryMode == "Retest (limit)") ? entryP : na
-            strategy.entry("NYORB-S", revH ? strategy.long : strategy.short, limit=c2LimNS, comment="ny-orb · C2 SHORT")
+            strategy.entry("NYORB-S", revH ? strategy.long : strategy.short, limit=c2LimNS, comment=_nyTag + " · C2 SHORT")
             if _useRtState
                 _rt_lvl   := revH ? entryP : nyorb_lo
                 _rt_entry := entryP
@@ -2278,7 +2281,7 @@ if modFRB and barstate.isconfirmed and _testWinOk and in_frb_trade and frb_locke
                 array.push(xS, Shadow.new(xlz, xez, xdz, rM * orbTPMult, xsz, 0, c2EntryMode != "Retest (limit)", 0.0, xsz, xsz, xsz, 0))
                 xSig := xSig + 1
 
-if modNYORB and barstate.isconfirmed and _testWinOk and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
+if (in_nyorb_trade ? modNYORB : modNYORBP) and barstate.isconfirmed and _testWinOk and nyorb_locked and not shDone and not na(nyorb_hi) and not na(nyorb_lo) and _orbGateNY and _hm_dow_ok
     rH = nyorb_hi - nyorb_lo
     if rH >= c2MinRangeNY
         okHL = close > nyorb_hi and (close - nyorb_hi) >= rH * c2MinBreakStr and f_liqOk(nyo_sw_lo, nyo_pool_lo) and (not orbBiasFilter or _orbBiasLong) and nyorbDirFilter != "Short only" and _orbSeasonL and (not orbNYFRBCtxL or (frb_short_today and h1B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (not asianBiasFilter or _asianBias >= 0) and _hOkL and _ctxL
@@ -2726,7 +2729,7 @@ condSig = input.string("ALL", "Signal to break down", options=["ALL", "M  Frankf
           tooltip="Study ONE signal at a time. Conditions are not shared between signals - the ADR guard is measured GOOD for H and BAD for M - so pooling them averages the real effects away.\n\nRun this four times, once per signal, and write down the buckets that hold both a high win rate AND low heat. Those are the rungs of the risk ladder.")
 showCond = input.bool(true, "Show condition study", group=G_COND)
 
-var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break weak  < .10", "break mid  .10-.25", "break strong > .25", "delta AGREES break", "delta OPPOSES break")
+var array<string> _cdLbl = array.from("ORB rng  < 10", "ORB rng  10-15", "ORB rng  15-20", "ORB rng  20-30", "ORB rng  30 +", "ADR  < 50%", "ADR  50-75%", "ADR  75-90%", "ADR  90% +", "dir  LONG", "dir  SHORT", "Daily bias AGREES", "Daily bias opposes", "M15 bias AGREES", "M15 bias opposes", "pool SWEPT", "pool not swept", "break .26-.40", "break .40-.60", "break > .60  (thin at mkt)", "delta AGREES break", "delta OPPOSES break")
 var table cdTbl = na
 
 f_drawCondTable(table t) =>
@@ -2778,7 +2781,7 @@ f_drawCondTable(table t) =>
                     bAgr = array.get(_ctxAgr, k4) == 1 ? 11 : 12
                     bM15 = array.get(_ctxM15, k4) == 1 ? 13 : 14
                     bPul = array.get(_ctxPool, k4) == 1 ? 15 : 16
-                    bStr = st < 0.10 ? 17 : st < 0.25 ? 18 : 19
+                    bStr = st < 0.40 ? 17 : st < 0.60 ? 18 : 19
                     // -1 = no footprint reading for this signal, so it joins
                     // neither delta bucket rather than silently padding one.
                     dl   = array.get(_ctxDelta, k4)

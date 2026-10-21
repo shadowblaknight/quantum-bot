@@ -711,7 +711,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       }
     } catch (_) {}
   }
-  const finalLot = decision.finalLot;
+  let finalLot = decision.finalLot;
   // V20 specialists: use Pine's exact SL/TP — the rules engine auto-promotes TPs
   // to 1R/2R/3R (effectiveMinRR >= 1.0 branch) and may widen SL in elevated regime,
   // both of which override the specialist's structural levels. Bypass for specialists.
@@ -774,16 +774,31 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   //   immediate -> ORDER_TYPE_BUY/SELL  (fill now, no geometry check)
   //   retest    -> ORDER_TYPE_BUY/SELL_LIMIT at rEntry (= retestEntry, no geometry check)
   //   missing   -> existing _canLimit geometry probe (all pre-v15.7 behavior unchanged)
+  // ---- GOLD MARKET ENTRY (2026-10-21) --------------------------------
+  // His call, and the live evidence is unambiguous: on 20 Oct the Sydney C2
+  // SELL LIMIT rested at 4123.90, price bounced to 4123.15 -- SHORT BY 0.75
+  // POINTS -- and then ran far enough to hit TP1 and TP2 and miss TP3 by 0.44.
+  // The break was 0.487 of the range, so the signal bar closed 1.54 pts BELOW
+  // its own limit; the stronger the break, the further below the limit it
+  // closes, and the better the trade turns out to be. C2 has already checked
+  // every criterion, so waiting for a retest is asking for a third one.
+  //
+  // This routes gold-specialist through the PROBE branch rather than straight
+  // to market, deliberately: the probe is what supplies a live price, and the
+  // run-past guard below it is the only thing stopping an unbounded chase.
+  const GOLD_MARKET_ENTRY = true;
+  const _forceMkt = GOLD_MARKET_ENTRY && p.template === 'gold-specialist';
+
   let entryType = 'retest';
   let useMarket = false;
   let _dbgProbed = null, _dbgProbeOk = false, _dbgCanLimit = null, _dbgDriftPips = null;
   let _dbgProbeSrc = null;
 
-  if (_pStyle === 'immediate') {
+  if (!_forceMkt && _pStyle === 'immediate') {
     // Pine explicitly flagged this as an immediate fill -- send MARKET unconditionally.
     useMarket = true;
     entryType = 'immediate';
-  } else if (_pStyle === 'retest') {
+  } else if (!_forceMkt && _pStyle === 'retest') {
     // Pine explicitly flagged this as a retest -- place LIMIT at rEntry.
     useMarket = false;
     entryType = 'retest';
@@ -942,6 +957,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       return;
     }
 
+    if (_forceMkt) {
+      // The confirmation IS the entry. Drift is already inside the run-past
+      // budget here -- anything wider returned above -- so this fills now.
+      useMarket = true;
+      entryType = 'immediate';
+    }
+
     if (!_canLimit) {
       // Entry sits at or through the market and drift is already inside budget,
       // so this is a genuine fills-now case: send it as MARKET.
@@ -1051,6 +1073,33 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       decided: useMarket ? 'immediate(market)' : 'retest(limit)',
     });
   } catch (_) {}
+
+  // ---- RESIZE A MARKET FILL ------------------------------------------
+  // finalLot was computed from |alert entry - SL|, but a market fill lands at
+  // the CURRENT price, which is further from the stop. Shipping the same lot
+  // over a longer stop silently over-risks: at the widest drift the guard
+  // allows that is 1.30x the intended amount, and at riskPct 4% that is 5.00%
+  // -- the FTMO daily cap, from one trade. Scale by the distance ratio so the
+  // dollars at risk stay exactly what was intended.
+  if (useMarket && _dbgProbed != null && isFinite(_dbgProbed) && finalLot > 0) {
+    const _dSig = Math.abs(entry - finalSL);
+    const _dMkt = Math.abs(_dbgProbed - finalSL);
+    if (_dSig > 0 && _dMkt > _dSig) {
+      const _step = 0.01;
+      const _scaled = Math.max(_step, Math.floor((finalLot * _dSig / _dMkt) / _step) * _step);
+      if (_scaled < finalLot) {
+        try {
+          await logActivity({
+            type: 'lot-resized-market', asset: assetId, template: p.template,
+            from: finalLot, to: +_scaled.toFixed(2),
+            sigStopPts: +_dSig.toFixed(2), mktStopPts: +_dMkt.toFixed(2),
+            signalEntry: entry, marketPrice: _dbgProbed,
+          });
+        } catch (_) {}
+        finalLot = +_scaled.toFixed(2);
+      }
+    }
+  }
 
   let placement = useMarket
     ? await placeMarketOrder(brokerSymbol, p.direction, finalLot, rSL, rTP, comment)
