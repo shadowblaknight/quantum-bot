@@ -549,6 +549,26 @@ export default function TerminalLayout({
   const trailArm  = settings?.trailArm  ?? 0.75;
   const trailKeep = settings?.trailKeep ?? 0.75;
 
+  // ── HIS STAIRCASE ─────────────────────────────────────────────────────────
+  // Clearing rung n parks the stop at rung (n - stairGive); rung stairFinal
+  // closes. Rungs are 0.75 x ORB range apart, so rung n sits at 0.75n from
+  // the ORB level and the stop lands half a rung behind the last one cleared.
+  const isStair    = settings?.exitMode === 'staircase';
+  const stairGive  = settings?.stairGive ?? 0.5;
+  const stairFinal = settings?.stairFinal ?? 4;
+  const RUNG       = 0.75;                      // the Pine's own TP spacing
+  const stairSince = settings?.staircaseSince ?? null;
+  // The day he switched is DAY 1, not day 0.
+  const stairDays  = stairSince
+    ? Math.max(1, Math.floor(
+        (Date.now() - new Date(stairSince + 'T00:00:00Z').getTime()) / 86400000) + 1)
+    : null;
+  const MODE_SEQ   = ['ratchet', 'staircase', 'tp1', 'final-tp'];
+  const modeLabel  = m => m === 'ratchet' ? 'RATCHET' : m === 'staircase' ? 'STAIRCASE'
+    : m === 'tp1' ? 'TP1' : 'FINAL TP';
+  const modeColor  = m => m === 'ratchet' ? C.green2 : m === 'staircase' ? C.ml2
+    : m === 'tp1' ? C.gold : C.t3;
+
   // Everything downstream sizes off this. Falls back to the store default (4%)
   // until the fetch lands, so the panel does not flash a stale 1%.
   const acctRiskPct = settings?.riskPct ?? 0.04;
@@ -1033,69 +1053,176 @@ export default function TerminalLayout({
                     BREAKEVEN / TRAIL · LIVE
                   </div>
                   <span style={{fontSize:7,fontFamily:'JetBrains Mono,monospace',
-                                color:settings?.exitMode==='ratchet'?C.green2:settings?.exitMode==='tp1'?C.gold:C.t3}}>
-                    {!settings?'LOADING…':settings.exitMode==='ratchet'?'RATCHET · NO TP':settings.exitMode==='tp1'?'TP1 · CLOSES AT TP1':'FINAL TP · CLOSES AT TP3'}
+                                color:modeColor(settings?.exitMode)}}>
+                    {!settings?'LOADING…'
+                      :isStair?`STAIRCASE · CLOSES AT RUNG ${stairFinal}`
+                      :settings.exitMode==='ratchet'?'RATCHET · NO TP'
+                      :settings.exitMode==='tp1'?'TP1 · CLOSES AT TP1'
+                      :'FINAL TP · CLOSES AT TP3'}
                   </span>
                 </div>
 
+                {/* ── DAY COUNTER — the engine's own age, from the day he switched ── */}
+                {isStair && stairSince && (
+                  <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,
+                               background:C.bg,border:`1px solid ${C.ml2}44`,padding:'6px 10px'}}>
+                    <div style={{width:6,height:6,borderRadius:3,background:C.ml2,
+                                 boxShadow:`0 0 8px ${C.ml2}`}} />
+                    <div style={{fontSize:7,color:C.t3,letterSpacing:1,
+                                 fontFamily:'JetBrains Mono,monospace'}}>HIS ENGINE · DAY</div>
+                    <div style={{fontSize:18,fontWeight:700,color:C.ml2,lineHeight:1,
+                                 fontFamily:'JetBrains Mono,monospace'}}>{stairDays}</div>
+                    <div style={{fontSize:7,color:C.t2,fontFamily:'JetBrains Mono,monospace',
+                                 marginLeft:'auto'}}>since {stairSince}</div>
+                  </div>
+                )}
+
                 <div style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap',marginBottom:8}}>
-                  <div>
-                    <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>ARM AFTER (× ORB RANGE)</div>
-                    <div style={{display:'flex',gap:4}}>
-                      {[0.5,0.75,1.0].map(v=>(
-                        <button key={v} disabled={!settings||riskSaving}
-                          onClick={()=>saveSettings({trailArm:v})}
-                          style={{padding:'4px 10px',background:Math.abs(trailArm-v)<0.001?C.b2:'transparent',
-                                  border:`1px solid ${Math.abs(trailArm-v)<0.001?C.blue3:C.b2}`,
-                                  color:Math.abs(trailArm-v)<0.001?C.blue3:C.t2,fontSize:9,
-                                  fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>LOCK FRACTION OF REACH</div>
-                    <div style={{display:'flex',gap:4}}>
-                      {[0.5,0.65,0.75,0.85].map(v=>(
-                        <button key={v} disabled={!settings||riskSaving}
-                          onClick={()=>saveSettings({trailKeep:v})}
-                          style={{padding:'4px 10px',background:Math.abs(trailKeep-v)<0.001?C.b2:'transparent',
-                                  border:`1px solid ${Math.abs(trailKeep-v)<0.001?C.gold:C.b2}`,
-                                  color:Math.abs(trailKeep-v)<0.001?C.gold:C.t2,fontSize:9,
-                                  fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
-                      ))}
-                    </div>
-                  </div>
+                  {isStair ? (
+                    <>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>GIVEBACK (× ONE RUNG)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0.25,0.4,0.5,0.6].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({stairGive:v})}
+                              style={{padding:'4px 10px',background:Math.abs(stairGive-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(stairGive-v)<0.001?C.ml2:C.b2}`,
+                                      color:Math.abs(stairGive-v)<0.001?C.ml2:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>FINAL RUNG (CLOSES)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[3,4,5,6].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({stairFinal:v})}
+                              style={{padding:'4px 10px',background:stairFinal===v?C.b2:'transparent',
+                                      border:`1px solid ${stairFinal===v?C.gold:C.b2}`,
+                                      color:stairFinal===v?C.gold:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>TP{v}</button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>ARM AFTER (× ORB RANGE)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0.5,0.75,1.0].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({trailArm:v})}
+                              style={{padding:'4px 10px',background:Math.abs(trailArm-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(trailArm-v)<0.001?C.blue3:C.b2}`,
+                                      color:Math.abs(trailArm-v)<0.001?C.blue3:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>LOCK FRACTION OF REACH</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0.5,0.65,0.75,0.85].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({trailKeep:v})}
+                              style={{padding:'4px 10px',background:Math.abs(trailKeep-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(trailKeep-v)<0.001?C.gold:C.b2}`,
+                                      color:Math.abs(trailKeep-v)<0.001?C.gold:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(2)}</button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
                   <button disabled={!settings||riskSaving}
-                    onClick={()=>saveSettings({exitMode:settings?.exitMode==='ratchet'?'final-tp':settings?.exitMode==='final-tp'?'tp1':'ratchet'})}
+                    onClick={()=>{
+                      const i = MODE_SEQ.indexOf(settings?.exitMode);
+                      saveSettings({exitMode: MODE_SEQ[(i < 0 ? 0 : i + 1) % MODE_SEQ.length]});
+                    }}
                     style={{marginLeft:'auto',padding:'5px 14px',background:'transparent',
-                            border:`1px solid ${settings?.exitMode==='ratchet'?C.green2:settings?.exitMode==='tp1'?C.gold:C.t3}`,
-                            color:settings?.exitMode==='ratchet'?C.green2:settings?.exitMode==='tp1'?C.gold:C.t3,fontSize:8,letterSpacing:.5,
+                            border:`1px solid ${modeColor(settings?.exitMode)}`,
+                            color:modeColor(settings?.exitMode),fontSize:8,letterSpacing:.5,
                             fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
-                    {settings?.exitMode==='ratchet'?'RATCHET':settings?.exitMode==='tp1'?'TP1':'FINAL TP'} ▸
+                    {modeLabel(settings?.exitMode)} ▸
                   </button>
                 </div>
 
-                {/* Live preview — what the stop actually locks at each excursion */}
-                <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:4}}>
-                  {[0.5,0.75,1.5,3,10].map(r=>{
-                    const armed = r>=trailArm;
-                    const lock  = r*trailKeep;
-                    return (
-                      <div key={r} style={{background:C.bg,border:`1px solid ${armed?C.b2:C.b}`,padding:'5px 6px',textAlign:'center'}}>
-                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>reach {r}×</div>
-                        <div style={{fontSize:11,fontWeight:700,fontFamily:'JetBrains Mono,monospace',
-                                     color:armed?C.green2:C.t3}}>
-                          {armed?`${lock.toFixed(2)}×`:'—'}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
-                  Stop trails at <span style={{color:C.gold}}>{(trailKeep*100).toFixed(0)}%</span> of the furthest move once price clears{' '}
-                  <span style={{color:C.blue3}}>{trailArm.toFixed(2)}×</span> the ORB range — it locks profit, never returns to entry.
-                  Giveback is capped at <span style={{color:C.t2}}>{((1-trailKeep)*100).toFixed(0)}%</span>. No take-profit is placed, so a runner is uncapped.
-                </div>
+                {isStair ? (
+                  <>
+                    {/* THE STAIRCASE, DRAWN. Each step is a rung: the step's
+                        height is where price has to reach, the filled band
+                        inside it is where the stop lands once that rung is
+                        cleared, and the gap between them is the giveback. */}
+                    <div style={{display:'flex',alignItems:'flex-end',gap:4,height:104,
+                                 background:C.bg,border:`1px solid ${C.b}`,padding:'8px 8px 0'}}>
+                      {Array.from({length:stairFinal},(_,i)=>i+1).map(n=>{
+                        const top   = n / stairFinal;                 // rung height, 0..1
+                        const lockR = Math.max(0, n - stairGive);
+                        const lock  = lockR / stairFinal;             // stop height, 0..1
+                        const last  = n === stairFinal;
+                        const col   = last ? C.gold : C.ml2;
+                        return (
+                          <div key={n} style={{flex:1,height:`${top*100}%`,position:'relative',
+                                               border:`1px solid ${col}66`,
+                                               borderBottom:'none',
+                                               background:`linear-gradient(to top, ${col}22, transparent)`}}>
+                            {/* the locked stop, as a solid band inside the step */}
+                            {!last && (
+                              <div style={{position:'absolute',left:0,right:0,bottom:0,
+                                           height:`${(lock/top)*100}%`,
+                                           background:`${col}33`,
+                                           borderTop:`2px solid ${col}`}} />
+                            )}
+                            <div style={{position:'absolute',top:-11,left:0,right:0,textAlign:'center',
+                                         fontSize:7,color:col,fontWeight:700,
+                                         fontFamily:'JetBrains Mono,monospace'}}>
+                              {(n*RUNG).toFixed(2)}
+                            </div>
+                            <div style={{position:'absolute',bottom:2,left:0,right:0,textAlign:'center',
+                                         fontSize:7,color:last?C.gold:C.t2,
+                                         fontFamily:'JetBrains Mono,monospace'}}>
+                              {last?'EXIT':`SL ${(lockR*RUNG).toFixed(2)}`}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
+                      Clear rung <span style={{color:C.ml2}}>n</span> and the stop climbs to rung{' '}
+                      <span style={{color:C.ml2}}>n − {stairGive.toFixed(2)}</span> — a fixed giveback of{' '}
+                      <span style={{color:C.t2}}>{(stairGive*RUNG).toFixed(3)}× the ORB range</span> that never grows with the win.
+                      Rung <span style={{color:C.gold}}>{stairFinal}</span> ({(stairFinal*RUNG).toFixed(2)}× range) closes the position.
+                      {stairGive>0.6 && <span style={{color:C.red2}}> ⚠ above 0.60 the first stop lands at entry, not in profit.</span>}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {/* Live preview — what the stop actually locks at each excursion */}
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:4}}>
+                      {[0.5,0.75,1.5,3,10].map(r=>{
+                        const armed = r>=trailArm;
+                        const lock  = r*trailKeep;
+                        return (
+                          <div key={r} style={{background:C.bg,border:`1px solid ${armed?C.b2:C.b}`,padding:'5px 6px',textAlign:'center'}}>
+                            <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>reach {r}×</div>
+                            <div style={{fontSize:11,fontWeight:700,fontFamily:'JetBrains Mono,monospace',
+                                         color:armed?C.green2:C.t3}}>
+                              {armed?`${lock.toFixed(2)}×`:'—'}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
+                      Stop trails at <span style={{color:C.gold}}>{(trailKeep*100).toFixed(0)}%</span> of the furthest move once price clears{' '}
+                      <span style={{color:C.blue3}}>{trailArm.toFixed(2)}×</span> the ORB range — it locks profit, never returns to entry.
+                      Giveback is capped at <span style={{color:C.t2}}>{((1-trailKeep)*100).toFixed(0)}%</span>. No take-profit is placed, so a runner is uncapped.
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Header */}

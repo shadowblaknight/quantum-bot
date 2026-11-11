@@ -33,7 +33,7 @@ const addGoalPnL  = goalHandler.addGoalPnL;
 const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
 const {
   notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired,
-  notifySpecialistTradeClosed, notifySpecialistTPConfirmed,
+  notifySpecialistTradeClosed, notifySpecialistTPConfirmed, notifyStaircaseRung,
   notifySpecialistSLLocked, notifySpecialistSLWarning, notifyOCOFailed,
 } = require('./telegram');
 const { SPECIALIST_SIGNALS } = require('./_templates');
@@ -449,10 +449,57 @@ async function managePosition(position) {
   // the position closes at TP1 and never rides to TP3. The SL cascade below is
   // then inert by construction - there is no rung above the exit to cascade to.
   const TP1_MODE = _qbSettings.exitMode === 'tp1';
+  // ─── HIS STAIRCASE ────────────────────────────────────────────────────────
+  // Clearing rung n parks the stop at rung (n - stairGive); rung stairFinal
+  // closes the position. Everything is measured in RUNG units from the ORB
+  // structural level, which is recoverable from the TPs the Pine already
+  // sends: they arrive equally spaced, so one rung is (tp2 - tp1) and the
+  // level sits one rung below tp1.
+  //
+  // ★ WHY rung stairFinal IS COMPUTED AND NOT READ. The Pine sends tp1/tp2/tp3
+  // only, and his spec closes at TP4. Parking the exit on tp3 instead would
+  // silently trade a DIFFERENT engine - one rung shallower than the one that
+  // was backtested - so the final rung is derived from the spacing rather
+  // than taken from the last element of tpLevels.
+  // ★★ TWO GUARDS, AND THEY ARE NOT DECORATION. Only the SPECIALIST signals
+  // send his grid. Read off the live Pine (qb-gold-specialist.pine ~1005):
+  //     tp_n = ORB level ± range x c2TpMult x n,  c2TpMult = 0.75
+  // so tp2-tp1 is one rung and tp1 minus one rung IS the ORB level - exactly
+  // his geometry. The LEGACY templates in the same file (~671) instead send
+  //     tp1 = entry ± slDist x (0.75 or 1.0),  tp2 = 2R,  tp3 = 3R
+  // where the same arithmetic recovers the ENTRY, not the ORB level, and at
+  // tp1Mult 0.75 the three targets are not even equally spaced (1.25R then
+  // 1.00R). Running the staircase on those would park the stop and the final
+  // TP at prices his spec never names, silently trading a different engine.
+  //
+  // So: specialist-only, AND the grid must be a true arithmetic progression.
+  // Either check failing falls back to the previous behaviour rather than
+  // guessing, and says so in the actions list.
+  const STAIR_MODE = _qbSettings.exitMode === 'staircase';
+  const _stairSpecialist = !!(matchedPending?.setup
+    && SPECIALIST_SIGNALS.includes(matchedPending.setup.template));
+  const _stairStep = tpLevels.length >= 2
+    ? Math.abs(tpLevels[1].price - tpLevels[0].price) : 0;
+  const _stairEven = tpLevels.length >= 3 && _stairStep > 0
+    ? Math.abs(Math.abs(tpLevels[2].price - tpLevels[1].price) - _stairStep)
+      < _stairStep * 0.02
+    : tpLevels.length === 2 && _stairStep > 0;
+  const _stairLevel = (_stairStep > 0)
+    ? (isLong ? tpLevels[0].price - _stairStep : tpLevels[0].price + _stairStep)
+    : null;
+  const _stairOK = STAIR_MODE && _stairStep > 0 && _stairLevel != null
+    && _stairSpecialist && _stairEven;
+  const _stairFinalPrice = _stairOK
+    ? (isLong
+        ? _stairLevel + _qbSettings.stairFinal * _stairStep
+        : _stairLevel - _qbSettings.stairFinal * _stairStep)
+    : null;
   const _tpIdx = TP1_MODE ? 0 : tpLevels.length - 1;
   const finalTPPrice = RATCHET_MODE
     ? null
-    : (tpLevels.length ? tpLevels[_tpIdx].price : null);
+    : _stairOK
+      ? _stairFinalPrice
+      : (tpLevels.length ? tpLevels[_tpIdx].price : null);
   if (tpLevels.length === 0) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
@@ -537,7 +584,11 @@ async function managePosition(position) {
     const confirmed = isLong ? extreme >= tpPrice + confirmBuffer : extreme <= tpPrice - confirmBuffer;
     if (!confirmed) continue;
 
-    if (i === finalIdx) { finalTouched = true; continue; }
+    // In STAIRCASE mode tp1/tp2/tp3 are ALL rungs, never the close — the
+    // close sits on the computed rung stairFinal below. Letting tp3 set
+    // finalTouched here would shut the trade one rung early and quietly
+    // trade a shallower engine than the one he chose.
+    if (i === finalIdx && !_stairOK) { finalTouched = true; continue; }
 
     if (!state.tpsHit.includes(tpName)) {
       state.tpsHit.push(tpName);
@@ -575,6 +626,63 @@ async function managePosition(position) {
     await setPositionState(position.id, state);
   }
 
+  // ─── STAIRCASE: the rung high-water, and the rung-stairFinal close ───────
+  // Reach is measured from the ORB LEVEL in rung units and kept as a
+  // HIGH-WATER mark, so a spike that clears a rung and retraces keeps the
+  // rung it earned. This is computed here, above the SL section, because the
+  // close check and the stop both need it.
+  let _stairReach = null;
+  if (_stairOK) {
+    const r = isLong
+      ? (extreme - _stairLevel) / _stairStep
+      : (_stairLevel - extreme) / _stairStep;
+    state.maxReach = Math.max(state.maxReach || 0, r);
+    _stairReach = state.maxReach;
+
+    // Rung advance notifications. tpsHit already covers rungs 1-3 via the
+    // detection loop; this covers rung 4 and beyond, which the Pine never
+    // sent, so he still hears about the rung that closes the trade.
+    const cleared = Math.floor(_stairReach);
+    const prevAnnounced = state.stairRungAnnounced || 0;
+    if (cleared > prevAnnounced && cleared >= 1) {
+      state.stairRungAnnounced = cleared;
+      actions.push({ action: 'stair-rung', rung: cleared });
+      await pushCommentary(asset, 'tp-hit',
+        `STAIRCASE rung ${cleared} cleared — stop goes to rung `
+        + `${(cleared - _qbSettings.stairGive).toFixed(2)}`);
+      try {
+        await notifyStaircaseRung({
+          positionId: position.id, asset, direction, rung: cleared,
+          slRung: cleared - _qbSettings.stairGive,
+          finalRung: _qbSettings.stairFinal,
+        });
+      } catch (_) {}
+      await setPositionState(position.id, state);
+    }
+
+    // The close. His TP4 is also parked as the broker TP at placement, so
+    // this is a BACKSTOP for the case where the broker TP did not fill
+    // (cleared intrabar, gapped, or the order was modified without it).
+    if (_stairReach >= _qbSettings.stairFinal
+        && !state.tpsHit.includes('STAIR-FINAL')) {
+      const closeResult = await partialClose(position.id, position.volume);
+      if (closeResult.ok) {
+        state.tpsHit.push('STAIR-FINAL');
+        state.partialCloses.push({
+          tpName: `rung${_qbSettings.stairFinal}`, lotClosed: position.volume,
+          atPrice: _stairFinalPrice, ts: Date.now(),
+        });
+        actions.push({ action: 'stair-final-close', rung: _qbSettings.stairFinal, ok: true });
+        await pushCommentary(asset, 'tp-hit',
+          `STAIRCASE rung ${_qbSettings.stairFinal} (final) reached — `
+          + `closed full ${position.volume} lot`);
+      } else {
+        actions.push({ action: 'stair-final-close', error: closeResult.error });
+      }
+      await setPositionState(position.id, state);
+    }
+  }
+
   // ─── SL RATCHET — lock the deepest TP price has actually reached ──
   // "TP hit -> SL at that TP." NO entry-breakeven, ever: the stop only moves to a
   // TP level price has genuinely traded through, and only when that level is a
@@ -607,7 +715,34 @@ async function managePosition(position) {
   const isSpecialistTrade = !!(matchedPending?.setup && SPECIALIST_SIGNALS.includes(matchedPending.setup.template));
   let chosen = null;
 
-  if (RATCHET_MODE && tpLevels.length >= 2) {
+  if (_stairOK) {
+    // ─── HIS STAIRCASE ───────────────────────────────────────────────
+    //   cleared rung n -> SL to rung (n - stairGive)
+    //   rung 1 (0.75) -> 0.375    rung 3 (2.25) -> 1.875
+    //   rung 2 (1.50) -> 1.125    rung 4 (3.00) -> closed above
+    //
+    // The giveback is a FIXED fraction of ONE rung, which is what separates
+    // this from 'ratchet': there the stop sits at trailKeep x the whole
+    // excursion, so the giveback GROWS with the win and the realised share
+    // is pinned at trailKeep however far price travelled. Here it is always
+    // stairGive rungs, whatever the trade did.
+    //
+    // Only whole rungs count. At reach 1.9 the stop sits on rung 0.5, not
+    // rung 1.4 — the engine is a staircase, not a trail, and that is the
+    // property that makes it reproducible in the Tester.
+    const cleared = Math.floor(_stairReach);
+    if (cleared >= 1) {
+      const lockRung = cleared - _qbSettings.stairGive;
+      const slTarget = isLong
+        ? _stairLevel + lockRung * _stairStep
+        : _stairLevel - lockRung * _stairStep;
+      const valid    = isLong ? slTarget <= currentPrice - stopBuffer : slTarget >= currentPrice + stopBuffer;
+      const improves = curSL == null ? true : (isLong ? slTarget > curSL : slTarget < curSL);
+      if (valid && improves) {
+        chosen = { name: `stair-r${cleared}@${lockRung.toFixed(2)}`, price: slTarget };
+      }
+    }
+  } else if (RATCHET_MODE && tpLevels.length >= 2) {
     // ─── UNBOUNDED RATCHET ───────────────────────────────────────────
     // tp1/tp2/tp3 arrive equally spaced from the ORB level, so one step is
     // (tp2 - tp1) and the level sits one step below tp1. That lets us extend

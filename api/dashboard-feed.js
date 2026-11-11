@@ -273,6 +273,12 @@ async function actionSetSettings(body) {
   if (body.tpR !== undefined)           patch.tpR = body.tpR;
   if (body.ladderEnabled !== undefined) patch.ladderEnabled = body.ladderEnabled;
   if (body.ladder !== undefined)        patch.ladder = body.ladder;
+  // HIS STAIRCASE. staircaseSince is deliberately NOT patchable from the
+  // panel: the first day he ran this engine is a historical fact, and a
+  // control that can edit it is a control that can erase it by accident.
+  // It lives in settings-store DEFAULTS and is only changed in code.
+  if (body.stairGive !== undefined)     patch.stairGive = body.stairGive;
+  if (body.stairFinal !== undefined)    patch.stairFinal = body.stairFinal;
   if (Object.keys(patch).length === 0) return err('no recognised settings in body');
   const result = await setTradeSettings(patch, body.who || 'control-panel');
   if (!result.ok) return err(result.error || 'save failed', 500);

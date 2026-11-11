@@ -247,6 +247,38 @@ async function notifySpecialistTPConfirmed({ positionId, asset, direction, tpNam
 }
 
 // =================================================================
+// HIS STAIRCASE: A RUNG WAS CLEARED
+// =================================================================
+// Live from 2026-11-11. Fires once per whole rung, so a trade that walks
+// 0.75 -> 1.50 -> 2.25 sends three messages and then the close. Rungs 1-3
+// also produce the normal TP-hit message because the Pine sends those as
+// tp1/tp2/tp3; rung 4 and beyond exist only here, which is why this notifier
+// is needed at all rather than reusing notifySpecialistTPConfirmed.
+//
+// Keyed on the RUNG, not on a TP name, so it stays correct past rung 3 where
+// there is no TP name to key on.
+
+async function notifyStaircaseRung({ positionId, asset, direction, rung, slRung, finalRung }) {
+  const dedupeKey = `stair-rung:${positionId}:${rung}`;
+  const isLong    = direction === 'LONG';
+  const last      = finalRung != null && rung >= finalRung;
+  const bar       = '▰'.repeat(Math.min(rung, 8)) + '▱'.repeat(Math.max(0, (finalRung || 4) - rung));
+
+  const text = last
+    ? `🏁 <b>Rung ${rung} — FINAL — ${assetLabel(asset)}</b>\n\n` +
+      `${isLong ? '🟢' : '🔴'} ${direction}\n` +
+      `${bar}\n` +
+      `Closing the full position at rung ${rung}.`
+    : `🪜 <b>Rung ${rung} cleared — ${assetLabel(asset)}</b>\n\n` +
+      `${isLong ? '🟢' : '🔴'} ${direction}\n` +
+      `${bar}  rung ${rung} of ${finalRung || 4}\n` +
+      `Stop climbs to rung <b>${slRung != null ? slRung.toFixed(2) : '?'}</b> — profit locked, ` +
+      `giveback is half a rung and never grows.`;
+
+  return sendOnce(dedupeKey, text);
+}
+
+// =================================================================
 // V20 EVENT 3: SL RATCHET LOCKED
 // =================================================================
 // Fires when broker confirms the new SL after a TP hit.
@@ -421,6 +453,7 @@ module.exports = {
   // V20 specialist events
   notifySpecialistTradePlaced,
   notifySpecialistTPConfirmed,
+  notifyStaircaseRung,
   notifySpecialistSLLocked,
   notifySpecialistSLWarning,
   notifyOCOFailed,

@@ -38,7 +38,39 @@ const DEFAULTS = {
   //              it. Rungs are spaced by the TP spacing the Pine already sends
   //              (tp2-tp1), extended past TP3 indefinitely.
   // 'final-tp' — legacy: full position rides to the last TP and closes there.
+  // 'staircase'— HIS ENGINE, live from 2026-11-11. The ORB-range staircase:
+  //              clearing rung n moves the stop to rung n minus HALF a rung,
+  //              and rung `stairFinal` closes the position outright.
+  //                TP1 0.75 -> SL 0.375    TP3 2.25 -> SL 1.875
+  //                TP2 1.50 -> SL 1.125    TP4 3.00 -> full exit
+  //              Unlike 'ratchet' the stop is a FIXED distance behind the last
+  //              rung cleared rather than a fraction of the whole excursion,
+  //              so the giveback does not grow with the win.
+  //              ⚠ MEASURED 4.4yr, blend, U dropped: 91.5% win rate against
+  //              58.1% for the one-shot, and 6.1%/yr against 35.3%/yr once
+  //              both are sized to the same 8% account drawdown. The win rate
+  //              is real; so is the cost. He chose it knowing both numbers -
+  //              see the his-orb-staircase note.
   exitMode: 'ratchet',
+
+  // ── HIS STAIRCASE ─────────────────────────────────────────────────────────
+  // stairGive  — giveback behind the last rung cleared, in RUNG units. 0.5 is
+  //              his spec ("0.75/2"). Hard-capped at 0.60 below, and that cap
+  //              is load-bearing: the entry sits depth x range past the ORB
+  //              level, which on the live geometry (depth 0.25, rung 0.75) is
+  //              0.333 rungs. So a giveback of 1 - 0.333 = 0.667 puts the rung-1
+  //              stop exactly AT the entry - breakeven, not profit. Measured:
+  //              at that point the win rate collapses 91.6% -> 47.0%, because a
+  //              scratch is not a win. Everything above 0.60 is that cliff.
+  // stairFinal — the rung that closes the position. 4 is his spec (TP4). The
+  //              Pine only sends tp1/tp2/tp3, so rung 4 is COMPUTED from the
+  //              rung spacing rather than received.
+  stairGive: 0.5,
+  stairFinal: 4,
+  // The day he switched to it. Recorded here as well as in Redis so the fact
+  // survives a cache flush - a start date that can silently reset is worse
+  // than no start date, because day counts would quietly restart.
+  staircaseSince: '2026-11-11',
 
   // Ratchet trail geometry, both measured in ORB-range units from the ORB
   // structural level (the same unit tp1/tp2/tp3 use).
@@ -139,8 +171,18 @@ function sanitize(s) {
     // TP1 wins net/DD (9.13) and carries 4 losses in three years, which is
     // the number that decides whether 4% risk survives a losing streak.
     // Anything unrecognised still falls back to 'ratchet', so a bad write
-    // can never invent a mode.
-    exitMode: ['final-tp', 'tp1'].includes(base.exitMode) ? base.exitMode : 'ratchet',
+    // can never invent a mode. 'staircase' added 2026-11-11.
+    exitMode: ['final-tp', 'tp1', 'staircase'].includes(base.exitMode)
+      ? base.exitMode : 'ratchet',
+    // stairGive is capped at 0.60, NOT 0.95. See the note on DEFAULTS: past
+    // ~0.667 the rung-1 stop lands at or below the entry and the engine stops
+    // locking profit at all. This clamp is the only thing standing between a
+    // typo in the panel and a staircase that scratches every winner.
+    stairGive:  clampNum(base.stairGive, 0.10, 0.60, DEFAULTS.stairGive),
+    stairFinal: Math.round(clampNum(base.stairFinal, 2, 8, DEFAULTS.stairFinal)),
+    staircaseSince: (typeof base.staircaseSince === 'string'
+      && /^\d{4}-\d{2}-\d{2}$/.test(base.staircaseSince))
+      ? base.staircaseSince : DEFAULTS.staircaseSince,
     // trailKeep capped below 1.0 — at 1.0 the stop would sit exactly on the
     // current extreme and get taken out by the first tick of noise.
     trailArm:  clampNum(base.trailArm,  0.05, 10.0, DEFAULTS.trailArm),
@@ -213,6 +255,10 @@ module.exports = {
   getTradeSettings,
   setTradeSettings,
   ladderToPrices,
+  // Exported for _staircase.test.js: the clamps on stairGive are the only
+  // thing between a typo in the panel and an engine that scratches every
+  // winner, so they are tested directly rather than through Redis.
+  sanitizeForTest: sanitize,
   DEFAULTS,
   MAX_RISK_PCT,
   SETTINGS_KEY,

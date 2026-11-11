@@ -755,10 +755,44 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // unreadable-store case is the historical TP3 behaviour, so a Redis failure
   // can only ever leave the order where it already was.
   let _exitMode = 'ratchet';
-  try { _exitMode = (await getTradeSettings()).exitMode; } catch (_) {}
+  let _qbSet = null;
+  try { _qbSet = await getTradeSettings(); _exitMode = _qbSet.exitMode; } catch (_) {}
+
+  // ─── HIS STAIRCASE: the exit parks on rung stairFinal ─────────────────────
+  // His spec closes at TP4 and the Pine only sends tp1/tp2/tp3, so the final
+  // rung is DERIVED from the rung spacing: the three targets arrive equally
+  // spaced from the ORB level, so one rung is (tp2 - tp1) and the level sits
+  // one rung below tp1.
+  //
+  // ★ IF THE SPACING CANNOT BE RECOVERED, THIS FALLS BACK TO TP3 rather than
+  // guessing. A wrong TP here is a real-money error that no later stage can
+  // correct: the order would rest at a price the backtest never used.
+  // ★★ SPECIALIST-ONLY, AND THE GRID MUST BE EVENLY SPACED. Only the
+  // specialist path sends tp_n = ORB level ± range x 0.75 x n, which is his
+  // geometry. The legacy templates send 1R/2R/3R from the ENTRY, where this
+  // same arithmetic recovers the entry rather than the ORB level - and at
+  // tp1Mult 0.75 they are not even equally spaced. Either check failing
+  // leaves the TP exactly where it was before this mode existed.
+  let _stairTP = null;
+  if (_exitMode === 'staircase' && isSpecialist
+      && _bTP2 != null && finalTP1 != null && _bTP3 != null
+      && isFinite(_bTP2) && isFinite(finalTP1) && isFinite(_bTP3)) {
+    const _step = Math.abs(_bTP2 - finalTP1);
+    const _even = _step > 0
+      && Math.abs(Math.abs(_bTP3 - _bTP2) - _step) < _step * 0.02;
+    if (_even) {
+      const _up = p.direction === 'LONG';
+      const _lvl = _up ? finalTP1 - _step : finalTP1 + _step;
+      const _n = (_qbSet && _qbSet.stairFinal) || 4;
+      _stairTP = _up ? _lvl + _n * _step : _lvl - _n * _step;
+    }
+  }
+
   const brokerTP = _exitMode === 'tp1'
     ? (finalTP1 != null ? finalTP1 : (_bTP2 != null ? _bTP2 : _bTP3))
-    : (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1));
+    : _stairTP != null
+      ? _stairTP
+      : (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1));
   // V20 specialists use QB-V20-{asset}-{signalType}; legacy stays QB-V13-{template}-{window}
   // gold-specialist-2 uses QB-V20-GS2-* prefix so its positions don't block gold-specialist
   // (15m) trades — each specialist has its own 1-per-asset slot.
@@ -956,7 +990,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     // Live evidence, 2026-09-30: a gold SHORT skipped at drift 133.4 pips against
     // an 81-pip TP1 budget. Under the stop-based budget (202 pips) it is taken,
     // and in ratchet mode it was a perfectly good trade.
+    // Staircase IS capped — at rung stairFinal — so it gets a real room
+    // budget rather than the uncapped fall-through. Using null here would
+    // measure the chase against 25% of the stop instead of against the
+    // distance to the actual exit, and would take trades that have already
+    // run past the target this engine closes at.
     const _exitTgt = _exitMode === 'tp1'      ? finalTP1
+                   : _exitMode === 'staircase' ? _stairTP
                    : _exitMode === 'final-tp' ? (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1))
                    : null;   // ratchet: uncapped, fall through to the stop-based budget
     const _room = (_exitTgt != null && isFinite(_exitTgt))
@@ -976,7 +1016,9 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       // Name the constraint that actually fired. Saying "TP1" in ratchet mode
       // would describe a target the position does not have.
       const _skipWhy = _room != null
-        ? (_exitMode === 'tp1' ? 'TP1' : 'TP3') + ' is already behind'
+        ? (_exitMode === 'tp1' ? 'TP1'
+           : _exitMode === 'staircase' ? ('rung ' + ((_qbSet && _qbSet.stairFinal) || 4))
+           : 'TP3') + ' is already behind'
         : 'that is past 25% of the stop';
       try {
         await sendOnce(`webhook-ranpast:${dedupeKey}`,
