@@ -454,11 +454,41 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         await sendOnce(`flip-close:${dedupeKey}`,
           `🔄 <b>REVERSAL — ${pineTicker}</b>\n\n` +
           `New <b>${_newDir}</b> signal fired against your open <b>${_blockerDir}</b> position.\n` +
-          `The new trade is being placed.\n\n` +
+          `<b>The new trade was NOT placed</b> — one position at a time.\n\n` +
           `⚠️ <b>Close the ${_blockerDir} position now</b> — ticket <code>${_blocker.id}</code>.\n` +
           `The bot does not close it for you.` +
           (_staleCxl ? `\n\nStale resting order <code>${restingOrder.id}</code>: ${_staleCxl}.` : ''));
       } catch (_) {}
+      // ── 2026-11-10, HIS CALL: BLOCK, do not place. ──────────────────
+      // This branch used to fall through and place the reversal, on the
+      // argument that opposing positions net out so exposure goes DOWN.
+      // That holds only while BOTH are open. The moment one stops out the
+      // other is naked and can stop out too, so the day can still carry
+      // two full losses: M long stops -3.98%, price reverses, G short
+      // stops -3.98%, total -7.96% against a 5% FTMO daily cap. And FTMO
+      // counts FLOATING P&L, while getTodaysPnL() is realized-only, so
+      // the bot's own daily guard reads 0 the whole way down.
+      //
+      // It also made LIVE disagree with the BACKTEST: the 410-trade /
+      // 96.34% / +2714.60 blend was measured at one trade at a time, no
+      // exceptions. Placing a reversal was a configuration never tested.
+      //
+      // ⚠ A RESTING LIMIT is NOT an open position and is handled in the
+      // else-branch below: it is cancelled and the new trade IS placed,
+      // because nothing is at risk until a fill. His words: "if it still
+      // open then no".
+      //
+      // Flip this back on an account with no daily-loss rule.
+      return bgSkip({
+        dedupeKey, pineTicker, template: p.template,
+        reason: 'opposite-direction-position-open',
+        extras: {
+          assetId, newDirection: _newDir, blockerDirection: _blockerDir,
+          blockerKind: 'position', blockerId: _blocker.id,
+          staleOrderCancel: _staleCxl,
+        },
+        notify: false,
+      });
     } else {
       // Resting limit: cancel it. Nothing for you to do by hand.
       let _cxlOk = false, _cxlErr = null;

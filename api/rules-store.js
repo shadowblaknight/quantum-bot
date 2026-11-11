@@ -60,7 +60,17 @@ const DEFAULT_RULES = {
 
   account: {
     maxDailyLossPct: 5.0,
-    maxConcurrentPositions: 5,
+    // 2026-11-10, HIS CALL, and 5 was dangerous: FTMO counts FLOATING P&L
+    // against the 5% daily cap, while getTodaysPnL() below reads a REALIZED
+    // daily counter and cannot see two open positions bleeding at once. At
+    // riskPct 4% a single stop is already 3.98% of a 100k, so two concurrent
+    // trades (M at -3% and G at -1%, his example) breach the cap with the
+    // bot's own guard still reading 0. One slot is the only setting that is
+    // arithmetically safe at 4%.
+    // ⚠ The LIVE value lives in Redis and is set from the app ("max
+    // positions"); this default only applies when the store is empty. Change
+    // it in BOTH places. Raise it only on an account with no daily rule.
+    maxConcurrentPositions: 1,
     maxRiskPerTradePct: 2.0,
     emergencyStop: false,
   },
