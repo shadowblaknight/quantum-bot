@@ -25,6 +25,7 @@ const { getRedis, safeParse, applyCors, atr, getCurrentSession, roundToPipSize }
 const { getAssetById } = require('./asset-registry');
 const { resolveSymbol, resolveAsset } = require('./symbol-resolver');
 const { fetchPositions, fetchCandles, refreshBalanceCache } = require('./broker');
+const { hourSigma } = require('./session-sigma');
 const { getPendingSetups, updatePendingSetup, pushCommentary } = require('./watcher');
 const { storeClosedTrade } = require('./recognition-memory');
 const { addDailyPnL, logActivity } = require('./rules-store');   // v1.3: NEW import
@@ -34,6 +35,7 @@ const { writeLedgerRecord } = require('./ledger');  // v14: P&L cost ledger
 const {
   notifySLHit, notifyTradeClosed, sendOnce, notifySessionExpired,
   notifySpecialistTradeClosed, notifySpecialistTPConfirmed, notifyStaircaseRung,
+  notifyOneShotEvent,
   notifySpecialistSLLocked, notifySpecialistSLWarning, notifyOCOFailed,
 } = require('./telegram');
 const { SPECIALIST_SIGNALS } = require('./_templates');
@@ -494,8 +496,30 @@ async function managePosition(position) {
         ? _stairLevel + _qbSettings.stairFinal * _stairStep
         : _stairLevel - _qbSettings.stairFinal * _stairStep)
     : null;
+  // ─── THE ONE-SHOT ────────────────────────────────────────────────────────
+  // Stage 1 cuts the risk early, the lock fires ONCE and is then frozen, a
+  // third is banked at tp1, and NO take-profit is ever placed - the runner
+  // is uncapped and exits on the frozen stop or the clock. Same two guards
+  // as the staircase: only the SPECIALIST grid encodes the ORB range the
+  // banked leg needs, and the grid must be a true arithmetic progression.
+  const ONESHOT_MODE = _qbSettings.exitMode === 'oneshot';
+  const _osOK = ONESHOT_MODE && _stairSpecialist && _stairEven
+    && _stairStep > 0 && _stairLevel != null;
+  // Sigma is fetched ONLY in one-shot mode, and a failure degrades to
+  // "leave the stop where it is" rather than guessing a distance. Sizing a
+  // live stop off a fallback number nobody measured is worse than not
+  // moving it at all.
+  let _osSigma = null, _osSigmaErr = null;
+  if (_osOK) {
+    try {
+      const _s = await hourSigma(asset);
+      if (_s && isFinite(_s.sigma) && _s.sigma > 0) _osSigma = _s.sigma;
+      else _osSigmaErr = (_s && _s.error) || 'no sigma';
+    } catch (e) { _osSigmaErr = `sigma threw: ${e && e.message}`; }
+  }
+
   const _tpIdx = TP1_MODE ? 0 : tpLevels.length - 1;
-  const finalTPPrice = RATCHET_MODE
+  const finalTPPrice = (RATCHET_MODE || _osOK)
     ? null
     : _stairOK
       ? _stairFinalPrice
@@ -588,7 +612,7 @@ async function managePosition(position) {
     // close sits on the computed rung stairFinal below. Letting tp3 set
     // finalTouched here would shut the trade one rung early and quietly
     // trade a shallower engine than the one he chose.
-    if (i === finalIdx && !_stairOK) { finalTouched = true; continue; }
+    if (i === finalIdx && !_stairOK && !_osOK) { finalTouched = true; continue; }
 
     if (!state.tpsHit.includes(tpName)) {
       state.tpsHit.push(tpName);
@@ -611,7 +635,7 @@ async function managePosition(position) {
   // ─── FINAL TP backstop close ─────────────────────────────────────
   const finalName = `TP${finalIdx + 1}`;
   // In ratchet mode the last TP is just another rung — never a close.
-  if (!RATCHET_MODE && finalTouched && !state.tpsHit.includes(finalName)) {
+  if (!RATCHET_MODE && !_osOK && finalTouched && !state.tpsHit.includes(finalName)) {
     const tpPrice = tpLevels[finalIdx].price;
     const closeResult = await partialClose(position.id, position.volume);
     if (closeResult.ok) {
@@ -624,6 +648,80 @@ async function managePosition(position) {
       actions.push({ action: 'final-tp-close', tpName: finalName, error: closeResult.error });
     }
     await setPositionState(position.id, state);
+  }
+
+  // ─── ONE-SHOT: the best CLOSE, and the banked third ──────────────────────
+  // ★ CLOSES, NOT THE EXTREME. Measured: arming off state.extreme takes the
+  // breach rate at 4% risk from 0.0% to 38.0%. Only bars that have actually
+  // CLOSED count, and only bars at or after the fill bar. The high-water
+  // lives in state, so a missed cron tick costs nothing as long as the next
+  // fetch still covers the gap - 60 bars is 15 hours of cover.
+  if (_osOK && _osSigma) {
+    try {
+      const _BAR = 15 * 60 * 1000;
+      const _cr = await fetchCandles(asset, '15m', 60);
+      const _cs = (_cr && _cr.candles) || [];
+      const _now = Date.now();
+      const _fill = state.createdAt || _now;
+      let _bc = (typeof state.osBestClose === 'number' && isFinite(state.osBestClose))
+        ? state.osBestClose : null;
+      let _bts = state.osBestCloseTs || 0;
+      for (const c of _cs) {
+        const t = new Date(c.time).getTime();
+        if (!isFinite(t)) continue;
+        if (t + _BAR > _now) continue;        // still forming
+        if (t + _BAR <= _fill) continue;      // closed before the fill
+        if (t <= _bts) continue;              // already folded in
+        const cl = Number(c.close);
+        if (!isFinite(cl)) continue;
+        _bc = _bc == null ? cl : (isLong ? Math.max(_bc, cl) : Math.min(_bc, cl));
+        if (t > _bts) _bts = t;
+      }
+      if (_bc != null) {
+        state.osBestClose = _bc;
+        state.osBestCloseTs = _bts;
+      }
+    } catch (_) {}
+
+    // THE BANKED THIRD, at tp1 = ORB level + 0.75 x range = tpLevels[0].
+    // Fires on the same CONFIRMED touch the TP detector uses, so it is a
+    // touch price has genuinely traded through, not a wick.
+    const _pp = _qbSettings.osPartPct;
+    if (_pp > 0 && !state.osPartDone && state.tpsHit.includes('TP1')) {
+      // 0.01 is the gold lot step. Both legs must clear it or the broker
+      // rejects the order and the position is left in an odd state.
+      const _lot = Math.round(position.volume * _pp * 100) / 100;
+      const _rest = Math.round((position.volume - _lot) * 100) / 100;
+      if (_lot >= 0.01 && _rest >= 0.01) {
+        const _pc = await partialClose(position.id, _lot);
+        if (_pc.ok) {
+          state.osPartDone = true;
+          state.partialCloses.push({
+            tpName: 'TP1-bank', lotClosed: _lot,
+            atPrice: tpLevels[0].price, ts: Date.now(),
+          });
+          actions.push({ action: 'oneshot-bank', lot: _lot, ok: true });
+          await pushCommentary(asset, 'tp-hit',
+            `ONE-SHOT banked ${(_pp * 100).toFixed(0)}% (${_lot} lot) at tp1 `
+            + `${tpLevels[0].price.toFixed(2)} — ${_rest} lot runs on`);
+          try {
+            await notifyOneShotEvent({
+              positionId: position.id, asset, direction, kind: 'bank',
+              price: tpLevels[0].price, lot: _lot, rest: _rest,
+            });
+          } catch (_) {}
+          await setPositionState(position.id, state);
+        } else {
+          actions.push({ action: 'oneshot-bank', error: _pc.error });
+        }
+      } else {
+        // too small to split - say so instead of silently running full size
+        state.osPartDone = true;
+        actions.push({ action: 'oneshot-bank', skipped: 'lot step',
+                       lot: _lot, rest: _rest });
+        await setPositionState(position.id, state);
+      }
+    }
   }
 
   // ─── STAIRCASE: the rung high-water, and the rung-stairFinal close ───────
@@ -715,7 +813,62 @@ async function managePosition(position) {
   const isSpecialistTrade = !!(matchedPending?.setup && SPECIALIST_SIGNALS.includes(matchedPending.setup.template));
   let chosen = null;
 
-  if (_stairOK) {
+  if (_osOK && _osSigma) {
+    // ─── THE ONE-SHOT STOP ───────────────────────────────────────────
+    //   stage 1 at +osS1Arm sigma  -> entry - osS1Keep x risk
+    //   the lock at +osArm  sigma  -> entry + (osArm - osGive) sigma, ONCE
+    // Both latch, and the excursion is measured from the best CLOSE. The
+    // lock never moves again once set: that is what lets a winner run,
+    // and it is the single property separating this from the ratchet.
+    const _bc = state.osBestClose;
+    if (typeof _bc === 'number' && isFinite(_bc)) {
+      const _exc = isLong ? (_bc - state.entry) : (state.entry - _bc);
+      const _cands = [];
+      if (!state.osS1 && _exc >= _qbSettings.osS1Arm * _osSigma) {
+        state.osS1 = true;
+        _cands.push(['s1', state.entry - (isLong ? 1 : -1)
+          * _qbSettings.osS1Keep * initialSLForR]);
+      } else if (state.osS1) {
+        _cands.push(['s1', state.entry - (isLong ? 1 : -1)
+          * _qbSettings.osS1Keep * initialSLForR]);
+      }
+      // ★★ THE LOCK PRICE IS STORED, NOT RECOMPUTED. sigma is a 14-day
+      // rolling mean, so it changes every day, and these holds run up to 5
+      // days. Deriving the level from the CURRENT sigma on every tick would
+      // move it whenever sigma grew - and since the stop may only improve,
+      // it would ratchet upward: a FROZEN lock quietly becomes a slow trail,
+      // which is the one thing this engine exists not to do. Measured cost
+      // of that mistake, from the close-vs-extreme test: R/DD 19.40 -> 4.90.
+      // The backtest sets the level once from the firing bar's sigma and
+      // never touches it again, so the price is frozen in state here.
+      if (!state.osLocked && _exc >= _qbSettings.osArm * _osSigma) {
+        state.osLocked = true;
+        state.osLockPx = state.entry + (isLong ? 1 : -1)
+          * (_qbSettings.osArm - _qbSettings.osGive) * _osSigma;
+        state.osLockSigma = _osSigma;
+        await setPositionState(position.id, state);
+        try {
+          await notifyOneShotEvent({
+            positionId: position.id, asset, direction, kind: 'lock',
+            price: state.osLockPx, sigma: _osSigma,
+          });
+        } catch (_) {}
+      }
+      if (state.osLocked && typeof state.osLockPx === 'number'
+          && isFinite(state.osLockPx)) {
+        _cands.push(['lock', state.osLockPx]);
+      }
+      for (const [nm, px] of _cands) {
+        const valid    = isLong ? px <= currentPrice - stopBuffer : px >= currentPrice + stopBuffer;
+        const improves = curSL == null ? true : (isLong ? px > curSL : px < curSL);
+        if (!valid || !improves) continue;
+        if (chosen == null
+            || (isLong ? px > chosen.price : px < chosen.price)) {
+          chosen = { name: `os-${nm}`, price: px };
+        }
+      }
+    }
+  } else if (_stairOK) {
     // ─── HIS STAIRCASE ───────────────────────────────────────────────
     //   cleared rung n -> SL to rung (n - stairGive)
     //   rung 1 (0.75) -> 0.375    rung 3 (2.25) -> 1.875
@@ -827,6 +980,12 @@ async function managePosition(position) {
     if (locksProfit && lockImproves) {
       chosen = { name: hitRungs[0].name + '-retrace', price: retraceLock };
     }
+  }
+
+  if (_osOK && !_osSigma && _osSigmaErr) {
+    // The engine cannot run without sigma. Say so on every tick rather than
+    // appearing to manage a position that is in fact only on its hard stop.
+    actions.push({ action: 'oneshot-no-sigma', reason: _osSigmaErr });
   }
 
   if (USE_SL_RATCHET && chosen) {

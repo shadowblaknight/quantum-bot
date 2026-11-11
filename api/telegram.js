@@ -247,6 +247,33 @@ async function notifySpecialistTPConfirmed({ positionId, asset, direction, tpNam
 }
 
 // =================================================================
+// THE ONE-SHOT: BANKED A THIRD, OR FROZE THE STOP
+// =================================================================
+// Two events, and they are deliberately worded to make the difference from
+// the ratchet obvious: the lock fires ONCE and is then never moved again,
+// which is why a runner can keep going. The ratchet re-tightens on every
+// new extreme and that is what caps it.
+
+async function notifyOneShotEvent({ positionId, asset, direction, kind,
+                                    price, lot, rest, sigma }) {
+  const dedupeKey = `oneshot:${positionId}:${kind}`;
+  const isLong    = direction === 'LONG';
+  const arrow     = isLong ? '🟢' : '🔴';
+
+  const text = kind === 'bank'
+    ? `💰 <b>Banked a third — ${assetLabel(asset)}</b>\n\n` +
+      `${arrow} ${direction}  ·  tp1 ${pFmt(price, asset)}\n` +
+      `Closed <b>${lot}</b> lot, <b>${rest}</b> lot runs on with no target.`
+    : `🧊 <b>Stop FROZEN — ${assetLabel(asset)}</b>\n\n` +
+      `${arrow} ${direction}\n` +
+      `Locked at <b>${pFmt(price, asset)}</b>` +
+      (sigma ? `  (σ ${sigma.toFixed(2)})` : '') + `\n` +
+      `It will not move again — the runner is uncapped from here.`;
+
+  return sendOnce(dedupeKey, text);
+}
+
+// =================================================================
 // HIS STAIRCASE: A RUNG WAS CLEARED
 // =================================================================
 // Live from 2026-11-11. Fires once per whole rung, so a trade that walks
@@ -454,6 +481,7 @@ module.exports = {
   notifySpecialistTradePlaced,
   notifySpecialistTPConfirmed,
   notifyStaircaseRung,
+  notifyOneShotEvent,
   notifySpecialistSLLocked,
   notifySpecialistSLWarning,
   notifyOCOFailed,

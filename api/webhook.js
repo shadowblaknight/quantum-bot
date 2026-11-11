@@ -788,11 +788,18 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     }
   }
 
-  const brokerTP = _exitMode === 'tp1'
-    ? (finalTP1 != null ? finalTP1 : (_bTP2 != null ? _bTP2 : _bTP3))
-    : _stairTP != null
-      ? _stairTP
-      : (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1));
+  // THE ONE-SHOT places NO take-profit at all, like 'ratchet': the runner is
+  // uncapped and leaves only on the frozen stop or the clock. Parking a TP
+  // here would cap the exact tail the engine exists to capture - its best win
+  // is +7.79R against +2.14R for the staircase, and that difference IS the
+  // absent target.
+  const brokerTP = _exitMode === 'oneshot'
+    ? null
+    : _exitMode === 'tp1'
+      ? (finalTP1 != null ? finalTP1 : (_bTP2 != null ? _bTP2 : _bTP3))
+      : _stairTP != null
+        ? _stairTP
+        : (_bTP3 != null ? _bTP3 : (_bTP2 != null ? _bTP2 : finalTP1));
   // V20 specialists use QB-V20-{asset}-{signalType}; legacy stays QB-V13-{template}-{window}
   // gold-specialist-2 uses QB-V20-GS2-* prefix so its positions don't block gold-specialist
   // (15m) trades — each specialist has its own 1-per-asset slot.

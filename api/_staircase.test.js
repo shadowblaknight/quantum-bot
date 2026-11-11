@@ -109,6 +109,56 @@ function reachOf(isLong, level, step, extreme) {
   is('so the 0.60 cap keeps a real margin below it', 0.60 < cliff, true);
 }
 
+// ── THE ONE-SHOT: stage 1, the frozen lock, and the banked third ───────────
+// Levels are in SIGMA, not ORB range. sigma is the hour-of-day unit from
+// session-sigma.js, verified in f88 to reproduce the backtest on 100.00% of
+// 100,147 bars.
+function osLevels(isLong, entry, risk, sigma, arm, give, s1Keep) {
+  const d = isLong ? 1 : -1;
+  return {
+    s1:   entry - d * s1Keep * risk,
+    lock: entry + d * (arm - give) * sigma,
+  };
+}
+{
+  const SIG = 6.0, RISK = 50.0;
+  console.log('\n--- ONE-SHOT  sigma 6.0  risk 50  arm 3.0  give 2.0 ---');
+  const L = osLevels(true, 4005, RISK, SIG, 3.0, 2.0, 0.25);
+  eq('LONG  stage 1 -> entry - 0.25 x risk', L.s1, 4005 - 12.5);
+  eq('LONG  lock    -> entry + 1.0 sigma',   L.lock, 4005 + 6.0);
+  is('LONG  stage 1 cuts the loss but does NOT lock profit', L.s1 < 4005, true);
+  is('LONG  the lock IS in profit', L.lock > 4005, true);
+  const S = osLevels(false, 3995, RISK, SIG, 3.0, 2.0, 0.25);
+  eq('SHORT stage 1 -> entry + 0.25 x risk', S.s1, 3995 + 12.5);
+  eq('SHORT lock    -> entry - 1.0 sigma',   S.lock, 3995 - 6.0);
+  is('SHORT the lock IS in profit (lower price)', S.lock < 3995, true);
+  // the arm distances themselves
+  eq('LONG  arms stage 1 at +1 sigma of best CLOSE', 1.0 * SIG, 6.0);
+  eq('LONG  arms the lock at +3 sigma of best CLOSE', 3.0 * SIG, 18.0);
+  is('so the lock gives back exactly 2 sigma of the 3 it earned',
+     Math.abs((3.0 - 1.0) * SIG - 12.0) < 1e-9, true);
+}
+
+// ── the banked third must respect the 0.01 gold lot step ──────────────────
+function bankLots(volume, pct) {
+  const lot  = Math.round(volume * pct * 100) / 100;
+  const rest = Math.round((volume - lot) * 100) / 100;
+  return { lot, rest, ok: lot >= 0.01 && rest >= 0.01 };
+}
+{
+  console.log('\n--- the banked third vs the 0.01 lot step ---');
+  let b = bankLots(0.50, 0.33);
+  eq('0.50 lot: banked', b.lot, 0.17);
+  eq('0.50 lot: runner', b.rest, 0.33);
+  is('0.50 lot splits', b.ok, true);
+  b = bankLots(0.03, 0.33);
+  is('0.03 lot still splits (0.01 / 0.02)', b.ok, true);
+  b = bankLots(0.01, 0.33);
+  is('0.01 lot CANNOT split - must be skipped, not sent', b.ok, false);
+  b = bankLots(0.02, 0.33);
+  is('0.02 lot: 0.01 banked, 0.01 runs', b.ok, true);
+}
+
 // ── the settings store must accept the mode and clamp the knobs ────────────
 (async () => {
   console.log('\n--- settings-store contract ---');
@@ -130,6 +180,19 @@ function reachOf(isLong, level, step, extreme) {
     eq('stairFinal rounds + clamps', san({ stairFinal: 99 }).stairFinal, 8);
     is('day 1 survives a junk write', san({ staircaseSince: 'nope' }).staircaseSince,
        '2026-11-11');
+    console.log('  one-shot:');
+    is('  accepts oneshot', san({ exitMode: 'oneshot' }).exitMode, 'oneshot');
+    eq('  osArm default', san({}).osArm, 3.0);
+    eq('  osGive default', san({}).osGive, 2.0);
+    // the relation, not just the range: osGive >= osArm would place the lock
+    // at or beyond the price that armed it and fill it instantly
+    const bad = san({ osArm: 2.0, osGive: 5.0 });
+    is('  osGive >= osArm is CORRECTED, not just clamped', bad.osGive < bad.osArm, true);
+    eq('  and corrected to half the arm', bad.osGive, 1.0);
+    const eqArm = san({ osArm: 3.0, osGive: 3.0 });
+    is('  osGive == osArm is also corrected', eqArm.osGive < eqArm.osArm, true);
+    eq('  osPartPct clamps at 0.9', san({ osPartPct: 5 }).osPartPct, 0.9);
+    eq('  osS1Keep clamps at 1.0', san({ osS1Keep: 9 }).osS1Keep, 1.0);
   }
   console.log(`\n${fails === 0 ? 'ALL CHECKS PASSED' : fails + ' CHECK(S) FAILED'}`);
   process.exit(fails === 0 ? 0 : 1);

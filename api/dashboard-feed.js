@@ -279,6 +279,12 @@ async function actionSetSettings(body) {
   // It lives in settings-store DEFAULTS and is only changed in code.
   if (body.stairGive !== undefined)     patch.stairGive = body.stairGive;
   if (body.stairFinal !== undefined)    patch.stairFinal = body.stairFinal;
+  // THE ONE-SHOT
+  if (body.osArm !== undefined)         patch.osArm = body.osArm;
+  if (body.osGive !== undefined)        patch.osGive = body.osGive;
+  if (body.osS1Arm !== undefined)       patch.osS1Arm = body.osS1Arm;
+  if (body.osS1Keep !== undefined)      patch.osS1Keep = body.osS1Keep;
+  if (body.osPartPct !== undefined)     patch.osPartPct = body.osPartPct;
   if (Object.keys(patch).length === 0) return err('no recognised settings in body');
   const result = await setTradeSettings(patch, body.who || 'control-panel');
   if (!result.ok) return err(result.error || 'save failed', 500);

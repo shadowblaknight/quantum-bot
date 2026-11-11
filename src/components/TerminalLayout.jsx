@@ -563,11 +563,22 @@ export default function TerminalLayout({
     ? Math.max(1, Math.floor(
         (Date.now() - new Date(stairSince + 'T00:00:00Z').getTime()) / 86400000) + 1)
     : null;
-  const MODE_SEQ   = ['ratchet', 'staircase', 'tp1', 'final-tp'];
-  const modeLabel  = m => m === 'ratchet' ? 'RATCHET' : m === 'staircase' ? 'STAIRCASE'
-    : m === 'tp1' ? 'TP1' : 'FINAL TP';
-  const modeColor  = m => m === 'ratchet' ? C.green2 : m === 'staircase' ? C.ml2
-    : m === 'tp1' ? C.gold : C.t3;
+  // ── THE ONE-SHOT ──────────────────────────────────────────────────────────
+  // Stage 1 cuts the risk, the lock fires ONCE and is then frozen, a third is
+  // banked at tp1, and no take-profit is ever placed. Distances are in SIGMA
+  // (the hour-of-day unit), not ORB range.
+  const isOneShot  = settings?.exitMode === 'oneshot';
+  const osArm      = settings?.osArm ?? 3.0;
+  const osGive     = settings?.osGive ?? 2.0;
+  const osS1Arm    = settings?.osS1Arm ?? 1.0;
+  const osS1Keep   = settings?.osS1Keep ?? 0.25;
+  const osPartPct  = settings?.osPartPct ?? 0.33;
+
+  const MODE_SEQ   = ['ratchet', 'oneshot', 'staircase', 'tp1', 'final-tp'];
+  const modeLabel  = m => m === 'ratchet' ? 'RATCHET' : m === 'oneshot' ? 'ONE-SHOT'
+    : m === 'staircase' ? 'STAIRCASE' : m === 'tp1' ? 'TP1' : 'FINAL TP';
+  const modeColor  = m => m === 'ratchet' ? C.green2 : m === 'oneshot' ? C.teal2
+    : m === 'staircase' ? C.ml2 : m === 'tp1' ? C.gold : C.t3;
 
   // Everything downstream sizes off this. Falls back to the store default (4%)
   // until the fetch lands, so the panel does not flash a stale 1%.
@@ -1055,6 +1066,7 @@ export default function TerminalLayout({
                   <span style={{fontSize:7,fontFamily:'JetBrains Mono,monospace',
                                 color:modeColor(settings?.exitMode)}}>
                     {!settings?'LOADING…'
+                      :isOneShot?`ONE-SHOT · FROZEN LOCK · NO TP`
                       :isStair?`STAIRCASE · CLOSES AT RUNG ${stairFinal}`
                       :settings.exitMode==='ratchet'?'RATCHET · NO TP'
                       :settings.exitMode==='tp1'?'TP1 · CLOSES AT TP1'
@@ -1078,7 +1090,52 @@ export default function TerminalLayout({
                 )}
 
                 <div style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap',marginBottom:8}}>
-                  {isStair ? (
+                  {isOneShot ? (
+                    <>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>ARM THE LOCK (× σ)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[2.0,2.5,3.0,4.0].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({osArm:v})}
+                              style={{padding:'4px 10px',background:Math.abs(osArm-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(osArm-v)<0.001?C.teal2:C.b2}`,
+                                      color:Math.abs(osArm-v)<0.001?C.teal2:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>{v.toFixed(1)}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>GIVE BACK (× σ)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[1.0,1.5,2.0,3.0].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving||v>=osArm}
+                              onClick={()=>saveSettings({osGive:v})}
+                              style={{padding:'4px 10px',background:Math.abs(osGive-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(osGive-v)<0.001?C.gold:C.b2}`,
+                                      color:v>=osArm?C.t3:Math.abs(osGive-v)<0.001?C.gold:C.t2,fontSize:9,
+                                      opacity:v>=osArm?0.4:1,
+                                      fontFamily:'JetBrains Mono,monospace',
+                                      cursor:v>=osArm?'not-allowed':'pointer'}}>{v.toFixed(1)}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>BANK AT TP1</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0,0.25,0.33,0.5].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({osPartPct:v})}
+                              style={{padding:'4px 10px',background:Math.abs(osPartPct-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(osPartPct-v)<0.001?C.blue3:C.b2}`,
+                                      color:Math.abs(osPartPct-v)<0.001?C.blue3:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                              {(v*100).toFixed(0)}%</button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  ) : isStair ? (
                     <>
                       <div>
                         <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>GIVEBACK (× ONE RUNG)</div>
@@ -1150,7 +1207,51 @@ export default function TerminalLayout({
                   </button>
                 </div>
 
-                {isStair ? (
+                {isOneShot ? (
+                  <>
+                    {/* THE ONE-SHOT, ON A SIGMA AXIS. Three events and then
+                        nothing: the stop is frozen and price runs free, which
+                        is the whole reason a runner can reach +7.79R here
+                        against +2.14R on the staircase. */}
+                    <div style={{background:C.bg,border:`1px solid ${C.b}`,padding:'10px 10px 8px'}}>
+                      <div style={{position:'relative',height:40}}>
+                        {/* the axis */}
+                        <div style={{position:'absolute',left:0,right:0,top:20,height:1,background:C.b2}} />
+                        {[['entry',0,C.t3],
+                          [`stage 1 · ${osS1Arm.toFixed(1)}σ`,osS1Arm,C.blue3],
+                          [`arm · ${osArm.toFixed(1)}σ`,osArm,C.teal2]].map(([lab,at,col])=>{
+                          const span = Math.max(osArm,1)*1.25;
+                          return (
+                            <div key={lab} style={{position:'absolute',left:`${(at/span)*100}%`,top:0}}>
+                              <div style={{width:1,height:40,background:col,opacity:.6}} />
+                              <div style={{position:'absolute',top:-2,left:4,fontSize:7,color:col,
+                                           whiteSpace:'nowrap',fontFamily:'JetBrains Mono,monospace'}}>{lab}</div>
+                            </div>
+                          );
+                        })}
+                        {/* where the stop ends up, frozen */}
+                        <div style={{position:'absolute',left:`${((osArm-osGive)/(Math.max(osArm,1)*1.25))*100}%`,top:22}}>
+                          <div style={{width:1,height:18,background:C.gold}} />
+                          <div style={{position:'absolute',top:12,left:4,fontSize:7,color:C.gold,
+                                       whiteSpace:'nowrap',fontFamily:'JetBrains Mono,monospace'}}>
+                            🧊 frozen at {(osArm-osGive).toFixed(1)}σ
+                          </div>
+                        </div>
+                        <div style={{position:'absolute',right:0,top:-2,fontSize:7,color:C.green2,
+                                     fontFamily:'JetBrains Mono,monospace'}}>runs ∞ →</div>
+                      </div>
+                    </div>
+                    <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
+                      At <span style={{color:C.blue3}}>{osS1Arm.toFixed(1)}σ</span> of best CLOSE the stop cuts to{' '}
+                      <span style={{color:C.blue3}}>−{osS1Keep.toFixed(2)}R</span>. At{' '}
+                      <span style={{color:C.teal2}}>{osArm.toFixed(1)}σ</span> it moves <b>once</b> to{' '}
+                      <span style={{color:C.gold}}>+{(osArm-osGive).toFixed(1)}σ</span> and is then{' '}
+                      <span style={{color:C.gold}}>never moved again</span> — no take-profit is placed, so the runner is uncapped.
+                      {osPartPct>0 && <> <span style={{color:C.blue3}}>{(osPartPct*100).toFixed(0)}%</span> is banked at tp1.</>}
+                      <br/><span style={{color:C.t2}}>σ is this hour's average range over the last 14 days — not the ORB range.</span>
+                    </div>
+                  </>
+                ) : isStair ? (
                   <>
                     {/* THE STAIRCASE, DRAWN. Each step is a rung: the step's
                         height is where price has to reach, the filled band

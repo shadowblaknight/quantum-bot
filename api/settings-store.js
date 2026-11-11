@@ -67,6 +67,35 @@ const DEFAULTS = {
   //              rung spacing rather than received.
   stairGive: 0.5,
   stairFinal: 4,
+
+  // ── THE ONE-SHOT ──────────────────────────────────────────────────────────
+  // 'oneshot' exitMode. Stage 1 cuts the risk early, the lock fires ONCE and
+  // is then FROZEN, a third is banked at tp1, and no take-profit is ever
+  // placed. The freeze is the design: the stop stops chasing, so a winner can
+  // actually run - best win +7.79R against +2.14R for the staircase.
+  //
+  // MEASURED, blend, U dropped, 4.4yr: +47.94R, maxDD 2.47R, R/DD 19.40,
+  // WR 58.1%. ★ AND IT IS THE ONLY ENGINE MEASURED THAT SURVIVES HIS LIVE 4%
+  // RISK: peak drawdown 9.88% and 0.0% breach, against 16.6-22.1% / 17-20%
+  // for the ratchet currently live and for the staircase.
+  //
+  // osArm / osGive are in SIGMA - the hour-of-day unit from session-sigma.js,
+  // NOT ORB range. 3.0/2.0 means: arm when the best CLOSE is 3 sigma up, then
+  // park the stop at entry + 1 sigma. Verified a plateau, not a spike: the
+  // neighbours (2.0/1.0, 4.0/3.0, 2.5/1.5) measure R/DD 16.04, 15.33, 14.73
+  // with breach <= 3.3%, so this is not one lucky cell.
+  //
+  // ⚠ SIGMA IS NOT OPTIONAL. On the ORB range instead - which would have been
+  // free, since the specialist TPs encode it - R/DD falls 19.40 -> 13.86 and
+  // the breach rate returns to 3.9%.
+  osArm: 3.0,
+  osGive: 2.0,
+  osS1Arm: 1.0,
+  osS1Keep: 0.25,
+  // the banked fraction, taken at tp1 (= ORB level + 0.75 x range), which for
+  // a specialist alert IS tpLevels[0] - so there is no separate multiplier to
+  // configure here, unlike the staircase.
+  osPartPct: 0.33,
   // The day he switched to it. Recorded here as well as in Redis so the fact
   // survives a cache flush - a start date that can silently reset is worse
   // than no start date, because day counts would quietly restart.
@@ -161,6 +190,14 @@ function sanitize(s) {
   let ladder = sanitizeLadder(base.ladder);
   // A rung at or beyond the final target can never fire — drop those.
   ladder = ladder.filter(r => r.trigger < tpR);
+  // ONE-SHOT: the giveback must stay strictly BELOW the arm. At osGive >=
+  // osArm the lock would be placed at or beyond the price that armed it and
+  // would fill on the very next tick, turning a 3-sigma runner into an
+  // instant scratch. Clamping the two independently cannot catch that, so
+  // the RELATION is enforced here.
+  const _osArm = clampNum(base.osArm, 0.5, 10.0, DEFAULTS.osArm);
+  let _osGive  = clampNum(base.osGive, 0.1, 9.0, DEFAULTS.osGive);
+  if (_osGive >= _osArm) _osGive = Math.max(0.1, +(_osArm * 0.5).toFixed(3));
   return {
     riskPct: clampNum(base.riskPct, MIN_RISK_PCT, MAX_RISK_PCT, DEFAULTS.riskPct),
     // 'tp1' added 2026-09-30. Measured on the G+H+M+U baseline, 3y, same
@@ -172,8 +209,16 @@ function sanitize(s) {
     // the number that decides whether 4% risk survives a losing streak.
     // Anything unrecognised still falls back to 'ratchet', so a bad write
     // can never invent a mode. 'staircase' added 2026-11-11.
-    exitMode: ['final-tp', 'tp1', 'staircase'].includes(base.exitMode)
+    exitMode: ['final-tp', 'tp1', 'staircase', 'oneshot'].includes(base.exitMode)
       ? base.exitMode : 'ratchet',
+    // osGive must stay BELOW osArm or the lock would sit at or beyond the
+    // price that armed it and fill on the spot. That relation is enforced
+    // after both are clamped, below.
+    osArm:    _osArm,
+    osGive:   _osGive,
+    osS1Arm:  clampNum(base.osS1Arm,  0.0,  5.0, DEFAULTS.osS1Arm),
+    osS1Keep: clampNum(base.osS1Keep, 0.0,  1.0, DEFAULTS.osS1Keep),
+    osPartPct: clampNum(base.osPartPct, 0.0, 0.9, DEFAULTS.osPartPct),
     // stairGive is capped at 0.60, NOT 0.95. See the note on DEFAULTS: past
     // ~0.667 the rung-1 stop lands at or below the entry and the engine stops
     // locking profit at all. This clamp is the only thing standing between a
