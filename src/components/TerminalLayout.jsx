@@ -1134,6 +1134,39 @@ export default function TerminalLayout({
                           ))}
                         </div>
                       </div>
+                      {/* STAGE 1 — the half of the engine that cuts losses.
+                          Without these two controls the panel exposed only
+                          the lock, so "full control" was not true. */}
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>STAGE 1 ARM (× σ)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0,0.5,1.0,1.5].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              onClick={()=>saveSettings({osS1Arm:v})}
+                              style={{padding:'4px 10px',background:Math.abs(osS1Arm-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(osS1Arm-v)<0.001?C.blue3:C.b2}`,
+                                      color:Math.abs(osS1Arm-v)<0.001?C.blue3:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                              {v===0?'off':v.toFixed(1)}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>STAGE 1 KEEPS (× R)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0,0.25,0.5,0.75].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving||osS1Arm<=0}
+                              onClick={()=>saveSettings({osS1Keep:v})}
+                              style={{padding:'4px 10px',background:Math.abs(osS1Keep-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(osS1Keep-v)<0.001?C.blue3:C.b2}`,
+                                      color:osS1Arm<=0?C.t3:Math.abs(osS1Keep-v)<0.001?C.blue3:C.t2,
+                                      fontSize:9,opacity:osS1Arm<=0?0.4:1,
+                                      fontFamily:'JetBrains Mono,monospace',
+                                      cursor:osS1Arm<=0?'not-allowed':'pointer'}}>
+                              {v===0?'BE':`−${v.toFixed(2)}`}</button>
+                          ))}
+                        </div>
+                      </div>
                     </>
                   ) : isStair ? (
                     <>

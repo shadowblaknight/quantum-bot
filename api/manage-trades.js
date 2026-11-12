@@ -858,16 +858,32 @@ async function managePosition(position) {
           && isFinite(state.osLockPx)) {
         _cands.push(['lock', state.osLockPx]);
       }
-      for (const [nm, px] of _cands) {
-        const valid    = isLong ? px <= currentPrice - stopBuffer : px >= currentPrice + stopBuffer;
+      for (const [nm, px0] of _cands) {
+        // CLAMP to a broker-valid stop instead of discarding the level. This
+        // is g15's `max(old, min(candidate, close))`: if price has already
+        // retraced past the level, the stop goes as close as the broker
+        // allows rather than being skipped entirely. Because the candidate
+        // is a FIXED price, this stops moving the moment price clears it -
+        // so it cannot become a trail, which is what the retrace lock would
+        // have done.
+        const px = isLong
+          ? Math.min(px0, currentPrice - stopBuffer)
+          : Math.max(px0, currentPrice + stopBuffer);
         const improves = curSL == null ? true : (isLong ? px > curSL : px < curSL);
-        if (!valid || !improves) continue;
+        if (!improves) continue;
         if (chosen == null
             || (isLong ? px > chosen.price : px < chosen.price)) {
           chosen = { name: `os-${nm}`, price: px };
         }
       }
     }
+  } else if (_osOK) {
+    // ONE-SHOT with no sigma. Deliberately does NOTHING: without sigma there
+    // is no measured distance to place a stop at, and falling through to the
+    // specialist cascade below would silently run a DIFFERENT engine - SL to
+    // breakeven at TP1, SL to TP1 at TP2 - on a position he set to one-shot.
+    // The trade keeps its original stop and `oneshot-no-sigma` is reported
+    // on every tick.
   } else if (_stairOK) {
     // ─── HIS STAIRCASE ───────────────────────────────────────────────
     //   cleared rung n -> SL to rung (n - stairGive)
@@ -886,12 +902,16 @@ async function managePosition(position) {
     const cleared = Math.floor(_stairReach);
     if (cleared >= 1) {
       const lockRung = cleared - _qbSettings.stairGive;
-      const slTarget = isLong
+      const slTarget0 = isLong
         ? _stairLevel + lockRung * _stairStep
         : _stairLevel - lockRung * _stairStep;
-      const valid    = isLong ? slTarget <= currentPrice - stopBuffer : slTarget >= currentPrice + stopBuffer;
+      // same clamp as the one-shot, and for the same reason: a fixed level
+      // placed as close as the broker allows, never a moving one
+      const slTarget = isLong
+        ? Math.min(slTarget0, currentPrice - stopBuffer)
+        : Math.max(slTarget0, currentPrice + stopBuffer);
       const improves = curSL == null ? true : (isLong ? slTarget > curSL : slTarget < curSL);
-      if (valid && improves) {
+      if (improves) {
         chosen = { name: `stair-r${cleared}@${lockRung.toFixed(2)}`, price: slTarget };
       }
     }
@@ -969,7 +989,16 @@ async function managePosition(position) {
   // original SL. Fix: lock at currentPrice - stopBuffer (any positive profit above
   // entry) so at least some R is captured. This fires repeatedly until a better
   // (improving) level exists — it self-cancels once the normal ratchet can fire.
-  if (!chosen && USE_SL_RATCHET && hitRungs.length > 0) {
+  // ★★ NOT FOR THE ONE-SHOT OR THE STAIRCASE. Both place their stop at a
+  // DELIBERATE, FIXED level and then leave it there. Once the stop is at that
+  // level `improves` is false, so `chosen` is null on every later tick - and
+  // this block would then fire repeatedly and drag the stop up to just behind
+  // price, turning a frozen lock into a tight trail. That is the single
+  // property both engines exist to avoid, and it is measured: arming/trailing
+  // closer takes the one-shot from R/DD 19.40 to 4.90 and his staircase from
+  // totR +17.14 to +6.83. The retrace lock stays on for 'ratchet', 'tp1' and
+  // the legacy cascade, which were all built expecting it.
+  if (!chosen && USE_SL_RATCHET && hitRungs.length > 0 && !_osOK && !_stairOK) {
     const retraceLock = isLong ? currentPrice - stopBuffer : currentPrice + stopBuffer;
     const locksProfit = isLong
       ? retraceLock > state.entry + pipSz
