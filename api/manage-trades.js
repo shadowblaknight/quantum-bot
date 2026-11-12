@@ -824,11 +824,20 @@ async function managePosition(position) {
     if (typeof _bc === 'number' && isFinite(_bc)) {
       const _exc = isLong ? (_bc - state.entry) : (state.entry - _bc);
       const _cands = [];
-      if (!state.osS1 && _exc >= _qbSettings.osS1Arm * _osSigma) {
+      // ★★ osS1Arm <= 0 MEANS OFF, NOT "ARM IMMEDIATELY".
+      // Without this guard, `_exc >= 0 * sigma` is true the moment the trade
+      // is at or above breakeven, so stage 1 would fire on the FIRST tick and
+      // park the stop at entry - 0.25 x risk on every trade, forever. The
+      // panel offers 0 labelled "off", so the UI would have promised the
+      // exact opposite of what the engine did - and stage 1 pulling the stop
+      // to a LOSS while a trade has not yet proven anything is precisely the
+      // behaviour he objected to. Same bug class as trailArm = 0 meaning
+      // "arm at zero excursion" rather than "no trail".
+      const _s1on = _qbSettings.osS1Arm > 0;
+      if (_s1on && !state.osS1 && _exc >= _qbSettings.osS1Arm * _osSigma) {
         state.osS1 = true;
-        _cands.push(['s1', state.entry - (isLong ? 1 : -1)
-          * _qbSettings.osS1Keep * initialSLForR]);
-      } else if (state.osS1) {
+      }
+      if (_s1on && state.osS1) {
         _cands.push(['s1', state.entry - (isLong ? 1 : -1)
           * _qbSettings.osS1Keep * initialSLForR]);
       }

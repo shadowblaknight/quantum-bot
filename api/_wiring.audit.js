@@ -153,6 +153,15 @@ chk(!!cm && +cm[1] >= 1200, 'candle budget >= 1200 ms',
 chk(WH.includes('probeBudgetMs'),
     'a probe failure logs the budgets that were in force');
 
+// ZERO MUST MEAN OFF, not "arm at zero excursion". The panel labels osS1Arm 0
+// as "off"; without an explicit > 0 guard the engine fires stage 1 on the
+// first tick of every trade and pulls the stop to a LOSS — the opposite of
+// what the control says, and exactly the behaviour he objected to. Same bug
+// class as trailArm = 0.
+chk(MT.includes('_s1on = _qbSettings.osS1Arm > 0'),
+    'osS1Arm <= 0 is treated as OFF, not arm-immediately');
+chk(/_s1on && !state\.osS1/.test(MT), 'the stage-1 latch respects that guard');
+
 console.log('\n=== 12. sigma, the unit the one-shot measures in ===');
 const SS = require('./session-sigma.js');
 chk(typeof SS.hourSigma === 'function', 'session-sigma.hourSigma exists');
