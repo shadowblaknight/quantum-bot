@@ -136,7 +136,24 @@ for (const [fn, label] of [['notifyStaircaseRung', 'staircase rung'],
   chk(MT.includes(fn), `${label}: imported and called in manage-trades`);
 }
 
-console.log('\n=== 11. sigma, the unit the one-shot measures in ===');
+console.log('\n=== 11. the price probe is given a broker-sized budget ===');
+// Regression guard for the 2026-11-12 08:30 skip: the probe gave the broker
+// 2500 ms against a BROKER_TIMEOUT_MS of 14000, so a patient call was
+// abandoned and a live gold signal was dropped. Same bug class as 9cce80b on
+// the dashboard path. If anyone tightens this back toward 2.5 s, say so here
+// rather than discovering it from a missed trade.
+const qm = /_PROBE_QUOTE_MS\s*=\s*(\d+)/.exec(WH);
+chk(!!qm, 'the quote budget is a named constant');
+if (qm) {
+  chk(+qm[1] >= 5000, 'quote budget >= 5000 ms', `= ${qm[1]} ms`);
+}
+const cm = /_PROBE_CANDLE_MS\s*=\s*(\d+)/.exec(WH);
+chk(!!cm && +cm[1] >= 1200, 'candle budget >= 1200 ms',
+    cm ? `= ${cm[1]} ms` : undefined);
+chk(WH.includes('probeBudgetMs'),
+    'a probe failure logs the budgets that were in force');
+
+console.log('\n=== 12. sigma, the unit the one-shot measures in ===');
 const SS = require('./session-sigma.js');
 chk(typeof SS.hourSigma === 'function', 'session-sigma.hourSigma exists');
 chk(SS.LOOK === 14, 'lookback is 14 days, as the backtest');

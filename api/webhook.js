@@ -894,11 +894,48 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     // stops running. Left alone deliberately: widening it would change routing
     // for sp500 / nas100 / gbpusd / ger40, none of which has been backtested
     // against a drift guard.
+    // ★★ THE PROBE BUDGET, FIXED 2026-11-12 after a live skip.
+    //
+    // 2026-11-12 08:30:11 UTC, gold-specialist SHORT: both probes missed and
+    // the signal was dropped. The cause was a timeout mismatch, not a broker
+    // outage - the NEXT signal at 09:00 placed and filled normally.
+    //
+    //   the probe gave the broker   2500 ms
+    //   broker.js is configured at  BROKER_TIMEOUT_MS   = 14000
+    //                               BROKER_MAX_ATTEMPTS = 2   (up to 28 s)
+    //
+    // So a call designed to be patient was abandoned after 2.5 s. This is the
+    // SAME BUG as 9cce80b "fix(dashboard): broker calls were given 2s against
+    // a 14s broker" - found and fixed on the dashboard path, never fixed here
+    // on the ORDER path, which is the one that costs a trade.
+    //
+    // WHY IT FIRED AT 08:30:11 AND NOT AT RANDOM. The 5m candle cache has a
+    // 300 s TTL and 08:30 is a 5m boundary, so the entry had just rolled over.
+    // The London ORB trade window opens at exactly 08:30, and nothing else
+    // keeps 5m warm (manage-trades only touches 1m and 1h). So the cheap path
+    // is COLDEST precisely when Signal G fires, and the expensive path was
+    // then cut off at 2.5 s. The code comment below already recorded 4 of 17
+    // gold routings reaching this skip - about a quarter - and this is why.
+    //
+    // BUDGET: webhook.js has maxDuration 30 in vercel.json, and the rest of
+    // the placement path measures ~2 s end to end (entry-routing 09:00:10.232
+    // -> trade-placed 09:00:12.138). The probe was using 4.9 s of 30. Now 10 s,
+    // which still leaves ~18 s of headroom.
+    //
+    // Deliberately NOT changed: which price is used when the probe succeeds.
+    // Reordering to ask the broker first would be more accurate - it is the
+    // ask/bid from the very account receiving the order - but it would move
+    // the price every signal's drift guard is judged against, and that has
+    // not been backtested. A timeout fix must not quietly re-route pricing.
+    const _PROBE_CANDLE_MS = 1500;   // was 1200
+    const _PROBE_ATTEMPTS  = 2;
+    const _PROBE_QUOTE_MS  = 7000;   // was 2500, against a 14000 ms broker
+
     let _cur = null, _bar = null;
     try {
       const { fetchCandles: _fcSrc } = require('./candle-source');
-      for (let _att = 0; _att < 2 && _cur == null; _att++) {
-        const _cr   = await withTimeout(_fcSrc(assetId, '5m', 3), 1200, null);
+      for (let _att = 0; _att < _PROBE_ATTEMPTS && _cur == null; _att++) {
+        const _cr   = await withTimeout(_fcSrc(assetId, '5m', 3), _PROBE_CANDLE_MS, null);
         const _last = _cr && _cr.candles && _cr.candles.length ? _cr.candles[_cr.candles.length - 1] : null;
         if (_last && isFinite(_last.close)) { _cur = _last.close; _bar = _last; _dbgProbeSrc = 'candles'; }
       }
@@ -926,7 +963,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
     // probe succeeded, so no signal that is placed today changes behaviour.
     if (_cur == null) {
       try {
-        const _q = await withTimeout(fetchPrice(assetId), 2500, null);
+        const _q = await withTimeout(fetchPrice(assetId), _PROBE_QUOTE_MS, null);
         if (_q && !_q.error) {
           const _side = isLong ? _q.ask : _q.bid;
           const _px   = isFinite(_side) ? _side : (isFinite(_q.price) ? _q.price : null);
@@ -943,6 +980,13 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         type: 'placement-skipped', asset: assetId, template: p.template,
         direction: p.direction, reason: 'price-probe-failed',
         signalEntry: rEntry, marketPrice: null, probeSrc: null,
+        // the budgets that were actually in force, so the next occurrence is
+        // diagnosable from the log alone instead of from source archaeology
+        probeBudgetMs: {
+          candle: _PROBE_CANDLE_MS, attempts: _PROBE_ATTEMPTS,
+          quote: _PROBE_QUOTE_MS,
+          brokerTimeout: parseInt(process.env.BROKER_TIMEOUT_MS, 10) || 14000,
+        },
       });
       try {
         await sendOnce(`webhook-noprobe:${dedupeKey}`,
