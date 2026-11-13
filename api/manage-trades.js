@@ -656,7 +656,14 @@ async function managePosition(position) {
   // CLOSED count, and only bars at or after the fill bar. The high-water
   // lives in state, so a missed cron tick costs nothing as long as the next
   // fetch still covers the gap - 60 bars is 15 hours of cover.
-  if (_osOK && _osSigma) {
+  // ★ THE STAIRCASE ALSO ARMS ON THE BAR CLOSE, not the extreme.
+  // It was reading `extreme`, which fires a rung on a bar that merely WICKS
+  // through it. Measured on 4.4yr: arming the staircase off the extreme gives
+  // totR +6.83 / R/DD 1.70, against +17.14 / 3.33 off the close - the live
+  // engine was the 2.5x WORSE variant of the one that was backtested. It also
+  // matters for his rule "don't move it at all until it hit tp1": the close
+  // arms LATER than a wick, so this moves the stop less eagerly, not more.
+  if ((_osOK && _osSigma) || _stairOK) {
     try {
       const _BAR = 15 * 60 * 1000;
       const _cr = await fetchCandles(asset, '15m', 60);
@@ -686,7 +693,10 @@ async function managePosition(position) {
     // THE BANKED THIRD, at tp1 = ORB level + 0.75 x range = tpLevels[0].
     // Fires on the same CONFIRMED touch the TP detector uses, so it is a
     // touch price has genuinely traded through, not a wick.
-    const _pp = _qbSettings.osPartPct;
+    // ONE-SHOT ONLY — the staircase shares the close tracker above but banks
+    // nothing, so this must stay gated on _osOK or switching to the staircase
+    // would start closing a third of every position.
+    const _pp = _osOK ? _qbSettings.osPartPct : 0;
     if (_pp > 0 && !state.osPartDone && state.tpsHit.includes('TP1')) {
       // 0.01 is the gold lot step. Both legs must clear it or the broker
       // rejects the order and the position is left in an odd state.
@@ -731,9 +741,15 @@ async function managePosition(position) {
   // close check and the stop both need it.
   let _stairReach = null;
   if (_stairOK) {
+    // ★ FROM THE BAR CLOSE, NOT THE EXTREME. See the tracker above: the wick
+    // version measures 2.5x worse and arms a rung on a bar that only poked
+    // through it. Falls back to the extreme ONLY while no 15m bar has closed
+    // since the fill, so a brand-new trade is not left unmanaged.
+    const _ref = (typeof state.osBestClose === 'number'
+      && isFinite(state.osBestClose)) ? state.osBestClose : extreme;
     const r = isLong
-      ? (extreme - _stairLevel) / _stairStep
-      : (_stairLevel - extreme) / _stairStep;
+      ? (_ref - _stairLevel) / _stairStep
+      : (_stairLevel - _ref) / _stairStep;
     state.maxReach = Math.max(state.maxReach || 0, r);
     _stairReach = state.maxReach;
 
@@ -1149,7 +1165,15 @@ async function managePosition(position) {
   const profitDistance = isLong ? currentPrice - state.entry : state.entry - currentPrice;
   const profitR = initialSLDistance > 0 ? profitDistance / initialSLDistance : 0;
 
-  if (USE_TRAILING_STOP && profitR >= 2.0 && state.tpsHit.length >= 2) {
+  // ★★ NOT FOR THE ONE-SHOT OR THE STAIRCASE. This is an independent ATR
+  // trail: after 2R and two TPs it drags the stop to currentPrice - 1 x ATR(1h)
+  // and re-tightens every 15 minutes. On either engine that OVERRIDES the
+  // level the engine deliberately chose - the staircase's rung, or the
+  // one-shot's frozen lock - and converts it into exactly the trail both
+  // exist to avoid. It never appeared in the backtest of either, because g15
+  // has no such block.
+  if (USE_TRAILING_STOP && !_osOK && !_stairOK
+      && profitR >= 2.0 && state.tpsHit.length >= 2) {
     const candles = await fetchCandles(asset, '1h', 30);
     const atrValue = atr(candles.candles || [], 14);
     if (atrValue) {
@@ -1178,7 +1202,17 @@ async function managePosition(position) {
   // ORB trades must close within 30 min. If no TP1 hit after 30 min, the momentum
   // is gone — move SL to break-even so the trade exits at zero rather than a full loss.
   // Does not fire if SL was already moved (state.slMoves.length > 0).
-  if (isScalp && USE_SL_RATCHET && state.tpsHit.length === 0 && state.slMoves.length === 0 && !state.scalpTimeoutLocked) {
+  // ★★ HIS RULE, 2026-11-13: "don't move sL to Be or -0.25 don't move it at
+  // all untill it hit tp1". This block is the only automatic path in the file
+  // that moves a stop BEFORE TP1 — it drags it to breakeven after 30 minutes
+  // with `state.tpsHit.length === 0`, i.e. precisely when TP1 has NOT been
+  // hit. It does not currently reach his gold trades (isScalp needs template
+  // 'orb' or style 'scalp', and the gold specialist resolves to style 'day'),
+  // but it is one config edit away from doing so, and he asked for the rule
+  // to hold absolutely rather than by accident. So both engines are excluded
+  // explicitly, and the exclusion is asserted in _wiring.audit.js.
+  if (isScalp && USE_SL_RATCHET && !_osOK && !_stairOK
+      && state.tpsHit.length === 0 && state.slMoves.length === 0 && !state.scalpTimeoutLocked) {
     const openMinutes = (Date.now() - (state.createdAt || Date.now())) / 60000;
     if (openMinutes >= 30) {
       const beSL      = isLong ? state.entry : state.entry;

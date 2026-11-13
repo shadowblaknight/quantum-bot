@@ -128,6 +128,24 @@ chk(/\} else if \(_osOK\) \{/.test(MT),
     'oneshot without sigma falls through to NOTHING, not the cascade');
 chk(MT.includes('state.osLockPx'), 'the lock price is frozen in state, not recomputed');
 
+// HIS RULE, 2026-11-13: nothing may move the stop before TP1. There are FOUR
+// modifyPosition call sites in this file, not one, and auditing only the
+// `chosen` path missed two of them. All three automatic ones are checked.
+chk(/USE_TRAILING_STOP && !_osOK && !_stairOK/.test(MT),
+    'the independent ATR trail excludes both engines');
+chk(/isScalp && USE_SL_RATCHET && !_osOK && !_stairOK/.test(MT),
+    'the 30-min scalp breakeven excludes both engines');
+chk(/cleared >= 1/.test(MT),
+    'the staircase moves the stop only once a whole rung is CLEARED');
+chk(MT.includes('(_osOK && _osSigma) || _stairOK'),
+    'the staircase arms on the bar CLOSE, not the wick');
+{
+  // exactly four modifyPosition sites are known and accounted for; a fifth
+  // would be an unaudited way to move a live stop
+  const n = (MT.match(/await modifyPosition\(/g) || []).length;
+  chk(n === 4, 'no NEW stop-modifying call site has appeared', `found ${n}`);
+}
+
 console.log('\n=== 10. notifications ===');
 for (const [fn, label] of [['notifyStaircaseRung', 'staircase rung'],
                             ['notifyOneShotEvent', 'oneshot bank/lock']]) {
