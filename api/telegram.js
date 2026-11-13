@@ -313,15 +313,51 @@ async function notifyStaircaseRung({ positionId, asset, direction, rung, slRung,
 async function notifySpecialistSLLocked({ positionId, asset, direction, tpName, slPrice, rMult }) {
   const dedupeKey  = `tplock:${positionId}:${tpName}`;
   const isBE       = tpName.endsWith('-be');
-  const label      = isBE ? `BE locked 🔒` : `SL → TP${parseInt(tpName.replace('TP','').replace('-be',''))-1} 🔒`;
-  const emoji      = isBE ? '🛡' : '🔒';
   const isLong     = direction === 'LONG';
+
+  // ★ "SL → TPNaN". The old label assumed tpName was always "TP<n>" and did
+  // parseInt(tpName) - 1. The new engines name their moves after what they
+  // ARE - "stair-r2@1.50", "os-lock", "os-s1", "trail-1.70x" - so parseInt
+  // returned NaN and he was sent "SL → TPNaN 🔒" on every live rung. Each
+  // family now names itself.
+  const m = /^stair-r(\d+)@([\d.]+)/.exec(tpName);
+  let label, emoji;
+  if (m) {
+    label = `SL → rung ${m[2]} 🪜`;
+    emoji = '🪜';
+  } else if (tpName === 'os-lock') {
+    label = 'Stop FROZEN 🧊';
+    emoji = '🧊';
+  } else if (tpName === 'os-s1') {
+    label = 'Risk cut 🛡';
+    emoji = '🛡';
+  } else if (tpName.startsWith('trail-')) {
+    label = 'Trail locked 🔒';
+    emoji = '🔒';
+  } else if (isBE) {
+    label = 'BE locked 🔒';
+    emoji = '🛡';
+  } else {
+    const n = parseInt(tpName.replace('TP', '').replace('-be', ''), 10);
+    label = Number.isFinite(n) ? `SL → TP${n - 1} 🔒` : 'SL moved 🔒';
+    emoji = '🔒';
+  }
+
+  // ⚠ AND THE TAIL WAS A LIE ON SMALL LOCKS. "Trade is risk-free" was printed
+  // unconditionally, including when the stop had been moved to +0.045R - 2.5
+  // points on a 55-point risk - which is breakeven in all but name. It is
+  // only risk-free once the stop is actually past the entry by something
+  // worth having, so say what was locked instead of claiming safety.
+  const r = (rMult != null && isFinite(rMult)) ? rMult : null;
+  const tail = r == null ? 'Stop moved.'
+    : r >= 0.20 ? `Locked ${r.toFixed(2)}R — the trade cannot lose from here.`
+    : r > 0      ? `Locked ${r.toFixed(3)}R — effectively breakeven, not a win yet.`
+    : `Stop at ${r.toFixed(2)}R — loss capped, NOT risk-free.`;
 
   const text =
     `${emoji} <b>${label} — ${assetLabel(asset)}</b>\n\n` +
-    `${isLong ? '🟢' : '🔴'} ${direction}  ·  SL now ${pFmt(slPrice, asset)}` +
-    (rMult != null ? `  (${rMult.toFixed(1)}R protected)` : '') +
-    `\nTrade is risk-free — riding to final TP`;
+    `${isLong ? '🟢' : '🔴'} ${direction}  ·  SL now ${pFmt(slPrice, asset)}\n` +
+    tail;
 
   return sendOnce(dedupeKey, text);
 }
