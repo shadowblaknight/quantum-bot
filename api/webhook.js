@@ -857,8 +857,40 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
   // This routes gold-specialist through the PROBE branch rather than straight
   // to market, deliberately: the probe is what supplies a live price, and the
   // run-past guard below it is the only thing stopping an unbounded chase.
-  const GOLD_MARKET_ENTRY = true;
-  const _forceMkt = GOLD_MARKET_ENTRY && p.template === 'gold-specialist';
+  //
+  // ★ SUPERSEDED 2026-11-16. The 0.75-point miss above is real, but it is one
+  // trade. Measured over the 4.4yr blend with the SAME staircase exit in both
+  // arms, and the market chase calibrated to the three real `entry-routing`
+  // events in this account's own activity log (7.47 / 13.75 / 4.41 pts,
+  // mean 8.4):
+  //
+  //     limit  at the signal entry   685 tr  89.05% WR  +$126/trade
+  //     market at the live chase     731 tr  72.09% WR  -$136/trade
+  //
+  // The reason is geometric, not statistical. Every staircase rung is anchored
+  // on the ORB LEVEL and the stop is level - c2SLBuf, so each point of chase
+  // is subtracted from the ladder AND added to the risk. On 2026-11-16: entry
+  // 7.89 pts past the signal price turned a 20.28-pt / 50-pt ladder into a
+  // 10.70-pt / 59.58-pt one, 0.41R of room down to 0.18R, and the win came in
+  // at $207 where the signal price would have paid $853. Breakeven is a
+  // 1.7-pt chase. See bt/f99_calibrate.py, [[entry-chase-kills-staircase]].
+  //
+  // Now a SETTING, so it is his call from the panel rather than mine in a
+  // constant, and so the two arms stay A/B-able live.
+  //
+  // ★ THE FALLBACK IS 'market', NOT 'limit', and that is deliberate. He chose
+  // market explicitly on 2026-11-17 ("No entry mode stays market"). If the
+  // settings read fails - a Redis hiccup, a cold start - the routing must
+  // degrade to the arm he CHOSE, not to the one I prefer. A failed read is
+  // not a change of mind. Also: the -$136/trade figure in the note above was
+  // a calibration error, corrected to +$96 (see settings-store DEFAULTS); the
+  // real gap is $30/trade, which never justified overriding an explicit call.
+  const _entryMode = (_qbSet && _qbSet.entryMode) || 'market';
+  const _forceMkt = _entryMode === 'market' && p.template === 'gold-specialist';
+  // When the order is going to REST, the run-past guard below must not fire:
+  // a limit is precisely the right response to price having run past, and
+  // skipping the signal throws away the pullback the limit exists to catch.
+  const _restingOK = _entryMode === 'limit' && p.template === 'gold-specialist';
 
   let entryType = 'retest';
   let useMarket = false;
@@ -1056,7 +1088,7 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       ? Math.max(_room, pipSz * 5)
       : Math.max(Math.abs(rEntry - rSL) * 0.25, pipSz * 10);
 
-    if (_drift >= _budget) {
+    if (_drift >= _budget && !(_restingOK && _canLimit)) {
       await logActivity({
         type: 'placement-skipped', asset: assetId, template: p.template,
         direction: p.direction, reason: 'ran-past-target',
@@ -1341,7 +1373,16 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       ].filter((t) => t.price != null),
       newsFeature: { newsState: 'none', highImpactWithin60min: false },
       createdAt: Date.now(),
-      expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+      // A RESTING limit must die with its session. The backtest cancels each
+      // signal's pending order when its trade window closes (London 150 min,
+      // Frankfurt 210, NY 180, Sydney 90); a flat 4 h let a London limit sit
+      // 90 min past that and fill during NY against a stale 08:00 level, with
+      // the stop anchored to an ORB that is hours old - the same class of gap
+      // as [[blind-window-1600-2200]]. Market fills are instant, so this only
+      // binds on the limit path.
+      expiresAt: (!useMarket && _sessionClosesAt)
+        ? Math.min(_sessionClosesAt, Date.now() + 4 * 60 * 60 * 1000)
+        : Date.now() + 4 * 60 * 60 * 1000,
       status: 'placed',
       brokerOrderId: placement.orderId, comment, positionId: null,
       entryType, execKind: useMarket ? 'market' : 'limit',

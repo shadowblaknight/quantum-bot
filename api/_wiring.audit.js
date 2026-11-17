@@ -26,6 +26,9 @@ const { DEFAULTS, sanitizeForTest } = require('./settings-store');
 const R = (f) => fs.readFileSync(path.join(__dirname, f), 'utf8');
 const UI = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'components', 'TerminalLayout.jsx'), 'utf8');
+// whitespace-stripped view of the panel, for checks that must not depend on
+// how a JSX expression happens to be line-wrapped
+const UIC = UI.replace(/\s+/g, '');
 const FEED = R('dashboard-feed.js');
 const MT = R('manage-trades.js');
 const WH = R('webhook.js');
@@ -39,8 +42,9 @@ function chk(ok, label, detail) {
 
 // knobs the user must be able to change from the panel
 const WRITABLE = {
-  staircase: ['stairGive', 'stairFinal'],
+  staircase: ['stairGive', 'stairFinal', 'stairArm', 'stairQ'],
   oneshot:   ['osArm', 'osGive', 'osS1Arm', 'osS1Keep', 'osPartPct'],
+  entry:     ['entryMode'],
 };
 // deliberately read-only: a historical fact a control could erase by accident
 const READONLY = ['staircaseSince'];
@@ -80,7 +84,12 @@ for (const k of READONLY) {
 console.log('\n=== 4. the panel has a control for every writable knob ===');
 for (const keys of Object.values(WRITABLE)) {
   for (const k of keys) {
-    chk(UI.includes(`saveSettings({${k}:`), `panel can write ${k}`);
+    // UIC is the panel with ALL whitespace stripped, so a line break after
+    // `saveSettings({` cannot hide a control that is really there. A plain
+    // includes() on UI reported entryMode as a broken link on 2026-11-17
+    // while the button was wired correctly - a false FAIL in an audit is as
+    // expensive as a missed one, because it trains you to ignore the output.
+    chk(UIC.includes(`saveSettings({${k}:`), `panel can write ${k}`);
   }
 }
 
@@ -152,6 +161,77 @@ for (const [fn, label] of [['notifyStaircaseRung', 'staircase rung'],
   const tg = require('./telegram.js');
   chk(typeof tg[fn] === 'function', `${label}: ${fn} exported`);
   chk(MT.includes(fn), `${label}: imported and called in manage-trades`);
+}
+
+console.log('\n=== 10b. ENTRY ROUTING (2026-11-16) ===');
+// The chase is worth more than the entire exit search: -$136/trade at the
+// live 8.4-pt chase against +$126 resting at the signal entry. Three things
+// have to hold or the limit arm is not the arm that was measured.
+// HIS CALL, 2026-11-17: "No entry mode stays market". The deployed settings
+// blob predates this key, so a 'limit' default would silently flip live
+// routing the moment this ships.
+chk(sanitizeForTest({}).entryMode === 'market',
+    'the default is MARKET, as he decided');
+chk(sanitizeForTest({ entryMode: 'market' }).entryMode === 'market',
+    'market is still selectable for a live A/B');
+chk(sanitizeForTest({ entryMode: 'limit' }).entryMode === 'limit',
+    'limit is still selectable');
+chk(sanitizeForTest({ entryMode: 'nonsense' }).entryMode === 'market',
+    'junk -> market, never a third routing mode');
+chk(!WH.includes('const GOLD_MARKET_ENTRY = true'),
+    'the hardcoded GOLD_MARKET_ENTRY const is gone');
+chk(/_forceMkt = _entryMode === 'market'/.test(WH),
+    'webhook routes on the setting, not a constant');
+// A limit IS the right answer to price having run past, so the run-past guard
+// must yield to an order that is going to rest. Without this the limit arm
+// silently drops exactly the pullback trades it exists to catch.
+chk(/_drift >= _budget && !\(_restingOK && _canLimit\)/.test(WH),
+    'the run-past guard yields to a resting limit');
+// And a resting limit must die with its session, or a London order fills in
+// NY against a stale 08:00 level. The backtest cancels at the window close
+// (London 150 min, Frankfurt 210, NY 180, Sydney 90); production used a flat
+// 4 h, which is longer than every one of them.
+chk(/expiresAt: \(!useMarket && _sessionClosesAt\)/.test(WH),
+    'an unfilled limit expires with its session, not after a flat 4 h');
+
+console.log('\n=== 10c. THE ARM AND THE STOP GRID (2026-11-17) ===');
+// FIX 2. Production had no entry-anchored arm at all, so with a market fill
+// past the ORB level rung 1 was cleared at open and a 59.6-pt stop became
+// 7.1 pt on the first tick. Over 4.4yr that is worse than having NO staircase
+// ($13/trade vs $246), and 20 of 20 coin-flip arm times beat it. The arm must
+// gate the stop move, be measured from the FILL, and be in RANGE units.
+chk(sanitizeForTest({}).stairArm === 1.25,
+    'the default arm is the derived 1.25 ranges');
+chk(sanitizeForTest({ stairArm: 0 }).stairArm === 0,
+    'arm 0 stays reachable for a deliberate A/B');
+chk(sanitizeForTest({ stairArm: 99 }).stairArm === 3.0,
+    'arm is capped at 3.00 ranges');
+chk(/if \(_gain >= _armDist\) state\.stairArmed = true/.test(MT),
+    'the arm latches in state, so a retrace cannot disarm it');
+chk(/const _armDist = _qbSettings\.stairArm \* \(_stairStep \/ STAIR_RUNG_STEP\)/
+    .test(MT),
+    'the arm is measured in ORB-RANGE units, recovered from the rung spacing');
+chk(MT.includes('const STAIR_RUNG_STEP = 0.75'),
+    'the rung step mirrors the Pine c2TpMult');
+chk(/const _gain = isLong \? \(_ref - state\.entry\) : \(state\.entry - _ref\)/
+    .test(MT),
+    'the arm is measured from the FILL, not the ORB level');
+chk(/if \(cleared >= 1 && _stairArmed\)/.test(MT),
+    'NO stop move at all before the arm clears');
+chk(MT.includes("action: 'stair-unarmed'"),
+    'an unarmed trade is reported, not silently unmanaged');
+// FIX 1. floor() to whole rungs discarded a mean 0.482 rungs per trade; on
+// 16 Nov that rounding cost $286 against the designed giveback's $172.
+chk(sanitizeForTest({}).stairQ === 0.25, 'the default stop grid is 0.25 rungs');
+chk(sanitizeForTest({ stairQ: 0 }).stairQ === 0.05,
+    'stairQ cannot reach 0 — a continuous stop is a TRAIL, not a staircase');
+chk(sanitizeForTest({ stairQ: 9 }).stairQ === 1.0, 'stairQ is capped at 1.00');
+chk(/Math\.max\(1, Math\.floor\(_stairReach \/ _q\) \* _q\)/.test(MT),
+    'the quantised reach never drops below rung 1');
+// And the arm must not have opened a new way to move a live stop.
+{
+  const n = (MT.match(/await modifyPosition\(/g) || []).length;
+  chk(n === 4, 'still exactly four stop-modifying call sites', `found ${n}`);
 }
 
 console.log('\n=== 11. the price probe is given a broker-sized budget ===');

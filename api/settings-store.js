@@ -53,6 +53,37 @@ const DEFAULTS = {
   //              see the his-orb-staircase note.
   exitMode: 'ratchet',
 
+  // ── ENTRY MODE ───────────────────────────────────────────────
+  // 'limit'  rest a pending order AT the signal entry (level + retestDepth x
+  //          range) and let it fill on a pullback, or not at all.
+  // 'market' probe the live price and send a market order immediately.
+  //
+  // WAS a hardcoded `const GOLD_MARKET_ENTRY = true` in webhook.js, turned on
+  // 2026-10-21 after a Sydney sell-limit missed by 0.75 points. Measured
+  // 2026-11-16 against the 4.4yr blend, with the SAME staircase exit in both
+  // arms and the market chase calibrated to the three real `entry-routing`
+  // fills in the production log (mean 8.4 pts):
+  //
+  //     limit  (depth 0.25)   685 tr  89.05% WR  +$126/trade  +$86,381
+  //     market (live chase)   731 tr  72.09% WR  -$136/trade  -$99,484
+  //
+  // ★ THAT -$136 WAS WRONG AND IS CORRECTED, 2026-11-16. The calibration
+  // forced the modelled mean chase to match a 3-sample live mean by adding a
+  // flat 4.7 pts to every historical trade. But the model already reproduces
+  // each live fill individually (16 Nov: modelled 7.87 against 7.89 paid) and
+  // real broker slippage is ~0.4 pts. Three above-average days are not a
+  // biased model. Paired signal by signal the honest figures are:
+  //
+  //     limit  +$126/trade      market  +$96/trade      gap  +$30
+  //
+  // ★★ AND HE CHOSE MARKET, 2026-11-17: "No entry mode stays market". The
+  // DEFAULT IS THEREFORE 'market', not 'limit'. This is load-bearing: the
+  // deployed settings blob predates this key, so a 'limit' default would
+  // silently flip live routing the moment this ships - the opposite of his
+  // decision. A $30/trade gap does not get to override an explicit call.
+  // See bt/f99_calibrate.py, bt/f101_paired.py, [[entry-chase-kills-staircase]].
+  entryMode: 'market',
+
   // ── HIS STAIRCASE ─────────────────────────────────────────────────────────
   // stairGive  — giveback behind the last rung cleared, in RUNG units. 0.5 is
   //              his spec ("0.75/2"). Hard-capped at 0.60 below, and that cap
@@ -65,8 +96,34 @@ const DEFAULTS = {
   // stairFinal — the rung that closes the position. 4 is his spec (TP4). The
   //              Pine only sends tp1/tp2/tp3, so rung 4 is COMPUTED from the
   //              rung spacing rather than received.
+  // stairArm   — ★ FIX 2, 2026-11-17. Excursion FROM THE FILL, in ORB-RANGE
+  //              units, required before ANY stop move. 0 is the old behaviour
+  //              and it is pathological: the rungs are anchored on the ORB
+  //              LEVEL, a market fill lands past it (1.891 rungs past on
+  //              16 Nov), so rung 1 was already cleared at open and a 59.6-pt
+  //              stop became 7.1 pt on the first tick. Over 4.4 yr at 4% that
+  //              setting is WORSE THAN NO STAIRCASE AT ALL - $13/trade against
+  //              $246 - and 20 of 20 coin-flip arm times beat it.
+  //              1.25 is DERIVED: stop = cleared - stairGive >= fill +
+  //              stairArm - 1.5 rungs, so above 1.125 ranges the first stop
+  //              move is always a profit lock, which is his own "never move
+  //              the SL to a loss" rule enforced by arithmetic.
+  //              ⚠ The VALUE is not established (arm 2.00 vs 1.00 is t=+1.71;
+  //              the best cell sits inside the coin-flip spread). It is a
+  //              delay chosen on principle - do not tune it off a sweep.
+  // stairQ     — ★ FIX 1. The grid the stop steps on, in RUNGS. 1 = whole
+  //              rungs, which DISCARDS the fractional reach: 16 Nov reached
+  //              3.828 and was paid at 2.5, and that rounding cost $286 where
+  //              the designed giveback cost $172. Mean 0.482 rungs discarded
+  //              per trade across the tape. 0.25 steps on quarter-rungs and
+  //              reprices 16 Nov from $210 to $469.
+  //              ⚠ On the whole tape 0.25 is a WASH ($171/trade vs $179,
+  //              maxDD 34.4% vs 29.8%). It moves money toward deep-reach
+  //              trades and away from the rest. That trade-off was his call.
   stairGive: 0.5,
   stairFinal: 4,
+  stairArm: 1.25,
+  stairQ: 0.25,
 
   // ── THE ONE-SHOT ──────────────────────────────────────────────────────────
   // 'oneshot' exitMode. Stage 1 cuts the risk early, the lock fires ONCE and
@@ -211,6 +268,9 @@ function sanitize(s) {
     // can never invent a mode. 'staircase' added 2026-11-11.
     exitMode: ['final-tp', 'tp1', 'staircase', 'oneshot'].includes(base.exitMode)
       ? base.exitMode : 'ratchet',
+    // Same shape: anything unrecognised falls back to the measured default
+    // rather than inventing a third routing mode.
+    entryMode: base.entryMode === 'limit' ? 'limit' : 'market',
     // osGive must stay BELOW osArm or the lock would sit at or beyond the
     // price that armed it and fill on the spot. That relation is enforced
     // after both are clamped, below.
@@ -225,6 +285,16 @@ function sanitize(s) {
     // typo in the panel and a staircase that scratches every winner.
     stairGive:  clampNum(base.stairGive, 0.10, 0.60, DEFAULTS.stairGive),
     stairFinal: Math.round(clampNum(base.stairFinal, 2, 8, DEFAULTS.stairFinal)),
+    // stairArm: 0 IS ALLOWED, and it is the old pathological behaviour, so it
+    // stays reachable only for a deliberate A/B. The top is 3.00 ranges —
+    // beyond that the arm never clears on a normal day and the staircase is
+    // off in all but name, which is what `exitMode` is for.
+    stairArm: clampNum(base.stairArm, 0.0, 3.0, DEFAULTS.stairArm),
+    // stairQ: 1.0 is whole rungs (the old grid). The floor is 0.05 rather
+    // than 0 because a continuous stop is a TRAIL, not a staircase, and a
+    // trail is the one shape this engine exists to avoid — at q -> 0 the
+    // "fires once per rung" property that makes it scorable disappears.
+    stairQ: clampNum(base.stairQ, 0.05, 1.0, DEFAULTS.stairQ),
     staircaseSince: (typeof base.staircaseSince === 'string'
       && /^\d{4}-\d{2}-\d{2}$/.test(base.staircaseSince))
       ? base.staircaseSince : DEFAULTS.staircaseSince,

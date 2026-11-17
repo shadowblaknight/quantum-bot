@@ -478,6 +478,13 @@ async function managePosition(position) {
   // Either check failing falls back to the previous behaviour rather than
   // guessing, and says so in the actions list.
   const STAIR_MODE = _qbSettings.exitMode === 'staircase';
+  // One rung, in ORB-RANGE units. This mirrors `c2TpMult` in the live
+  // qb-gold-specialist.pine (tp_n = level ± range × c2TpMult × n) and is the
+  // ONLY way to recover the opening range from the grid the Pine sends:
+  // range = _stairStep / STAIR_RUNG_STEP. If c2TpMult ever changes in the
+  // Pine this constant must change with it, or stairArm silently measures in
+  // the wrong unit.
+  const STAIR_RUNG_STEP = 0.75;
   const _stairSpecialist = !!(matchedPending?.setup
     && SPECIALIST_SIGNALS.includes(matchedPending.setup.template));
   const _stairStep = tpLevels.length >= 2
@@ -740,6 +747,23 @@ async function managePosition(position) {
   // rung it earned. This is computed here, above the SL section, because the
   // close check and the stop both need it.
   let _stairReach = null;
+  // ★★ FIX 2, 2026-11-17 — THE ARM. The rungs are anchored on the ORB LEVEL
+  // but a MARKET fill lands PAST it (1.891 rungs past it on 16 Nov), so rung 1
+  // was already cleared when the position opened and the stop jumped to rung
+  // 0.5 on the first managed tick: a 59.6-pt stop became a 7.1-pt stop before
+  // the trade had done anything, on a market whose median opening range is
+  // 5.39 pts. Measured over 4.4 yr at 4% risk that setting is WORSE THAN
+  // HAVING NO STAIRCASE AT ALL ($13/trade against $246), and 20 of 20
+  // coin-flip arm times beat it. stairArm is the excursion FROM THE FILL, in
+  // ORB-RANGE units, required before ANY stop move.
+  //   1.25 is DERIVED, not ranked: stop = cleared - stairGive >= fill +
+  //   stairArm - 1.5 rungs, so any arm above 1.125 ranges makes the first
+  //   stop move a guaranteed profit lock - his own "never move the SL to a
+  //   loss" rule, enforced by arithmetic instead of a second guard.
+  // ⚠ The exact value is NOT established (arm 2.00 vs 1.00 is t=+1.71 and the
+  // best-scoring cell sits inside the coin-flip distribution), so this is a
+  // delay chosen on principle. Do not tune it off a sweep. [[staircase-arm-leak]]
+  let _stairArmed = false;
   if (_stairOK) {
     // ★ FROM THE BAR CLOSE, NOT THE EXTREME. See the tracker above: the wick
     // version measures 2.5x worse and arms a rung on a bar that only poked
@@ -752,6 +776,16 @@ async function managePosition(position) {
       : (_stairLevel - _ref) / _stairStep;
     state.maxReach = Math.max(state.maxReach || 0, r);
     _stairReach = state.maxReach;
+
+    // The arm, off the SAME reference the rungs use, so the two can never
+    // disagree about where price has been. One ORB range is _stairStep /
+    // rungStep (0.75), which is how the range is recovered from the grid the
+    // Pine sent. Latched in state: once armed it stays armed, exactly as the
+    // rung high-water does.
+    const _armDist = _qbSettings.stairArm * (_stairStep / STAIR_RUNG_STEP);
+    const _gain = isLong ? (_ref - state.entry) : (state.entry - _ref);
+    if (_gain >= _armDist) state.stairArmed = true;
+    _stairArmed = !!state.stairArmed;
 
     // Rung advance notifications. tpsHit already covers rungs 1-3 via the
     // detection loop; this covers rung 4 and beyond, which the Pine never
@@ -921,12 +955,39 @@ async function managePosition(position) {
     // is pinned at trailKeep however far price travelled. Here it is always
     // stairGive rungs, whatever the trade did.
     //
-    // Only whole rungs count. At reach 1.9 the stop sits on rung 0.5, not
-    // rung 1.4 — the engine is a staircase, not a trail, and that is the
-    // property that makes it reproducible in the Tester.
+    // ★★ FIX 1, 2026-11-17 — stairQ, THE GRID THE STOP STEPS ON, IN RUNGS.
+    // At stairQ 1 only whole rungs count, so reach 3.828 parks the stop on
+    // rung 2.5 and the 0.828 is DISCARDED. On 16 Nov that rounding cost $286
+    // where the designed half-rung giveback cost $172 - the rounding was the
+    // bigger loss. Across 4.4 yr the mean fraction thrown away is 0.482 rungs
+    // (p90 0.870). stairQ 0.25 steps the stop on quarter-rungs instead, which
+    // keeps the FIXED giveback that defines this engine - unlike 'ratchet',
+    // whose giveback grows with the win - and drops only the rounding.
+    // 16 Nov repriced: rung 2.500 -> 3.250, $210 -> $469.
+    // ⚠ HONEST COST, measured: on the whole tape stairQ 0.25 is a WASH
+    // ($171/trade against $179, maxDD 34.4% against 29.8%). It moves money
+    // TOWARD deep-reach trades like 16 Nov and away from the rest. He chose
+    // it knowing that.
+    // ⚠ And it moves the stop on bars where no whole rung fired, so this is
+    // no longer "one move per rung". Every move is still on a bar CLOSE, so
+    // Pine can express it, but the Tester cannot replay it rung by rung.
+    //
+    // ★ THE ARM GATES EVERYTHING. Before stairArm is cleared the stop is not
+    // touched at all - and no other path can touch it either, because the ATR
+    // trail, the scalp breakeven, the TP cascade and the retrace emergency
+    // lock are all excluded by `!_stairOK`. The trade keeps the stop it was
+    // placed with, which is the entire point.
     const cleared = Math.floor(_stairReach);
-    if (cleared >= 1) {
-      const lockRung = cleared - _qbSettings.stairGive;
+    if (cleared >= 1 && _stairArmed) {
+      const _q = _qbSettings.stairQ;
+      // Never below rung 1, so the FIRST stop move is identical to stairQ 1
+      // whatever grid is chosen (a q that does not divide 1 evenly, e.g. 0.3,
+      // would otherwise snap 1.0 down to 0.9 and place the first stop LOWER
+      // than production does).
+      const _k = _q >= 1
+        ? cleared
+        : Math.max(1, Math.floor(_stairReach / _q) * _q);
+      const lockRung = _k - _qbSettings.stairGive;
       const slTarget0 = isLong
         ? _stairLevel + lockRung * _stairStep
         : _stairLevel - lockRung * _stairStep;
@@ -937,8 +998,15 @@ async function managePosition(position) {
         : Math.max(slTarget0, currentPrice + stopBuffer);
       const improves = curSL == null ? true : (isLong ? slTarget > curSL : slTarget < curSL);
       if (improves) {
-        chosen = { name: `stair-r${cleared}@${lockRung.toFixed(2)}`, price: slTarget };
+        chosen = { name: `stair-r${_k.toFixed(2)}@${lockRung.toFixed(2)}`, price: slTarget };
       }
+    } else if (cleared >= 1 && !_stairArmed) {
+      // Say so on every tick, or a trade sitting on its original stop looks
+      // like an unmanaged position rather than a deliberate one.
+      actions.push({
+        action: 'stair-unarmed', rung: cleared,
+        needRanges: _qbSettings.stairArm,
+      });
     }
   } else if (RATCHET_MODE && tpLevels.length >= 2) {
     // ─── UNBOUNDED RATCHET ───────────────────────────────────────────

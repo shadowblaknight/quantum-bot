@@ -268,6 +268,7 @@ async function actionSetSettings(body) {
   const patch = {};
   if (body.riskPct !== undefined)       patch.riskPct = body.riskPct;
   if (body.exitMode !== undefined)      patch.exitMode = body.exitMode;
+  if (body.entryMode !== undefined)     patch.entryMode = body.entryMode;
   if (body.trailArm !== undefined)      patch.trailArm = body.trailArm;
   if (body.trailKeep !== undefined)     patch.trailKeep = body.trailKeep;
   if (body.tpR !== undefined)           patch.tpR = body.tpR;
@@ -279,6 +280,8 @@ async function actionSetSettings(body) {
   // It lives in settings-store DEFAULTS and is only changed in code.
   if (body.stairGive !== undefined)     patch.stairGive = body.stairGive;
   if (body.stairFinal !== undefined)    patch.stairFinal = body.stairFinal;
+  if (body.stairArm !== undefined)      patch.stairArm = body.stairArm;
+  if (body.stairQ !== undefined)        patch.stairQ = body.stairQ;
   // THE ONE-SHOT
   if (body.osArm !== undefined)         patch.osArm = body.osArm;
   if (body.osGive !== undefined)        patch.osGive = body.osGive;

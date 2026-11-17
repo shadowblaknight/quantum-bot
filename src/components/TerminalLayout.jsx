@@ -556,6 +556,11 @@ export default function TerminalLayout({
   const isStair    = settings?.exitMode === 'staircase';
   const stairGive  = settings?.stairGive ?? 0.5;
   const stairFinal = settings?.stairFinal ?? 4;
+  // FIX 2 / FIX 1, 2026-11-17. stairArm is the profit FROM THE FILL, in ORB
+  // ranges, required before any stop move; stairQ is the rung grid the stop
+  // steps on. See [[staircase-arm-leak]] and [[staircase-quantisation]].
+  const stairArm   = settings?.stairArm ?? 1.25;
+  const stairQ     = settings?.stairQ ?? 0.25;
   const RUNG       = 0.75;                      // the Pine's own TP spacing
   const stairSince = settings?.staircaseSince ?? null;
   // The day he switched is DAY 1, not day 0.
@@ -1196,6 +1201,41 @@ export default function TerminalLayout({
                           ))}
                         </div>
                       </div>
+                      {/* FIX 2 — nothing touches the stop until the trade is
+                          this far in profit FROM THE FILL. 0.00 is the old
+                          behaviour and is worse than no staircase at all. */}
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>ARM AFTER (× ORB RANGE)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[0,0.75,1.25,2.0].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              title={v===0?'OFF — the stop arms on the first bar. Measured WORSE than having no staircase at all ($13/trade vs $246 over 4.4yr).':`No stop move until the trade is ${v.toFixed(2)}× the ORB range in profit from the fill.`}
+                              onClick={()=>saveSettings({stairArm:v})}
+                              style={{padding:'4px 10px',background:Math.abs(stairArm-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(stairArm-v)<0.001?(v===0?C.red2:C.green2):C.b2}`,
+                                      color:Math.abs(stairArm-v)<0.001?(v===0?C.red2:C.green2):C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                              {v===0?'OFF':v.toFixed(2)}</button>
+                          ))}
+                        </div>
+                      </div>
+                      {/* FIX 1 — the grid the stop steps on. 1.00 = whole
+                          rungs, which throws the fractional reach away. */}
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>STOP GRID (RUNGS)</div>
+                        <div style={{display:'flex',gap:4}}>
+                          {[1.0,0.5,0.25,0.1].map(v=>(
+                            <button key={v} disabled={!settings||riskSaving}
+                              title={v>=1?'WHOLE rungs. Reach 3.83 is paid as 3.00 — the 0.83 is discarded (mean 0.482 rungs/trade).':`The stop steps every ${v.toFixed(2)} of a rung, so less of the reach is rounded away.`}
+                              onClick={()=>saveSettings({stairQ:v})}
+                              style={{padding:'4px 10px',background:Math.abs(stairQ-v)<0.001?C.b2:'transparent',
+                                      border:`1px solid ${Math.abs(stairQ-v)<0.001?C.ml2:C.b2}`,
+                                      color:Math.abs(stairQ-v)<0.001?C.ml2:C.t2,fontSize:9,
+                                      fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                              {v>=1?'WHOLE':v.toFixed(2)}</button>
+                          ))}
+                        </div>
+                      </div>
                     </>
                   ) : (
                     <>
@@ -1227,12 +1267,31 @@ export default function TerminalLayout({
                       </div>
                     </>
                   )}
+                  {/* ENTRY ROUTING. Measured 2026-11-16 on the 4.4yr blend with
+                      the SAME exit in both arms, market calibrated to this
+                      account's three real entry-routing fills (mean 8.4 pts of
+                      chase): limit +$126/trade at 89.05% WR, market -$136 at
+                      72.09%. Breakeven is a 1.7-pt chase, because each point is
+                      paid in RUNGS and also widens the stop. Red when set to the
+                      arm that loses money. */}
+                  <button disabled={!settings||riskSaving}
+                    title={settings?.entryMode === 'market'
+                      ? 'MARKET: fills instantly, pays the chase (~8 pts on 16 Nov). Paired: +$96/trade. HIS CHOICE, 2026-11-17.'
+                      : 'LIMIT: rests at the signal entry, fills on a pullback or not at all. Paired: +$126/trade.'}
+                    onClick={()=>saveSettings({entryMode: settings?.entryMode === 'market' ? 'limit' : 'market'})}
+                    style={{marginLeft:'auto',padding:'5px 14px',background:'transparent',
+                            border:`1px solid ${settings?.entryMode==='market'?C.red2:C.green2}`,
+                            color:settings?.entryMode==='market'?C.red2:C.green2,
+                            fontSize:8,letterSpacing:.5,
+                            fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                    ENTRY · {settings?.entryMode==='market'?'MARKET':'LIMIT'} ▸
+                  </button>
                   <button disabled={!settings||riskSaving}
                     onClick={()=>{
                       const i = MODE_SEQ.indexOf(settings?.exitMode);
                       saveSettings({exitMode: MODE_SEQ[(i < 0 ? 0 : i + 1) % MODE_SEQ.length]});
                     }}
-                    style={{marginLeft:'auto',padding:'5px 14px',background:'transparent',
+                    style={{marginLeft:6,padding:'5px 14px',background:'transparent',
                             border:`1px solid ${modeColor(settings?.exitMode)}`,
                             color:modeColor(settings?.exitMode),fontSize:8,letterSpacing:.5,
                             fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
@@ -1325,10 +1384,21 @@ export default function TerminalLayout({
                       })}
                     </div>
                     <div style={{fontSize:7,color:C.t3,marginTop:6,fontFamily:'Inter,sans-serif',lineHeight:1.6}}>
-                      Clear rung <span style={{color:C.ml2}}>n</span> and the stop climbs to rung{' '}
+                      {stairArm>0
+                        ? <>Nothing touches the stop until the trade is{' '}
+                            <span style={{color:C.green2}}>{stairArm.toFixed(2)}× the ORB range</span> in profit{' '}
+                            <span style={{color:C.t2}}>from the fill</span>. Then: </>
+                        : <><span style={{color:C.red2}}>⚠ ARM OFF — the stop moves on the first bar.</span>{' '}
+                            A market fill lands past the ORB level, so rung 1 is already cleared at open and the
+                            full stop collapses immediately. Measured worse than having no staircase at all. </>}
+                      clear rung <span style={{color:C.ml2}}>n</span> and the stop climbs to rung{' '}
                       <span style={{color:C.ml2}}>n − {stairGive.toFixed(2)}</span> — a fixed giveback of{' '}
                       <span style={{color:C.t2}}>{(stairGive*RUNG).toFixed(3)}× the ORB range</span> that never grows with the win.
-                      Rung <span style={{color:C.gold}}>{stairFinal}</span> ({(stairFinal*RUNG).toFixed(2)}× range) closes the position.
+                      {stairQ<1 && <> The stop steps every{' '}
+                        <span style={{color:C.ml2}}>{stairQ.toFixed(2)}</span> of a rung, so reach 3.83 locks rung{' '}
+                        <span style={{color:C.ml2}}>{(Math.floor(3.827/stairQ)*stairQ - stairGive).toFixed(2)}</span>{' '}
+                        instead of {(3-stairGive).toFixed(2)}.</>}
+                      {' '}Rung <span style={{color:C.gold}}>{stairFinal}</span> ({(stairFinal*RUNG).toFixed(2)}× range) closes the position.
                       {stairGive>0.6 && <span style={{color:C.red2}}> ⚠ above 0.60 the first stop lands at entry, not in profit.</span>}
                     </div>
                   </>
