@@ -66,6 +66,28 @@ sydADRGuard   = input.bool(true,  "U) Skip when >90% ADR already consumed", grou
 lonADRGuard   = input.bool(false, "G) Skip when >90% ADR already consumed", group=G_ADR,
                 tooltip="DEFAULT OFF — measured useless for G. Of the six filters tested on London ORB, only the Asian cascade helped.")
 
+// ─── PER-SIGNAL HTF BIAS — was HARDCODED, now switchable (2026-10-22) ──
+// Until today M, H and U each carried `h1B == 1 and h4B == 1` INLINE in their
+// entry conditions, with no input. A filter with no box cannot be turned off,
+// cannot be seen in the settings panel, and cannot be compared against the
+// strategy file - which is exactly how the missing G filter went unnoticed for
+// a month. These three switches make the decision visible.
+//
+// ★ HIS TESTER RESULT 2026-10-22: the bias alignment carries H and ONLY H.
+// M and U are better without it, so they ship OFF and H ships ON. Same shape
+// as the ADR guard above, which is measured GOOD for H and BAD for M.
+//
+// ⚠ M AND U NOW FIRE MORE OFTEN. Dropping a filter adds signals; it never
+// removes them. Watch the first week's alert volume against expectation.
+G_BIAS = "HTF bias (per signal)"
+frbBiasFilter = input.bool(false, "M) Require H1+H4 bias alignment", group=G_BIAS,
+                tooltip="OFF = measured. Frankfurt fires at 07:30, when the day's higher-timeframe bias has had only a few hours to form, so the alignment it reads is largely yesterday's.")
+nyBiasFilter  = input.bool(true,  "H) Require H1+H4 bias alignment", group=G_BIAS,
+                tooltip="ON = measured, and H is the only signal this helps. At 14:30 it reads a bias that has had most of a session to form, which is the difference.")
+sydBiasFilter = input.bool(false, "U) Require H1+H4 bias alignment", group=G_BIAS,
+                tooltip="OFF = measured. U is the FIRST signal of the trading day, so the H1/H4 bias it reads is still yesterday's picture - the day's own bias only begins forming during U itself.")
+
+
 G_LON = "G — London ORB"
 c2MinRangeLON = input.float(0.0, "G) Min London ORB range (pts)", group=G_LON, step=1.0,
                 tooltip="Same 5-pt floor M and H use. With a 150-pt stop, a 2-pt opening range is not a tradeable structure.")
@@ -85,7 +107,7 @@ orbNYLonLoFilter = input.bool(true, "H SHORT) Require close below London session
                 tooltip="Symmetric to the LONG filter above.")
 
 G_C2 = "C2 — OCO (Signal M + H)"
-c2SLBuf    = input.float(40.0, "SL beyond C2 level (pts)",         group=G_C2, step=0.5,
+c2SLBuf    = input.float(50.0, "SL beyond C2 level (pts)",         group=G_C2, step=0.5,
               tooltip="Stop loss placed this many pts beyond the C2 structural level, not from the C1 close.\nFor FRB SHORT retest at frb_lo, SL = frb_lo + 40.\n\n★ CHANGED 76 -> 40 ON 2026-10-18, and it is a SIZING DECISION, not a free parameter. The live lot is risk-based:\n  lot = (capital x riskPct) / (entry-SL distance x $100/pt)\nEntry sits 0.25 x range inside the level, so entry-to-SL is 40 + ~4 = ~44 pts.\nAt 4% of ~$100k that is $4,004 / (44 x 100) = ~0.9 LOTS, against 0.50 at the old 76.\n⚠ TWO STOPS IN ONE DAY IS 8% AND BREACHES THE FTMO 5% DAILY CAP. That is unchanged by the tighter stop - the lot grows to hold the dollar risk constant.\n\n⚠ THE OLD SWEEP IN THIS TOOLTIP ARGUED FOR 80 AND IS SUPERSEDED. It was measured with c2MinBreakStr 0 and the 5-pt min-range floors:\n   40 pts: WR 89.28%  PF 1.343\n   80 pts: WR 97.94%  PF 4.412  <- the old pick\n40 only works in the NEW package - break strength 0.26 and the floors at 0. Do not move this number without re-reading those two.\n\n⚠ PF IS NOT COMPARABLE ACROSS STOPS in the Tester: percent_of_equity gives every stop the SAME position size, so a wider stop simply makes each loss bigger in dollars. Compare net P&L and max DD at a FIXED stop, or compare netR.")
 c2MinBreakStr = input.float(0.26, "C2 min break strength (x ORB range)", group=G_C2, minval=0.0, maxval=1.00, step=0.01,
               tooltip="The signal bar must close at least this far BEYOND the ORB level, measured in range units. 0.26 means a break of a 20-pt range has to close 5.2 pts clear of it.\n\n★ ADDED 2026-10-18 after he found it by hand over 3 years in the Tester. It is the filter that pays for the tighter stop.\n\n⚠ THE SEPTEMBER REJECTION OF THIS INPUT WAS WRONG BY RANGE, NOT BY DIRECTION. That test swept 0.00 / 0.10 / 0.15 only and concluded monotonically worse. The curve declines, bottoms somewhere around 0.15-0.40, then RECOVERS - it simply never crossed 0.25.\n\n★ METHOD NOTE: a monotonic verdict is only valid over the range actually swept. Say the range in the conclusion.\n\nNote it interacts with the retest depth: at depth 0.25 a break weaker than 0.25 closes INSIDE the resting limit and fills instantly, while anything above it needs a genuine pullback. Every trade past 0.26 is therefore a real retest.")
@@ -336,6 +358,93 @@ if _minOfDay >= 480 and _minOfDay < 840
 
 // Asian close direction: +1 up, -1 down, 0 flat/unknown. Drives the G cascade.
 _asianBias = na(_asian_sess_open) or na(_asian_sess_close) ? 0 : _asian_sess_close > _asian_sess_open ? 1 : _asian_sess_close < _asian_sess_open ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════
+// BLEND BASELINE — 2026-11-10          (his 3-day campaign + the blend)
+// ═══════════════════════════════════════════════════════════════════
+// U+M+G+H together: 410 trades, 96.34% WR, PF 2.088, +2714.60, maxDD
+// 691.89 over 3 years on his Tester. Four filters were missing from the
+// live indicator; they are added here with HIS values as the defaults.
+// Per signal, because every one of them was measured per signal:
+//   06:45 prior      M and G      ORB/ADR 0.0855   M and G
+//   BOS oppose       U only       prior-day liq    H only
+// ⚠ The ORB/ADR veto keeps 97.4% of H days (inert) and only 34.4% of U
+// days (guts it). That is WHY it is M+G: the distributions say so.
+G_NB = "Blend baseline (2026-11-10)"
+nbPre0645 = input.bool(true, "M/G) Require agreement with the 06:45 UTC bar", group=G_NB,
+            tooltip="The breakout must agree with the direction of the 06:45 UTC bar. It closes at 07:00, before M's range opens, so there is no lookahead.\n\nHIS WORDS: 'the best filter'. Measured in the engine: M 675->392 trades, -0.0068 -> +0.0557 R/trade, eras 2/4 -> 4/4; G 563->340, +0.0071 -> +0.0549. Random-deletion null M p=0.0060, G p=0.0393 — both SELECT rather than thin.\n\nMORNING SIGNALS ONLY. On H and U it is inside the null AND negative, so it is deliberately not wired to them.")
+nbVetoOn  = input.bool(true, "M/G) Require ORB range / ADR(14d) >=", group=G_NB,
+            tooltip="A floor on the opening range as a fraction of the 14-day ADR. His number, found over three days in the Tester.\n\nWHY M AND G ONLY, measured 2026-11-10: median range/ADR is H 0.206, G 0.126, M 0.125, U 0.064. At 0.0855 this keeps 97.4% of H days (inert — it does nothing) and only 34.4% of U days (it would delete two thirds of U). The per-signal assignment is what the distributions dictate, not a preference.\n\n⚠ It is a RATIO and was supposed to be immune to the ADR trap. It is not: the share of days kept runs 97 / 84 / 81 / 81 / 69 % from 2022 to 2026, because opening ranges have shrunk against the daily range.")
+nbVetoMin = input.float(0.0855, "M/G)   ORB range / ADR(14d) >=", group=G_NB, minval=0.0, maxval=2.0, step=0.0005)
+nbBosU    = input.bool(true, "U) Require a break of structure OPPOSING the trade", group=G_NB,
+            tooltip="U only takes a break that runs AGAINST the most recent break of structure. His single filter for Sydney, and the only one he kept there.\n\n⚠ I measured BOS-oppose at -0.0061 R/trade applied to ALL FOUR signals at once and called it dead. He found it on U ALONE. Those are not the same measurement and his is the finer one.\n\nA fractal pivot is confirmed lb bars after it forms, so a BOS is already historical when this reads it. No lookahead.")
+nbPivLb   = input.int(5, "U)   pivot lookback for structure", group=G_NB, minval=2, maxval=30)
+nbLiqH    = input.bool(true, "H) Require the OPPOSITE prior-day extreme swept today", group=G_NB,
+            tooltip="A LONG needs yesterday's LOW to have been taken out earlier today; a SHORT needs yesterday's HIGH. The classic sweep-then-reverse read, and his single SMC filter for New York.\n\n⚠ I measured liquidity-opposite at -0.0144 R/trade across all four signals. He found it on H ALONE. Same note as the BOS switch above.\n\nReads the COMPLETED daily bar via [1], and the swept flags are copied before this bar can set them, so the trigger bar's own wick cannot satisfy its own filter.")
+
+// --- the 06:45 UTC bar's own direction, held for the day ------------
+// 405 = 6*60+45. Captured on the CONFIRMED bar; M opens 07:00, G 08:00.
+var float _nbPre = na
+if _newDay
+    _nbPre := na
+if _minOfDay == 405 and barstate.isconfirmed
+    _nbPre := close - close[1]
+_nbPreL = not nbPre0645 or (not na(_nbPre) and _nbPre > 0)
+_nbPreS = not nbPre0645 or (not na(_nbPre) and _nbPre < 0)
+
+// --- break of structure, for U --------------------------------------
+// ta.pivothigh(lb, lb) publishes lb bars AFTER the pivot forms, so the
+// BOS this reads is always already in the past.
+_nbPh = ta.pivothigh(nbPivLb, nbPivLb)
+_nbPl = ta.pivotlow(nbPivLb, nbPivLb)
+var float _nbLastPh = na
+var float _nbLastPl = na
+if not na(_nbPh)
+    _nbLastPh := _nbPh
+if not na(_nbPl)
+    _nbLastPl := _nbPl
+var int _nbBos = 0
+if not na(_nbLastPh) and close > _nbLastPh and _nbBos != 1
+    _nbBos := 1
+else if not na(_nbLastPl) and close < _nbLastPl and _nbBos != -1
+    _nbBos := -1
+// OPPOSE: a long needs a DOWN break of structure behind it, and vice
+// versa. No structure at all (0) blocks, exactly as the engine does.
+_nbBosL = not nbBosU or _nbBos == -1
+_nbBosS = not nbBosU or _nbBos == 1
+
+// --- prior-day liquidity swept today, for H -------------------------
+// ★ BUGFIX 2026-11-17 — these were lookahead_off, and that made them mean
+// DIFFERENT DAYS live and replayed. With lookahead_off the daily value only
+// becomes available once the daily bar CLOSES, so:
+//   realtime bar  -> the forming day D is used, high[1] = day D-1 (yesterday)
+//   replayed bar  -> the last CLOSED day D-1 is used, high[1] = day D-2
+// A chart reload therefore re-ran H against the day before yesterday and
+// painted labels for signals that never fired. Seen live on 17 Nov 2026:
+// today's low 3839.20 missed yesterday's 3835.20 by 4.00pts, so H was
+// correctly blocked and no alert was sent - then the reload compared against
+// 15 Nov's 3880.50, passed, and drew a "NYORB C2 LONG" that never existed.
+//
+// lookahead_ON is the NON-REPAINTING form here, not the cheating one: it is
+// only ever paired with [1], so it reads the PREVIOUS daily bar, which is
+// fully closed and fully known from the first tick of the current day. Same
+// answer on every bar, live and replayed. Never drop the [1].
+_nbPdH = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+_nbPdL = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+var bool _nbPdhT = false
+var bool _nbPdlT = false
+if _newDay
+    _nbPdhT := false
+    _nbPdlT := false
+// read the state BEFORE this bar can change it
+_nbPdhWas = _nbPdhT
+_nbPdlWas = _nbPdlT
+if not na(_nbPdH) and high >= _nbPdH
+    _nbPdhT := true
+if not na(_nbPdL) and low <= _nbPdL
+    _nbPdlT := true
+_nbLiqL = not nbLiqH or _nbPdlWas
+_nbLiqS = not nbLiqH or _nbPdhWas
 
 // ─── U) SYDNEY ORB RANGE TRACKING ────────────────────────────────────
 // Reset on the RISING EDGE OF ITS OWN WINDOW, never on _newDay. On XAUUSD the
@@ -901,7 +1010,7 @@ if modPsychExt and barstate.isconfirmed and not in_kz and adr_psych_ok and adr_h
 if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_done and not na(frb_hi) and not na(frb_lo) and adr_hard_ok and (not frbADRGuard or _adrConsumed[1] < 0.90)
     orb_range_frb = frb_hi - frb_lo
     if orb_range_frb >= c2MinRangeFRB
-        if close < frb_lo and h1B == -1 and h4B == -1 and not na(ar_lo_prefrb) and close < ar_lo_prefrb and (frb_lo - close) >= orb_range_frb * c2MinBreakStr
+        if close < frb_lo and (not frbBiasFilter or (h1B == -1 and h4B == -1)) and not na(ar_lo_prefrb) and close < ar_lo_prefrb and (frb_lo - close) >= orb_range_frb * c2MinBreakStr and _nbPreS and (not nbVetoOn or (_atr14d > 0 and orb_range_frb / _atr14d >= nbVetoMin))
             // C2 — SELL LIMIT: retest of broken FRB low (now resistance).
             // Depth drops the limit toward price so a shallow bounce fills it;
             // SL/TP stay on the ORB level, so only the entry price moves.
@@ -912,7 +1021,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             tp2     = frb_lo - orb_range_frb * c2TpMult * 2.0
             tp3     = frb_lo - orb_range_frb * c2TpMult * 3.0
             frb_done := true
-            fStr    = "FRB-C2✓ H1-H4-SHORT✓ ASIAN-LO✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            fStr    = "FRB-C2✓ HTF:" + (frbBiasFilter ? "H1-H4-SHORT✓" : "off") + " ASIAN-LO✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
                                 frb_hi, frb_lo, "FRB",
                                 sess_label, "A", "h1+h4", fStr,
@@ -924,7 +1033,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
-        else if close > frb_hi and h1B == 1 and h4B == 1 and not na(ar_hi_prefrb) and close > ar_hi_prefrb and (close - frb_hi) >= orb_range_frb * c2MinBreakStr
+        else if close > frb_hi and (not frbBiasFilter or (h1B == 1 and h4B == 1)) and not na(ar_hi_prefrb) and close > ar_hi_prefrb and (close - frb_hi) >= orb_range_frb * c2MinBreakStr and _nbPreL and (not nbVetoOn or (_atr14d > 0 and orb_range_frb / _atr14d >= nbVetoMin))
             // C2 — BUY LIMIT: retest of broken FRB high (now support).
             // Depth lifts the limit toward price so a shallow pullback fills it.
             entryP  = frb_hi + orb_range_frb * _c2Depth
@@ -934,7 +1043,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
             tp2     = frb_hi + orb_range_frb * c2TpMult * 2.0
             tp3     = frb_hi + orb_range_frb * c2TpMult * 3.0
             frb_done := true
-            fStr    = "FRB-C2✓ H1-H4-LONG✓ ASIAN-HI✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            fStr    = "FRB-C2✓ HTF:" + (frbBiasFilter ? "H1-H4-LONG✓" : "off") + " ASIAN-HI✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
                                 frb_hi, frb_lo, "FRB",
                                 sess_label, "A", "h1+h4", fStr,
@@ -971,7 +1080,7 @@ if modFRB and barstate.isconfirmed and in_frb_trade and frb_locked and not frb_d
 if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lorb_done and not na(lorb_hi) and not na(lorb_lo) and adr_hard_ok and (not lonADRGuard or _adrConsumed[1] < 0.90)
     orb_range_lon = lorb_hi - lorb_lo
     if orb_range_lon >= c2MinRangeLON
-        if close > lorb_hi and (not lonAsianCascade or _asianBias >= 0) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (close - lorb_hi) >= orb_range_lon * c2MinBreakStr
+        if close > lorb_hi and (not lonAsianCascade or _asianBias >= 0) and (not lonBreakAsianHi or (not na(ar_hi) and close > ar_hi)) and (close - lorb_hi) >= orb_range_lon * c2MinBreakStr and _nbPreL and (not nbVetoOn or (_atr14d > 0 and orb_range_lon / _atr14d >= nbVetoMin))
             // C2 — BUY LIMIT: retest of the broken London ORB high (now support).
             entryP  = lorb_hi + orb_range_lon * _c2Depth
             slP     = lorb_hi - c2SLBuf
@@ -992,7 +1101,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
-        else if close < lorb_lo and (not lonAsianCascade or _asianBias <= 0) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (lorb_lo - close) >= orb_range_lon * c2MinBreakStr
+        else if close < lorb_lo and (not lonAsianCascade or _asianBias <= 0) and (not lonBreakAsianLo or (not na(ar_lo) and close < ar_lo)) and (lorb_lo - close) >= orb_range_lon * c2MinBreakStr and _nbPreS and (not nbVetoOn or (_atr14d > 0 and orb_range_lon / _atr14d >= nbVetoMin))
             // C2 — SELL LIMIT: retest of the broken London ORB low (now resistance).
             entryP  = lorb_lo - orb_range_lon * _c2Depth
             slP     = lorb_lo + c2SLBuf
@@ -1024,7 +1133,7 @@ if modORB and barstate.isconfirmed and in_lorb_trade and lorb_locked and not lor
 if modNYORB and barstate.isconfirmed and (not modNYORBP or in_nyorb_trade) and nyorb_locked and not nyorb_done and not na(nyorb_hi) and not na(nyorb_lo) and adr_hard_ok and (not nyADRGuard or _adrConsumed[1] < 0.90)
     orb_range_ny = nyorb_hi - nyorb_lo
     if orb_range_ny >= c2MinRangeNY
-        if close > nyorb_hi and h1B == 1 and h4B == 1 and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (close - nyorb_hi) >= orb_range_ny * c2MinBreakStr
+        if close > nyorb_hi and (not nyBiasFilter or (h1B == 1 and h4B == 1)) and (not orbNYLonHiFilter or (not na(lon_hi_preny) and close > lon_hi_preny)) and (close - nyorb_hi) >= orb_range_ny * c2MinBreakStr and _nbLiqL
             // C2 — BUY LIMIT: retest of broken NY ORB high (now support).
             // Depth lifts the limit toward price so a shallow pullback fills it.
             entryP  = nyorb_hi + orb_range_ny * _c2Depth
@@ -1034,7 +1143,7 @@ if modNYORB and barstate.isconfirmed and (not modNYORBP or in_nyorb_trade) and n
             tp2     = nyorb_hi + orb_range_ny * c2TpMult * 2.0
             tp3     = nyorb_hi + orb_range_ny * c2TpMult * 3.0
             nyorb_done := true
-            fStr    = "NYORB-C2✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            fStr    = "NYORB-C2✓ HTF:" + (nyBiasFilter ? "H1-H4-LONG✓" : "off") + " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
                                 nyorb_hi, nyorb_lo, "NYORB",
                                 sess_label, "A", "h1+h4", fStr,
@@ -1046,7 +1155,7 @@ if modNYORB and barstate.isconfirmed and (not modNYORBP or in_nyorb_trade) and n
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
-        else if close < nyorb_lo and h1B == -1 and h4B == -1 and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (nyorb_lo - close) >= orb_range_ny * c2MinBreakStr
+        else if close < nyorb_lo and (not nyBiasFilter or (h1B == -1 and h4B == -1)) and (not orbNYLonLoFilter or (not na(lon_lo_preny) and close < lon_lo_preny)) and (nyorb_lo - close) >= orb_range_ny * c2MinBreakStr and _nbLiqS
             // C2 — SELL LIMIT: retest of broken NY ORB low (now resistance).
             // Depth drops the limit toward price so a shallow bounce fills it.
             entryP  = nyorb_lo - orb_range_ny * _c2Depth
@@ -1056,7 +1165,7 @@ if modNYORB and barstate.isconfirmed and (not modNYORBP or in_nyorb_trade) and n
             tp2     = nyorb_lo - orb_range_ny * c2TpMult * 2.0
             tp3     = nyorb_lo - orb_range_ny * c2TpMult * 3.0
             nyorb_done := true
-            fStr    = "NYORB-C2✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            fStr    = "NYORB-C2✓ HTF:" + (nyBiasFilter ? "H1-H4-SHORT✓" : "off") + " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
                                 nyorb_hi, nyorb_lo, "NYORB",
                                 sess_label, "A", "h1+h4", fStr,
@@ -1087,7 +1196,7 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
     // Wrap-safe minutes since the ORB locked (the window can cross midnight).
     _sydMinsIn    = (_minOfDay - (_sydOrbEnd % 1440) + 1440) % 1440
     if orb_range_syd >= c2MinRangeSYD
-        if close < syd_lo and h1B == -1 and h4B == -1 and (syd_lo - close) >= orb_range_syd * c2MinBreakStr
+        if close < syd_lo and (not sydBiasFilter or (h1B == -1 and h4B == -1)) and (syd_lo - close) >= orb_range_syd * c2MinBreakStr and _nbBosS
             // C2 — SELL LIMIT: retest of the broken Sydney low (now resistance).
             entryP  = syd_lo - orb_range_syd * _c2Depth
             slP     = syd_lo + c2SLBuf
@@ -1095,7 +1204,7 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
             tp2     = syd_lo - orb_range_syd * c2TpMult * 2.0
             tp3     = syd_lo - orb_range_syd * c2TpMult * 3.0
             syd_done := true
-            fStr    = "SYD-C2✓ H1-H4-SHORT✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            fStr    = "SYD-C2✓ HTF:" + (sydBiasFilter ? "H1-H4-SHORT✓" : "off") + " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "SHORT", entryP, slP, tp1, tp2, tp3,
                                 syd_hi, syd_lo, "SYD",
                                 "SYDNEY", "A", "h1+h4", fStr, _sydMinsIn),
@@ -1106,7 +1215,7 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
             if showPosBox
                 f_drawPosBox(entryP, slP, tp3)
 
-        else if close > syd_hi and h1B == 1 and h4B == 1 and (close - syd_hi) >= orb_range_syd * c2MinBreakStr
+        else if close > syd_hi and (not sydBiasFilter or (h1B == 1 and h4B == 1)) and (close - syd_hi) >= orb_range_syd * c2MinBreakStr and _nbBosL
             // C2 — BUY LIMIT: retest of the broken Sydney high (now support).
             entryP  = syd_hi + orb_range_syd * _c2Depth
             slP     = syd_hi - c2SLBuf
@@ -1114,7 +1223,7 @@ if modSYD and barstate.isconfirmed and in_syd_trade and syd_locked and not syd_d
             tp2     = syd_hi + orb_range_syd * c2TpMult * 2.0
             tp3     = syd_hi + orb_range_syd * c2TpMult * 3.0
             syd_done := true
-            fStr    = "SYD-C2✓ H1-H4-LONG✓ ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
+            fStr    = "SYD-C2✓ HTF:" + (sydBiasFilter ? "H1-H4-LONG✓" : "off") + " ADR:" + str.tostring(math.round(_adrConsumed * 100)) + "%"
             alert(f_buildAlert("gold-specialist", "LONG", entryP, slP, tp1, tp2, tp3,
                                 syd_hi, syd_lo, "SYD",
                                 "SYDNEY", "A", "h1+h4", fStr, _sydMinsIn),
