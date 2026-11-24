@@ -1004,14 +1004,70 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
       } catch (_) { /* _cur stays null -> skipped below, never a blind limit */ }
     }
 
+    // ★★ THIRD FALLBACK, 2026-11-24: THE SIGNAL BAR'S OWN CLOSE.
+    //
+    // A gold SHORT was skipped this morning with "No live price available"
+    // and he had to take it by hand. Both probes above had missed - and the
+    // reason they miss together is that THEY ARE BOTH METAAPI:
+    // candle-source.js pickProvider returns 'metaapi' for gold (there is no
+    // other provider branch left in that file), and fetchPrice is the same
+    // account's /current-price endpoint. So the "two independent probes" are
+    // one dependency, and one cold or throttled MetaAPI costs the trade.
+    //
+    // ★ THE POINT: A FORCED-MARKET GOLD ENTRY DOES NOT NEED A LIVE PRICE.
+    // _cur is read in exactly three places below - _canLimit, _drift, and the
+    // log - and when _forceMkt is true the routing is MARKET whatever
+    // _canLimit says (see `if (_forceMkt)` after the run-past guard). So the
+    // only decision a live price informs here is the run-past guard. Dropping
+    // the signal for want of it, under a message about "not placing a blind
+    // limit", throws away an order that was never going to be a limit.
+    //
+    // barClose is the right number for that guard and it CANNOT time out: it
+    // arrives inside the alert body (qb-gold-specialist.pine builds it into
+    // `ctx`), and it is the same price g15 models the market fill at
+    // (mktpx = the signal bar's close + slip). So the guard still does its
+    // real work - it still sees a bar that closed far past the level, which
+    // is what the chase actually is.
+    //
+    // SCOPED TO _forceMkt ON PURPOSE. What this price cannot see is movement
+    // between the bar close and this request, which a live probe would have
+    // caught. For a MARKET order that is bounded risk and strictly better
+    // than not trading. For a LIMIT routing it is not: a stale reference can
+    // put the resting order on the wrong side of the market and MT5 rejects
+    // it with INVALID_PRICE, so that path still skips.
+    //
+    // Probe budgets deliberately UNCHANGED. With this fallback in place a
+    // slow probe no longer costs a trade, so widening the timeouts would only
+    // delay a market fill into more chase. The reason the budgets exist is in
+    // the note above; the reason they are no longer critical is this block.
+    if (_cur == null && _forceMkt) {
+      const _pbc = parseFloat(p.barClose);
+      if (isFinite(_pbc) && _pbc > 0) {
+        _cur = _pbc;
+        _dbgProbeSrc = 'payload-barclose';
+        try {
+          await logActivity({
+            type: 'price-probe-fallback', asset: assetId, template: p.template,
+            direction: p.direction, reason: 'both-metaapi-probes-missed',
+            usedPrice: _pbc, source: 'payload.barClose', signalEntry: rEntry,
+            note: 'market routing: price is used for the run-past guard only',
+          });
+        } catch (_) {}
+      }
+    }
+
     // NO PRICE = NO ORDER. An order that cannot fill still consumes the
     // one-position-per-asset slot, so guessing wrong costs the NEXT signal too.
     // 4 of 17 gold routings reached this path; 18 Sep 17:15 is the worked example.
+    // Reaching it now means either a LIMIT routing (where a stale price is not
+    // good enough) or an alert with no usable barClose.
     if (_cur == null) {
       await logActivity({
         type: 'placement-skipped', asset: assetId, template: p.template,
         direction: p.direction, reason: 'price-probe-failed',
         signalEntry: rEntry, marketPrice: null, probeSrc: null,
+        entryMode: _entryMode, forceMarket: _forceMkt,
+        payloadBarClose: p.barClose == null ? null : String(p.barClose),
         // the budgets that were actually in force, so the next occurrence is
         // diagnosable from the log alone instead of from source archaeology
         probeBudgetMs: {
@@ -1021,10 +1077,17 @@ async function processSignalBackground({ p, assetId, pineTicker, dedupeKey, entr
         },
       });
       try {
+        // Name the routing. "not placing a blind limit" was being sent for
+        // signals that were going to be MARKET orders, which is why this skip
+        // read as a bug rather than as a decision.
         await sendOnce(`webhook-noprobe:${dedupeKey}`,
           `\u26a0\ufe0f <b>Signal SKIPPED \u2014 ${pineTicker}</b>\n\n` +
           `Template: ${p.template}\nDirection: ${p.direction}\n` +
-          `No live price available \u2014 not placing a blind limit.`);
+          (_forceMkt
+            ? `No live price AND no barClose in the alert \u2014 nothing to `
+              + `judge the run-past guard against.`
+            : `No live price available \u2014 not placing a blind limit `
+              + `(entry mode: ${_entryMode}).`));
       } catch (_) {}
       return;
     }

@@ -251,6 +251,42 @@ chk(!!cm && +cm[1] >= 1200, 'candle budget >= 1200 ms',
 chk(WH.includes('probeBudgetMs'),
     'a probe failure logs the budgets that were in force');
 
+// ★★ 2026-11-24. The 11-12 fix widened the budgets; it did not stop a probe
+// failure from COSTING THE TRADE. A gold SHORT was skipped again this morning
+// with "No live price available" and he took it by hand. Both probes are
+// MetaAPI (candle-source's only provider branch, then /current-price on the
+// same account), so they fail together - and a FORCED-MARKET gold entry never
+// needed a live price: _cur feeds _canLimit (irrelevant under _forceMkt),
+// _drift (the run-past guard) and the log. The signal bar's own close is in
+// the alert body, cannot time out, and is the price g15 models the fill at.
+// Measured on the 4.4yr book: drift past rEntry has median 0.39 ranges and
+// only 2 of 486 trades (0.41%) exceed the stairFinal-6 guard budget, so the
+// fallback neither disables the guard nor waves a runaway through.
+chk(/if \(_cur == null && _forceMkt\)/.test(WH),
+    'a forced-market gold entry falls back to the payload close');
+chk(/_pbc = parseFloat\(p\.barClose\)/.test(WH),
+    'the fallback price is the signal bar close from the alert');
+chk(WH.includes("_dbgProbeSrc = 'payload-barclose'"),
+    'the fallback is attributed in the log, so it is measurable');
+chk(WH.includes("type: 'price-probe-fallback'"),
+    'using the fallback writes its own activity entry');
+{
+  // ORDER IS THE WHOLE SAFETY ARGUMENT: live quote first, payload close only
+  // after it misses, skip only after BOTH. If the fallback ever moves above
+  // the live probes it silently becomes the primary price source.
+  const iQ = WH.indexOf("_dbgProbeSrc = 'broker-quote'");
+  const iF = WH.indexOf('if (_cur == null && _forceMkt)');
+  const iS = WH.indexOf("reason: 'price-probe-failed'");
+  chk(iQ > 0 && iF > iQ && iS > iF,
+      'live probes -> payload close -> skip, in that order');
+}
+// A LIMIT routing must STILL skip: a stale reference can put the resting
+// order on the wrong side of the market and MT5 rejects it INVALID_PRICE.
+chk(!/if \(_cur == null\)\s*\{\s*const _pbc/.test(WH),
+    'the fallback is NOT applied to a limit routing');
+chk(/No live price AND no barClose/.test(WH),
+    'the skip message names the routing instead of always saying "limit"');
+
 // ZERO MUST MEAN OFF, not "arm at zero excursion". The panel labels osS1Arm 0
 // as "off"; without an explicit > 0 guard the engine fires stage 1 on the
 // first tick of every trade and pulls the stop to a LOSS — the opposite of
