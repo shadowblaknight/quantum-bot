@@ -46,6 +46,12 @@ const WRITABLE = {
   staircase: ['stairGive', 'stairFinal', 'stairArm', 'stairArmZone',
               'stairQ'],
   oneshot:   ['osArm', 'osGive', 'osS1Arm', 'osS1Keep', 'osPartPct'],
+  // HIS dollar ladder, 2026-11-28, and the Telegram mode that replaced the
+  // per-event spam. Registered here so sections 1-4 trace each one the whole
+  // way: DEFAULTS -> sanitize -> GET /settings -> POST whitelist -> a control
+  // in the panel. An unreachable knob is live-looking and dead.
+  dladder:   ['dladStep', 'dladLock', 'dladFinal', 'dladTouch'],
+  telegram:  ['tgMode'],
   entry:     ['entryMode'],
 };
 // deliberately read-only: a historical fact a control could erase by accident
@@ -256,6 +262,76 @@ chk(/\s+: _qbSettings\.stairArm;/.test(MT),
     'an unknown zone or other template falls back to the global arm');
 chk(/needRanges: _armRanges/.test(MT),
     'the unarmed report names the arm ACTUALLY in force, not the global');
+
+console.log('\n=== 10g. HIS DOLLAR LADDER (2026-11-28) ===');
+// Spec: a rung every dladStep dollars of floating profit, the stop parked at
+// dladLock, everything closed at dladFinal. Of the five locks he asked to
+// have tested, over 4.4 years: $700 +$98,074 / $750 +$97,272 / $800 +$99,297
+// / $850 +$102,801 / $900 +$107,598, against the staircase's +$87,115 -
+// monotone in the tightness of the giveback - and BOTH walk-forward halves
+// chose $900 AND ranked all five the same way on the half they had not seen.
+const LD = sanitizeForTest({});
+chk(LD.dladStep === 1000, 'a rung every $1,000 of profit (measured best)');
+chk(LD.dladLock === 900, 'the stop locks $900 on rung 1 (measured best)');
+chk(LD.dladFinal === 3000,
+    'closes at $3,000 - his $5,000 never fired once in 4.4 years',
+    'nothing ever climbed past rung 4');
+chk(LD.dladTouch === false,
+    'rungs fire on a BAR CLOSE, not a wick', 'close +$108k vs touch +$78k');
+chk(sanitizeForTest({ exitMode: 'dladder' }).exitMode === 'dladder',
+    "'dladder' is a selectable exitMode");
+// ! a lock at or above its own rung parks the stop at the price that
+// triggered the move; the broker rejects it and the trade is left unmanaged.
+chk(sanitizeForTest({ dladStep: 1000, dladLock: 5000 }).dladLock === 950,
+    'the lock is clamped BELOW its own rung, so the stop is always placeable');
+chk(sanitizeForTest({ dladFinal: 0 }).dladFinal === 0,
+    'final 0 means NO target, which the measurements support');
+// the engine itself
+chk(/\(position\.volume \|\| 0\)\s*\n?\s*\* \(\(_dladMeta && _dladMeta\.contractSize\) \|\| 0\)/
+    .test(MT),
+    'dollars come from volume x contractSize, exact for any symbol');
+chk(MT.includes('const DLAD_EPS = 1e-9'),
+    'the rung edge carries an epsilon',
+    'a peak landing EXACTLY on a rung computed a hair under it and did not lock');
+chk(/\(_dladRung - 1\) \* _qbSettings\.dladStep\s*\n?\s*\+ _qbSettings\.dladLock/
+    .test(MT),
+    'rung n locks (n-1) x step + lock, so the giveback is FIXED at every rung');
+chk(/_dladOK\s*\n?\s*\? _dladFinalPrice/.test(MT),
+    'the ladder owns the broker take-profit while it is the active engine');
+chk(MT.includes('(_osOK && _osSigma) || _stairOK || _dladOK'),
+    'the bar-CLOSE tracker runs for the ladder too, or its peak would be a wick');
+chk(MT.includes("state.tpsHit.includes('DLAD-FINAL')"),
+    'the final close is latched, so it cannot fire twice');
+
+console.log('\n=== 10h. ONE TELEGRAM CARD INSTEAD OF ELEVEN MESSAGES ===');
+// "telegram has too much notification i want somthing new and clean". A trade
+// that climbed three rungs produced ELEVEN messages, and with a 0.10-rung stop
+// grid the SL-locked line alone could fire dozens of times in one trade.
+chk(LD.tgMode === 'card', 'the live card is the default');
+chk(sanitizeForTest({ tgMode: 'verbose' }).tgMode === 'verbose',
+    "'verbose' restores the old per-event behaviour without a deploy");
+chk(sanitizeForTest({ tgMode: 'nope' }).tgMode === 'card',
+    'an unknown mode falls back to the card rather than going silent');
+chk(TG.includes("tgCall('editMessageText'"),
+    'the card is EDITED in place, so Telegram does not re-notify');
+chk(/not modified/i.test(TG),
+    'an edit that changes nothing is treated as SUCCESS',
+    'otherwise a quiet tick would post a duplicate card every minute');
+chk(/const sent = await sendTelegram\(text, \{\}\);/.test(TG),
+    'an unreachable card is RESENT, so a close can never be lost');
+// the three it replaces, and the one class it must never swallow
+for (const [fn, why] of [
+  ['notifySpecialistTPConfirmed', 'the per-TP message'],
+  ['notifyStaircaseRung', 'the per-rung message'],
+  ['notifySpecialistSLLocked', 'the per-stop-move message'],
+]) {
+  const re = new RegExp("tgMode !== 'card'[\\s\\S]{0,400}" + fn);
+  chk(re.test(MT), `card mode suppresses ${why}`);
+}
+chk(!/tgMode !== 'card'[\s\S]{0,300}notifySpecialistSLWarning/.test(MT),
+    'but it NEVER suppresses an SL warning - a failure must stay loud');
+chk(MT.includes('status: \'closed\''),
+    "the card's last state is the close message");
 
 console.log('\n=== 10f. THE RUNG MESSAGE TELLS THE TRUTH (2026-11-27) ===');
 // The rung Telegram fired on the rung high-water alone and said "stop goes

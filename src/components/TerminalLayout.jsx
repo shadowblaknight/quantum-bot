@@ -593,11 +593,27 @@ export default function TerminalLayout({
   const osS1Keep   = settings?.osS1Keep ?? 0.25;
   const osPartPct  = settings?.osPartPct ?? 0.33;
 
-  const MODE_SEQ   = ['ratchet', 'oneshot', 'staircase', 'tp1', 'final-tp'];
+  const MODE_SEQ   = ['ratchet', 'oneshot', 'staircase', 'dladder', 'tp1',
+                      'final-tp'];
   const modeLabel  = m => m === 'ratchet' ? 'RATCHET' : m === 'oneshot' ? 'ONE-SHOT'
-    : m === 'staircase' ? 'STAIRCASE' : m === 'tp1' ? 'TP1' : 'FINAL TP';
+    : m === 'staircase' ? 'STAIRCASE' : m === 'dladder' ? '$ LADDER'
+    : m === 'tp1' ? 'TP1' : 'FINAL TP';
   const modeColor  = m => m === 'ratchet' ? C.green2 : m === 'oneshot' ? C.teal2
-    : m === 'staircase' ? C.ml2 : m === 'tp1' ? C.gold : C.t3;
+    : m === 'staircase' ? C.ml2 : m === 'dladder' ? C.gold
+    : m === 'tp1' ? C.gold : C.t3;
+  // ★ THE DOLLAR LADDER, 2026-11-28. HIS DESIGN, and the only exit in this
+  // panel that is denominated in MONEY rather than in a volatility unit:
+  // a rung every dladStep dollars of floating profit, the stop parked at
+  // dladLock, the position closed at dladFinal. Measured over 4.4 years his
+  // five candidate locks scored $700 +$98,074 / $750 +$97,272 /
+  // $800 +$99,297 / $850 +$102,801 / $900 +$107,598 against the staircase's
+  // +$87,115 - monotone in the tightness of the giveback - and BOTH
+  // walk-forward halves picked $900.
+  const isLadder   = settings?.exitMode === 'dladder';
+  const dladStep   = settings?.dladStep  ?? 1000;
+  const dladLock   = settings?.dladLock  ?? 900;
+  const dladFinal  = settings?.dladFinal ?? 3000;
+  const tgMode     = settings?.tgMode    ?? 'card';
 
   // Everything downstream sizes off this. Falls back to the store default (4%)
   // until the fetch lands, so the panel does not flash a stale 1%.
@@ -1086,6 +1102,8 @@ export default function TerminalLayout({
                                 color:modeColor(settings?.exitMode)}}>
                     {!settings?'LOADING…'
                       :isOneShot?`ONE-SHOT · FROZEN LOCK · NO TP`
+                      :isLadder?`$ LADDER · RUNG EVERY $${dladStep} · LOCKS $${dladLock}`
+                        + (dladFinal>0?` · CLOSES AT $${dladFinal}`:' · NO TARGET')
                       :isStair?`STAIRCASE · CLOSES AT RUNG ${stairFinal}`
                       :settings.exitMode==='ratchet'?'RATCHET · NO TP'
                       :settings.exitMode==='tp1'?'TP1 · CLOSES AT TP1'
@@ -1342,7 +1360,117 @@ export default function TerminalLayout({
                   </button>
                 </div>
 
-                {isOneShot ? (
+                {/* * TELEGRAM, 2026-11-28. "telegram has too much
+                    notification i want somthing new and clean" - and the
+                    count was the problem: a trade climbing three rungs
+                    produced ELEVEN messages. CARD is ONE message per trade,
+                    edited in place as it moves; Telegram does not re-notify
+                    on an edit, so there is one ping on open and one on close.
+                    Errors are never suppressed. */}
+                <div>
+                  <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>TELEGRAM</div>
+                  <div style={{display:'flex',gap:4}}>
+                    {[['card','ONE LIVE CARD'],['verbose','EVERY EVENT']].map(([v,lbl])=>(
+                      <button key={v} disabled={!settings||riskSaving}
+                        title={v==='card'?'One message per trade, edited in place. Replaces the TP-confirmed, rung and SL-locked messages \u2014 with a 0.10-rung stop grid that last one alone could fire dozens of times in a single trade.':'The old behaviour: a separate message for every event.'}
+                        onClick={()=>saveSettings({tgMode:v})}
+                        style={{padding:'4px 10px',background:tgMode===v?C.b2:'transparent',
+                                border:`1px solid ${tgMode===v?(v==='card'?C.gold:C.t3):C.b2}`,
+                                color:tgMode===v?(v==='card'?C.gold:C.t2):C.t2,fontSize:9,
+                                fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                        {lbl}</button>
+                    ))}
+                  </div>
+                </div>
+                {isLadder ? (
+                  <>
+                    {/* HIS SPEC: "if price reaches 1000$ move sl to 800$ then
+                        when it reaches 2000$ move sl to 1800$ ... until
+                        reaching final tp 5K take the hole profit". The
+                        giveback is a FIXED number of dollars at every rung,
+                        which is what separates it from RATCHET - there the
+                        giveback GROWS with the win. */}
+                    <div>
+                      <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>A RUNG EVERY ($ OF PROFIT)</div>
+                      <div style={{display:'flex',gap:4}}>
+                        {[500,750,1000,1500,2000].map(v=>(
+                          <button key={v} disabled={!settings||riskSaving}
+                            title={v===1000?'MEASURED BEST over 4.4yr: $500 made +$91k, $750 +$75k, $1,500 +$59k, against $1,000\u2019s +$108k.':`A rung every $${v} of floating profit.`}
+                            onClick={()=>saveSettings({dladStep:v})}
+                            style={{padding:'4px 9px',background:dladStep===v?C.b2:'transparent',
+                                    border:`1px solid ${dladStep===v?(v===1000?C.gold:C.green2):C.b2}`,
+                                    color:dladStep===v?(v===1000?C.gold:C.green2):C.t2,fontSize:9,
+                                    fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                            {v>=1000?'$'+(v/1000)+'k':'$'+v}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {/* The five HE asked to have tested. $900 won on total
+                        made AND on both walk-forward halves. */}
+                    <div>
+                      <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>STOP LOCKS AT ($ ON RUNG 1)</div>
+                      <div style={{display:'flex',gap:4}}>
+                        {[700,750,800,850,900].map(v=>(
+                          <button key={v} disabled={!settings||riskSaving}
+                            title={`Rung 1 parks the stop at +$${v}, rung 2 at +$${dladStep+v}, and so on \u2014 a fixed $${dladStep-v} giveback at every rung. Over 4.4yr: ${({700:'+$98,074',750:'+$97,272',800:'+$99,297',850:'+$102,801',900:'+$107,598 \u2014 BEST, and both walk-forward halves chose it'})[v]}.`}
+                            onClick={()=>saveSettings({dladLock:v})}
+                            style={{padding:'4px 9px',background:dladLock===v?C.b2:'transparent',
+                                    border:`1px solid ${dladLock===v?(v===900?C.gold:C.green2):C.b2}`,
+                                    color:dladLock===v?(v===900?C.gold:C.green2):C.t2,fontSize:9,
+                                    fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                            ${v}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {/* His spec said $5,000. NOTHING in 4.4 years ever
+                        climbed past rung 4, so it never fired once. */}
+                    <div>
+                      <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>CLOSE EVERYTHING AT ($)</div>
+                      <div style={{display:'flex',gap:4}}>
+                        {[0,3000,4000,5000].map(v=>(
+                          <button key={v} disabled={!settings||riskSaving}
+                            title={v===0?'No target \u2014 exit on the ladder stop only. +$110k over 4.4yr.':v===3000?'MEASURED BEST: +$114k over 4.4yr.':v===5000?'His original figure. NOTHING reached it in 4.4 years \u2014 no trade ever climbed past rung 4. +$108k.':`Close the full position at +$${v}. +$112k.`}
+                            onClick={()=>saveSettings({dladFinal:v})}
+                            style={{padding:'4px 9px',background:dladFinal===v?C.b2:'transparent',
+                                    border:`1px solid ${dladFinal===v?(v===3000?C.gold:C.green2):C.b2}`,
+                                    color:dladFinal===v?(v===3000?C.gold:C.green2):C.t2,fontSize:9,
+                                    fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                            {v===0?'NONE':'$'+(v/1000)+'k'}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {/* "If price reaches 1000$" literally means an
+                        intrabar TOUCH, but a wick arms a rung the bar then
+                        gives back - the same lesson as the arm-on-bar-1 bug.
+                        Measured: close +$108k against touch +$78k. */}
+                    <div>
+                      <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>A RUNG FIRES ON</div>
+                      <div style={{display:'flex',gap:4}}>
+                        {[[false,'15m BAR CLOSE'],[true,'INTRABAR TOUCH']].map(([v,lbl])=>(
+                          <button key={String(v)} disabled={!settings||riskSaving}
+                            title={v?'A wick through the rung arms it. Literally what "if price reaches" says, and MEASURABLY WORSE: +$78k against +$108k over 4.4yr, because a wick arms a rung the bar then gives back.':'MEASURED BEST: the rung arms only once a 15m bar CLOSES beyond it. +$108k over 4.4yr.'}
+                            onClick={()=>saveSettings({dladTouch:v})}
+                            style={{padding:'4px 10px',background:(!!settings?.dladTouch)===v?C.b2:'transparent',
+                                    border:`1px solid ${(!!settings?.dladTouch)===v?(v?C.red2:C.gold):C.b2}`,
+                                    color:(!!settings?.dladTouch)===v?(v?C.red2:C.gold):C.t2,fontSize:9,
+                                    fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                            {lbl}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {/* The ladder as it will actually run, so the three rows
+                        of numbers above are not abstract. */}
+                    <div style={{fontSize:8,color:C.t3,fontFamily:'JetBrains Mono,monospace',
+                                 lineHeight:1.7,paddingTop:2}}>
+                      {[1,2,3,4].map(k=>{
+                        const hit=k*dladStep, lk=(k-1)*dladStep+dladLock;
+                        if(dladFinal>0&&hit>=dladFinal) return null;
+                        return <div key={k}>reaches <span style={{color:C.t2}}>+${hit.toLocaleString()}</span> {'\u2192'} stop to <span style={{color:C.gold}}>+${lk.toLocaleString()}</span></div>;
+                      })}
+                      {dladFinal>0&&<div>reaches <span style={{color:C.t2}}>+${dladFinal.toLocaleString()}</span> {'\u2192'} <span style={{color:C.green2}}>close it all</span></div>}
+                    </div>
+                  </>
+                ) : isOneShot ? (
                   <>
                     {/* THE ONE-SHOT, ON A SIGMA AXIS. Three events and then
                         nothing: the stop is frozen and price runs free, which

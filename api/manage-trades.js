@@ -37,6 +37,7 @@ const {
   notifySpecialistTradeClosed, notifySpecialistTPConfirmed, notifyStaircaseRung,
   notifyOneShotEvent,
   notifySpecialistSLLocked, notifySpecialistSLWarning, notifyOCOFailed,
+  notifyTradeCard,
 } = require('./telegram');
 const { SPECIALIST_SIGNALS } = require('./_templates');
 const { getTradeSettings } = require('./settings-store');
@@ -525,12 +526,49 @@ async function managePosition(position) {
     } catch (e) { _osSigmaErr = `sigma threw: ${e && e.message}`; }
   }
 
+  // --- THE DOLLAR LADDER: SETUP ------------------------------------------
+  // HIS DESIGN, 2026-11-27: a rung every dladStep dollars of floating profit,
+  // the stop parked at dladLock on rung 1 and (n-1)*step + lock on rung n, the
+  // whole position closed at dladFinal.
+  //
+  // * IT NEEDS NOTHING FROM THE SIGNAL. The staircase must recover the ORB
+  // range from the specialist TP grid and the one-shot must fetch an hourly
+  // sigma; each degrades when its input is missing. This measures in DOLLARS,
+  // which the position itself carries exactly:
+  //     $ = (price - entry) x dir x volume x contractSize
+  // so there is no grid check and no sigma fetch that can fail. The registry
+  // carries contractSize per symbol (gold 100), so it is exact for any asset.
+  //
+  // _dladEntry is the ONE source of truth for the fill in this engine - the
+  // rung prices and the final target must not be able to disagree about where
+  // zero is.
+  const DLAD_MODE = _qbSettings.exitMode === 'dladder';
+  const _dladEntry = position.openPrice;
+  // getAssetById is called again here rather than reusing `assetMeta`, which
+  // is declared further down: the broker take-profit is resolved on the very
+  // next line and must not reference a binding that does not exist yet.
+  const _dladMeta = getAssetById(asset);
+  const _dladUsdPerPrice = (position.volume || 0)
+    * ((_dladMeta && _dladMeta.contractSize) || 0);
+  const _dladOK = DLAD_MODE && _dladUsdPerPrice > 0
+    && typeof _dladEntry === 'number' && isFinite(_dladEntry);
+  // dladFinal 0 means NO target, which the measurements support: at lock $900
+  // a $3,000 cap scores +27.44 R, no cap +26.48 and his $5,000 +25.93 - and in
+  // 4.4 years not one trade ever climbed past rung 4, so $5,000 never fired.
+  const _dladFinalPrice = (_dladOK && _qbSettings.dladFinal > 0)
+    ? (isLong
+        ? _dladEntry + _qbSettings.dladFinal / _dladUsdPerPrice
+        : _dladEntry - _qbSettings.dladFinal / _dladUsdPerPrice)
+    : null;
+
   const _tpIdx = TP1_MODE ? 0 : tpLevels.length - 1;
   const finalTPPrice = (RATCHET_MODE || _osOK)
     ? null
-    : _stairOK
-      ? _stairFinalPrice
-      : (tpLevels.length ? tpLevels[_tpIdx].price : null);
+    : _dladOK
+      ? _dladFinalPrice
+      : _stairOK
+        ? _stairFinalPrice
+        : (tpLevels.length ? tpLevels[_tpIdx].price : null);
   if (tpLevels.length === 0) {
     return { id: position.id, error: 'no TP levels in pending setup' };
   }
@@ -634,7 +672,11 @@ async function managePosition(position) {
       // Ensures the user is always notified even when the ratchet can't lock immediately
       // (e.g. price bounced back within the stop-buffer window).
       try {
-        await notifySpecialistTPConfirmed({ positionId: position.id, asset, direction, tpName, tpPrice, rMult });
+        // Suppressed in card mode: the live card shows the deepest level
+        // price has reached, so a message per level is pure duplication.
+        if (_qbSettings.tgMode !== 'card') {
+          await notifySpecialistTPConfirmed({ positionId: position.id, asset, direction, tpName, tpPrice, rMult });
+        }
       } catch (_) {}
     }
   }
@@ -670,7 +712,7 @@ async function managePosition(position) {
   // engine was the 2.5x WORSE variant of the one that was backtested. It also
   // matters for his rule "don't move it at all until it hit tp1": the close
   // arms LATER than a wick, so this moves the stop less eagerly, not more.
-  if ((_osOK && _osSigma) || _stairOK) {
+  if ((_osOK && _osSigma) || _stairOK || _dladOK) {
     try {
       const _BAR = 15 * 60 * 1000;
       const _cr = await fetchCandles(asset, '15m', 60);
@@ -831,14 +873,18 @@ async function managePosition(position) {
         : `STAIRCASE rung ${cleared} reached — stop NOT moved; the arm needs `
           + `${_armRanges.toFixed(2)}× the ORB range from the fill and the trade `
           + `is at ${_armHave.toFixed(2)}×`);
-      try {
-        await notifyStaircaseRung({
-          positionId: position.id, asset, direction, rung: cleared,
-          slRung: cleared - _qbSettings.stairGive,
-          finalRung: _qbSettings.stairFinal,
-          armed, needRanges: _armRanges, haveRanges: _armHave,
-        });
-      } catch (_) {}
+      // Suppressed in card mode: the card carries the rung AND whether the
+      // stop actually moved, which is exactly what these two messages said.
+      if (_qbSettings.tgMode !== 'card') {
+        try {
+          await notifyStaircaseRung({
+            positionId: position.id, asset, direction, rung: cleared,
+            slRung: cleared - _qbSettings.stairGive,
+            finalRung: _qbSettings.stairFinal,
+            armed, needRanges: _armRanges, haveRanges: _armHave,
+          });
+        } catch (_) {}
+      }
       await setPositionState(position.id, state);
     };
     if (cleared >= 1 && _stairArmed
@@ -871,6 +917,73 @@ async function managePosition(position) {
         actions.push({ action: 'stair-final-close', error: closeResult.error });
       }
       await setPositionState(position.id, state);
+    }
+  }
+
+  // ─── THE DOLLAR LADDER: THE PEAK, AND THE FINAL TARGET ───────────────
+  // * THE PEAK IS A BAR CLOSE, NOT A WICK. Measured over 4.4 years:
+  // close-triggered +25.93 R against intrabar-touch +18.74 R. "If price
+  // reaches 1000$" literally means a touch, but a wick arms a rung that the
+  // bar then gives back - the same lesson as the arm-on-bar-1 bug. dladTouch
+  // switches to the touch reading for anyone who wants it; it is measurably
+  // worse and ships OFF.
+  // The peak is a HIGH-WATER in state, so a retrace can never un-lock a rung
+  // that has already been cleared.
+  let _dladRung = 0, _dladLockUsd = 0;
+  if (_dladOK) {
+    const _dref = _qbSettings.dladTouch
+      ? extreme
+      : ((typeof state.osBestClose === 'number' && isFinite(state.osBestClose))
+          ? state.osBestClose : extreme);
+    const _dpeak = (isLong ? (_dref - _dladEntry) : (_dladEntry - _dref))
+      * _dladUsdPerPrice;
+    state.dladPeakUsd = Math.max(state.dladPeakUsd || 0, _dpeak);
+    // EPS: a peak that lands EXACTLY on a rung computes a hair under it.
+    // (ref - entry) * usdPerPrice subtracts two numbers near 4,000, so a
+    // true +$1,000.00 came out $999.9999999999909 and Math.floor returned
+    // rung 0 - the stop would NOT have locked on a trade sitting precisely
+    // at the rung. Caught by _staircase.test.js, and it matters: 27 Nov
+    // peaked at about $1,000 exactly. 1e-9 RELATIVE is ~1e-6 dollars at a
+    // $1,000 step, a thousand times the observed float noise and
+    // economically nothing. g15.py uses the identical epsilon so the
+    // backtest and production cannot disagree about where a rung is.
+    const DLAD_EPS = 1e-9;
+    _dladRung = Math.floor(
+      state.dladPeakUsd / _qbSettings.dladStep + DLAD_EPS);
+    if (_dladRung >= 1) {
+      _dladLockUsd = (_dladRung - 1) * _qbSettings.dladStep
+        + _qbSettings.dladLock;
+      state.dladRung = Math.max(state.dladRung || 0, _dladRung);
+    }
+
+    // The close. _dladFinalPrice is parked as the broker take-profit on every
+    // modify, so this is a BACKSTOP for the case where that order did not
+    // fill: a gap through it, or a modify that failed. Measured on the LIVE
+    // price, not the peak, because a target is a price that must still be
+    // available to trade at.
+    if (_qbSettings.dladFinal > 0 && !state.tpsHit.includes('DLAD-FINAL')) {
+      const _dnow = (isLong ? (currentPrice - _dladEntry)
+                            : (_dladEntry - currentPrice)) * _dladUsdPerPrice;
+      if (_dnow >= _qbSettings.dladFinal) {
+        const closeResult = await partialClose(position.id, position.volume);
+        if (closeResult.ok) {
+          state.tpsHit.push('DLAD-FINAL');
+          state.partialCloses.push({
+            tpName: `dlad-final@$${Math.round(_qbSettings.dladFinal)}`,
+            lotClosed: position.volume, atPrice: _dladFinalPrice,
+            ts: Date.now(),
+          });
+          actions.push({ action: 'dlad-final-close', ok: true,
+                         atUsd: Math.round(_dnow) });
+          await pushCommentary(asset, 'tp-hit',
+            `LADDER final target $${Math.round(_qbSettings.dladFinal)} `
+            + `reached — closed full ${position.volume} lot`);
+        } else {
+          actions.push({ action: 'dlad-final-close',
+                         error: closeResult.error });
+        }
+        await setPositionState(position.id, state);
+      }
     }
   }
 
@@ -1053,6 +1166,41 @@ async function managePosition(position) {
         needRanges: _armRanges, armZone: _armZone,
       });
     }
+  } else if (_dladOK) {
+    // ─── THE DOLLAR LADDER STOP ──────────────────────────────────────
+    // rung n parks the stop at (n-1) x dladStep + dladLock dollars of
+    // profit, so the giveback is a FIXED number of dollars at every rung.
+    // That is the property his spec has and 'ratchet' does not: there the
+    // stop sits at trailKeep x the whole excursion, so the giveback GROWS
+    // with the win and the realised share is pinned however far price ran.
+    //
+    // Nothing is touched before rung 1, so a trade that never reaches
+    // dladStep keeps exactly the stop it was placed with. There is no
+    // separate arm to tune - the first rung IS the arm, which is why this
+    // engine has one fewer number in it than the staircase.
+    if (_dladRung >= 1 && !state.tpsHit.includes('DLAD-FINAL')) {
+      const _dslTarget0 = isLong
+        ? _dladEntry + _dladLockUsd / _dladUsdPerPrice
+        : _dladEntry - _dladLockUsd / _dladUsdPerPrice;
+      // Same clamp every other engine here uses, for the same reason: a stop
+      // parked the wrong side of market is rejected by the broker and the
+      // trade is left unmanaged on its original stop.
+      const _dslTarget = isLong
+        ? Math.min(_dslTarget0, currentPrice - stopBuffer)
+        : Math.max(_dslTarget0, currentPrice + stopBuffer);
+      const _dimproves = curSL == null
+        ? true : (isLong ? _dslTarget > curSL : _dslTarget < curSL);
+      if (_dimproves) {
+        chosen = { name: `dlad-r${_dladRung}@$${Math.round(_dladLockUsd)}`,
+                   price: _dslTarget };
+      }
+    }
+    // Reported every tick, armed or not, so a trade sitting on its original
+    // stop reads as a deliberate state rather than an unmanaged position.
+    actions.push({ action: 'dlad', rung: _dladRung,
+                   peakUsd: Math.round(state.dladPeakUsd || 0),
+                   lockUsd: Math.round(_dladLockUsd),
+                   stepUsd: _qbSettings.dladStep });
   } else if (RATCHET_MODE && tpLevels.length >= 2) {
     // ─── UNBOUNDED RATCHET ───────────────────────────────────────────
     // tp1/tp2/tp3 arrive equally spaced from the ORB level, so one step is
@@ -1235,7 +1383,13 @@ async function managePosition(position) {
               ? Math.abs(slCandidate - matchedPending.plannedEntry) / plannedSLDist
               : (Math.abs(slCandidate - state.entry) / initialSLForR);
             try {
-              await notifySpecialistSLLocked({ positionId: position.id, asset, direction, tpName: chosen.name, slPrice: slCandidate, rMult });
+              // Suppressed in card mode. With stairQ 0.10 the stop steps on
+              // tenth-of-a-rung grids, so this one line could fire dozens of
+              // times in a single trade - the single worst source of the noise
+              // he complained about. The card shows the live stop instead.
+              if (_qbSettings.tgMode !== 'card') {
+                await notifySpecialistSLLocked({ positionId: position.id, asset, direction, tpName: chosen.name, slPrice: slCandidate, rMult });
+              }
             } catch (_) {}
           }
         } else if (slAfter === null) {
@@ -1351,6 +1505,62 @@ async function managePosition(position) {
         }
       }
     }
+  }
+
+  // ─── THE LIVE TRADE CARD ─────────────────────────────────────────────
+  // ONE Telegram message per position, edited in place instead of a message
+  // per event. Placed LAST on purpose: every engine above has finished, so
+  // the stop and rung reported here are the ones actually in force going
+  // into the next tick - a card rendered earlier could announce a stop that
+  // a later block then overrode.
+  // Wrapped whole in try/catch: a notifier must never be able to affect
+  // trade management.
+  if (_qbSettings.tgMode === 'card') {
+    try {
+      const _upp = _dladUsdPerPrice;
+      // The stop the broker has CONFIRMED, preferred over the one read off
+      // the position: MetaAPI often serves a stale stopLoss on the tick
+      // right after a modify, which would make the card understate the lock.
+      const _eSL = (typeof state.lastVerifiedSL === 'number'
+        && isFinite(state.lastVerifiedSL)) ? state.lastVerifiedSL : curSL;
+      const _cdir = isLong ? 1 : -1;
+      const _nowUsd = _upp > 0
+        ? (currentPrice - _dladEntry) * _cdir * _upp : null;
+      const _peakUsd = _dladOK
+        ? (state.dladPeakUsd || 0)
+        : (_upp > 0 ? (extreme - _dladEntry) * _cdir * _upp : null);
+      // What the stop GUARANTEES, in dollars. Floored at 0 so a stop still
+      // below the fill reads as "not moved yet" rather than a negative lock.
+      const _lockUsd = (_upp > 0 && _eSL != null)
+        ? Math.max(0, (_eSL - _dladEntry) * _cdir * _upp) : 0;
+      // Only touch Telegram when a number a reader would notice has moved.
+      // An unchanged edit is harmless - the API answers "not modified" and
+      // notifyTradeCard treats that as success - but it is a wasted round
+      // trip on every cron tick of every open position.
+      const _csig = [Math.round(_nowUsd || 0), Math.round(_peakUsd || 0),
+                     Math.round(_lockUsd), state.dladRung || 0].join('|');
+      if (_csig !== state.tgCardSig) {
+        const _cr = await notifyTradeCard({
+          positionId: position.id, messageId: state.tgCardId || null,
+          asset, direction, entry: _dladEntry, sl: _eSL,
+          lot: position.volume,
+          riskDollars: (matchedPending.sizing && matchedPending.sizing.baseRisk)
+            || (initialSLForR * _upp) || null,
+          signal: (matchedPending.setup && matchedPending.setup.zoneType)
+            || null,
+          nowUsd: _nowUsd, peakUsd: _peakUsd, lockUsd: _lockUsd,
+          rung: state.dladRung || 0,
+          stepUsd: _dladOK ? _qbSettings.dladStep : 0,
+          finalUsd: _dladOK ? _qbSettings.dladFinal : 0,
+          status: 'open',
+        });
+        if (_cr && _cr.messageId) {
+          state.tgCardId = _cr.messageId;
+          state.tgCardSig = _csig;
+          await setPositionState(position.id, state);
+        }
+      }
+    } catch (_) {}
   }
 
   return { id: position.id, asset, actions, state };
@@ -1597,7 +1807,32 @@ async function detectAndProcessClosed(currentOpenIds) {
       const _tmpl     = matchedPending.setup?.template || null;
       const _isV20    = SPECIALIST_SIGNALS.includes(_tmpl);
 
-      if (_isV20) {
+      // ─── CARD MODE: the card's LAST state IS the close message ───────
+      // One message per trade, start to finish. If the edit fails for any
+      // reason notifyTradeCard posts a fresh card instead, so the close can
+      // never be lost - which is why it is safe to suppress the per-event
+      // close notifications below rather than send both.
+      if (_qbSettings.tgMode === 'card' && state.tgCardId) {
+        const _lastDeal = positionDeals[positionDeals.length - 1] || {};
+        const _exitPx = [_lastDeal.price, _lastDeal.closePrice]
+          .find((v) => typeof v === 'number' && isFinite(v));
+        await notifyTradeCard({
+          positionId, messageId: state.tgCardId,
+          asset: state.asset, direction: state.direction,
+          entry: state.entry, exit: _exitPx == null ? null : _exitPx,
+          lot: state.originalLot || null,
+          riskDollars: (matchedPending.sizing && matchedPending.sizing.baseRisk)
+            || null,
+          signal: (matchedPending.setup && matchedPending.setup.zoneType)
+            || null,
+          peakUsd: state.dladPeakUsd == null ? null : state.dladPeakUsd,
+          rung: state.dladRung || 0,
+          stepUsd: 0, finalUsd: 0,
+          closedUsd: totalPnL,
+          heldMs: state.createdAt ? (Date.now() - state.createdAt) : null,
+          status: 'closed',
+        });
+      } else if (_isV20) {
         const _zoneType = matchedPending.setup?.zoneType || null;
         await notifySpecialistTradeClosed({
           asset:       state.asset,

@@ -282,6 +282,11 @@ async function actionSetSettings(body) {
   if (body.stairFinal !== undefined)    patch.stairFinal = body.stairFinal;
   if (body.stairArm !== undefined)      patch.stairArm = body.stairArm;
   if (body.stairArmZone !== undefined)  patch.stairArmZone = body.stairArmZone;
+  if (body.dladStep !== undefined)      patch.dladStep = body.dladStep;
+  if (body.dladLock !== undefined)      patch.dladLock = body.dladLock;
+  if (body.dladFinal !== undefined)     patch.dladFinal = body.dladFinal;
+  if (body.dladTouch !== undefined)     patch.dladTouch = body.dladTouch;
+  if (body.tgMode !== undefined)        patch.tgMode = body.tgMode;
   if (body.stairQ !== undefined)        patch.stairQ = body.stairQ;
   // THE ONE-SHOT
   if (body.osArm !== undefined)         patch.osArm = body.osArm;

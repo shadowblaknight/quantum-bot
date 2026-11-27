@@ -61,6 +61,115 @@ function armRangesFor(_qbSettings, matchedPending) {
 function pend(template, zoneType) {
   return { setup: { template, zoneType } };
 }
+// Copied verbatim from manage-trades.js, the dollar ladder. $ per 1.00 of
+// price is volume x contractSize (gold 100), so 0.78 lot = $78 per point -
+// which is exactly the figure his live fills imply (1R = $4,150 on a 53.2pt
+// stop). The whole engine is these four expressions.
+function dladUsdPerPrice(volume, contractSize) {
+  return (volume || 0) * (contractSize || 0);
+}
+function dladPeakUsd(isLong, ref, entry, usdPerPrice) {
+  return (isLong ? (ref - entry) : (entry - ref)) * usdPerPrice;
+}
+function dladRungOf(peakUsd, step) {
+  // the DLAD_EPS from manage-trades.js: an exact rung hit computes a hair
+  // under the rung, so without this a +$1,000.00 peak reads as rung 0.
+  return Math.floor(peakUsd / step + 1e-9);
+}
+function dladLockUsdOf(rung, step, lock) {
+  return rung >= 1 ? (rung - 1) * step + lock : 0;
+}
+function dladSlPrice(isLong, entry, lockUsd, usdPerPrice) {
+  return isLong ? entry + lockUsd / usdPerPrice
+                : entry - lockUsd / usdPerPrice;
+}
+function dladFinalPriceOf(isLong, entry, finalUsd, usdPerPrice) {
+  if (!(finalUsd > 0)) return null;
+  return isLong ? entry + finalUsd / usdPerPrice
+                : entry - finalUsd / usdPerPrice;
+}
+
+// ══ THE DOLLAR LADDER (2026-11-27, HIS DESIGN) ═════════════════════════════
+// Spec: "if price reaches 1000$ move sl to 800$ then when it reaches 2000$
+// move sl to 1800$ then when it reaches 3000$ move sl to 2800$ continue like
+// that until reaching final tp 5K take the hole profit".
+// Shipped with lock $900 (MEASURED: of his five candidates over 4.4 years,
+// $700 +$98,074 / $750 +$97,272 / $800 +$99,297 / $850 +$102,801 /
+// $900 +$107,598 against the staircase's +$87,115 - monotone in the
+// tightness of the giveback, and BOTH walk-forward halves chose $900) and a
+// $3,000 final target (his $5,000 never fired once in 4.4 years: nothing
+// ever climbed past rung 4).
+{
+  console.log('\n--- THE DOLLAR LADDER: his real sizing, 0.78 lot gold ---');
+  const VOL = 0.78, CS = 100, ENTRY = 4000;
+  const upp = dladUsdPerPrice(VOL, CS);
+  eq('  $ per 1.00 of price = 0.78 x 100', upp, 78);
+  eq('  so 1R on a 53.2pt stop is his $4,150', upp * 53.2, 4149.6, 0.5);
+
+  const STEP = 1000, LOCK = 900, FINAL = 3000;
+  // --- where each rung FIRES, and what it LOCKS (long)
+  const fires = (k) => ENTRY + (k * STEP) / upp;
+  eq('  rung 1 fires at +$1,000 = 4012.82', fires(1), 4012.8205, 1e-3);
+  eq('  rung 2 fires at +$2,000 = 4025.64', fires(2), 4025.6410, 1e-3);
+  eq('  rung 3 fires at +$3,000 = 4038.46', fires(3), 4038.4615, 1e-3);
+
+  const lockAt = (k) => dladSlPrice(true, ENTRY,
+    dladLockUsdOf(k, STEP, LOCK), upp);
+  eq('  rung 1 locks $900  -> SL 4011.54', lockAt(1), 4011.5385, 1e-3);
+  eq('  rung 2 locks $1,900 -> SL 4024.36', lockAt(2), 4024.3590, 1e-3);
+  eq('  rung 3 locks $2,900 -> SL 4037.18', lockAt(3), 4037.1795, 1e-3);
+  // the giveback is a FIXED $100 at EVERY rung - the property 'ratchet' lacks
+  for (const k of [1, 2, 3, 4]) {
+    eq(`  rung ${k} giveback is always $${STEP - LOCK}`,
+       (fires(k) - lockAt(k)) * upp, STEP - LOCK, 1e-6);
+  }
+
+  // --- the rung is a floor of the PEAK, and never goes backwards
+  eq('  peak +$999 is still rung 0 (stop untouched)',
+     dladRungOf(dladPeakUsd(true, ENTRY + 999 / upp, ENTRY, upp), STEP), 0);
+  eq('  peak +$1,000 is rung 1',
+     dladRungOf(dladPeakUsd(true, fires(1), ENTRY, upp), STEP), 1);
+  eq('  peak +$1,999 is still rung 1',
+     dladRungOf(dladPeakUsd(true, ENTRY + 1999 / upp, ENTRY, upp), STEP), 1);
+  eq('  rung 0 locks nothing', dladLockUsdOf(0, STEP, LOCK), 0);
+
+  // --- SHORT is the mirror, which is where a sign error would show
+  const sEntry = 4000;
+  const sLock1 = dladSlPrice(false, sEntry, dladLockUsdOf(1, STEP, LOCK), upp);
+  eq('  SHORT rung 1 locks $900 -> SL 3988.46', sLock1, 3988.4615, 1e-3);
+  eq('  SHORT peak is measured downward',
+     dladPeakUsd(false, sEntry - 1000 / upp, sEntry, upp), 1000, 1e-6);
+  is('  SHORT stop sits BELOW the short entry', sLock1 < sEntry, true);
+
+  // --- the final target
+  eq('  final $3,000 -> TP 4038.46',
+     dladFinalPriceOf(true, ENTRY, FINAL, upp), 4038.4615, 1e-3);
+  is('  final 0 means NO target',
+     dladFinalPriceOf(true, ENTRY, 0, upp) === null, true);
+  // his $5,000 would have sat here, and nothing reached it in 4.4 years
+  eq('  his original $5,000 would be 4064.10',
+     dladFinalPriceOf(true, ENTRY, 5000, upp), 4064.1026, 1e-3);
+
+  // --- a DIFFERENT lot size must not change the DOLLARS, only the prices
+  const upp2 = dladUsdPerPrice(0.2, CS);
+  eq('  0.20 lot = $20 per point', upp2, 20);
+  eq('  rung 1 still locks $900 of profit at 0.20 lot',
+     (dladSlPrice(true, ENTRY, dladLockUsdOf(1, STEP, LOCK), upp2) - ENTRY)
+     * upp2, 900, 1e-6);
+  is('  but it needs a FURTHER move to get there',
+     dladSlPrice(true, ENTRY, 900, upp2)
+     > dladSlPrice(true, ENTRY, 900, upp), true);
+
+  // --- 27 Nov, his actual trade: ~$1,000 peak on an FRB long
+  console.log('  the 27-Nov trade, under this engine:');
+  const pk = 1000;
+  const rk = dladRungOf(pk, STEP);
+  eq('  a $1,000 peak clears rung 1', rk, 1);
+  eq('  so it would have banked $900 instead of -$4,036',
+     dladLockUsdOf(rk, STEP, LOCK), 900);
+  is('  (a $999 peak would NOT have - the rung is a hard edge)',
+     dladRungOf(999, STEP) === 0, true);
+}
 
 // ── LONG: ORB level 4000, range 20, depth 0.25 -> entry 4005 ───────────────
 {

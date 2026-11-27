@@ -318,6 +318,122 @@ async function notifyStaircaseRung({ positionId, asset, direction, rung, slRung,
   return sendOnce(dedupeKey, text);
 }
 
+
+// =================================================================
+// THE LIVE TRADE CARD  (2026-11-28)
+// =================================================================
+// "telegram has too much notification i want somthing new and clean"
+//
+// He was right about the count. One trade that climbed three rungs produced
+// ELEVEN messages: 1 placed + 3 TP-confirmed + 3 rung + 3 SL-locked + 1
+// closed. None of them was wrong; together they were unreadable on a phone.
+//
+// This is ONE message per position, EDITED IN PLACE as the trade moves, so
+// the whole life of a trade occupies a single line in his chat and always
+// shows the CURRENT state rather than a history he has to reassemble.
+// Telegram does not re-notify on an edit, so the updates are silent by
+// construction - he is pinged once when a trade opens and once when it
+// closes, and can look at the card any time in between.
+//
+// THE THREE FAILURE MODES, ALL HANDLED, because a notifier that throws must
+// never be able to affect trade management:
+//   · "message is not modified" - Telegram's error for an edit that changes
+//     nothing. That is SUCCESS here (the tick moved no numbers), not a
+//     failure, and must not trigger a resend or the card would duplicate on
+//     every quiet tick.
+//   · the message is gone (he deleted it, or it is older than 48h, which
+//     Telegram refuses to edit) - send a FRESH card and hand back the new id
+//     so the caller can store it.
+//   · no id yet (first call) - send and return the id.
+// The return is always { ok, messageId }; the caller persists messageId in
+// the position state.
+function ladderBar(rung, totalRungs) {
+  const done = Math.max(0, Math.min(rung, totalRungs));
+  return '▰'.repeat(done) + '▱'.repeat(Math.max(0, totalRungs - done));
+}
+
+function cardText(d) {
+  const isLong = d.direction === 'LONG';
+  const arrow  = isLong ? '🟢' : '🔴';
+  const label  = assetLabel(d.asset);
+  const sig    = d.signal ? ` · <b>${d.signal}</b>` : '';
+  const px     = (p) => formatPrice(p, d.asset);
+  const m      = (v) => (v == null || !isFinite(v))
+    ? '—' : `${v >= 0 ? '+' : '−'}$${Math.abs(Math.round(v)).toLocaleString('en-US')}`;
+  const total  = d.stepUsd > 0 && d.finalUsd > 0
+    ? Math.max(1, Math.floor(d.finalUsd / d.stepUsd)) : 4;
+
+  // ---- CLOSED: the card's last state. No ladder, just the outcome.
+  if (d.status === 'closed') {
+    const won = (d.closedUsd || 0) >= 0;
+    const rr  = (d.riskDollars > 0 && d.closedUsd != null)
+      ? `  ·  ${d.closedUsd >= 0 ? '+' : ''}${(d.closedUsd / d.riskDollars).toFixed(2)}R`
+      : '';
+    return [
+      `${won ? '✅' : '🛑'} <b>${label} ${d.direction}</b>${sig}`,
+      ``,
+      `<b>${m(d.closedUsd)}</b>${rr}`,
+      `${px(d.entry)} → ${px(d.exit)}   ${d.lot} lot`,
+      ``,
+      d.rung >= 1
+        ? `reached rung ${d.rung} · peak ${m(d.peakUsd)}`
+        : `never reached rung 1 · peak ${m(d.peakUsd)}`,
+      d.heldMs ? `held ${formatDuration(d.heldMs)}` : null,
+    ].filter((x) => x !== null).join('\n');
+  }
+
+  // ---- OPEN: what is locked, what is at risk, and how far up the ladder.
+  const lines = [
+    `${arrow} <b>${label} ${d.direction}</b>${sig}`,
+    `${d.lot} lot @ ${px(d.entry)}   risk ${m(-Math.abs(d.riskDollars || 0))}`,
+    ``,
+    `now <b>${m(d.nowUsd)}</b>     peak ${m(d.peakUsd)}`,
+  ];
+  // Keyed on the DOLLARS the stop guarantees, not on a rung, so this reads
+  // correctly under the staircase and the one-shot too - neither of which has
+  // rungs denominated in money.
+  if (d.lockUsd > 0) {
+    lines.push(`🔒 locked <b>${m(d.lockUsd)}</b>  ·  stop ${px(d.sl)}`);
+  } else {
+    lines.push(`stop ${px(d.sl)} — <b>not moved yet</b>`);
+  }
+  // The ladder bar exists only where there is a ladder; stepUsd 0 is every
+  // other engine, and drawing an empty ladder for them would be a lie.
+  if (d.stepUsd > 0) {
+    lines.push(``);
+    lines.push(d.rung >= 1
+      ? `${ladderBar(d.rung, total)}  rung ${d.rung} of ${total}`
+        + (d.finalUsd > 0 ? `   target ${m(d.finalUsd)}` : '')
+      : `${ladderBar(0, total)}  rung 1 at ${m(d.stepUsd)}`);
+  }
+  return lines.join('\n');
+}
+
+async function notifyTradeCard(d) {
+  const text   = cardText(d);
+  const token  = process.env[TG_BOT_TOKEN_ENV];
+  const chatId = process.env[TG_CHAT_ID_ENV];
+  if (!token || !chatId) return { ok: false, messageId: d.messageId || null };
+
+  if (d.messageId) {
+    const r = await tgCall('editMessageText', {
+      chat_id: chatId, message_id: d.messageId, text,
+      parse_mode: 'HTML', disable_web_page_preview: true,
+    });
+    if (r && r.ok) return { ok: true, messageId: d.messageId };
+    // An edit that changes nothing is not a failure - do NOT resend, or a
+    // quiet tick would post a duplicate card every minute.
+    if (r && typeof r.description === 'string'
+        && /not modified/i.test(r.description)) {
+      return { ok: true, messageId: d.messageId };
+    }
+    // Anything else means the card is unreachable: fall through and post a
+    // new one rather than losing the update.
+  }
+  const sent = await sendTelegram(text, {});
+  return { ok: !!sent.ok, messageId: sent.messageId || null };
+}
+
 // =================================================================
 // V20 EVENT 3: SL RATCHET LOCKED
 // =================================================================
@@ -526,6 +642,9 @@ module.exports = {
   formatPrice,
   formatMoney,
   assetLabel,
+  // THE LIVE CARD - one message per position, edited in place
+  notifyTradeCard,
+  cardText,
   // V20 specialist events
   notifySpecialistTradePlaced,
   notifySpecialistTPConfirmed,

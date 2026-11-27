@@ -168,6 +168,67 @@ const DEFAULTS = {
   //                breaks the inequality above. Do not change one without it.
   stairQ: 0.10,
 
+  // -- THE DOLLAR LADDER ----------------------------------------------------
+  // 'dladder' exitMode. HIS DESIGN, 2026-11-27, spec verbatim:
+  //   "if price reaches 1000$ move sl to 800$ then when it reaches 2000$ move
+  //    sl to 1800$ then when it reaches 3000$ move sl to 2800$ continue like
+  //    that until reaching final tp 5K take the hole profit"
+  //
+  // * WHY IT NEEDS NOTHING FROM THE SIGNAL. Every other engine here measures
+  // distance in a volatility unit, so the staircase needs the specialist TP
+  // grid to recover the ORB range and the one-shot needs an hourly sigma -
+  // and each degrades when its input is missing. This one measures in
+  // DOLLARS, which the position itself carries exactly:
+  //     $ = (price - entry) x dir x volume x contractSize
+  // so it has no grid and no sigma precondition that can fail.
+  //
+  // * SIZING MAKES IT EQUIVALENT TO AN R LADDER, WHICH IS WHY IT BACKTESTS.
+  // Risk-based sizing keeps the dollar risk D constant and sets
+  // lot = D / (stopPts x contractSize), so $P of profit is P/D in R whatever
+  // the stop distance. At his 1R = $4,150 the spec is a rung every 0.241 R
+  // with a 0.024 R giveback.
+  //
+  // dladLock - the profit the stop parks at on rung 1; rung n parks at
+  //            (n-1) x dladStep + dladLock, so the giveback is a FIXED
+  //            number of dollars at every rung. That is the property his
+  //            spec has and 'ratchet' does not (there the giveback grows
+  //            with the win).
+  //            900 is MEASURED, not chosen: over 4.4 yr his five candidates
+  //            scored $700 +$98,074 / $750 +$97,272 / $800 +$99,297 /
+  //            $850 +$102,801 / $900 +$107,598 against the staircase's
+  //            +$87,115, monotone in the tightness of the giveback, and
+  //            BOTH walk-forward halves picked $900 and ranked all five the
+  //            same way on the half they had not seen.
+  // dladFinal- close the whole position at this profit. His spec says
+  //            $5,000; $3,000 MEASURES BETTER (+27.44 R against +25.93) and
+  //            in 4.4 years NOT ONE trade ever climbed past rung 4, so the
+  //            $5,000 target never fired at all. 0 disables the target.
+  // dladTouch- false fires the rungs on a 15m bar CLOSE, true on an
+  //            intrabar touch. "If price reaches" literally means touch, but
+  //            touch measures +18.74 R against the close's +25.93 - a wick
+  //            arms a rung the bar then gives back, the same lesson as the
+  //            arm-on-bar-1 bug. Left FALSE.
+  dladStep: 1000,
+  dladLock: 900,
+  dladFinal: 3000,
+  dladTouch: false,
+
+  // tgMode - HOW MUCH TELEGRAM. "telegram has too much notification i want
+  //          somthing new and clean", 2026-11-28, and the count was the
+  //          problem: one trade that climbed three rungs produced ELEVEN
+  //          messages (1 placed + 3 TP-confirmed + 3 rung + 3 SL-locked +
+  //          1 closed), and stairQ 0.10 can move the stop on tenth-of-a-rung
+  //          steps, so the SL-locked line alone could fire dozens of times.
+  //   'card'    ONE message per position, EDITED in place as the trade moves.
+  //             Telegram does not re-notify on an edit, so he is pinged once
+  //             on open and once on close and can read the current state any
+  //             time in between. The per-event messages this replaces are
+  //             suppressed; ERRORS (SL warnings, OCO failures) are NOT - a
+  //             failure must always be loud.
+  //   'verbose' exactly the previous behaviour, kept so the card can be
+  //             turned off without a deploy if it ever misbehaves.
+  tgMode: 'card',
+
   // ── THE ONE-SHOT ──────────────────────────────────────────────────────────
   // 'oneshot' exitMode. Stage 1 cuts the risk early, the lock fires ONCE and
   // is then FROZEN, a third is banked at tp1, and no take-profit is ever
@@ -332,7 +393,8 @@ function sanitize(s) {
     // the number that decides whether 4% risk survives a losing streak.
     // Anything unrecognised still falls back to 'ratchet', so a bad write
     // can never invent a mode. 'staircase' added 2026-11-11.
-    exitMode: ['final-tp', 'tp1', 'staircase', 'oneshot'].includes(base.exitMode)
+    exitMode: ['final-tp', 'tp1', 'staircase', 'oneshot',
+      'dladder'].includes(base.exitMode)
       ? base.exitMode : 'ratchet',
     // Same shape: anything unrecognised falls back to the measured default
     // rather than inventing a third routing mode.
@@ -364,6 +426,20 @@ function sanitize(s) {
     // trail is the one shape this engine exists to avoid — at q -> 0 the
     // "fires once per rung" property that makes it scorable disappears.
     stairQ: clampNum(base.stairQ, 0.05, 1.0, DEFAULTS.stairQ),
+    // The dollar ladder. dladLock is clamped BELOW dladStep because a lock at
+    // or above the rung that fires it would park the stop at or past the
+    // price that triggered the move - the broker rejects it and the trade is
+    // left on its original stop. 0.95 leaves at least 5% of a rung of room.
+    dladStep: clampNum(base.dladStep, 100, 20000, DEFAULTS.dladStep),
+    dladLock: Math.min(
+      clampNum(base.dladLock, 0, 20000, DEFAULTS.dladLock),
+      clampNum(base.dladStep, 100, 20000, DEFAULTS.dladStep) * 0.95),
+    // 0 = no final target, which the measurements support: at lock $900 a
+    // $3,000 cap scores +27.44 R, no cap +26.48, his $5,000 +25.93.
+    dladFinal: clampNum(base.dladFinal, 0, 100000, DEFAULTS.dladFinal),
+    dladTouch: base.dladTouch === true,
+    tgMode: ['card', 'verbose'].includes(base.tgMode)
+      ? base.tgMode : DEFAULTS.tgMode,
     staircaseSince: (typeof base.staircaseSince === 'string'
       && /^\d{4}-\d{2}-\d{2}$/.test(base.staircaseSince))
       ? base.staircaseSince : DEFAULTS.staircaseSince,
