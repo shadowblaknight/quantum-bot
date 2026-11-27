@@ -782,7 +782,24 @@ async function managePosition(position) {
     // rungStep (0.75), which is how the range is recovered from the grid the
     // Pine sent. Latched in state: once armed it stays armed, exactly as the
     // rung high-water does.
-    const _armDist = _qbSettings.stairArm * (_stairStep / STAIR_RUNG_STEP);
+    // * PER-SIGNAL ARM, 2026-11-27. FRB arms LATER (2.00 ranges), NYORB
+    // EARLIER (0.50); LORB and SYD stay on the global. That pair took the
+    // 4.4-yr book from +20.53 R / maxDD 6.73 / R/DD 3.05 to +31.04 R /
+    // maxDD 5.17 / R/DD 6.01, and is the only config found that raised big
+    // wins AND cut big losses instead of trading one for the other.
+    //
+    // ! SCOPED BY TEMPLATE, NOT BY ZONE. sp500-specialist uses the SAME
+    // zoneType keys ('FRB', 'NYORB') and was never measured for this, so
+    // keying on zoneType alone would silently re-arm the S&P engine off a
+    // gold study. Any other template, or a missing/unknown zone, falls back
+    // to the global stairArm - so this can only ever change gold.
+    const _armZone = (matchedPending?.setup?.template === 'gold-specialist')
+      ? matchedPending.setup.zoneType : null;
+    const _armRanges = (_armZone && _qbSettings.stairArmZone
+      && typeof _qbSettings.stairArmZone[_armZone] === 'number')
+      ? _qbSettings.stairArmZone[_armZone]
+      : _qbSettings.stairArm;
+    const _armDist = _armRanges * (_stairStep / STAIR_RUNG_STEP);
     const _gain = isLong ? (_ref - state.entry) : (state.entry - _ref);
     if (_gain >= _armDist) state.stairArmed = true;
     _stairArmed = !!state.stairArmed;
@@ -790,22 +807,48 @@ async function managePosition(position) {
     // Rung advance notifications. tpsHit already covers rungs 1-3 via the
     // detection loop; this covers rung 4 and beyond, which the Pine never
     // sent, so he still hears about the rung that closes the trade.
+    // ★ 2026-11-27: THIS MESSAGE USED TO LIE WHILE UNARMED. It fired on the
+    // rung high-water alone and said "stop goes to rung X", but the actual
+    // stop move further down is gated on _stairArmed - so on an unarmed trade
+    // nothing moved and he was told it had. The per-signal arm makes that
+    // WORSE, not better: FRB now arms at 2.00 ranges, so a trade can clear
+    // several rungs before anything touches the stop.
+    //
+    // TWO SEPARATE LATCHES, not one. If the unarmed notice reused
+    // stairRungAnnounced, then arming later would find the rung already
+    // announced and stay silent - and the stop actually moving is the one
+    // event he most needs to hear. stairRungWaiting tracks what he has been
+    // told about while parked; stairRungAnnounced still tracks real moves.
     const cleared = Math.floor(_stairReach);
-    const prevAnnounced = state.stairRungAnnounced || 0;
-    if (cleared > prevAnnounced && cleared >= 1) {
-      state.stairRungAnnounced = cleared;
-      actions.push({ action: 'stair-rung', rung: cleared });
-      await pushCommentary(asset, 'tp-hit',
-        `STAIRCASE rung ${cleared} cleared — stop goes to rung `
-        + `${(cleared - _qbSettings.stairGive).toFixed(2)}`);
+    const _armHave = (_stairStep > 0)
+      ? _gain / (_stairStep / STAIR_RUNG_STEP) : 0;
+    const _rungNotify = async (armed) => {
+      actions.push({ action: armed ? 'stair-rung' : 'stair-rung-waiting',
+                     rung: cleared, armed });
+      await pushCommentary(asset, 'tp-hit', armed
+        ? `STAIRCASE rung ${cleared} cleared — stop goes to rung `
+          + `${(cleared - _qbSettings.stairGive).toFixed(2)}`
+        : `STAIRCASE rung ${cleared} reached — stop NOT moved; the arm needs `
+          + `${_armRanges.toFixed(2)}× the ORB range from the fill and the trade `
+          + `is at ${_armHave.toFixed(2)}×`);
       try {
         await notifyStaircaseRung({
           positionId: position.id, asset, direction, rung: cleared,
           slRung: cleared - _qbSettings.stairGive,
           finalRung: _qbSettings.stairFinal,
+          armed, needRanges: _armRanges, haveRanges: _armHave,
         });
       } catch (_) {}
       await setPositionState(position.id, state);
+    };
+    if (cleared >= 1 && _stairArmed
+        && cleared > (state.stairRungAnnounced || 0)) {
+      state.stairRungAnnounced = cleared;
+      await _rungNotify(true);
+    } else if (cleared >= 1 && !_stairArmed
+               && cleared > (state.stairRungWaiting || 0)) {
+      state.stairRungWaiting = cleared;
+      await _rungNotify(false);
     }
 
     // The close. His TP4 is also parked as the broker TP at placement, so
@@ -1005,7 +1048,9 @@ async function managePosition(position) {
       // like an unmanaged position rather than a deliberate one.
       actions.push({
         action: 'stair-unarmed', rung: cleared,
-        needRanges: _qbSettings.stairArm,
+        // the arm ACTUALLY in force, which is per-signal for gold - reporting
+        // the global here would misstate why the trade is unmanaged.
+        needRanges: _armRanges, armZone: _armZone,
       });
     }
   } else if (RATCHET_MODE && tpLevels.length >= 2) {

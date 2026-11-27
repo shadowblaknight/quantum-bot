@@ -560,7 +560,21 @@ export default function TerminalLayout({
   // ranges, required before any stop move; stairQ is the rung grid the stop
   // steps on. See [[staircase-arm-leak]] and [[staircase-quantisation]].
   const stairArm   = settings?.stairArm ?? 1.25;
-  const stairQ     = settings?.stairQ ?? 0.25;
+  const stairQ     = settings?.stairQ ?? 0.10;
+  // * PER-SIGNAL ARM, 2026-11-27. The global stairArm above is the fallback;
+  // this map overrides it per GOLD signal. FRB wants to arm LATER (2.00
+  // ranges) and NYORB EARLIER (0.50) - the only configuration found that
+  // raised big wins AND cut big losses instead of trading one for the other
+  // (+20.53 R at R/DD 3.05 -> +31.04 R at R/DD 6.01 over 4.4 yr). LORB and
+  // SYD picked opposite ends in the two walk-forward folds, so they are left
+  // on the global. An ABSENT key means "use the global", which is why the
+  // writer deletes rather than writing a sentinel.
+  const stairArmZone = settings?.stairArmZone ?? {};
+  const setZoneArm = (z, v) => {
+    const next = { ...stairArmZone };
+    if (v === null) delete next[z]; else next[z] = v;
+    saveSettings({stairArmZone: next});
+  };
   const RUNG       = 0.75;                      // the Pine's own TP spacing
   const stairSince = settings?.staircaseSince ?? null;
   // The day he switched is DAY 1, not day 0.
@@ -1218,6 +1232,35 @@ export default function TerminalLayout({
                               {v===0?'OFF':v.toFixed(2)}</button>
                           ))}
                         </div>
+                      </div>
+                      {/* ★ PER-SIGNAL ARM — the global above is the
+                          fallback. GOLD ONLY: sp500-specialist uses the same
+                          zone names and was never measured for this.
+                          ⚠ FRB arming LATER accepts MORE full stops (17 vs
+                          14) to collect bigger wins — it is not a loss
+                          filter. All the loss-cutting is NYORB at 0.50. */}
+                      <div>
+                        <div style={{fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace',marginBottom:3}}>PER-SIGNAL ARM · GOLD ONLY (× ORB RANGE)</div>
+                        {[['FRB','M · FRANKFURT',2.0],['NYORB','H · NY ORB',0.5],['LORB','G · LONDON',null],['SYD','U · SYDNEY',null]].map(([z,lbl,rec])=>(
+                          <div key={z} style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
+                            <div style={{width:96,fontSize:7,color:C.t3,fontFamily:'JetBrains Mono,monospace'}}>{lbl}</div>
+                            {[null,0.5,1.25,2.0].map(v=>{
+                              const cur   = typeof stairArmZone[z]==='number' ? stairArmZone[z] : null;
+                              const on    = v===null ? cur===null : (cur!==null && Math.abs(cur-v)<0.001);
+                              const isRec = rec!==null && v!==null && Math.abs(rec-v)<0.001;
+                              return (
+                                <button key={String(v)} disabled={!settings||riskSaving}
+                                  title={v===null?`${z} follows the global arm above.`:`${z} makes no stop move until the trade is ${v.toFixed(2)}× the ORB range in profit from the fill.${isRec?'  ← measured best for this signal (both walk-forward halves agreed)':''}`}
+                                  onClick={()=>setZoneArm(z,v)}
+                                  style={{padding:'3px 7px',background:on?C.b2:'transparent',
+                                          border:`1px solid ${on?(isRec?C.gold:C.green2):C.b2}`,
+                                          color:on?(isRec?C.gold:C.green2):(isRec?C.t2:C.t3),fontSize:8,
+                                          fontFamily:'JetBrains Mono,monospace',cursor:'pointer'}}>
+                                  {v===null?'GLOBAL':v.toFixed(2)}</button>
+                              );
+                            })}
+                          </div>
+                        ))}
                       </div>
                       {/* FIX 1 — the grid the stop steps on. 1.00 = whole
                           rungs, which throws the fractional reach away. */}

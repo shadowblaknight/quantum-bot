@@ -46,6 +46,21 @@ function stairFromTPs(isLong, tp1, tp2, stairFinal, stairGive, rung) {
 function reachOf(isLong, level, step, extreme) {
   return isLong ? (extreme - level) / step : (level - extreme) / step;
 }
+// Copied verbatim from manage-trades.js, the per-signal arm resolution. The
+// scoping is the part that matters: sp500-specialist uses the SAME zoneType
+// keys ('FRB', 'NYORB') and was never measured for this, so keying on the
+// zone alone would re-arm the S&P engine off a gold study.
+function armRangesFor(_qbSettings, matchedPending) {
+  const _armZone = (matchedPending?.setup?.template === 'gold-specialist')
+    ? matchedPending.setup.zoneType : null;
+  return (_armZone && _qbSettings.stairArmZone
+    && typeof _qbSettings.stairArmZone[_armZone] === 'number')
+    ? _qbSettings.stairArmZone[_armZone]
+    : _qbSettings.stairArm;
+}
+function pend(template, zoneType) {
+  return { setup: { template, zoneType } };
+}
 
 // ── LONG: ORB level 4000, range 20, depth 0.25 -> entry 4005 ───────────────
 {
@@ -197,10 +212,76 @@ function bankLots(volume, pct) {
     eq('  stairArm default is the derived 1.25', san({}).stairArm, 1.25);
     eq('  stairArm 0 stays reachable', san({ stairArm: 0 }).stairArm, 0);
     eq('  stairArm caps at 3.00', san({ stairArm: 99 }).stairArm, 3.0);
-    eq('  stairQ default 0.25', san({}).stairQ, 0.25);
+    // 0.25 -> 0.10 on 2026-11-27, for the RULE and not for performance: see
+    // the profit-lock invariant below. On its own the grid change is a wash
+    // (+20.99 R against +20.53, maxDD 6.67 vs 6.73).
+    eq('  stairQ default 0.10', san({}).stairQ, 0.10);
     eq('  stairQ floor 0.05 (never a continuous trail)',
        san({ stairQ: 0 }).stairQ, 0.05);
     eq('  stairQ caps at 1.00', san({ stairQ: 9 }).stairQ, 1.0);
+
+    // ── THE PER-SIGNAL ARM, 2026-11-27 ──────────────────────────────────
+    // FRB arms LATER (2.00 ranges), NYORB EARLIER (0.50). Over 4.4 yr that
+    // pair is +31.04 R / maxDD 5.17 / R/DD 6.01 against the single global
+    // arm's +20.53 / 6.73 / 3.05, and it is the only configuration found
+    // that raised big wins AND cut big losses at the same time. LORB and
+    // SYD are ABSENT on purpose: the two walk-forward halves picked
+    // opposite ends for them, which is no information.
+    console.log('  per-signal arm (2026-11-27):');
+    eq('  FRB arms later, at 2.00', san({}).stairArmZone.FRB, 2.0);
+    eq('  NYORB arms earlier, at 0.50', san({}).stairArmZone.NYORB, 0.5);
+    is('  LORB has no override, so it uses the global',
+       san({}).stairArmZone.LORB === undefined, true);
+    is('  SYD has no override, so it uses the global',
+       san({}).stairArmZone.SYD === undefined, true);
+    is('  an unknown zone key is dropped',
+       Object.keys(san({ stairArmZone: { FRB: 1, NOPE: 9 } })
+         .stairArmZone).join(','), 'FRB');
+    eq('  a per-zone arm caps at 3.00',
+       san({ stairArmZone: { NYORB: 99 } }).stairArmZone.NYORB, 3.0);
+    eq('  an empty map restores the single global arm',
+       Object.keys(san({ stairArmZone: {} }).stairArmZone).length, 0);
+
+    // ── THE PROFIT-LOCK INVARIANT ───────────────────────────────────────
+    // "Never move the SL to a loss", as arithmetic. The stop parks at rung
+    // (quantise(reach) - stairGive) and the quantiser can give back up to
+    // stairQ of a rung, so the FIRST stop move clears the fill only when
+    //     arm > STAIR_RUNG_STEP x (stairQ + stairGive)
+    // At stairQ 0.25 that is 0.5625 and NYORB's 0.50 BREAKS it on 43 of 120
+    // H trades (worst 6.1% of a range below the fill). At 0.10 it is 0.4500
+    // and it holds on all 120. Checked against every SHIPPED arm so that
+    // moving any one of the three numbers cannot silently re-break it.
+    // What the engine will ACTUALLY use, through the real expression.
+    console.log('  the resolution, through the live expression:');
+    const _s = san({});
+    eq('  gold FRB   -> 2.00', armRangesFor(_s, pend('gold-specialist', 'FRB')), 2.0);
+    eq('  gold NYORB -> 0.50', armRangesFor(_s, pend('gold-specialist', 'NYORB')), 0.5);
+    eq('  gold LORB  -> the global 1.25',
+       armRangesFor(_s, pend('gold-specialist', 'LORB')), 1.25);
+    eq('  gold SYD   -> the global 1.25',
+       armRangesFor(_s, pend('gold-specialist', 'SYD')), 1.25);
+    // the three ways this must fall back rather than guess
+    eq('  S&P FRB is NOT re-armed off a gold study',
+       armRangesFor(_s, pend('sp500-specialist', 'FRB')), 1.25);
+    eq('  S&P NYORB is NOT re-armed off a gold study',
+       armRangesFor(_s, pend('sp500-specialist', 'NYORB')), 1.25);
+    eq('  an unknown gold zone falls back to the global',
+       armRangesFor(_s, pend('gold-specialist', 'FVG')), 1.25);
+    eq('  a missing setup falls back to the global',
+       armRangesFor(_s, null), 1.25);
+    eq('  an empty override map falls back to the global',
+       armRangesFor(san({ stairArmZone: {} }), pend('gold-specialist', 'FRB')),
+       1.25);
+
+    console.log('  the profit-lock invariant:');
+    const _d = san({});
+    const _thr = 0.75 * (_d.stairQ + _d.stairGive);
+    is(`  global arm ${_d.stairArm} clears the ${_thr.toFixed(4)} threshold`,
+       _d.stairArm > _thr, true);
+    for (const [z, v] of Object.entries(_d.stairArmZone || {})) {
+      is(`  ${z} arm ${v} clears the ${_thr.toFixed(4)} threshold`,
+         v > _thr, true);
+    }
   }
 
   // ── THE 16 NOV TRADE, END TO END ────────────────────────────────────────

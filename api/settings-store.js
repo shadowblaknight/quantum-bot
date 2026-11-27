@@ -120,10 +120,53 @@ const DEFAULTS = {
   //              ⚠ On the whole tape 0.25 is a WASH ($171/trade vs $179,
   //              maxDD 34.4% vs 29.8%). It moves money toward deep-reach
   //              trades and away from the rest. That trade-off was his call.
+  // stairArmZone - * PER-SIGNAL ARM, 2026-11-27. The arm is the one staircase
+  //              parameter whose best value differs by SIGNAL, and it is the
+  //              only configuration found that moves BOTH ways at once: more
+  //              big wins AND fewer big losses. On the 4.4-yr book:
+  //                global 1.25  486 tr  +20.53 R  maxDD 6.73  R/DD 3.05  57 losses
+  //                FRB 2.00 +
+  //                NYORB 0.50   472 tr  +31.04 R  maxDD 5.17  R/DD 6.01  48 losses
+  //              Both walk-forward halves agreed on the DIRECTION: FRB chose
+  //              2.00 in both, NYORB chose below 1.25 in both (0.75 and 0.50).
+  //              LORB and SYD are deliberately ABSENT - their two folds picked
+  //              opposite ends (G 0.75 vs 2.00, U 2.00 vs 0.25), which is no
+  //              information, so they stay on the global arm.
+  //              An absent or non-numeric entry falls back to `stairArm`, so
+  //              {} restores the single-arm behaviour exactly.
+  //              ! GOLD ONLY, scoped by TEMPLATE in manage-trades.js.
+  //                sp500-specialist uses the SAME zoneType keys ('FRB',
+  //                'NYORB') and was never measured for this.
+  //              ! Counter-intuitive, and it must be said plainly: FRB arming
+  //                LATER accepts MORE full stops (17 vs 14) to collect bigger
+  //                wins. It would NOT have saved the 27-Nov -$4,036 FRB trade.
+  //                All of the loss-cutting comes from NYORB at 0.50.
+  //              ! The measured gain is concentrated in 2026 (+18.52 R of the
+  //                book's +20.53), as is every other 4.4-yr figure here.
   stairGive: 0.5,
   stairFinal: 4,
   stairArm: 1.25,
-  stairQ: 0.25,
+  stairArmZone: { FRB: 2.0, NYORB: 0.5 },
+  // stairQ     - 0.25 -> 0.10 on 2026-11-27, and the reason is HIS RULE, not
+  //              performance. The first stop move is a profit lock only when
+  //                  arm  >  STAIR_RUNG_STEP x (stairQ + stairGive)
+  //              because the quantiser can give back up to stairQ of a rung
+  //              and the giveback takes stairGive more. That threshold is
+  //                  stairQ 1.00 -> arm > 1.1250   (the old derivation)
+  //                  stairQ 0.25 -> arm > 0.5625
+  //                  stairQ 0.10 -> arm > 0.4500
+  //              NYORB's measured arm is 0.50, which FAILS at 0.25: 43 of 120
+  //              H trades would park their first stop at or below the fill, by
+  //              up to 6.1% of an ORB range. At 0.10 it is 0 of 120.
+  //              The grid change is near-neutral on its own - production at
+  //              0.10 scores +20.99 R against +20.53, maxDD 6.67 vs 6.73 - so
+  //              it buys the rule without buying a new bet. With the arms it
+  //              is +30.51 R / maxDD 5.08 / R/DD 6.01 against the 0.25
+  //              version's +31.04 / 5.17 / 6.01: the same R/DD, 0.53 R less,
+  //              and H itself is marginally BETTER (+0.0562 vs +0.0551 R/tr).
+  //              ! _wiring.audit.js section 10e FAILS if any shipped arm
+  //                breaks the inequality above. Do not change one without it.
+  stairQ: 0.10,
 
   // ── THE ONE-SHOT ──────────────────────────────────────────────────────────
   // 'oneshot' exitMode. Stage 1 cuts the risk early, the lock fires ONCE and
@@ -186,6 +229,29 @@ function clampNum(v, lo, hi, fallback) {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(hi, Math.max(lo, n));
+}
+
+// The only zoneTypes a per-signal arm may name. Anything else is DROPPED
+// rather than carried, because a typo that silently becomes a live arm value
+// is exactly the failure this function exists to prevent. Mirrors
+// SPECIALIST_ALLOWED_ZONES['gold-specialist'] in webhook.js.
+const STAIR_ARM_ZONES = ['FRB', 'NYORB', 'SYD', 'LORB'];
+
+function clampArmZone(v) {
+  // undefined (an older Redis blob) -> the researched defaults.
+  // {} (a deliberate clear) -> {}, which restores the single global arm.
+  if (v === undefined || v === null) return { ...DEFAULTS.stairArmZone };
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    return { ...DEFAULTS.stairArmZone };
+  }
+  const out = {};
+  for (const k of STAIR_ARM_ZONES) {
+    const n = Number(v[k]);
+    // Same band as the global arm: 0 stays reachable for a deliberate A/B,
+    // 3.00 ranges is the top beyond which the arm never clears.
+    if (Number.isFinite(n)) out[k] = Math.min(3.0, Math.max(0.0, n));
+  }
+  return out;
 }
 
 // RISK_PCT ENV OVERRIDE - added 2026-09-22.
@@ -290,6 +356,9 @@ function sanitize(s) {
     // beyond that the arm never clears on a normal day and the staircase is
     // off in all but name, which is what `exitMode` is for.
     stairArm: clampNum(base.stairArm, 0.0, 3.0, DEFAULTS.stairArm),
+    // Per-signal overrides on top of that global. Unknown keys dropped,
+    // values clamped to the same 0.0-3.0 band. See DEFAULTS for the study.
+    stairArmZone: clampArmZone(base.stairArmZone),
     // stairQ: 1.0 is whole rungs (the old grid). The floor is 0.05 rather
     // than 0 because a continuous stop is a TRAIL, not a staircase, and a
     // trail is the one shape this engine exists to avoid — at q -> 0 the

@@ -33,6 +33,7 @@ const FEED = R('dashboard-feed.js');
 const MT = R('manage-trades.js');
 const WH = R('webhook.js');
 const TG = R('telegram.js');
+const SRC_SETTINGS = R('settings-store.js');
 
 let fails = 0;
 function chk(ok, label, detail) {
@@ -42,7 +43,8 @@ function chk(ok, label, detail) {
 
 // knobs the user must be able to change from the panel
 const WRITABLE = {
-  staircase: ['stairGive', 'stairFinal', 'stairArm', 'stairQ'],
+  staircase: ['stairGive', 'stairFinal', 'stairArm', 'stairArmZone',
+              'stairQ'],
   oneshot:   ['osArm', 'osGive', 'osS1Arm', 'osS1Keep', 'osPartPct'],
   entry:     ['entryMode'],
 };
@@ -208,7 +210,7 @@ chk(sanitizeForTest({ stairArm: 99 }).stairArm === 3.0,
     'arm is capped at 3.00 ranges');
 chk(/if \(_gain >= _armDist\) state\.stairArmed = true/.test(MT),
     'the arm latches in state, so a retrace cannot disarm it');
-chk(/const _armDist = _qbSettings\.stairArm \* \(_stairStep \/ STAIR_RUNG_STEP\)/
+chk(/const _armDist = _armRanges \* \(_stairStep \/ STAIR_RUNG_STEP\)/
     .test(MT),
     'the arm is measured in ORB-RANGE units, recovered from the rung spacing');
 chk(MT.includes('const STAIR_RUNG_STEP = 0.75'),
@@ -220,9 +222,90 @@ chk(/if \(cleared >= 1 && _stairArmed\)/.test(MT),
     'NO stop move at all before the arm clears');
 chk(MT.includes("action: 'stair-unarmed'"),
     'an unarmed trade is reported, not silently unmanaged');
+console.log('\n=== 10d. THE PER-SIGNAL ARM (2026-11-27) ===');
+// The arm is the one staircase parameter whose best value differs by SIGNAL,
+// and the pair below is the only configuration found that moved BOTH ways at
+// once - more big wins AND fewer big losses - instead of trading one for the
+// other:
+//   global 1.25            486 tr  +20.53 R  maxDD 6.73  R/DD 3.05  57 losses
+//   FRB 2.00 + NYORB 0.50  472 tr  +31.04 R  maxDD 5.17  R/DD 6.01  48 losses
+// Both walk-forward halves agreed on the DIRECTION (FRB 2.00 in both, NYORB
+// below 1.25 in both). LORB and SYD picked opposite ends in the two folds, so
+// they are deliberately absent and keep the global arm.
+const AZ = sanitizeForTest({}).stairArmZone;
+chk(!!AZ && AZ.FRB === 2.0, 'FRB arms LATER, at 2.00 ranges');
+chk(!!AZ && AZ.NYORB === 0.5, 'NYORB arms EARLIER, at 0.50 ranges');
+chk(!!AZ && AZ.LORB === undefined && AZ.SYD === undefined,
+    'LORB and SYD are ABSENT, so they fall back to the global arm');
+chk(Object.keys(sanitizeForTest({ stairArmZone: { FRB: 1, NOPE: 2 } })
+      .stairArmZone).join(',') === 'FRB',
+    'an unknown zone key is DROPPED, not carried into a live arm');
+chk(sanitizeForTest({ stairArmZone: { NYORB: 99 } }).stairArmZone.NYORB === 3.0,
+    'a per-zone arm is capped at 3.00 ranges, like the global');
+chk(sanitizeForTest({ stairArmZone: { FRB: 0 } }).stairArmZone.FRB === 0,
+    'arm 0 stays reachable per zone for a deliberate A/B');
+chk(Object.keys(sanitizeForTest({ stairArmZone: {} }).stairArmZone).length === 0,
+    'an EMPTY map restores the single global arm exactly');
+chk(sanitizeForTest({ stairArmZone: 'nope' }).stairArmZone.FRB === 2.0,
+    'a non-object falls back to the defaults rather than silently disarming');
+// ! sp500-specialist uses the SAME zoneType keys ('FRB', 'NYORB') and was
+// never measured for this, so the override MUST be scoped by template.
+chk(MT.includes("matchedPending?.setup?.template === 'gold-specialist'"),
+    'the per-signal arm is scoped BY TEMPLATE, not by zone (sp500 shares keys)');
+chk(/\s+: _qbSettings\.stairArm;/.test(MT),
+    'an unknown zone or other template falls back to the global arm');
+chk(/needRanges: _armRanges/.test(MT),
+    'the unarmed report names the arm ACTUALLY in force, not the global');
+
+console.log('\n=== 10f. THE RUNG MESSAGE TELLS THE TRUTH (2026-11-27) ===');
+// The rung Telegram fired on the rung high-water alone and said "stop goes
+// to rung X", while the stop move itself is gated on _stairArmed - so on an
+// unarmed trade nothing moved and he was told it had. The per-signal arm
+// makes it worse: FRB arms at 2.00 ranges, so several rungs can clear first.
+chk(/cleared > \(state\.stairRungAnnounced \|\| 0\)/.test(MT)
+    && /&& _stairArmed/.test(MT),
+    'the "stop goes to rung X" message only fires when the stop really moved');
+chk(/state\.stairRungWaiting = cleared/.test(MT),
+    'the unarmed notice uses its OWN latch, so arming later still reports');
+chk(MT.includes("'stair-rung-waiting'"),
+    'a rung reached while parked is reported as waiting, not as a stop move');
+chk(/armed, needRanges: _armRanges, haveRanges: _armHave/.test(MT),
+    'the waiting notice carries the arm ACTUALLY in force, per signal');
+// ! the dedupe key must separate the two events or the second is swallowed
+chk(/stair-rung:\$\{positionId\}:\$\{rung\}:\$\{armed \? 'armed' : 'wait'\}/
+    .test(TG),
+    'the dedupe key separates "reached" from "stop moved" for the same rung');
+chk(/The stop has <b>NOT<\/b> moved yet/.test(TG),
+    'the waiting message says plainly that the stop has not moved');
+
+console.log('\n=== 10e. THE PROFIT-LOCK INVARIANT (his own rule, in arithmetic) ===');
+// "Never move the SL to a loss" is his rule, and 1.25 was DERIVED from it
+// rather than fitted. The general form: the stop parks at rung
+// (quantise(reach) - stairGive), the quantiser can give back up to stairQ of
+// a rung, so the FIRST stop move clears the fill only when
+//     arm > STAIR_RUNG_STEP x (stairQ + stairGive)
+// At stairQ 0.25 that threshold is 0.5625 and NYORB's measured 0.50 BREAKS
+// it on 43 of 120 H trades (worst 6.1% of a range below the fill). At 0.10
+// the threshold is 0.4500 and it holds on all 120. This check exists so that
+// moving any one of the three numbers cannot silently re-break the rule.
+const _lk = sanitizeForTest({});
+const RUNG_STEP = 0.75;
+const _thr = RUNG_STEP * (_lk.stairQ + _lk.stairGive);
+chk(SRC_SETTINGS.includes('stairQ + stairGive'),
+    'the invariant is written down where the defaults are set');
+chk(_lk.stairArm > _thr,
+    'the GLOBAL arm locks profit on its first move',
+    `arm ${_lk.stairArm} > ${_thr.toFixed(4)}`);
+for (const [z, v] of Object.entries(_lk.stairArmZone || {})) {
+  chk(v > _thr, `the ${z} arm locks profit on its first move`,
+      `arm ${v} > ${_thr.toFixed(4)}`);
+}
+
 // FIX 1. floor() to whole rungs discarded a mean 0.482 rungs per trade; on
 // 16 Nov that rounding cost $286 against the designed giveback's $172.
-chk(sanitizeForTest({}).stairQ === 0.25, 'the default stop grid is 0.25 rungs');
+chk(sanitizeForTest({}).stairQ === 0.10,
+    'the default stop grid is 0.10 rungs — see 10e, it is what lets the '
+    + 'NYORB arm of 0.50 still lock profit on its first move');
 chk(sanitizeForTest({ stairQ: 0 }).stairQ === 0.05,
     'stairQ cannot reach 0 — a continuous stop is a TRAIL, not a staircase');
 chk(sanitizeForTest({ stairQ: 9 }).stairQ === 1.0, 'stairQ is capped at 1.00');

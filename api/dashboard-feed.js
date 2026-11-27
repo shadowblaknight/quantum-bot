@@ -281,6 +281,7 @@ async function actionSetSettings(body) {
   if (body.stairGive !== undefined)     patch.stairGive = body.stairGive;
   if (body.stairFinal !== undefined)    patch.stairFinal = body.stairFinal;
   if (body.stairArm !== undefined)      patch.stairArm = body.stairArm;
+  if (body.stairArmZone !== undefined)  patch.stairArmZone = body.stairArmZone;
   if (body.stairQ !== undefined)        patch.stairQ = body.stairQ;
   // THE ONE-SHOT
   if (body.osArm !== undefined)         patch.osArm = body.osArm;

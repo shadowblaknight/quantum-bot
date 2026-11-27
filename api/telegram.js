@@ -285,8 +285,13 @@ async function notifyOneShotEvent({ positionId, asset, direction, kind,
 // Keyed on the RUNG, not on a TP name, so it stays correct past rung 3 where
 // there is no TP name to key on.
 
-async function notifyStaircaseRung({ positionId, asset, direction, rung, slRung, finalRung }) {
-  const dedupeKey = `stair-rung:${positionId}:${rung}`;
+async function notifyStaircaseRung({ positionId, asset, direction, rung, slRung, finalRung, armed = true, needRanges, haveRanges }) {
+  // ★ THE ARMED STATE IS PART OF THE DEDUPE KEY ON PURPOSE. A rung is worth
+  // announcing twice for good reason - once when price reaches it with the
+  // stop still parked, and again when the arm clears and the stop actually
+  // moves - and those are different events. Keying on the rung alone
+  // swallowed the SECOND one, which is the one that matters.
+  const dedupeKey = `stair-rung:${positionId}:${rung}:${armed ? 'armed' : 'wait'}`;
   const isLong    = direction === 'LONG';
   const last      = finalRung != null && rung >= finalRung;
   const bar       = '▰'.repeat(Math.min(rung, 8)) + '▱'.repeat(Math.max(0, (finalRung || 4) - rung));
@@ -296,6 +301,14 @@ async function notifyStaircaseRung({ positionId, asset, direction, rung, slRung,
       `${isLong ? '🟢' : '🔴'} ${direction}\n` +
       `${bar}\n` +
       `Closing the full position at rung ${rung}.`
+    : !armed
+    ? `⏳ <b>Rung ${rung} reached — ${assetLabel(asset)}</b>\n\n` +
+      `${isLong ? '🟢' : '🔴'} ${direction}\n` +
+      `${bar}  rung ${rung} of ${finalRung || 4}\n` +
+      `The stop has <b>NOT</b> moved yet. This signal arms at ` +
+      `<b>${needRanges != null ? needRanges.toFixed(2) : '?'}×</b> the ORB range ` +
+      `from the fill; the trade is at ` +
+      `<b>${haveRanges != null ? haveRanges.toFixed(2) : '?'}×</b>.`
     : `🪜 <b>Rung ${rung} cleared — ${assetLabel(asset)}</b>\n\n` +
       `${isLong ? '🟢' : '🔴'} ${direction}\n` +
       `${bar}  rung ${rung} of ${finalRung || 4}\n` +
