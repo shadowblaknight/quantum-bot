@@ -51,7 +51,16 @@ const DEFAULTS = {
   //              both are sized to the same 8% account drawdown. The win rate
   //              is real; so is the cost. He chose it knowing both numbers -
   //              see the his-orb-staircase note.
-  exitMode: 'ratchet',
+  // * $ LADDER IS THE DEFAULT, 2026-11-28, HIS CALL. His own design, and the
+  // only exit measured here that beats production on his own metric AND
+  // survives both walk-forward halves: $113,867 over 4.4 years against the
+  // staircase's $87,115, with sub-$500 wins falling from 191 to 4.
+  // ! A STORED exitMode BEATS THIS. Production Redis carried 'staircase'
+  // (updatedBy control-panel), so changing this default alone changes
+  // nothing live - the stored value has to be rewritten too, and only AFTER
+  // the deploy, because an older build would reject an unknown mode and fall
+  // back to 'ratchet'.
+  exitMode: 'dladder',
 
   // ── ENTRY MODE ───────────────────────────────────────────────
   // 'limit'  rest a pending order AT the signal entry (level + retestDepth x
@@ -393,9 +402,13 @@ function sanitize(s) {
     // the number that decides whether 4% risk survives a losing streak.
     // Anything unrecognised still falls back to 'ratchet', so a bad write
     // can never invent a mode. 'staircase' added 2026-11-11.
-    exitMode: ['final-tp', 'tp1', 'staircase', 'oneshot',
+    // ! 'ratchet' sits IN the list now rather than acting as the fallback.
+    // It used to be both, which made DEFAULTS.exitMode unreachable: an empty
+    // store returned the hardcoded 'ratchet' and changing the default did
+    // nothing at all. Caught while making the $ ladder the default.
+    exitMode: ['ratchet', 'final-tp', 'tp1', 'staircase', 'oneshot',
       'dladder'].includes(base.exitMode)
-      ? base.exitMode : 'ratchet',
+      ? base.exitMode : DEFAULTS.exitMode,
     // Same shape: anything unrecognised falls back to the measured default
     // rather than inventing a third routing mode.
     entryMode: base.entryMode === 'limit' ? 'limit' : 'market',

@@ -114,7 +114,12 @@ chk(reads('staircase'), 'panel reads exitMode staircase');
 console.log('\n=== 6. settings-store accepts the modes and rejects junk ===');
 chk(sanitizeForTest({ exitMode: 'staircase' }).exitMode === 'staircase', 'accepts staircase');
 chk(sanitizeForTest({ exitMode: 'oneshot' }).exitMode === 'oneshot', 'accepts oneshot');
-chk(sanitizeForTest({ exitMode: 'nonsense' }).exitMode === 'ratchet', 'junk -> ratchet');
+// was 'junk -> ratchet'. The fallback is DEFAULTS.exitMode now, because
+// 'ratchet' being both a value and the hardcoded fallback made the default
+// unreachable. Asserted against the default rather than a literal, so this
+// check keeps working the next time the default moves.
+chk(sanitizeForTest({ exitMode: 'nonsense' }).exitMode === DEFAULTS.exitMode,
+    'junk -> the DEFAULT exit mode');
 
 console.log('\n=== 7. the execution path branches on both ===');
 chk(MT.includes("exitMode === 'staircase'"), 'manage-trades reads staircase');
@@ -280,6 +285,15 @@ chk(LD.dladTouch === false,
     'rungs fire on a BAR CLOSE, not a wick', 'close +$108k vs touch +$78k');
 chk(sanitizeForTest({ exitMode: 'dladder' }).exitMode === 'dladder',
     "'dladder' is a selectable exitMode");
+chk(sanitizeForTest({}).exitMode === 'dladder',
+    'the $ ladder is the DEFAULT exit mode');
+// ! 'ratchet' used to be both a valid value AND the hardcoded fallback, which
+// made DEFAULTS.exitMode unreachable - an empty store always returned
+// 'ratchet' and changing the default did nothing. Both halves are pinned.
+chk(sanitizeForTest({ exitMode: 'ratchet' }).exitMode === 'ratchet',
+    'an explicit ratchet is still honoured, not swallowed as unknown');
+chk(sanitizeForTest({ exitMode: 'zzz' }).exitMode === 'dladder',
+    'an unknown mode falls back to the DEFAULT, not to a hardcoded value');
 // ! a lock at or above its own rung parks the stop at the price that
 // triggered the move; the broker rejects it and the trade is left unmanaged.
 chk(sanitizeForTest({ dladStep: 1000, dladLock: 5000 }).dladLock === 950,

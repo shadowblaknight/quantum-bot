@@ -286,7 +286,7 @@ function bankLots(volume, pct) {
 // ── the settings store must accept the mode and clamp the knobs ────────────
 (async () => {
   console.log('\n--- settings-store contract ---');
-  const { sanitizeForTest } = require('./settings-store');
+  const { sanitizeForTest, DEFAULTS } = require('./settings-store');
   const san = sanitizeForTest || null;
   if (!san) {
     console.log('note  sanitize not exported; checking live defaults instead');
@@ -298,7 +298,12 @@ function bankLots(volume, pct) {
     is('day 1 recorded', s.staircaseSince, '2026-11-11');
   } else {
     is('accepts staircase', san({ exitMode: 'staircase' }).exitMode, 'staircase');
-    is('rejects nonsense', san({ exitMode: 'moon' }).exitMode, 'ratchet');
+    // the fallback is DEFAULTS.exitMode now, not a hardcoded 'ratchet' -
+    // that literal made the default unreachable. Asserted against the
+    // default so this keeps working the next time the default moves.
+    is('rejects nonsense', san({ exitMode: 'moon' }).exitMode,
+       DEFAULTS.exitMode);
+    is('the $ ladder is the default', san({}).exitMode, 'dladder');
     eq('clamps stairGive above the cliff', san({ stairGive: 0.95 }).stairGive, 0.60);
     eq('clamps stairGive below floor', san({ stairGive: 0.01 }).stairGive, 0.10);
     eq('stairFinal rounds + clamps', san({ stairFinal: 99 }).stairFinal, 8);
